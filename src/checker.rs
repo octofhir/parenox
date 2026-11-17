@@ -1483,6 +1483,7 @@ impl Checker<'_> {
                         )
                     };
                 }
+                "clojure.core/contains?" => return self.contains(xs, span, env),
                 "clojure.core/get-in" => return self.get_in(xs, span, env),
                 "clojure.core/assoc" => return self.assoc(xs, span, env),
                 "clojure.core/assoc-in" => return self.assoc_in(xs, span, env),
@@ -1960,7 +1961,7 @@ impl Checker<'_> {
         let Kind::List(xs) = &test.without_metadata().kind else {
             return;
         };
-        if xs.len() != 2 {
+        if xs.len() < 2 {
             return;
         }
         let Some(op) = xs[0].symbol() else { return };
@@ -1972,6 +1973,22 @@ impl Checker<'_> {
             return;
         }
         let op = self.model.resolve(op);
+        if op == "clojure.core/contains?" {
+            if let [_, target, key] = xs.as_slice()
+                && let Some(key) = key.keyword()
+                && let Some(value) = target.symbol().and_then(|name| env.get_mut(name))
+            {
+                value.narrow(narrow_key_presence(
+                    &value.known,
+                    &self.model.key(key),
+                    truth,
+                ));
+            }
+            return;
+        }
+        if xs.len() != 2 {
+            return;
+        }
         if op == "clojure.core/not" {
             self.narrow(&xs[1], !truth, env);
             return;
@@ -2116,6 +2133,42 @@ impl Checker<'_> {
             notes.extend(default.notes.clone());
         }
         Value::with_notes(ty, notes)
+    }
+
+    fn contains(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
+        let [_, target, key] = xs else {
+            self.error("PNX2554", span, "contains? requires a target and key");
+            return Value::new(Type::Unknown);
+        };
+        let value = self.infer(target, env);
+        let key_value = self.infer(key, env);
+        let Type::Key(key) = key_value.known else {
+            return self.unsupported(key.span, "contains? currently requires a known keyword key");
+        };
+        Value::new(self.contains_type(&value.known, &key, target.span))
+    }
+
+    fn contains_type(&mut self, ty: &Type, key: &str, span: Span) -> Type {
+        match ty {
+            Type::Never | Type::Unknown => ty.clone(),
+            Type::Union(parts) => {
+                Type::union(parts.iter().map(|part| self.contains_type(part, key, span)))
+            }
+            Type::Map(_) | Type::Nil | Type::Set(_) | Type::Vector(_) => {
+                key_presence(ty, key).map_or(Type::Boolean, Type::Bool)
+            }
+            _ => {
+                self.error(
+                    "PNX2322",
+                    span,
+                    format!(
+                        "contains? expects a map, set, vector or Nil, got {}",
+                        ty.inferred()
+                    ),
+                );
+                Type::Unknown
+            }
+        }
     }
 
     fn keyword_path(&mut self, form: &Form, name: &str) -> Option<Vec<(String, Span)>> {
@@ -2423,5 +2476,59 @@ fn predicate_result(actual: &Type, expected: &Type) -> Type {
             Type::union(parts.iter().map(|part| predicate_result(part, expected)))
         }
         actual => Type::Bool(actual.subtype_of(expected)),
+    }
+}
+
+/// Presence is independent of the stored value's truthiness.
+fn key_presence(ty: &Type, key: &str) -> Option<bool> {
+    match ty {
+        Type::Map(map) => match map.fields.get(key) {
+            Some(field) if field.required => Some(true),
+            Some(field) if field.ty == Type::Never => Some(false),
+            None if !map.open => Some(false),
+            _ => None,
+        },
+        Type::Nil | Type::Vector(_) => Some(false), // A keyword is not a vector index.
+        Type::Set(element)
+            if !Type::Key(key.to_owned()).subtype_of(element) && !element.contains_unknown() =>
+        {
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+fn narrow_key_presence(ty: &Type, key: &str, present: bool) -> Type {
+    if let Type::Union(parts) = ty {
+        return Type::union(
+            parts
+                .iter()
+                .map(|part| narrow_key_presence(part, key, present)),
+        );
+    }
+    match (key_presence(ty, key), ty) {
+        (Some(known), _) if known != present => Type::Never,
+        (None, Type::Map(map)) => {
+            let mut map = map.clone();
+            if present {
+                // An undeclared field still has no known value type on the present path.
+                if let Some(field) = map.fields.get_mut(key) {
+                    field.required = true;
+                }
+            } else if map.open {
+                // An optional field with no possible value records absence even in an open map.
+                map.fields.insert(
+                    key.to_owned(),
+                    Field {
+                        ty: Type::Never,
+                        required: false,
+                    },
+                );
+            } else {
+                map.fields.remove(key);
+            }
+            Type::Map(map)
+        }
+        _ => ty.clone(),
     }
 }

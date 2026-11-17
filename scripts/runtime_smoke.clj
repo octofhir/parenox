@@ -206,3 +206,20 @@
            (try (demo.paths-bad/wrong-parent) :unexpected-success
                 (catch ClassCastException _ :throws))))
 (println "Clojure/JVM nested paths: 8 assertions passed")
+
+(load-file "examples/presence.clj")
+(load-file "examples/presence_bad.clj")
+(assert (= "ADA" (demo.presence/display-name {:name "Ada"})))
+(assert (= "UNKNOWN" (demo.presence/display-name nil)))
+(assert (= "inactive" (demo.presence/status {:active false})))
+(assert (= "unknown" (demo.presence/status {})))
+(assert (contains? {:name nil} :name))
+(assert (not (contains? [:name] :name)))
+(assert (contains? #{:name} :name))
+(assert (= :throws
+           (try (demo.presence-bad/nullable-name {:name nil}) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(assert (= "Missing required key: :name"
+           (try (demo.presence-bad/missing-name {}) :unexpected-success
+                (catch RuntimeException e (.getMessage e)))))
+(println "Clojure/JVM map presence: 9 assertions passed")

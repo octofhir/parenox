@@ -61,6 +61,7 @@ just threading       # ->, ->>, some->, some->> and three deliberate errors
 just conditional     # cond->, cond->>, as-> and three deliberate errors
 just guards          # if-let, when-let, if-some and when-some
 just paths           # nested map lookup and update with source diagnostics
+just presence        # presence guards for optional fields
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -315,6 +316,13 @@ fallback when a path is absent and preserves a present terminal nil or false.
 and flags scalar parents. The update supports paths of 1 to 32 keys. Runtime
 paths and numeric indices report an analysis gap. Run `just paths` to see both
 operations and their diagnostics.
+
+`contains?` checks a known keyword key. A guard such as `(contains? patient :name)`
+refines a local map in each branch. The successful branch can read a declared
+optional field without adding nil for absence. The failure branch lets `get`
+or `get-in` use the fallback. A field declared nilable still accepts explicit
+nil, and the type of an undeclared field in an open map remains unknown.
+Run `just presence` for examples and source diagnostics.
 
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
 `:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.

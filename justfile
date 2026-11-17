@@ -100,3 +100,8 @@ guards format="pretty": build
 paths format="pretty": build
     @./target/release/parenox check examples/paths.clj --format {{quote(format)}}
     @./target/release/parenox check examples/paths_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check map presence guards and show nilable-value and absent-key errors.
+presence format="pretty": build
+    @./target/release/parenox check examples/presence.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/presence_bad.clj --format {{quote(format)}} || test "$?" -eq 1
