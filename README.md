@@ -124,8 +124,9 @@ just syntax examples/syntax_bad.clj   # deliberate mismatch; exit 1, later code 
 ```
 
 `parenox syntax FILE` prints the CST to stdout and source-highlighted reader
-errors to stderr. It uses [Rowan](https://github.com/rust-analyzer/rowan) 0.17,
-with the same reader as the checker. The library exposes `reader::parse(source)`:
+errors to stderr. It uses [Rowan](https://github.com/rust-analyzer/rowan)
+0.18.0-alpha.2, pinned exactly while its trivia APIs evolve. The same reader
+serves the checker and the CST. The library exposes `reader::parse(source)`:
 its `syntax()` view preserves every input byte, including whitespace, comments,
 commas, discarded forms and malformed input. Valid top-level forms and reader
 errors are returned separately. Check the errors before using recovered forms.
