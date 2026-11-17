@@ -175,3 +175,28 @@ fn successful_default_output_reports_success_without_source_noise() {
     );
     assert!(!text.contains("-->"));
 }
+
+#[test]
+fn syntax_command_keeps_trivia_and_reports_errors_without_losing_later_code() {
+    let valid = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .args(["syntax", "examples/syntax.clj"])
+        .output()
+        .unwrap();
+    assert!(valid.status.success());
+    assert!(valid.stderr.is_empty());
+    let tree = String::from_utf8(valid.stdout).unwrap();
+    for kind in ["Root@", "Comment@", "Discard@", "Comma@", "Map@", "Set@"] {
+        assert!(tree.contains(kind), "{kind}: {tree}");
+    }
+    let invalid = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .args(["syntax", "examples/syntax_bad.clj"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(1));
+    let tree = String::from_utf8(invalid.stdout).unwrap();
+    assert!(tree.contains("Error@"), "{tree}");
+    assert!(tree.contains("retained"), "{tree}");
+    let errors = String::from_utf8(invalid.stderr).unwrap();
+    assert!(errors.contains("error[PNX9000]"), "{errors}");
+    assert!(errors.contains("examples/syntax_bad.clj:4:5"), "{errors}");
+}

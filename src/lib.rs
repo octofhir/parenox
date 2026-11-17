@@ -2,6 +2,7 @@ mod checker;
 pub mod output;
 mod project;
 pub mod reader;
+pub mod syntax;
 mod types;
 
 use reader::Span;
@@ -34,6 +35,12 @@ pub struct Suggestion {
     pub span: Span,
     pub replacement: String,
     pub applicability: &'static str,
+}
+
+impl From<reader::ReadError> for Diagnostic {
+    fn from(error: reader::ReadError) -> Self {
+        Self::new("PNX9000", error.span, error.message)
+    }
 }
 
 impl Diagnostic {

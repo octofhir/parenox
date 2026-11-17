@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::syntax::{Builder, SyntaxKind, SyntaxNode};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Position {
     pub offset: usize,
@@ -70,23 +72,57 @@ pub struct ReadError {
     pub message: String,
 }
 
+/// Fast semantic forms for checking. Uses the same reader without capturing a CST.
 pub fn read(source: &str) -> Result<Vec<Form>, ReadError> {
-    let mut reader = Reader {
-        source,
-        depth: 0,
-        pos: Position {
-            offset: 0,
-            line: 1,
-            column: 1,
-        },
-    };
+    let mut reader = Reader::new(source, false);
     let mut forms = Vec::new();
+    while let Some(form) = reader.next_form()? {
+        forms.push(form);
+    }
+    Ok(forms)
+}
+
+#[derive(Debug)]
+pub struct Parse {
+    green: rowan::GreenNode,
+    pub forms: Vec<Form>,
+    pub errors: Vec<ReadError>,
+}
+
+impl Parse {
+    /// Cheap syntax view over the immutable green tree, including trivia and errors.
+    pub fn syntax(&self) -> SyntaxNode {
+        SyntaxNode::new_root(self.green.clone())
+    }
+}
+
+/// Retains all source bytes, including invalid and unsupported reader syntax.
+/// Forms contain only successfully read top-level values; errors must be checked before analysis.
+pub fn parse(source: &str) -> Parse {
+    let mut reader = Reader::new(source, true);
+    let mut forms = Vec::new();
+    let mut errors = Vec::new();
     loop {
-        reader.skip()?;
-        if reader.peek().is_none() {
-            return Ok(forms);
+        let start = reader.pos;
+        match reader.next_form() {
+            Ok(Some(form)) => forms.push(form),
+            Ok(None) => break,
+            Err(error) => {
+                errors.push(error);
+                // Every recovery step must consume input, even at an unsupported construct.
+                if reader.pos.offset == start.offset {
+                    if reader.bump().is_none() {
+                        break;
+                    }
+                    reader.token(SyntaxKind::ErrorToken, start);
+                }
+            }
         }
-        forms.push(reader.form()?);
+    }
+    Parse {
+        green: reader.tree.unwrap().build(),
+        forms,
+        errors,
     }
 }
 
@@ -94,9 +130,50 @@ struct Reader<'a> {
     source: &'a str,
     pos: Position,
     depth: usize,
+    tree: Option<Builder<'a>>,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    fn new(source: &'a str, capture: bool) -> Self {
+        Self {
+            source,
+            pos: Position {
+                offset: 0,
+                line: 1,
+                column: 1,
+            },
+            depth: 0,
+            tree: capture.then(|| Builder::new(source)),
+        }
+    }
+
+    fn next_form(&mut self) -> Result<Option<Form>, ReadError> {
+        self.skip()?;
+        if self.peek().is_none() {
+            Ok(None)
+        } else {
+            self.form().map(Some)
+        }
+    }
+
+    fn start_node(&mut self, start: Position) {
+        if let Some(tree) = &mut self.tree {
+            tree.start(start.offset);
+        }
+    }
+
+    fn finish_node(&mut self, kind: SyntaxKind) {
+        if let Some(tree) = &mut self.tree {
+            tree.finish(kind, self.pos.offset);
+        }
+    }
+
+    fn token(&mut self, kind: SyntaxKind, start: Position) {
+        if let Some(tree) = &mut self.tree {
+            tree.token(kind, start.offset..self.pos.offset);
+        }
+    }
+
     fn peek(&self) -> Option<char> {
         self.source[self.pos.offset..].chars().next()
     }
@@ -123,33 +200,52 @@ impl Reader<'_> {
         }
     }
 
-    // Discards are consumed as reader syntax, including nested #_ #_ forms.
+    // Discards remain syntax in a CST and disappear from semantic forms.
     fn skip(&mut self) -> Result<(), ReadError> {
         loop {
+            let start = self.pos;
             match self.peek() {
-                Some(c) if c.is_whitespace() || c == ',' => {
+                Some(c) if c.is_whitespace() => {
+                    while self.peek().is_some_and(char::is_whitespace) {
+                        self.bump();
+                    }
+                    self.token(SyntaxKind::Whitespace, start);
+                }
+                Some(',') => {
                     self.bump();
+                    self.token(SyntaxKind::Comma, start);
                 }
                 Some(';') => {
                     while self.peek().is_some_and(|c| c != '\n') {
                         self.bump();
                     }
+                    self.token(SyntaxKind::Comment, start);
                 }
                 Some('#') if self.source[self.pos.offset..].starts_with("#_") => {
-                    let start = self.pos;
+                    self.start_node(start);
                     self.bump();
                     self.bump();
-                    if self.depth >= 128 {
-                        return Err(self.error(start, "Reader nesting limit (128) exceeded"));
-                    }
-                    self.depth += 1;
-                    let skipped = self.skip();
-                    self.depth -= 1;
-                    skipped?;
-                    if self.peek().is_none() || self.peek().is_some_and(|c| ")]}".contains(c)) {
-                        return Err(self.error(start, "Expected a form after #_"));
-                    }
-                    self.form()?;
+                    self.token(SyntaxKind::DiscardMark, start);
+                    let result = (|| {
+                        if self.depth >= 128 {
+                            return Err(self.error(start, "Reader nesting limit (128) exceeded"));
+                        }
+                        self.depth += 1;
+                        let skipped = self.skip();
+                        self.depth -= 1;
+                        skipped?;
+                        if self.peek().is_none() || self.peek().is_some_and(|c| ")]}".contains(c)) {
+                            return Err(self.error(start, "Expected a form after #_"));
+                        }
+                        self.form()?;
+                        Ok(())
+                    })();
+                    self.finish_node(if result.is_ok() {
+                        SyntaxKind::Discard
+                    } else {
+                        SyntaxKind::Error
+                    });
+                    result?;
                 }
                 _ => return Ok(()),
             }
@@ -161,18 +257,46 @@ impl Reader<'_> {
             return Err(self.error(self.pos, "Reader nesting limit (128) exceeded"));
         }
         self.depth += 1;
-        let result = self.form_inner();
+        let result = self.skip().and_then(|()| {
+            self.start_node(self.pos);
+            let result = self.form_inner();
+            if let Some(tree) = &mut self.tree {
+                let kind = result
+                    .as_ref()
+                    .map_or(SyntaxKind::Error, |form| match form.kind {
+                        Kind::List(_) => SyntaxKind::List,
+                        Kind::Vector(_) => SyntaxKind::Vector,
+                        Kind::Map(_) => SyntaxKind::Map,
+                        Kind::Set(_) => SyntaxKind::Set,
+                        Kind::Quote(_) => SyntaxKind::Quote,
+                        Kind::Symbol(_) => SyntaxKind::Symbol,
+                        Kind::Keyword(_) => SyntaxKind::Keyword,
+                        Kind::String(_) => SyntaxKind::String,
+                        Kind::Number => SyntaxKind::Number,
+                        Kind::Bool(_) => SyntaxKind::Boolean,
+                        Kind::Nil => SyntaxKind::Nil,
+                    });
+                tree.finish(kind, self.pos.offset);
+            }
+            result
+        });
         self.depth -= 1;
         result
     }
 
     fn form_inner(&mut self) -> Result<Form, ReadError> {
-        self.skip()?;
         let start = self.pos;
         let kind = match self.bump() {
-            Some('(') => Kind::List(self.collection(')', start)?),
-            Some('[') => Kind::Vector(self.collection(']', start)?),
+            Some('(') => {
+                self.token(SyntaxKind::OpenParen, start);
+                Kind::List(self.collection(')', start)?)
+            }
+            Some('[') => {
+                self.token(SyntaxKind::OpenBracket, start);
+                Kind::Vector(self.collection(']', start)?)
+            }
             Some('{') => {
+                self.token(SyntaxKind::OpenBrace, start);
                 let xs = self.collection('}', start)?;
                 if xs.len() % 2 != 0 {
                     return Err(self.error(start, "Map literal requires an even number of forms"));
@@ -180,9 +304,13 @@ impl Reader<'_> {
                 Kind::Map(xs)
             }
             Some('"') => Kind::String(self.string(start)?),
-            Some('\'') => Kind::Quote(Box::new(self.form()?)),
+            Some('\'') => {
+                self.token(SyntaxKind::QuoteMark, start);
+                Kind::Quote(Box::new(self.form()?))
+            }
             Some('#') if self.peek() == Some('{') => {
                 self.bump();
+                self.token(SyntaxKind::OpenSet, start);
                 Kind::Set(self.collection('}', start)?)
             }
             Some(c @ (')' | ']' | '}')) => {
@@ -235,7 +363,17 @@ impl Reader<'_> {
             self.skip()?;
             match self.peek() {
                 Some(c) if c == end => {
+                    let close = self.pos;
                     self.bump();
+                    self.token(
+                        match end {
+                            ')' => SyntaxKind::CloseParen,
+                            ']' => SyntaxKind::CloseBracket,
+                            '}' => SyntaxKind::CloseBrace,
+                            _ => unreachable!(),
+                        },
+                        close,
+                    );
                     return Ok(xs);
                 }
                 None => return Err(self.error(start, format!("Unclosed form; expected {end}"))),

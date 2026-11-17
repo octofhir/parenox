@@ -50,6 +50,7 @@ just errors          # three clinic errors with highlighted source
 just errors plain
 just errors json
 just good            # passing example
+just syntax          # inspect source-preserving syntax
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -114,6 +115,29 @@ and hidden directory entries are skipped. Supplied files form one project;
 namespace cycles and duplicate namespaces are reported. JSON output for a project
 is one object with per-file reports and aggregate statistics. Single-file JSON
 keeps the simpler file-report shape.
+
+## Lossless syntax
+
+```sh
+just syntax                          # comments, commas, quotes, sets and #_ forms
+just syntax examples/syntax_bad.clj   # deliberate mismatch; exit 1, later code retained
+```
+
+`parenox syntax FILE` prints the CST to stdout and source-highlighted reader
+errors to stderr. It uses [Rowan](https://github.com/rust-analyzer/rowan) 0.17,
+with the same reader as the checker. The library exposes `reader::parse(source)`:
+its `syntax()` view preserves every input byte, including whitespace, comments,
+commas, discarded forms and malformed input. Valid top-level forms and reader
+errors are returned separately. Check the errors before using recovered forms.
+
+`reader::read(source)` is the strict semantic path used by checking: it stops at
+the first reader error and does not construct a CST. CST capture is optional;
+ordinary checks keep using semantic forms and their existing caches.
+
+The same reader handles the currently supported common Clojure/EDN syntax.
+This does not implement a complete EDN reader, macro expansion, incremental
+reparsing or a formatter. A future formatter can consume the CST and verify
+that its output preserves significant tokens and comments.
 
 ## Agent sessions
 

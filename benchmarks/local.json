@@ -3,24 +3,24 @@
   "fresh_cli_process": {
     "iterations": 30,
     "timings": {
-      "max_us": 2614.2,
-      "p50_us": 1857.2,
-      "p95_us": 1925.9
+      "max_us": 15202.6,
+      "p50_us": 2251.4,
+      "p95_us": 5786.0
     }
   },
   "generated_file": {
     "bytes": 55905,
-    "first_round_trip_us": 9421.5,
+    "first_round_trip_us": 4902.667,
     "functions": 1000,
     "single_body_edit_round_trip": {
-      "max_us": 5333.0,
-      "p50_us": 4998.0,
-      "p95_us": 5066.8
+      "max_us": 9475.4,
+      "p50_us": 5372.0,
+      "p95_us": 7258.5
     },
     "warm_round_trip": {
-      "max_us": 631.6,
-      "p50_us": 576.5,
-      "p95_us": 591.5
+      "max_us": 1671.5,
+      "p50_us": 603.4,
+      "p95_us": 1307.2
     }
   },
   "iterations": 100,
@@ -31,12 +31,12 @@
   "scope": "Synthetic single-file fixtures. Rust JSON encoding, pipes, full source transfer and response decoding. Fresh CLI includes process startup and file I/O. No JVM or macro expansion.",
   "small_file": {
     "bytes": 633,
-    "first_round_trip_us": 327.08299999999997,
+    "first_round_trip_us": 97.0,
     "functions": 4,
     "warm_round_trip": {
-      "max_us": 114.5,
-      "p50_us": 70.8,
-      "p95_us": 100.8
+      "max_us": 30.7,
+      "p50_us": 16.0,
+      "p95_us": 21.4
     }
   }
 }

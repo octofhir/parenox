@@ -4,16 +4,16 @@ use std::fmt::Write;
 
 use annotate_snippets::{AnnotationKind, Group, Level, Patch, Renderer, Snippet};
 
-use crate::Report;
+use crate::{Diagnostic, Report};
 
-pub fn pretty(report: &Report, source: &str, color: bool) -> String {
+pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: bool) -> String {
     let renderer = if color {
         Renderer::styled()
     } else {
         Renderer::plain()
     };
     let mut output = String::new();
-    for diagnostic in &report.diagnostics {
+    for diagnostic in diagnostics {
         let label = match &diagnostic.actual {
             Some(actual) => format!("this expression has type `{actual}`"),
             None => diagnostic.message.clone(),
@@ -22,14 +22,11 @@ pub fn pretty(report: &Report, source: &str, color: bool) -> String {
             .primary_title(&diagnostic.message)
             .id(&diagnostic.code)
             .element(
-                Snippet::source(source)
-                    .path(&report.path)
-                    .fold(true)
-                    .annotation(
-                        AnnotationKind::Primary
-                            .span(diagnostic.span.start.offset..diagnostic.span.end.offset)
-                            .label(label),
-                    ),
+                Snippet::source(source).path(path).fold(true).annotation(
+                    AnnotationKind::Primary
+                        .span(diagnostic.span.start.offset..diagnostic.span.end.offset)
+                        .label(label),
+                ),
             );
         if let (Some(expected), Some(actual)) = (&diagnostic.expected, &diagnostic.actual) {
             primary = primary.element(
@@ -47,7 +44,7 @@ pub fn pretty(report: &Report, source: &str, color: bool) -> String {
             groups.push(
                 Group::with_title(Level::HELP.secondary_title(&suggestion.message)).element(
                     Snippet::source(source)
-                        .path(&report.path)
+                        .path(path)
                         .fold(true)
                         .patch(Patch::new(
                             suggestion.span.start.offset..suggestion.span.end.offset,
@@ -58,6 +55,11 @@ pub fn pretty(report: &Report, source: &str, color: bool) -> String {
         }
         writeln!(output, "{}\n", renderer.render(&groups)).unwrap();
     }
+    output
+}
+
+pub fn pretty(report: &Report, source: &str, color: bool) -> String {
+    let mut output = diagnostics(&report.path, source, &report.diagnostics, color);
     if !report.complete {
         writeln!(
             output,

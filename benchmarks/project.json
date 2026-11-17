@@ -1,25 +1,25 @@
 {
   "after_fix": {
     "checked_functions": 2,
-    "elapsed_us": 488,
+    "elapsed_us": 489,
     "parsed_files": 2,
     "reused_functions": 1,
     "reused_parses": 3
   },
   "body_edit": {
     "checked_functions": 1,
-    "elapsed_us": 42,
+    "elapsed_us": 41,
     "parsed_files": 1,
     "reused_functions": 2,
     "reused_parses": 4
   },
   "body_edit_round_trip": {
-    "max_us": 358.1,
-    "p50_us": 68.6,
-    "p95_us": 323.2
+    "max_us": 448.6,
+    "p50_us": 65.8,
+    "p95_us": 72.5
   },
-  "first_round_trip_us": 287881.792,
-  "fix_round_trip_us": 661.584,
+  "first_round_trip_us": 295882.208,
+  "fix_round_trip_us": 644.375,
   "initial_errors": [
     {
       "code": "PNX2322",
@@ -40,7 +40,7 @@
       "message": "clojure.string/upper-case: expected String, got Nil | String"
     }
   ],
-  "iterations": 100,
+  "iterations": 1000,
   "platform": {
     "arch": "aarch64",
     "os": "macos"
@@ -48,18 +48,18 @@
   "scenario": "clinic: 4 namespaces + 1 declared library contract",
   "scope": "Release CLI process; Rust JSON encoding, pipes, full project snapshots and response decoding. Local fixture, not a production-scale benchmark.",
   "signature_change": {
-    "round_trip_us": 138.584,
+    "round_trip_us": 127.042,
     "stats": {
       "checked_functions": 2,
-      "elapsed_us": 89,
+      "elapsed_us": 81,
       "parsed_files": 1,
       "reused_functions": 1,
       "reused_parses": 4
     }
   },
   "warm_round_trip": {
-    "max_us": 320.0,
-    "p50_us": 54.8,
-    "p95_us": 258.2
+    "max_us": 325.9,
+    "p50_us": 53.2,
+    "p95_us": 58.5
   }
 }

@@ -57,3 +57,7 @@ runtime-smoke:
 inference: build
     @./target/release/parenox check examples/inferred.clj
     @./target/release/parenox check examples/inferred_bad.clj || test "$?" -eq 1
+
+# Inspect the lossless CST, including comments, punctuation and reader discards.
+syntax path="examples/syntax.clj": build
+    @./target/release/parenox syntax {{quote(path)}}

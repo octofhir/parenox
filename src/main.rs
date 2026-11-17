@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use parenox::{Session, Source, output};
+use parenox::{Diagnostic, Session, Source, output, reader};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -14,6 +14,7 @@ const HELP: &str = "Parenox — experimental source-only Clojure checker
 
 Usage:
   parenox check <file.clj>... [--format pretty|plain|json] [--color auto|always|never] [--externs file.edn]
+  parenox syntax <file.clj>
   parenox serve
   parenox bench <file.clj> [--iterations N]
 
@@ -41,6 +42,7 @@ fn run() -> Result<u8, String> {
     match args.first().map(String::as_str) {
         Some("check") => check(&args[1..]),
         Some("serve") if args.len() == 1 => serve(),
+        Some("syntax") => syntax(&args[1..]),
         Some("bench") => bench(&args[1..]),
         Some("--help" | "-h") | None => {
             print!("{HELP}");
@@ -48,6 +50,21 @@ fn run() -> Result<u8, String> {
         }
         _ => Err(HELP.into()),
     }
+}
+
+fn syntax(args: &[String]) -> Result<u8, String> {
+    let [path] = args else {
+        return Err(HELP.into());
+    };
+    let source = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
+    let parsed = reader::parse(&source);
+    print!("{:#?}", parsed.syntax());
+    let diagnostics: Vec<_> = parsed.errors.into_iter().map(Diagnostic::from).collect();
+    eprint!(
+        "{}",
+        output::diagnostics(path, &source, &diagnostics, Color::Auto.enabled())
+    );
+    Ok(u8::from(!diagnostics.is_empty()))
 }
 
 fn check(args: &[String]) -> Result<u8, String> {

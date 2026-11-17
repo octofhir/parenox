@@ -58,7 +58,7 @@ impl FileCache {
                 self.forms.clear();
                 self.namespace.clear();
                 self.dependencies.clear();
-                self.parse_error = Some(Diagnostic::new("PNX9000", error.span, error.message));
+                self.parse_error = Some(error.into());
             }
         }
         true
