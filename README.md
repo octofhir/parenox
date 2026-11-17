@@ -81,6 +81,7 @@ just accumulators     # growing vectors with retained element types
 just exceptions       # explicit errors and structured exception data
 just handlers         # try/catch/finally and recur boundaries
 just literal-vars     # literal config values across namespaces
+just core-imports     # core referrals and local replacements
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -155,6 +156,10 @@ whose namespace differs from the file that declares them. Input file order does
 not affect resolution. An alias created with `:as-alias` can qualify keywords
 without creating a namespace load dependency. Competing declarations of the
 same spec key in separate files report an analysis gap.
+
+`:refer-clojure` supports `:exclude`, `:only` and nonoverlapping `:rename`
+mappings. Qualified calls to `clojure.core` continue to resolve when an
+unqualified name is excluded.
 
 `def` supports literal maps, vectors, sets and scalar values. Their inferred
 types are available to importing namespaces, subject to `^:private`. Changes

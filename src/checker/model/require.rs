@@ -1,8 +1,9 @@
 //! Namespace imports from Clojure ns declarations.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Declarations;
-use crate::reader::{Form, Kind};
+use crate::checker::calls::is_builtin;
+use crate::reader::{Form, Kind, Span};
 
 impl Declarations {
     pub(super) fn read_libspec(&mut self, lib: &Form) {
@@ -22,21 +23,14 @@ impl Declarations {
             self.error("PNX9001", name.span, "Expected a required namespace");
             return;
         };
-        let (pairs, unmatched) = options.as_chunks::<2>();
-        if !unmatched.is_empty() {
-            self.error("PNX9001", lib.span, "Expected require option/value pairs");
+        let Some(options) = self.options(
+            options,
+            lib.span,
+            ":require",
+            &[":as", ":as-alias", ":refer", ":exclude", ":rename"],
+        ) else {
             return;
-        }
-        let mut options = BTreeMap::new();
-        for [option, value] in pairs {
-            if let Some(key @ (":as" | ":as-alias" | ":refer" | ":exclude" | ":rename")) =
-                option.keyword()
-            {
-                options.insert(key, value);
-            } else {
-                self.error("PNX9001", option.span, "Unsupported require option");
-            }
-        }
+        };
         if !options.contains_key(":as-alias") || options.contains_key(":as") {
             self.dependencies.push(namespace.to_owned());
         }
@@ -95,6 +89,7 @@ impl Declarations {
             if let Some(previous) = self.names.refers.get(alias)
                 && previous != &qualified
                 && !previous.starts_with("clojure.core/")
+                && namespace != "clojure.core"
             {
                 self.error(
                     "PNX2790",
@@ -105,6 +100,112 @@ impl Declarations {
             }
             self.names.refers.insert(alias.to_owned(), qualified);
         }
+    }
+
+    pub(super) fn read_core_refers(&mut self, forms: &[Form], span: Span) {
+        let Some(options) = self.options(
+            forms,
+            span,
+            ":refer-clojure",
+            &[":only", ":exclude", ":rename"],
+        ) else {
+            return;
+        };
+        if let Some(only) = options.get(":only") {
+            self.names.core_only = Some(
+                self.symbols(only, ":only")
+                    .into_iter()
+                    .map(|(name, _)| name.to_owned())
+                    .collect(),
+            );
+        }
+        if let Some(excluded) = options.get(":exclude") {
+            let hidden = self.symbols(excluded, ":exclude");
+            self.names
+                .core_hidden
+                .extend(hidden.into_iter().map(|(name, _)| name.to_owned()));
+        }
+        let mut renames = Vec::new();
+        if let Some(rename) = options.get(":rename") {
+            let Some(entries) = rename.map() else {
+                self.error("PNX9001", rename.span, ":rename requires a map of symbols");
+                return;
+            };
+            for [from, to] in entries.as_chunks::<2>().0 {
+                let (Some(from), Some(alias)) = (unqualified(from), unqualified(to)) else {
+                    self.error(
+                        "PNX1001",
+                        to.span,
+                        "Core rename keys and values must be unqualified symbols",
+                    );
+                    continue;
+                };
+                if self.names.core_visible(from) {
+                    renames.push((from, alias, to.span));
+                }
+            }
+        }
+        self.names
+            .core_hidden
+            .extend(renames.iter().map(|(from, _, _)| (*from).to_owned()));
+        let replacements: Vec<_> = self
+            .names
+            .refers
+            .keys()
+            .filter(|name| self.core_refers_here(name))
+            .cloned()
+            .collect();
+        for name in replacements {
+            self.names.refers.remove(&name);
+        }
+        let mut aliases = BTreeSet::new();
+        for (from, alias, span) in renames {
+            let qualified = format!("clojure.core/{from}");
+            if !aliases.insert(alias) || self.core_refers_here(alias) {
+                self.error(
+                    "PNX9001",
+                    span,
+                    format!("Core rename to {alias} overlaps another referral"),
+                );
+            } else {
+                self.names.refers.insert(alias.into(), qualified);
+            }
+        }
+    }
+
+    fn core_refers_here(&self, name: &str) -> bool {
+        self.names.core_visible(name) && (self.names.core_only.is_some() || known_core_var(name))
+    }
+
+    fn options<'a>(
+        &mut self,
+        forms: &'a [Form],
+        span: Span,
+        context: &str,
+        supported: &[&str],
+    ) -> Option<BTreeMap<&'a str, &'a Form>> {
+        let (pairs, unmatched) = forms.as_chunks::<2>();
+        if !unmatched.is_empty() {
+            self.error(
+                "PNX9001",
+                span,
+                format!("Expected {context} option/value pairs"),
+            );
+            return None;
+        }
+        let mut options = BTreeMap::new();
+        for [option, value] in pairs {
+            if let Some(key) = option.keyword().filter(|key| supported.contains(key)) {
+                options.insert(key, value);
+            } else {
+                self.error(
+                    "PNX9001",
+                    option.span,
+                    format!("Unsupported {context} option"),
+                );
+            }
+        }
+        Some(options)
     }
 
     fn symbols<'a>(&mut self, form: &'a Form, option: &str) -> Vec<(&'a str, &'a Form)> {
@@ -128,4 +229,51 @@ impl Declarations {
             })
             .collect()
     }
+}
+
+fn unqualified(form: &Form) -> Option<&str> {
+    form.symbol()
+        .filter(|name| !name.contains('/') || *name == "/")
+}
+
+fn known_core_var(name: &str) -> bool {
+    is_builtin(&format!("clojure.core/{name}"))
+        || matches!(
+            name,
+            "ns" | "defn"
+                | "defn-"
+                | "loop"
+                | "fn"
+                | "let"
+                | "or"
+                | "and"
+                | "cond"
+                | "case"
+                | "when"
+                | "if-let"
+                | "when-let"
+                | "if-some"
+                | "when-some"
+                | "map?"
+                | "vector?"
+                | "set?"
+                | "->"
+                | "->>"
+                | "some->"
+                | "some->>"
+                | "cond->"
+                | "cond->>"
+                | "as->"
+                | "get"
+                | "req!"
+                | "contains?"
+                | "get-in"
+                | "assoc"
+                | "assoc-in"
+                | "update"
+                | "update-in"
+                | "mapv"
+                | "filterv"
+                | "fnil"
+        )
 }

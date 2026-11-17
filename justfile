@@ -195,3 +195,8 @@ handlers format="pretty" color="auto": build
 literal-vars format="pretty" color="auto": build
     @./target/release/parenox check examples/literal_vars/config.clj examples/literal_vars/app.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/literal_vars/config.clj examples/literal_vars/bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check explicit core imports and show an excluded core name.
+core-imports format="pretty" color="auto": build
+    @./target/release/parenox check examples/core_imports.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/core_imports_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

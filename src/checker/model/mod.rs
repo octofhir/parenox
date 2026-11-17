@@ -222,10 +222,8 @@ impl Model {
             .map(|f| (&f.name, &f.args, &f.ret))
             .collect();
         format!(
-            "{:?}|{:?}|{:?}|{:?}|{sigs:?}|{:?}|{}",
-            self.names.namespace,
-            self.names.aliases,
-            self.names.refers,
+            "{:?}|{:?}|{sigs:?}|{:?}|{}",
+            self.names,
             self.specs,
             self.literals,
             globals.dependency_key(&self.dependencies)

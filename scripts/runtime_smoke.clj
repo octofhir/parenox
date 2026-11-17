@@ -556,3 +556,14 @@
                   (when (clojure.string/includes? (ex-message (ex-cause e)) "is not public")
                     :not-public)))))
 (println "Clojure/JVM literal vars: 5 assertions passed")
+
+(load-file "examples/core_imports.clj")
+(assert (= 4 (demo.core-imports/label-width "Ada")))
+(assert (= 4 (demo.core-imports/prior 5)))
+(assert (nil? (ns-resolve 'demo.core-imports 'dec)))
+(assert (= :unbound (try (load-file "examples/core_imports_bad.clj")
+                         (catch clojure.lang.Compiler$CompilerException e
+                           (when (clojure.string/includes? (ex-message (ex-cause e))
+                                                          "Unable to resolve symbol: inc")
+                             :unbound)))))
+(println "Clojure/JVM core imports: 4 assertions passed")

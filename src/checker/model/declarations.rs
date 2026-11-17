@@ -9,6 +9,8 @@ pub(super) struct Names {
     pub(super) namespace: String,
     pub(super) refers: BTreeMap<String, String>,
     pub(super) aliases: BTreeMap<String, String>,
+    pub(super) core_only: Option<BTreeSet<String>>,
+    pub(super) core_hidden: BTreeSet<String>,
 }
 
 impl Names {
@@ -22,11 +24,22 @@ impl Names {
                 self.aliases.get(prefix).map_or(prefix, String::as_str)
             )
         } else {
-            self.refers
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| format!("clojure.core/{name}"))
+            self.refers.get(name).cloned().unwrap_or_else(|| {
+                let namespace = if self.core_visible(name) {
+                    "clojure.core"
+                } else {
+                    &self.namespace
+                };
+                format!("{namespace}/{name}")
+            })
         }
+    }
+
+    pub(super) fn core_visible(&self, name: &str) -> bool {
+        self.core_only
+            .as_ref()
+            .is_none_or(|only| only.contains(name))
+            && !self.core_hidden.contains(name)
     }
 
     pub(super) fn key(&self, key: &str) -> String {
@@ -128,6 +141,14 @@ impl Declarations {
                 model.error("PNX9001", form.span, "Expected a top-level declaration");
                 continue;
             };
+            match op {
+                "ns" | "clojure.core/ns" => continue,
+                "def" => {
+                    model.literal_vars.push(index);
+                    continue;
+                }
+                _ => {}
+            }
             match model.names.resolve(op).as_str() {
                 "clojure.core/ns" => {}
                 "clojure.spec.alpha/def" if xs.len() == 3 => {
@@ -145,7 +166,6 @@ impl Declarations {
                     }
                 }
                 "clojure.core/defn" | "clojure.core/defn-" => model.functions.push(index),
-                "clojure.core/def" => model.literal_vars.push(index),
                 _ => model.error(
                     "PNX9001",
                     form.span,
@@ -162,6 +182,7 @@ impl Declarations {
             return;
         };
         self.names.namespace = name.to_string();
+        let mut has_core_clause = false;
         for clause in xs.iter().skip(2) {
             // ns docstrings and attr-maps are declarations, not executable forms.
             if matches!(clause.kind, Kind::String(_) | Kind::Map(_)) {
@@ -171,16 +192,22 @@ impl Declarations {
                 self.error("PNX9001", clause.span, "Unsupported ns clause");
                 continue;
             };
-            if items.first().and_then(Form::keyword) != Some(":require") {
-                self.error(
+            match items.first().and_then(Form::keyword) {
+                Some(":require") => {
+                    for lib in &items[1..] {
+                        self.read_libspec(lib);
+                    }
+                }
+                Some(":refer-clojure") if !has_core_clause => {
+                    has_core_clause = true;
+                    self.read_core_refers(&items[1..], clause.span);
+                }
+                Some(":refer-clojure") => self.error(
                     "PNX9001",
                     clause.span,
-                    "Only :require ns clauses are supported",
-                );
-                continue;
-            }
-            for lib in items.iter().skip(1) {
-                self.read_libspec(lib);
+                    "Only one :refer-clojure clause is supported",
+                ),
+                _ => self.error("PNX9001", clause.span, "Unsupported ns clause"),
             }
         }
     }

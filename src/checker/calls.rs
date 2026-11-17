@@ -460,7 +460,7 @@ fn predicate_result(actual: &Type, expected: &Type) -> Type {
     }
 }
 
-fn is_builtin(name: &str) -> bool {
+pub(super) fn is_builtin(name: &str) -> bool {
     matches!(
         name,
         "clojure.core/+"
