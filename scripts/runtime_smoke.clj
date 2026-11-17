@@ -129,3 +129,25 @@
                 :unexpected-success
                 (catch ClassCastException _ :throws))))
 (println "Clojure/JVM destructuring defaults: 12 assertions passed")
+
+(load-file "examples/threading.clj")
+(load-file "examples/threading_bad.clj")
+(assert (= "UNKNOWN" (demo.threading/display-name {})))
+(assert (= "ADA" (demo.threading/display-name {:name " Ada "})))
+(assert (= "7: Ada" (demo.threading/numbered-name "Ada")))
+(assert (nil? (demo.threading/maybe-name nil)))
+(assert (= "ADA" (demo.threading/maybe-name " Ada ")))
+(assert (nil? (demo.threading/maybe-numbered nil)))
+(assert (= "7: Ada" (demo.threading/maybe-numbered "Ada")))
+(assert (= "false" (demo.threading/false-text)))
+(assert (nil? (some-> nil (str (inc "bad")))))
+(assert (= "seed" (->> "seed" (let [{:keys [user/parenox__thread_0]} {:user/parenox__thread_0 42}]))))
+(assert (= [3 1] (let [calls (atom 0) result (some-> (swap! calls inc) inc inc)] [result @calls])))
+(assert (= :throws
+           (try (demo.threading-bad/unsafe-name {}) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(assert (= :throws
+           (try (demo.threading-bad/bad-number) :unexpected-success
+                (catch ClassCastException _ :throws))))
+(assert (nil? (demo.threading-bad/optional-result nil)))
+(println "Clojure/JVM threading macros: 14 assertions passed")

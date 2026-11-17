@@ -57,6 +57,7 @@ just reader          # metadata, characters and tagged EDN
 just portable        # JVM branches in a .cljc source file
 just checked         # Clojure 1.13 checked bindings and two deliberate errors
 just defaults        # destructuring defaults and three deliberate errors
+just threading       # ->, ->>, some->, some->> and three deliberate errors
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -176,9 +177,10 @@ including numeric spelling; the forms alone are not yet a runtime value model.
 | Reader and forms | Recognize syntax, preserve spans and metadata, retain tag/payload pairs | More reader forms and literal decoding |
 | Optional CST | Preserve every byte, trivia and malformed input | Formatter and editor operations |
 | Analysis and sessions | Resolve names, infer types, track dependencies and cache checks | Library analysis and richer contracts |
-| Future expansion and lowering | Consume forms with source origins | Macro expansion, interpreter or compiled runtime |
+| Core transformations | Transform threading steps using existing forms and source spans | More reviewed core macro rules |
+| Future runtime and lowering | Consume forms with source origins | Interpreter or compiled runtime |
 
-Expansion and execution will be separate semantic stages. Types, namespace
+Core form transformations and execution are separate semantic stages. Types, namespace
 resolution and mutable runtime state do not belong in the CST. Macro-generated
 code will need explicit expansion origins and its own cache dependencies; source
 spans alone cannot represent an expansion history. These are extension boundaries,
@@ -263,6 +265,23 @@ Run `just inference` for passing and failing patient-label examples. Errors poin
 to the helper body and include notes showing its call chain. Repeated calls with
 the same inputs reuse inferred results within the checked entry function.
 
+Core threading macros `->`, `->>`, `some->` and `some->>` are supported. The checker
+resolves names before selecting a rule, so local and project functions can shadow
+these names. `some->` variants stop on nil; false continues through the chain.
+The seed is analyzed once, and flat pipelines are processed iteratively. Nested
+threading expansion is bounded to 32 active expressions and reports an analysis
+gap at the limit. Compiler-level resolution and arity checks still apply to skipped
+steps; runtime type and missing-key errors are excluded from proven skipped paths.
+Run `just threading` for examples and three deliberate errors.
+
+[expand.rs](src/expand.rs) transforms individual threading steps using the shared
+`Form` representation, independently of the type checker. The consumer
+owns evaluation order, nil guards and temporary lifetime. Source steps and their
+metadata are preserved; diagnostics include macro origin notes. Mechanical edits
+inside transformed calls are withheld when source replacement could change the
+threading semantics. User macro execution, a general macroexpander and full
+expansion provenance remain future work.
+
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
 `:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.
 Keys after `&` in a keys vector are not bound; checked directives require their
@@ -305,6 +324,7 @@ inferred helper work is included in the check of their callers.
 | Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
 | Spec forms | `s/keys`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`; local predicate narrowing |
+| Core macros | `->`, `->>`, `some->`, `some->>` with source diagnostics |
 | Data operations | Keyword lookup, literal-key `get`/`req!`/`assoc`, nested keyword map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |

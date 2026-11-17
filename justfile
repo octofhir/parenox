@@ -80,3 +80,8 @@ checked format="pretty": build
 defaults format="pretty": build
     @./target/release/parenox check examples/defaults.clj --format {{quote(format)}}
     @./target/release/parenox check examples/defaults_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check threading macros, then show source-mapped type and Nil errors.
+threading format="pretty": build
+    @./target/release/parenox check examples/threading.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/threading_bad.clj --format {{quote(format)}} || test "$?" -eq 1

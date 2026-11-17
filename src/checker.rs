@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::expand::{self, Threading};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Field, MapType, Type};
 use crate::{Diagnostic, Suggestion};
@@ -801,6 +802,7 @@ impl Model {
             source,
             diagnostics: Vec::new(),
             active_helpers: Vec::new(),
+            thread_depth: 0,
             specializations: BTreeMap::new(),
         };
         let env = checker.bind_parameters(&function.params, |index| {
@@ -864,6 +866,7 @@ struct Checker<'a> {
     source: &'a str,
     diagnostics: Vec<Diagnostic>,
     active_helpers: Vec<String>,
+    thread_depth: usize,
     specializations: BTreeMap<(String, Vec<Value>), (Value, Vec<Diagnostic>)>,
 }
 
@@ -1408,6 +1411,9 @@ impl Checker<'_> {
             && self.model.signature(name, self.globals).is_none()
         {
             let resolved = self.model.resolve(name);
+            if let Some(threading) = Threading::from_core_symbol(&resolved) {
+                return self.thread_form(xs, span, env, threading, &resolved);
+            }
             match resolved.as_str() {
                 "clojure.core/let" => return self.let_form(xs, span, env),
                 "clojure.core/if" | "clojure.core/when" => {
@@ -1506,6 +1512,98 @@ impl Checker<'_> {
                 format!("Calling {} is not supported", function.ty),
             ),
         }
+    }
+
+    fn thread_form(
+        &mut self,
+        xs: &[Form],
+        span: Span,
+        env: &Env,
+        threading: Threading,
+        name: &str,
+    ) -> Value {
+        if xs.len() < 2 {
+            self.error(
+                "PNX2554",
+                span,
+                format!("{name} requires an initial expression"),
+            );
+            return Value::new(Type::Unknown);
+        }
+        if self.thread_depth >= 32 {
+            return self.unsupported(span, "Threading expansion nesting limit (32) exceeded");
+        }
+        self.thread_depth += 1;
+        let result = self.thread_steps(xs, env, threading, name, span);
+        self.thread_depth -= 1;
+        result
+    }
+
+    fn thread_steps(
+        &mut self,
+        xs: &[Form],
+        env: &Env,
+        threading: Threading,
+        name: &str,
+        span: Span,
+    ) -> Value {
+        let mut current = self.infer(&xs[1], env);
+        if xs.len() == 2 {
+            return current;
+        }
+        let temporary = expand::temporary(&xs[1..], |name| env.contains_key(name));
+        let mut local = env.clone();
+        local.insert(temporary.clone(), Value::new(Type::Never));
+        let mut origin = xs[1].span;
+        let mut skipped_nil = false;
+        for step in &xs[2..] {
+            if threading.guards_nil() {
+                skipped_nil |= nil_part(&current.known) == Type::Nil;
+                current.narrow(current.known.without_nil());
+            }
+            let reachable = current.known != Type::Never;
+            *local.get_mut(&temporary).unwrap() = current;
+            let call = threading.apply(
+                step,
+                Form {
+                    kind: Kind::Symbol(temporary.clone()),
+                    span: origin,
+                },
+            );
+            let start = self.diagnostics.len();
+            current = self.infer(&call, &local);
+            if !reachable {
+                // The compiler must still resolve the skipped forms. Runtime type
+                // and missing-key failures do not occur on this unreachable path.
+                let errors = self.diagnostics.split_off(start);
+                self.diagnostics.extend(
+                    errors
+                        .into_iter()
+                        .filter(|d| !matches!(d.code.as_str(), "PNX2322" | "PNX2741")),
+                );
+                current.narrow(Type::Never);
+            }
+            for diagnostic in &mut self.diagnostics[start..] {
+                // A synthetic argument span can point at a keyword or a bare step.
+                // Wrapping that fragment can change threading semantics; no patch
+                // is proposed until edits can be mapped through the expansion.
+                if !diagnostic.suggestions.is_empty() {
+                    diagnostic.suggestions.clear();
+                    diagnostic.help = Some("Handle the expected type explicitly in the threading expression before this call.".into());
+                }
+                diagnostic.notes.push(format!(
+                    "While expanding {name} at {}:{}",
+                    span.start.line, span.start.column
+                ));
+            }
+            origin = step.span;
+        }
+        if skipped_nil {
+            let known = std::mem::replace(&mut current.known, Type::Never);
+            current.narrow(known.nilable());
+            current.notes.push(format!("{name} returns Nil when its input or an intermediate result is Nil; False continues through the chain."));
+        }
+        current
     }
 
     fn let_form(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {

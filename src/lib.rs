@@ -1,4 +1,5 @@
 mod checker;
+pub mod expand;
 pub mod output;
 mod project;
 pub mod reader;
