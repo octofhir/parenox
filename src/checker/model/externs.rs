@@ -35,7 +35,11 @@ impl Model {
         };
         let mut functions = BTreeMap::new();
         for [name, signature] in entries.as_chunks::<2>().0 {
-            let Some(name_string) = name.symbol().filter(|s| s.contains('/')) else {
+            let Some(name_string) = name.symbol().filter(|symbol| {
+                symbol
+                    .split_once('/')
+                    .is_some_and(|(namespace, local)| !namespace.is_empty() && !local.is_empty())
+            }) else {
                 model.error(
                     "PNX9001",
                     name.span,
@@ -58,7 +62,7 @@ impl Model {
         let mut namespaces: BTreeMap<&str, Vec<_>> = BTreeMap::new();
         for (name, signature) in &functions {
             namespaces
-                .entry(name.rsplit_once('/').unwrap().0)
+                .entry(name.split_once('/').unwrap().0)
                 .or_default()
                 .push((name, signature));
         }

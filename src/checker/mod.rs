@@ -258,7 +258,7 @@ impl Checker<'_> {
                     Value::new(value.known())
                 } else {
                     let qualified = self.model.function_name(s);
-                    let external = qualified.rsplit_once('/').is_some_and(|(namespace, _)| {
+                    let external = qualified.split_once('/').is_some_and(|(namespace, _)| {
                         namespace != self.model.namespace()
                             && !self.globals.project_namespaces.contains(namespace)
                     });

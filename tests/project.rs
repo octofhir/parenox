@@ -426,3 +426,57 @@ fn referring_renames_only_selected_names_and_preserves_their_binding() {
             .contains("render already refers to vendor/label")
     );
 }
+
+#[test]
+fn qualified_slash_names_follow_source_and_extern_interface_edits() {
+    let app = Source {
+        path: "app.clj",
+        source: "(ns app) (defn run {:t/sig '[:-> number?]} [] (rates// 4))",
+    };
+    let provider = Source {
+        path: "rates.clj",
+        source: "(ns rates (:refer-clojure :exclude [/]))
+                 (defn / {:t/sig '[number? :-> number?]} [n] (inc n))",
+    };
+    let mut session = Session::default();
+    assert!(session.check_project(&[app, provider], None).ok);
+    let edited = provider
+        .source
+        .replace(":-> number?", ":-> string?")
+        .replace("(inc n)", "(str n)");
+    let changed = session.check_project(
+        &[
+            app,
+            Source {
+                source: &edited,
+                ..provider
+            },
+        ],
+        None,
+    );
+    assert!(!changed.ok && changed.complete, "{changed:#?}");
+    assert_eq!(changed.stats.checked_functions, 2);
+    assert_eq!(
+        changed.files[0].diagnostics[0].actual.as_deref(),
+        Some("String")
+    );
+
+    let externs = Source {
+        path: "externs.edn",
+        source: "{rates// [number? :-> number?]}",
+    };
+    assert!(session.check_project(&[app], Some(externs)).ok);
+    let changed = session.check_project(
+        &[app],
+        Some(Source {
+            source: "{rates// [number? :-> string?]}",
+            ..externs
+        }),
+    );
+    assert!(!changed.ok && changed.complete, "{changed:#?}");
+    assert_eq!(changed.stats.checked_functions, 1);
+    assert_eq!(
+        changed.files[0].diagnostics[0].actual.as_deref(),
+        Some("String")
+    );
+}

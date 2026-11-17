@@ -15,23 +15,25 @@ pub(super) struct Names {
 
 impl Names {
     pub(super) fn resolve(&self, name: &str) -> String {
-        if let Some((prefix, tail)) = name
+        let (namespace, local) = self.resolve_parts(name);
+        format!("{namespace}/{local}")
+    }
+
+    fn resolve_parts<'a>(&'a self, name: &'a str) -> (&'a str, &'a str) {
+        if let Some((prefix, local)) = name
             .split_once('/')
             .filter(|(prefix, _)| !prefix.is_empty())
         {
-            format!(
-                "{}/{tail}",
-                self.aliases.get(prefix).map_or(prefix, String::as_str)
+            (
+                self.aliases.get(prefix).map_or(prefix, String::as_str),
+                local,
             )
+        } else if let Some(referred) = self.refers.get(name) {
+            referred.split_once('/').unwrap()
+        } else if self.core_visible(name) {
+            ("clojure.core", name)
         } else {
-            self.refers.get(name).cloned().unwrap_or_else(|| {
-                let namespace = if self.core_visible(name) {
-                    "clojure.core"
-                } else {
-                    &self.namespace
-                };
-                format!("{namespace}/{name}")
-            })
+            (&self.namespace, name)
         }
     }
 
@@ -105,14 +107,11 @@ impl Declarations {
                 model.read_ns(xs, form.span);
             }
         }
-        let mut dependencies: BTreeSet<_> = model.dependencies.iter().cloned().collect();
-        fn visit(form: &Form, names: &Names, dependencies: &mut BTreeSet<String>) {
+        let mut dependencies: BTreeSet<_> = model.dependencies.iter().map(String::as_str).collect();
+        fn visit<'a>(form: &'a Form, names: &'a Names, dependencies: &mut BTreeSet<&'a str>) {
             match &form.kind {
                 Kind::Symbol(name) => {
-                    let resolved = names.resolve(name);
-                    if let Some((namespace, _)) = resolved.rsplit_once('/') {
-                        dependencies.insert(namespace.to_string());
-                    }
+                    dependencies.insert(names.resolve_parts(name).0);
                 }
                 Kind::List(xs) | Kind::Vector(xs) | Kind::Map(xs) | Kind::Set(xs) => {
                     for x in xs {
@@ -130,8 +129,8 @@ impl Declarations {
         for form in forms {
             visit(form, &model.names, &mut dependencies);
         }
-        dependencies.remove(&model.names.namespace);
-        model.dependencies = dependencies.into_iter().collect();
+        dependencies.remove(model.names.namespace.as_str());
+        model.dependencies = dependencies.into_iter().map(str::to_owned).collect();
         for (index, form) in forms.iter().enumerate() {
             let Kind::List(xs) = &form.without_metadata().kind else {
                 model.error("PNX9001", form.span, "Unsupported top-level form");
