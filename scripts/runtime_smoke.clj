@@ -239,3 +239,10 @@
            (try (demo.updates-bad/normalize-name) :unexpected-success
                 (catch NullPointerException _ :throws))))
 (println "Clojure/JVM map updates: 8 assertions passed")
+
+(assert (= {:visits 1} (update {} :visits (fnil inc 0))))
+(assert (= {:p {:x 3}} (update-in {} [:p :x] (fnil + 0) 3)))
+(assert (= false ((fnil identity true) false)))
+(assert (= 3 ((fnil + 1 2 100) nil nil)))
+(assert (= 103 ((fnil + 1 2 100) nil nil nil)))
+(println "Clojure/JVM fnil: 5 assertions passed")

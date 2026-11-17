@@ -262,7 +262,7 @@ impl Checker<'_> {
         args.extend(extra.iter().map(|arg| (self.infer(arg, env), arg.span)));
 
         let start = self.diagnostics.len();
-        let value = self.call_updater(updater, args, span, env);
+        let value = self.call_form(updater, args, span, env);
         for diagnostic in &mut self.diagnostics[start..] {
             if diagnostic.span == *old_span && diagnostic.code == "PNX2322" {
                 diagnostic.suggestions.clear();

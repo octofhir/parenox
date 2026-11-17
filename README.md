@@ -330,7 +330,12 @@ literal keywords. The updater receives the old value first, followed by any
 extra arguments. An absent entry passes nil. The updater's result becomes the
 new field type, and sibling fields retain their types. Supported updaters
 include built-in functions, functions with signatures, and directly named
-private helpers. Run `just updates` to see callback errors at the affected key.
+private helpers. Inline `fnil` replaces nil arguments and preserves false.
+For example, `(update patient :visits (fnil inc 0))` works when visits is absent.
+Parenox supports one to three defaults when the wrapper is called immediately
+or passed directly to `update` or `update-in`. Storing the wrapper for later use
+reports an analysis gap. Run `just updates` to see callback errors at the key.
+
 
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
 `:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.

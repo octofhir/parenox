@@ -11,10 +11,7 @@
 (defn visits-after
   {:t/sig '[::patient number? :-> number?]}
   [patient delta]
-  (let [updated (if (contains? patient :visits)
-                  (update patient :visits + delta)
-                  (assoc patient :visits delta))]
-    (:visits updated)))
+  (:visits (update patient :visits (fnil + 0) delta)))
 
 (defn- normalize-or-default [name fallback]
   (str/upper-case (or name fallback)))

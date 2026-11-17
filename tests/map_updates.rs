@@ -85,3 +85,44 @@ fn changing_a_private_updater_invalidates_its_cached_caller() {
     assert_eq!(report.stats.checked_functions, 1);
     assert_eq!(report.diagnostics[0].actual.as_deref(), Some("String"));
 }
+
+#[test]
+fn fnil_replaces_only_nil_for_direct_calls_and_map_updates() {
+    for body in [
+        r#"(defn f {:t/sig '[:-> number?]} [] (:x (update {} :x (fnil inc 0))))"#,
+        r#"(defn f {:t/sig '[:-> number?]} [] (get-in (update-in {} [:p :x] (fnil + 0) 3) [:p :x]))"#,
+        r#"(s/def ::only-false #{false})
+           (defn f {:t/sig '[:-> ::only-false]} [] ((fnil identity true) false))"#,
+        r#"(defn f {:t/sig '[:-> number?]} [] ((fnil + 1 2 "unused") nil nil))"#,
+        r#"(defn f {:t/sig '[:-> number?]} [] ((fnil + 1 2 3) nil nil nil))"#,
+        r#"(defn f {:t/sig '[:-> number?]} [] ((fnil (fnil inc 0) nil) nil))"#,
+        r#"(defn fnil {:t/sig '[number? number? :-> number?]} [x y] (+ x y))
+           (defn f {:t/sig '[:-> number?]} [] (fnil 1 2))"#,
+    ] {
+        let report = check(body);
+        assert!(report.ok && report.complete, "{body}: {report:#?}");
+    }
+}
+
+#[test]
+fn fnil_reports_bad_defaults_and_wrapper_arity() {
+    let source = r#"(defn f {:t/sig '[:-> number?]} [] (:x (update {} :x (fnil inc "zero"))))"#;
+    let report = Session::default().check("fnil.clj", source);
+    assert!(!report.ok && report.complete, "{report:#?}");
+    let diagnostic = &report.diagnostics[0];
+    assert_eq!(
+        &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+        "\"zero\""
+    );
+    assert_eq!(diagnostic.actual.as_deref(), Some("String"));
+
+    for (expr, code) in [
+        ("((fnil inc) nil)", "PNX2554"),
+        ("((fnil + 1 2 3) nil)", "PNX2554"),
+        ("((fnil identity (inc \"bad\")) 1)", "PNX2322"),
+        ("(let [f (fnil inc 0)] (f nil))", "PNX9001"),
+    ] {
+        let report = check(&format!("(defn f {{:t/sig '[:-> number?]}} [] {expr})"));
+        assert_eq!(report.diagnostics[0].code, code, "{report:#?}");
+    }
+}
