@@ -167,6 +167,42 @@ fn removed_sources_or_contracts_do_not_leave_stale_declarations() {
 }
 
 #[test]
+fn an_extern_file_preserves_the_interface_of_a_source_named_externs() {
+    let mut files = BTreeMap::from([
+        (
+            "caller.clj",
+            "(ns caller (:require [externs :as provider]))
+             (defn call {:t/sig '[:-> string?]} [] (provider/value))"
+                .into(),
+        ),
+        (
+            "externs.clj",
+            "(ns externs)
+             (defn value {:t/sig '[:-> string?]} [] \"hello\")"
+                .into(),
+        ),
+    ]);
+    // The EDN file contributes a distinct contract in the same namespace.
+    let externs = Some("{externs/clock [:-> number?]}");
+    let mut session = Session::default();
+    assert!(run(&mut session, &files, externs).ok);
+    assert_eq!(run(&mut session, &files, externs).stats.reused_functions, 2);
+
+    *files.get_mut("externs.clj").unwrap() = "(ns externs)
+         (defn value {:t/sig '[:-> number?]} [] 42)"
+        .into();
+    let changed = run(&mut session, &files, externs);
+    assert!(!changed.ok && changed.complete, "{changed:#?}");
+    assert_eq!(changed.stats.checked_functions, 2);
+    let [caller, provider, external] = changed.files.as_slice() else {
+        panic!("{changed:#?}");
+    };
+    assert!(provider.ok && external.ok);
+    assert_eq!(caller.diagnostics[0].expected.as_deref(), Some("String"));
+    assert_eq!(caller.diagnostics[0].actual.as_deref(), Some("Number"));
+}
+
+#[test]
 fn namespace_graph_rejects_cycles_duplicates_and_private_imports() {
     let cycle = [
         Source {

@@ -201,7 +201,7 @@ impl Session {
             let (_, cache, _) = &mut entries[count];
             if cache.parse_error.is_none() {
                 cache.model = Some(Model::externs(&cache.forms, &globals));
-                cache.model.as_ref().unwrap().publish(&mut globals);
+                cache.model.as_ref().unwrap().publish_externs(&mut globals);
             }
         }
         let mut totals = Stats::default();

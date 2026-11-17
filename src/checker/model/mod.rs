@@ -319,6 +319,9 @@ impl Model {
         globals
             .interfaces
             .insert(self.ns.clone(), format!("{:?}|{exported:?}", self.specs));
+    }
+
+    pub fn publish_externs(&self, globals: &mut Globals) {
         let mut external_namespaces: BTreeMap<&str, Vec<_>> = BTreeMap::new();
         for (name, signature) in &self.externs {
             globals.functions.insert(name.clone(), signature.clone());
