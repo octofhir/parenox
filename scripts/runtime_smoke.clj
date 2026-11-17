@@ -103,3 +103,29 @@
 ;; This changes throwing semantics and remains explicitly unsupported by Parenox.
 (assert (= [nil {:name nil}] (let [{:req! {n :name} :missing absent} {}] [n absent])))
 (println "Clojure/JVM checked bindings: 12 assertions passed")
+
+(load-file "examples/defaults.clj")
+(assert (= "UNKNOWN" (demo.defaults/display-name {:id "p-1"})))
+(assert (= "ADA" (demo.defaults/display-name {:id "p-1" :name "Ada"})))
+(assert (= "Configured" (demo.defaults/configured-name {:id "p-1"} "Configured")))
+(assert (= "Unknown" (demo.defaults/inferred-name {:id "p-1"})))
+;; The last definition is intentionally invalid at macroexpansion time.
+;; Earlier definitions remain available to verify their independent runtime errors.
+(assert (= :invalid
+           (try (load-file "examples/defaults_bad.clj") :unexpected-success
+                (catch clojure.lang.Compiler$CompilerException _ :invalid))))
+(assert (= :throws
+           (try (demo.defaults-bad/nil-name) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(assert (= :throws
+           (try (demo.defaults-bad/invalid-fallback) :unexpected-success
+                (catch ClassCastException _ :throws))))
+(assert (= "outer" (let [x "outer" {:keys [x y] :or {x 1 y x}} {}] y)))
+(assert (= "Unknown" (let [{:person/keys [name] :or {:person/name "Unknown"}} {}] name)))
+(assert (= "Unknown" (let [{:req! {{:keys [name] :or {name "Unknown"}} :patient}} {:patient nil}] name)))
+(assert (nil? (let [{:keys [person/name] :or {person/name "Unknown"}} {}] name)))
+(assert (= :throws
+           (try (let [{:keys [name] :or {unused (inc "bad")}} {:name "Ada"}] name)
+                :unexpected-success
+                (catch ClassCastException _ :throws))))
+(println "Clojure/JVM destructuring defaults: 12 assertions passed")

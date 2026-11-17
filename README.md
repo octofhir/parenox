@@ -56,6 +56,7 @@ just syntax          # inspect source-preserving syntax
 just reader          # metadata, characters and tagged EDN
 just portable        # JVM branches in a .cljc source file
 just checked         # Clojure 1.13 checked bindings and two deliberate errors
+just defaults        # destructuring defaults and three deliberate errors
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -277,7 +278,20 @@ remains an explicit analysis gap; presence-only checks after `&` need no value t
 Refinement applies to bound locals and checked lookup results. Source-map aliases
 keep their declared types.
 
-Map destructuring with `:or`, `:missing`, `:select`, `:all` or `:excess`, sequential
+Map `:or` defaults can use local symbols or literal keyword lookup keys, including
+renamed, namespaced and nested bindings. An absent key uses its default; a present
+nil or false is preserved. Every default expression is analyzed eagerly in the
+outer lexical scope, including unused defaults and defaults for present keys.
+Defaults in one map do not introduce locals for each other. Ordinary function
+arguments are available before parameter destructuring, including later arguments.
+Private helpers used in parameter defaults participate in inference and cache
+invalidation. Run `just defaults` for examples and deliberate failures.
+
+Providing both a local-symbol default and a keyword default for the same binding,
+or providing a default for a checked required key, produces `PNX1001` at the
+default. A default applies to the local value; `:as` retains the input collection.
+
+Map destructuring with `:missing`, `:select`, `:all` or `:excess`, sequential
 patterns, and string/symbol lookup keys remain unsupported and are reported.
 
 Recursive helpers, unused helpers with no typed caller, and helpers used as

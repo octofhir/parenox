@@ -139,7 +139,7 @@ fn renamed_and_nested_patterns_preserve_checked_levels_and_report_unsupported_mo
             report
                 .diagnostics
                 .iter()
-                .any(|d| matches!(d.code.as_str(), "PNX9001" | "PNX2554")),
+                .any(|d| matches!(d.code.as_str(), "PNX9001" | "PNX2554" | "PNX1001")),
             "{report:#?}"
         );
     }

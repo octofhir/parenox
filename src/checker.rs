@@ -678,8 +678,37 @@ impl Model {
                 }
             }
         }
+        fn visit_defaults(form: &Form, model: &Model, names: &mut BTreeSet<String>) {
+            match &form.without_metadata().kind {
+                Kind::Map(entries) => {
+                    for pair in entries.as_chunks::<2>().0 {
+                        match pair[0].keyword() {
+                            Some(":or") => {
+                                if let Some(defaults) = pair[1].map() {
+                                    for default in defaults.as_chunks::<2>().0 {
+                                        visit(std::slice::from_ref(&default[1]), model, names);
+                                    }
+                                }
+                            }
+                            Some(":req!") => visit_defaults(&pair[1], model, names),
+                            _ => visit_defaults(&pair[0], model, names),
+                        }
+                    }
+                }
+                Kind::Vector(forms) => {
+                    for form in forms {
+                        visit_defaults(form, model, names);
+                    }
+                }
+                _ => {}
+            }
+        }
         for function in self.functions.values() {
             let mut names = BTreeSet::new();
+            for param in &function.params {
+                visit_defaults(param, self, &mut names);
+            }
+
             visit(&function.body, self, &mut names);
             self.helper_dependencies
                 .insert(function.name.clone(), names);
@@ -774,10 +803,9 @@ impl Model {
             active_helpers: Vec::new(),
             specializations: BTreeMap::new(),
         };
-        let mut env = BTreeMap::new();
-        for (param, ty) in function.params.iter().zip(&function.args) {
-            checker.bind(param, Value::new(ty.clone()), &mut env);
-        }
+        let env = checker.bind_parameters(&function.params, |index| {
+            Value::new(function.args[index].clone())
+        });
         let result = checker.body(&function.body, &env);
         checker.expect(
             &result,
@@ -821,6 +849,7 @@ impl Value {
 }
 
 type Env = BTreeMap<String, Value>;
+type Defaults = BTreeMap<String, (Value, Span)>;
 
 #[derive(Clone, Copy)]
 enum Lookup<'a> {
@@ -915,6 +944,27 @@ impl Checker<'_> {
         value
     }
 
+    fn bind_parameters(&mut self, params: &[Form], value: impl Fn(usize) -> Value) -> Env {
+        let mut env = Env::new();
+        // All ordinary arguments exist before fn destructuring, including later ones.
+        // Destructuring then proceeds in parameter order and can shadow those names.
+        for (index, param) in params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.symbol().is_some())
+        {
+            self.bind(param, value(index), &mut env);
+        }
+        for (index, param) in params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.symbol().is_none())
+        {
+            self.bind(param, value(index), &mut env);
+        }
+        env
+    }
+
     fn bind(&mut self, form: &Form, value: Value, env: &mut Env) {
         match &form.without_metadata().kind {
             Kind::Symbol(name) => {
@@ -936,9 +986,19 @@ impl Checker<'_> {
                     );
                     return;
                 }
+                // Clojure evaluates every default once in the outer lexical scope,
+                // before introducing this map's locals and :as alias.
+                let defaults = xs
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .find(|p| p[0].keyword() == Some(":or"))
+                    .map(|p| self.binding_defaults(&p[1], env))
+                    .unwrap_or_default();
                 for pair in xs.as_chunks::<2>().0 {
                     let directive = pair[0].keyword().map(|key| self.model.key(key));
                     match directive.as_deref() {
+                        Some(":or") => {}
                         Some(":as") if pair[1].symbol().is_some() => {
                             env.insert(pair[1].symbol().unwrap().into(), value.clone());
                         }
@@ -952,7 +1012,7 @@ impl Checker<'_> {
                                 continue;
                             };
                             for entry in entries.as_chunks::<2>().0 {
-                                self.bind_entry(entry, &value, true, env);
+                                self.bind_entry(entry, &value, true, &defaults, env);
                             }
                         }
                         Some(directive)
@@ -961,9 +1021,9 @@ impl Checker<'_> {
                                 Some(":keys" | ":keys!" | "keys" | "keys!")
                             ) =>
                         {
-                            self.bind_keys(directive, &pair[1], &value, env);
+                            self.bind_keys(directive, &pair[1], &value, &defaults, env);
                         }
-                        _ => self.bind_entry(pair, &value, false, env),
+                        _ => self.bind_entry(pair, &value, false, &defaults, env),
                     }
                 }
             }
@@ -971,7 +1031,14 @@ impl Checker<'_> {
         }
     }
 
-    fn bind_entry(&mut self, pair: &[Form; 2], value: &Value, required: bool, env: &mut Env) {
+    fn bind_entry(
+        &mut self,
+        pair: &[Form; 2],
+        value: &Value,
+        required: bool,
+        defaults: &Defaults,
+        env: &mut Env,
+    ) {
         if !matches!(
             pair[0].without_metadata().kind,
             Kind::Symbol(_) | Kind::Map(_) | Kind::Vector(_)
@@ -992,15 +1059,23 @@ impl Checker<'_> {
             return;
         };
         let key = self.model.key(key);
-        let field = if required {
-            self.checked_lookup(value, &key, Lookup::Required, pair[1].span)
+        let mode = if required {
+            Lookup::Required
         } else {
-            self.lookup(value, &key, None, pair[1].span)
+            Lookup::Optional(None)
         };
+        let field = self.binding_value(value, &key, pair[0].symbol(), mode, defaults, pair[1].span);
         self.bind(&pair[0], field, env);
     }
 
-    fn bind_keys(&mut self, directive: &str, form: &Form, value: &Value, env: &mut Env) {
+    fn bind_keys(
+        &mut self,
+        directive: &str,
+        form: &Form,
+        value: &Value,
+        defaults: &Defaults,
+        env: &mut Env,
+    ) {
         let Some(keys) = form.vector() else {
             self.error(
                 "PNX9001",
@@ -1061,14 +1136,101 @@ impl Checker<'_> {
                 lookup_key = format!("{ns}/{}", lookup_key.trim_start_matches(':'));
             }
             if let Some(local) = local {
-                let field = if required {
-                    self.checked_lookup(value, &lookup_key, Lookup::Required, key.span)
+                let mode = if required {
+                    Lookup::Required
                 } else {
-                    self.lookup(value, &lookup_key, None, key.span)
+                    Lookup::Optional(None)
                 };
+                let field =
+                    self.binding_value(value, &lookup_key, Some(local), mode, defaults, key.span);
                 env.insert(local.into(), field);
             } else if required {
-                self.checked_lookup(value, &lookup_key, Lookup::Presence, key.span);
+                self.binding_value(
+                    value,
+                    &lookup_key,
+                    None,
+                    Lookup::Presence,
+                    defaults,
+                    key.span,
+                );
+            }
+        }
+    }
+
+    fn binding_defaults(&mut self, form: &Form, env: &Env) -> Defaults {
+        let mut defaults = Defaults::new();
+        let Some(entries) = form.map() else {
+            self.error(
+                "PNX1001",
+                form.span,
+                ":or requires a map of locals or keyword keys to defaults",
+            );
+            return defaults;
+        };
+        for pair in entries.as_chunks::<2>().0 {
+            let value = self.infer(&pair[1], env);
+            let key = if let Some(symbol) = pair[0].symbol() {
+                symbol.to_owned()
+            } else if let Some(keyword) = pair[0].keyword() {
+                self.model.key(keyword)
+            } else {
+                self.error(
+                    "PNX9001",
+                    pair[0].span,
+                    "Defaults currently require local symbols or literal keyword keys",
+                );
+                continue;
+            };
+            if defaults
+                .insert(key.clone(), (value, pair[0].span))
+                .is_some()
+            {
+                self.error(
+                    "PNX2790",
+                    pair[0].span,
+                    format!("Duplicate :or default {key}"),
+                );
+            }
+        }
+        defaults
+    }
+
+    fn binding_value(
+        &mut self,
+        value: &Value,
+        key: &str,
+        local: Option<&str>,
+        mode: Lookup<'_>,
+        defaults: &Defaults,
+        span: Span,
+    ) -> Value {
+        let by_local = local.and_then(|name| defaults.get(name));
+        let by_key = defaults.get(key);
+        if let (Some(_), Some((_, span))) = (by_local, by_key) {
+            self.error(
+                "PNX1001",
+                *span,
+                format!(
+                    "Both local {} and key {key} have :or defaults; choose one",
+                    local.unwrap()
+                ),
+            );
+            return Value::new(Type::Unknown);
+        }
+        let default = by_local.or(by_key);
+        match mode {
+            Lookup::Optional(_) => self.lookup(value, key, default.map(|(value, _)| value), span),
+            Lookup::Required | Lookup::Presence => {
+                if let Some((_, span)) = default {
+                    self.error(
+                        "PNX1001",
+                        *span,
+                        format!("Required key {key} cannot have an :or default"),
+                    );
+                    Value::new(Type::Unknown)
+                } else {
+                    self.checked_lookup(value, key, mode, span)
+                }
             }
         }
     }
@@ -1204,10 +1366,7 @@ impl Checker<'_> {
                 return Value::new(Type::Unknown);
             }
             self.active_helpers.push(function.name.clone());
-            let mut env = Env::new();
-            for (param, value) in function.params.iter().zip(&key.1) {
-                self.bind(param, value.clone(), &mut env);
-            }
+            let env = self.bind_parameters(&function.params, |index| key.1[index].clone());
             let result = self.body(&function.body, &env);
             self.active_helpers.pop();
             self.specializations

@@ -75,3 +75,8 @@ portable: build
 checked format="pretty": build
     @./target/release/parenox check examples/checked.clj --format {{quote(format)}}
     @./target/release/parenox check examples/checked_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check :or defaults, then show Nil, eager-expression and required-key conflicts.
+defaults format="pretty": build
+    @./target/release/parenox check examples/defaults.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/defaults_bad.clj --format {{quote(format)}} || test "$?" -eq 1
