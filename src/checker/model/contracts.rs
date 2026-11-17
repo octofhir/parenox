@@ -16,10 +16,14 @@ impl Model {
         if let Some(ty) = self.specs.get(key) {
             return ty.clone();
         }
-        if !self.raw_specs.contains_key(key)
-            && let Some(ty) = globals.specs.get(key)
-        {
-            return ty.clone();
+        if !self.raw_specs.contains_key(key) {
+            let external = globals.specs.get(key);
+            self.external_specs
+                .entry(key.into())
+                .or_insert_with(|| external.cloned());
+            if let Some(ty) = external {
+                return ty.clone();
+            }
         }
         if visiting.iter().any(|k| k == key) {
             self.error(

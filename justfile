@@ -23,8 +23,8 @@ serve: build
     @./target/release/parenox serve
 
 # Fix clinic errors in memory, then measure warm checks and edits.
-agent-loop iterations="100" binary="target/release/parenox": build
-    cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations {{quote(iterations)}} --binary {{quote(binary)}}
+agent-loop iterations="100" binary="target/release/parenox" extra_externs="0": build
+    cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations {{quote(iterations)}} --binary {{quote(binary)}} --extra-externs {{quote(extra_externs)}}
 
 # Measure synthetic single-file sessions and fresh CLI processes.
 bench iterations="100" functions="1000": build

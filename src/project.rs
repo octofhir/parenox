@@ -27,6 +27,7 @@ pub struct ProjectReport {
 struct FileCache {
     source: String,
     parsed: bool,
+    kind: FileKind,
     forms: Vec<Form>,
     parse_error: Option<Diagnostic>,
     namespace: String,
@@ -37,32 +38,42 @@ struct FileCache {
     functions: BTreeMap<String, (String, Vec<Diagnostic>)>,
 }
 
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum FileKind {
+    #[default]
+    Source,
+    Externs,
+}
+
 impl FileCache {
-    fn update(&mut self, source: &str, path: &str) -> bool {
-        if self.parsed && self.source == source {
+    fn update(&mut self, source: &str, path: &str, kind: FileKind) -> bool {
+        if self.parsed && self.source == source && self.kind == kind {
             return false;
         }
         self.source.clear();
         self.source.push_str(source);
         self.parsed = true;
+        self.kind = kind;
         self.model = None;
         self.parse_error = None;
-        let conditionals = if path.ends_with(".cljc") {
+        self.namespace.clear();
+        self.dependencies.clear();
+        let conditionals = if kind == FileKind::Source && path.ends_with(".cljc") {
             reader::Conditionals::Select(":clj")
         } else {
             reader::Conditionals::Reject
         };
         match reader::read_with(source, conditionals) {
             Ok(forms) => {
-                let context = Model::context(&forms);
-                self.namespace = context.ns;
-                self.dependencies = context.dependencies;
+                if kind == FileKind::Source {
+                    let context = Model::context(&forms);
+                    self.namespace = context.ns;
+                    self.dependencies = context.dependencies;
+                }
                 self.forms = forms;
             }
             Err(error) => {
                 self.forms.clear();
-                self.namespace.clear();
-                self.dependencies.clear();
                 self.parse_error = Some(error.into());
             }
         }
@@ -113,9 +124,15 @@ impl Session {
         let mut entries = Vec::new();
         let mut reports = Vec::new();
         let mut paths = BTreeSet::new();
-        for source in sources.iter().copied().chain(externs) {
+        let count = sources.len();
+        for (index, source) in sources.iter().copied().chain(externs).enumerate() {
+            let kind = if index < count {
+                FileKind::Source
+            } else {
+                FileKind::Externs
+            };
             let mut cache = self.files.remove(source.path).unwrap_or_default();
-            let parsed = cache.update(source.source, source.path);
+            let parsed = cache.update(source.source, source.path, kind);
             let mut hasher = DefaultHasher::new();
             source.source.hash(&mut hasher);
             let mut diagnostics: Vec<_> = cache.parse_error.iter().cloned().collect();
@@ -141,7 +158,6 @@ impl Session {
             });
             entries.push((source, cache, parsed));
         }
-        let count = sources.len();
         let mut namespaces = BTreeMap::new();
         for (index, (_, cache, _)) in entries[..count].iter().enumerate() {
             if cache.parse_error.is_none()
@@ -200,7 +216,13 @@ impl Session {
         if externs.is_some() {
             let (_, cache, _) = &mut entries[count];
             if cache.parse_error.is_none() {
-                cache.model = Some(Model::externs(&cache.forms, &globals));
+                if cache
+                    .model
+                    .as_ref()
+                    .is_none_or(|model| !model.external_specs_current(&globals))
+                {
+                    cache.model = Some(Model::externs(&cache.forms, &globals));
+                }
                 cache.model.as_ref().unwrap().publish_externs(&mut globals);
             }
         }

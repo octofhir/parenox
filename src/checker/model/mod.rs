@@ -57,6 +57,7 @@ pub(crate) struct Model {
     aliases: BTreeMap<String, String>,
     raw_specs: BTreeMap<String, Form>,
     specs: BTreeMap<String, Type>,
+    external_specs: BTreeMap<String, Option<Type>>,
     pub functions: BTreeMap<String, Function>,
     // Conservative references to unannotated helpers, including transitive cache dependencies.
     helper_dependencies: BTreeMap<String, BTreeSet<String>>,
@@ -337,6 +338,12 @@ impl Model {
                 .or_default()
                 .push_str(&format!("|{signatures:?}"));
         }
+    }
+
+    pub fn external_specs_current(&self, globals: &Globals) -> bool {
+        self.external_specs
+            .iter()
+            .all(|(key, previous)| globals.specs.get(key) == previous.as_ref())
     }
 
     pub fn interface_key(&self, globals: &Globals) -> String {

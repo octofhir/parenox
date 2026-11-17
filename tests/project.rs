@@ -203,6 +203,70 @@ fn an_extern_file_preserves_the_interface_of_a_source_named_externs() {
 }
 
 #[test]
+fn unchanged_externs_follow_edited_removed_and_restored_spec_declarations() {
+    let model = "(ns model (:require [clojure.spec.alpha :as s]))
+                 (s/def ::value string?)";
+    let mut files = BTreeMap::from([
+        (
+            "caller.clj",
+            "(ns caller (:require [vendor :as v]))
+             (defn call {:t/sig '[:-> string?]} [] (v/value))"
+                .into(),
+        ),
+        ("model.clj", model.into()),
+    ]);
+    let externs = Some("{vendor/value [:-> :model/value]}");
+    let mut session = Session::default();
+    assert!(run(&mut session, &files, externs).ok);
+    let warm = run(&mut session, &files, externs);
+    assert_eq!(warm.stats.parsed_files, 0);
+    assert_eq!(warm.stats.reused_functions, 1);
+
+    files.insert("model.clj", model.replace("string?", "number?"));
+    let changed = run(&mut session, &files, externs);
+    assert!(!changed.ok && changed.complete, "{changed:#?}");
+    assert_eq!(changed.stats.parsed_files, 1);
+    assert_eq!(changed.stats.checked_functions, 1);
+    assert_eq!(
+        changed.files[0].diagnostics[0].actual.as_deref(),
+        Some("Number")
+    );
+
+    files.remove("model.clj");
+    let removed = run(&mut session, &files, externs);
+    assert!(!removed.ok && !removed.complete, "{removed:#?}");
+    let external = removed.files.last().unwrap();
+    assert!(
+        external.diagnostics[0]
+            .message
+            .contains("No declaration for spec :model/value")
+    );
+
+    files.insert("model.clj", model.into());
+    let restored = run(&mut session, &files, externs);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+    assert_eq!(restored.stats.checked_functions, 1);
+}
+
+#[test]
+fn a_path_changing_from_externs_to_source_is_checked_in_its_new_role() {
+    let mut session = Session::default();
+    let externs = Source {
+        path: "same.clj",
+        source: "{}",
+    };
+    assert!(session.check_project(&[], Some(externs)).ok);
+    let source = session.check(externs.path, externs.source);
+    assert!(!source.ok && !source.complete, "{source:#?}");
+    assert!(
+        source.diagnostics[0]
+            .message
+            .contains("Unsupported top-level form")
+    );
+    assert!(session.check_project(&[], Some(externs)).ok);
+}
+
+#[test]
 fn namespace_graph_rejects_cycles_duplicates_and_private_imports() {
     let cycle = [
         Source {

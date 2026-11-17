@@ -251,6 +251,7 @@ Project results contain a `files` array. Invalid JSON returns an error and the
 process continues.
 
 - Unchanged sources reuse their parsed forms and declaration models.
+- Unchanged externs reuse their declarations until a referenced spec changes.
 - Annotated body edits recheck that function while preserving callers' cached results.
 - Edits to unannotated private helpers invalidate their transitive callers in the same file.
 - Public contract changes invalidate dependent namespaces.
@@ -262,6 +263,10 @@ process continues.
 
 `source_hash` is a session fingerprint, not a cryptographic digest. Cache validity
 uses exact source, positions and interface comparisons.
+
+To measure the same clinic edit sequence with a larger extern file, run
+`just agent-loop 1000 target/release/parenox 512`. The last argument adds
+synthetic library contracts that refer to the clinic's patient spec.
 
 ## Current scope
 

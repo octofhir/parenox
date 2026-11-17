@@ -1,5 +1,6 @@
 //! End-to-end agent scenarios over the CLI's JSON Lines protocol.
 use std::error::Error;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -75,7 +76,13 @@ fn summarize(mut samples: Vec<f64>) -> Value {
     })
 }
 
-fn clinic(agent: &mut Agent, root: &Path, project: &str, iterations: usize) -> Result<Value> {
+fn clinic(
+    agent: &mut Agent,
+    root: &Path,
+    project: &str,
+    iterations: usize,
+    extra_externs: usize,
+) -> Result<Value> {
     let files: Vec<_> = ["http.clj", "model.clj", "service.clj", "store.clj"]
         .into_iter()
         .map(|name| {
@@ -84,8 +91,23 @@ fn clinic(agent: &mut Agent, root: &Path, project: &str, iterations: usize) -> R
         })
         .collect::<Result<_>>()?;
     let extern_path = Path::new(project).join("externs.edn");
+    let mut externs = fs::read_to_string(root.join(&extern_path))?;
+    if extra_externs > 0 {
+        let original = externs
+            .trim_end()
+            .strip_suffix('}')
+            .ok_or("Expected an extern EDN map")?;
+        externs.truncate(original.len());
+        for index in 0..extra_externs {
+            writeln!(
+                externs,
+                " bench.library/operation-{index} [(clojure.spec.alpha/nilable :clinic.model/patient) :-> string?]"
+            )?;
+        }
+        externs.push('}');
+    }
     let mut payload = json!({"files": files, "externs": {
-        "path": extern_path, "source": fs::read_to_string(root.join(&extern_path))?,
+        "path": extern_path, "source": externs,
     }});
     let (initial, first_us) = agent.send(&mut payload)?;
     let errors: Vec<_> = initial["files"]
@@ -166,6 +188,7 @@ fn clinic(agent: &mut Agent, root: &Path, project: &str, iterations: usize) -> R
     );
     Ok(json!({
         "scenario": "clinic: 4 namespaces + 1 declared library contract",
+        "extra_externs": extra_externs,
         "iterations": iterations, "initial_errors": errors,
         "first_round_trip_us": first_us, "fix_round_trip_us": fix_us,
         "after_fix": fixed["stats"],
@@ -276,26 +299,31 @@ fn main() -> Result<()> {
     let mut project = None;
     let mut iterations = 100;
     let mut functions = 1000;
+    let mut extra_externs = 0;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
             .next()
-            .ok_or("Expected --binary PATH, --project DIR, --iterations N or --functions N")?;
+            .ok_or_else(|| format!("Missing value for {flag}"))?;
         match flag.as_str() {
             "--binary" => binary = value.into(),
             "--project" => project = Some(value),
             "--iterations" => iterations = value.parse::<usize>()?,
             "--functions" => functions = value.parse::<usize>()?,
+            "--extra-externs" => extra_externs = value.parse::<usize>()?,
             _ => return Err(format!("Unknown option {flag}").into()),
         }
     }
     if iterations == 0 || functions == 0 {
         return Err("Iterations and functions must be positive".into());
     }
+    if extra_externs != 0 && project.is_none() {
+        return Err("--extra-externs requires --project".into());
+    }
     let binary = root.join(binary);
     let mut agent = Agent::start(&binary, root)?;
     let mut report = if let Some(project) = project {
-        clinic(&mut agent, root, &project, iterations)?
+        clinic(&mut agent, root, &project, iterations, extra_externs)?
     } else {
         synthetic(&mut agent, root, &binary, iterations, functions)?
     };
