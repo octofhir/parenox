@@ -11,7 +11,7 @@ pub(crate) use model::{Globals, Model};
 use std::collections::BTreeMap;
 
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Field, MapType, Type};
+use crate::types::{ExtraFields, Field, MapType, Type};
 use crate::{Diagnostic, Suggestion};
 
 impl Model {
@@ -260,7 +260,7 @@ impl Checker<'_> {
                 }
                 Value::new(Type::Map(MapType {
                     fields,
-                    open: false,
+                    extra: ExtraFields::Closed,
                 }))
             }
             Kind::List(xs) if xs.is_empty() => {

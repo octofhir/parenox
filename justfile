@@ -120,3 +120,8 @@ vectors format="pretty" color="auto": build
 entries format="pretty" color="auto": build
     @./target/release/parenox check examples/entries.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/entries_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check map-of contracts and show callback and map return-type diagnostics.
+dictionaries format="pretty" color="auto": build
+    @./target/release/parenox check examples/dictionaries.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/dictionaries_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

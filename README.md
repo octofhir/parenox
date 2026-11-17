@@ -66,6 +66,7 @@ just presence        # presence guards for optional fields
 just updates         # update and update-in with callback diagnostics
 just vectors pretty always  # mapv and filterv with colored callback diagnostics
 just entries pretty always  # map entry pipelines and diagnostics
+just dictionaries pretty always  # map-of contracts and diagnostics
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -357,11 +358,11 @@ vector of callback results. It stops at the shortest input. `filterv` retains
 elements for which the callback returns a truthy value. Core scalar predicates
 narrow the retained type. `some?` removes nil and keeps false.
 
-Both support vectors, sets, strings (as characters), closed keyword maps, and
-nil (as empty). User-defined predicates retain the input element type unless
-the callback is known to always return a falsey value. Run
-`just vectors pretty always` to see a patient-label pipeline and diagnostics
-for two callback errors.
+Both support vectors, sets, strings (as characters), closed keyword maps,
+`s/map-of` dictionaries, and nil (as empty). User-defined predicates retain the
+input element type unless the callback is known to always return a falsey
+value. Run `just vectors pretty always` for a patient-label pipeline and
+two callback diagnostics.
 
 A closed map supplies a `MapEntry<K, V>` for each present field. Use `key`,
 `val`, or fixed positional bindings such as `(fn [[k v :as entry]] ...)`.
@@ -369,6 +370,16 @@ Optional fields contribute entries only when present, and a present nil remains
 nil. An entry satisfies vector contracts for its two items. Iterating an open
 map, including an `s/keys` contract, reports an analysis gap because undeclared
 fields can have arbitrary types. Run `just entries pretty always` for examples.
+
+A contract of the form `(s/map-of key-spec value-spec)` types the entries of
+a dictionary. It allows empty maps. The key and value specs flow into
+`MapEntry<K, V>` when a dictionary is iterated. Literal keyword lookups
+use the value type if the key can occur, and preserve missing-key defaults.
+`contains?` narrows presence, and `assoc` and `update` track the updated
+entry while retaining the types of the remaining entries.
+Run `just dictionaries pretty always` for examples.
+Options on `s/map-of` and string-key lookup, update, and map literals remain
+unsupported.
 
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
 `:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.
@@ -411,7 +422,7 @@ inferred helper work is included in the check of their callers.
 | Area | Supported |
 |---|---|
 | Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
-| Spec forms | `s/keys`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
+| Spec forms | `s/keys`, `s/map-of`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
 | Data operations | Keyword lookup, literal-key `get`/`req!`/`assoc`, keyword paths in `get-in` and `assoc-in`, nested keyword map destructuring and checked keys |
@@ -430,7 +441,7 @@ strings are shown as `String`, including inside maps and collections, while exac
 values remain available to check finite-value contracts.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
-recursive specs, multi-arity/variadic definitions, string-key maps, full numeric
+recursive specs, multi-arity/variadic definitions, string-key map literals, full numeric
 tower semantics and some reader forms. All numbers currently share `Number`.
 Externs currently declare qualified function signatures; they do not load JARs or
 resolve Maven/Git dependencies. There is no runtime, interpreter or VM yet.

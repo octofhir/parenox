@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use super::{Function, Globals, Model, Signature};
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Field, MapType, Type};
+use crate::types::{ExtraFields, Field, MapType, Type};
 
 impl Model {
     pub(super) fn spec(
@@ -55,7 +55,7 @@ impl Model {
                 "clojure.core/nil?" => Type::Nil,
                 "clojure.core/map?" => Type::Map(MapType {
                     fields: BTreeMap::new(),
-                    open: true,
+                    extra: ExtraFields::Open,
                 }),
                 _ => {
                     self.error("PNX9001", form.span, format!("Unsupported type {s}"));
@@ -95,6 +95,11 @@ impl Model {
                             types.push(self.parse_type(&pair[1], visiting, globals));
                         }
                         Type::union(types)
+                    }
+                    Some("clojure.spec.alpha/map-of") if xs.len() == 3 => {
+                        let key = self.parse_type(&xs[1], visiting, globals);
+                        let value = self.parse_type(&xs[2], visiting, globals);
+                        Type::Map(MapType::dictionary(key, value))
                     }
                     Some("clojure.spec.alpha/keys") if xs.len() % 2 == 1 => {
                         let mut fields = BTreeMap::new();
@@ -140,7 +145,10 @@ impl Model {
                                 }
                             }
                         }
-                        Type::Map(MapType { fields, open: true })
+                        Type::Map(MapType {
+                            fields,
+                            extra: ExtraFields::Open,
+                        })
                     }
                     Some("clojure.spec.alpha/coll-of")
                         if xs.len() == 4

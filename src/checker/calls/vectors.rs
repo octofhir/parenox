@@ -116,13 +116,7 @@ fn element_type(collection: Type) -> Result<Type, CollectionError> {
             .map(element_type)
             .collect::<Result<Vec<_>, _>>()
             .map(Type::union),
-        Type::Map(map) if !map.open => Ok(Type::union(
-            map.fields
-                .into_iter()
-                .filter(|(_, field)| field.ty != Type::Never)
-                .map(|(key, field)| Type::MapEntry(Box::new([Type::Key(key), field.ty]))),
-        )),
-        Type::Map(_) => Err(CollectionError::OpenMap),
+        Type::Map(map) => map.into_entry_type().ok_or(CollectionError::OpenMap),
         Type::MapEntry(items) => Ok(Type::union(*items)),
         _ => Err(CollectionError::NotSeqable),
     }

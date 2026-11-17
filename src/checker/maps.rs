@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use super::{Checker, Env, Value, nil_part};
 use crate::Diagnostic;
 use crate::reader::{Form, Span};
-use crate::types::{Field, MapType, Type};
+use crate::types::{ExtraFields, Field, MapSlot, MapType, Type};
 
 #[derive(Clone, Copy)]
 pub(super) enum Lookup<'a> {
@@ -91,29 +91,20 @@ impl Checker<'_> {
                     Type::Never
                 }
             }
-            Type::Map(map) => match map.fields.get(key) {
-                Some(field)
-                    if field.required || matches!(mode, Lookup::Required | Lookup::Presence) =>
-                {
-                    field.ty.clone()
+            Type::Map(map) => match map.slot(key) {
+                MapSlot::Present(ty) => ty.clone(),
+                MapSlot::Optional(ty) if matches!(mode, Lookup::Required | Lookup::Presence) => {
+                    ty.clone()
                 }
-                Some(field) => {
+                MapSlot::Optional(ty) => {
                     notes.push(format!(
-                        "Field {key} is optional; a missing key returns {}",
-                        default_type
+                        "Field {key} is optional; a missing key returns {default_type}"
                     ));
-                    Type::union([field.ty.clone(), default_type])
+                    Type::union([ty.clone(), default_type])
                 }
-                None if !map.open => default_type,
-                None if matches!(mode, Lookup::Presence) => Type::Unknown,
-                None => {
-                    self.error(
-                        "PNX9003",
-                        span,
-                        format!("No declared type for {key} in this open map"),
-                    );
-                    Type::Unknown
-                }
+                MapSlot::Absent => default_type,
+                MapSlot::Undeclared if matches!(mode, Lookup::Presence) => Type::Unknown,
+                MapSlot::Undeclared => self.undeclared_key(key, span),
             },
             _ if matches!(mode, Lookup::Path(_)) => default_type,
             _ => {
@@ -129,6 +120,15 @@ impl Checker<'_> {
             notes.extend(default.notes.clone());
         }
         Value::with_notes(ty, notes)
+    }
+
+    fn undeclared_key(&mut self, key: &str, span: Span) -> Type {
+        self.error(
+            "PNX9003",
+            span,
+            format!("No declared type for {key} in this open map"),
+        );
+        Type::Unknown
     }
 
     pub(super) fn contains(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
@@ -322,22 +322,15 @@ impl Checker<'_> {
         let ty = if path.len() == 1 {
             value.clone()
         } else {
-            let parent = match map.fields.remove(key) {
-                Some(field) if field.required => field.ty,
-                Some(field) => field.ty.nilable(),
-                None if !map.open => Type::Nil,
-                None => {
-                    self.error(
-                        "PNX9003",
-                        *key_span,
-                        format!("No declared type for {key} in this open map"),
-                    );
-                    Type::Unknown
-                }
+            let parent = match map.slot(key) {
+                MapSlot::Present(ty) => ty.clone(),
+                MapSlot::Optional(ty) => ty.clone().nilable(),
+                MapSlot::Absent => Type::Nil,
+                MapSlot::Undeclared => self.undeclared_key(key, *key_span),
             };
             self.assoc_path(parent, &path[1..], value, *key_span, name)
         };
-        map.fields.insert(key.clone(), Field { ty, required: true });
+        map.set_field(key.clone(), Field { ty, required: true });
         Type::Map(map)
     }
 
@@ -346,7 +339,7 @@ impl Checker<'_> {
             Type::Map(map) => Ok(map),
             Type::Nil => Ok(MapType {
                 fields: BTreeMap::new(),
-                open: false,
+                extra: ExtraFields::Closed,
             }),
             Type::Unknown | Type::Never => Err(target),
             _ => {
@@ -392,7 +385,7 @@ impl Checker<'_> {
                 }
             };
             for (key, ty) in &updates {
-                map.fields.insert(
+                map.set_field(
                     key.clone(),
                     Field {
                         ty: ty.clone(),
@@ -409,10 +402,9 @@ impl Checker<'_> {
 /// Presence is independent of the stored value's truthiness.
 fn key_presence(ty: &Type, key: &str) -> Option<bool> {
     match ty {
-        Type::Map(map) => match map.fields.get(key) {
-            Some(field) if field.required => Some(true),
-            Some(field) if field.ty == Type::Never => Some(false),
-            None if !map.open => Some(false),
+        Type::Map(map) => match map.slot(key) {
+            MapSlot::Present(_) => Some(true),
+            MapSlot::Absent => Some(false),
             _ => None,
         },
         Type::Nil | Type::Vector(_) | Type::MapEntry(_) => Some(false), // A keyword is not a vector index.
@@ -439,12 +431,18 @@ pub(super) fn narrow_key_presence(ty: &Type, key: &str, present: bool) -> Type {
             let mut map = map.clone();
             if present {
                 // An undeclared field still has no known value type on the present path.
-                if let Some(field) = map.fields.get_mut(key) {
-                    field.required = true;
+                if let MapSlot::Optional(ty) = map.slot(key) {
+                    map.set_field(
+                        key.to_owned(),
+                        Field {
+                            ty: ty.clone(),
+                            required: true,
+                        },
+                    );
                 }
-            } else if map.open {
-                // An optional field with no possible value records absence even in an open map.
-                map.fields.insert(
+            } else if !matches!(map.extra, ExtraFields::Closed) {
+                // An explicit absent field masks a possible extra entry.
+                map.set_field(
                     key.to_owned(),
                     Field {
                         ty: Type::Never,

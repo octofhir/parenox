@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+mod maps;
+
+pub use maps::{ExtraFields, Field, MapSlot, MapType};
+use std::collections::BTreeSet;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,46 +26,6 @@ pub enum Type {
     Union(Vec<Type>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct MapType {
-    pub fields: BTreeMap<String, Field>,
-    pub open: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Field {
-    pub ty: Type,
-    pub required: bool,
-}
-
-impl MapType {
-    fn join_values(mut self, mut other: Self) -> Self {
-        self.fields.retain(|key, field| {
-            if let Some(right) = other.fields.remove(key) {
-                let left = std::mem::replace(&mut field.ty, Type::Never);
-                field.ty = left.join_values(right.ty);
-                field.required &= right.required;
-                true
-            } else if other.open {
-                // The other path can have an arbitrary undeclared value here.
-                // Dropping the declaration keeps a later lookup an explicit gap.
-                false
-            } else {
-                field.required = false;
-                true
-            }
-        });
-        if !self.open {
-            for (key, mut field) in other.fields {
-                field.required = false;
-                self.fields.insert(key, field);
-            }
-        }
-        self.open |= other.open;
-        self
-    }
-}
-
 impl Type {
     /// General expression type. Exact string values remain available separately as refinements.
     /// Keywords and booleans retain precision for Clojure lookup and truthiness semantics.
@@ -77,22 +40,7 @@ impl Type {
             }
             Type::Vector(t) => Type::Vector(Box::new(t.inferred())),
             Type::Set(t) => Type::Set(Box::new(t.inferred())),
-            Type::Map(map) => Type::Map(MapType {
-                fields: map
-                    .fields
-                    .iter()
-                    .map(|(key, field)| {
-                        (
-                            key.clone(),
-                            Field {
-                                ty: field.ty.inferred(),
-                                required: field.required,
-                            },
-                        )
-                    })
-                    .collect(),
-                open: map.open,
-            }),
+            Type::Map(map) => Type::Map(map.inferred()),
             t => t.clone(),
         }
     }
@@ -103,10 +51,7 @@ impl Type {
             Type::Union(xs) => xs.iter().any(Type::constrains_literal_values),
             Type::MapEntry(items) => items.iter().any(Type::constrains_literal_values),
             Type::Vector(t) | Type::Set(t) => t.constrains_literal_values(),
-            Type::Map(map) => map
-                .fields
-                .values()
-                .any(|f| f.ty.constrains_literal_values()),
+            Type::Map(map) => map.any_type(Type::constrains_literal_values),
             Type::Function(args, ret) => {
                 args.iter().any(Type::constrains_literal_values) || ret.constrains_literal_values()
             }
@@ -151,21 +96,28 @@ impl Type {
     /// shape with optional fields; contract unions continue to use `union`.
     pub fn join_values(self, other: Type) -> Type {
         match (self, other) {
-            (Type::Map(left), Type::Map(right)) => Type::Map(left.join_values(right)),
+            (Type::Map(left), Type::Map(right)) if left.is_shape() && right.is_shape() => {
+                Type::Map(left.join_values(right))
+            }
             (left, right) => match Type::union([left, right]) {
                 Type::Union(parts)
-                    if parts.iter().filter(|t| matches!(t, Type::Map(_))).count() > 1 =>
+                    if parts
+                        .iter()
+                        .filter(|t| matches!(t, Type::Map(map) if map.is_shape()))
+                        .count()
+                        > 1 =>
                 {
                     let mut map: Option<MapType> = None;
                     let mut rest = Vec::with_capacity(parts.len());
                     for part in parts {
-                        if let Type::Map(next) = part {
-                            map = Some(match map {
-                                Some(map) => map.join_values(next),
-                                None => next,
-                            });
-                        } else {
-                            rest.push(part);
+                        match part {
+                            Type::Map(next) if next.is_shape() => {
+                                map = Some(match map {
+                                    Some(map) => map.join_values(next),
+                                    None => next,
+                                });
+                            }
+                            part => rest.push(part),
                         }
                     }
                     rest.extend(map.map(Type::Map));
@@ -243,14 +195,7 @@ impl Type {
                     && args.iter().zip(e_args).all(|(a, e)| e.subtype_of(a))
                     && ret.subtype_of(e_ret)
             }
-            (Type::Map(a), Type::Map(e)) => {
-                e.fields.iter().all(|(key, field)| match a.fields.get(key) {
-                    Some(actual) => {
-                        (!field.required || actual.required) && actual.ty.subtype_of(&field.ty)
-                    }
-                    None => !field.required && !a.open,
-                }) && (e.open || (!a.open && a.fields.keys().all(|k| e.fields.contains_key(k))))
-            }
+            (Type::Map(a), Type::Map(e)) => a.subtype_of(e),
             _ => false,
         }
     }
@@ -261,7 +206,7 @@ impl Type {
             Type::Union(xs) => xs.iter().any(Type::contains_unknown),
             Type::MapEntry(items) => items.iter().any(Type::contains_unknown),
             Type::Vector(t) | Type::Set(t) => t.contains_unknown(),
-            Type::Map(m) => m.fields.values().any(|f| f.ty.contains_unknown()),
+            Type::Map(m) => m.any_type(Type::contains_unknown),
             Type::Function(args, ret) => {
                 args.iter().any(Type::contains_unknown) || ret.contains_unknown()
             }
@@ -305,19 +250,7 @@ impl fmt::Display for Type {
                 let xs = xs.iter().map(ToString::to_string).collect::<Vec<_>>();
                 write!(f, "{}", xs.join(" | "))
             }
-            Type::Map(m) => {
-                let fields = m
-                    .fields
-                    .iter()
-                    .map(|(k, v)| format!("{k}{}: {}", if v.required { "" } else { "?" }, v.ty))
-                    .collect::<Vec<_>>();
-                write!(
-                    f,
-                    "{{{}{}}}",
-                    fields.join(", "),
-                    if m.open { ", ..." } else { "" }
-                )
-            }
+            Type::Map(map) => map.fmt(f),
         }
     }
 }

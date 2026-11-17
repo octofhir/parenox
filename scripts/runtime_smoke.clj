@@ -293,3 +293,20 @@
            (try (demo.entries-bad/key-of-pair) :unexpected-success
                 (catch ClassCastException _ :throws))))
 (println "Clojure/JVM map entries: 7 assertions passed")
+
+(load-file "examples/dictionaries.clj")
+(load-file "examples/dictionaries_bad.clj")
+(assert (clojure.spec.alpha/valid? :demo.dictionaries/prices {}))
+(assert (= ["SKU-1: 12"] (demo.dictionaries/price-labels {"sku-1" 12})))
+(assert (= 1 (demo.dictionaries/next-open-count {})))
+(assert (= 5 (demo.dictionaries/next-open-count {:open 4})))
+(assert (= {:open 1 :closed 3} (demo.dictionaries/record-open {:closed 3})))
+(assert (= {:open 5 :closed 3} (demo.dictionaries/record-open {:open 4 :closed 3})))
+(assert (= nil (get {:open nil} :open 0)))
+(assert (not (clojure.spec.alpha/valid?
+               :demo.dictionaries/counts
+               (demo.dictionaries-bad/record-open {:closed 3}))))
+(assert (= :throws
+           (try (demo.dictionaries-bad/increment-sku {"sku-1" 12}) :unexpected-success
+                (catch ClassCastException _ :throws))))
+(println "Clojure/JVM dictionaries: 9 assertions passed")
