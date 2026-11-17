@@ -134,7 +134,7 @@ impl Model {
                                 };
                                 let required = directive.starts_with(":req");
                                 if fields
-                                    .insert(field_key.clone(), Field { ty, required })
+                                    .insert(Type::Key(field_key.clone()), Field { ty, required })
                                     .is_some()
                                 {
                                     self.error(

@@ -121,21 +121,20 @@ impl Checker<'_> {
             );
             return;
         }
-        let Some(key) = pair[1].keyword() else {
+        let Some(key) = self.literal_map_key(&pair[1]) else {
             self.error(
                 "PNX9001",
                 pair[1].span,
-                "Destructuring currently requires literal keyword keys",
+                "Destructuring currently requires literal keyword or string keys",
             );
             return;
         };
-        let key = self.model.key(key);
         let mode = if required {
             Lookup::Required
         } else {
             Lookup::Optional(None)
         };
-        let field = self.binding_value(value, &key, pair[0].symbol(), mode, defaults, pair[1].span);
+        let field = self.binding_value(value, key, pair[0].symbol(), mode, defaults, pair[1].span);
         self.bind(&pair[0], field, env);
     }
 
@@ -212,13 +211,19 @@ impl Checker<'_> {
                 } else {
                     Lookup::Optional(None)
                 };
-                let field =
-                    self.binding_value(value, &lookup_key, Some(local), mode, defaults, key.span);
+                let field = self.binding_value(
+                    value,
+                    Type::Key(lookup_key),
+                    Some(local),
+                    mode,
+                    defaults,
+                    key.span,
+                );
                 env.insert(local.into(), field);
             } else if required {
                 self.binding_value(
                     value,
-                    &lookup_key,
+                    Type::Key(lookup_key),
                     None,
                     Lookup::Presence,
                     defaults,
@@ -269,14 +274,17 @@ impl Checker<'_> {
     fn binding_value(
         &mut self,
         value: &Value,
-        key: &str,
+        key: Type,
         local: Option<&str>,
         mode: Lookup<'_>,
         defaults: &Defaults,
         span: Span,
     ) -> Value {
         let by_local = local.and_then(|name| defaults.get(name));
-        let by_key = defaults.get(key);
+        let by_key = match &key {
+            Type::Key(name) => defaults.get(name),
+            _ => None,
+        };
         if let (Some(_), Some((_, span))) = (by_local, by_key) {
             self.error(
                 "PNX1001",
@@ -291,7 +299,7 @@ impl Checker<'_> {
         let default = by_local.or(by_key);
         match mode {
             Lookup::Optional(_) | Lookup::Path(_) => {
-                self.lookup(value, key, default.map(|(value, _)| value), span)
+                self.lookup(value, &key, default.map(|(value, _)| value), span)
             }
             Lookup::Required | Lookup::Presence => {
                 if let Some((_, span)) = default {
@@ -302,7 +310,7 @@ impl Checker<'_> {
                     );
                     Value::new(Type::Unknown)
                 } else {
-                    self.checked_lookup(value, key, mode, span)
+                    self.checked_lookup(value, &key, mode, span)
                 }
             }
         }

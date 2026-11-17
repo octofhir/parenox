@@ -1,4 +1,5 @@
-//! Keyword lookup, path updates and key presence.
+//! Map lookup, path updates and key presence.
+mod keys;
 use std::collections::BTreeMap;
 
 use super::{Checker, Env, Value, nil_part};
@@ -18,7 +19,7 @@ impl Checker<'_> {
     pub(super) fn lookup(
         &mut self,
         value: &Value,
-        key: &str,
+        key: &Type,
         default: Option<&Value>,
         span: Span,
     ) -> Value {
@@ -28,7 +29,7 @@ impl Checker<'_> {
     pub(super) fn checked_lookup(
         &mut self,
         value: &Value,
-        key: &str,
+        key: &Type,
         mode: Lookup<'_>,
         span: Span,
     ) -> Value {
@@ -51,7 +52,17 @@ impl Checker<'_> {
         result
     }
 
-    fn lookup_value(&mut self, value: &Value, key: &str, mode: Lookup<'_>, span: Span) -> Value {
+    fn lookup_value(&mut self, value: &Value, key: &Type, mode: Lookup<'_>, span: Span) -> Value {
+        match key {
+            Type::Unknown | Type::Never => return Value::new(key.clone()),
+            Type::Union(parts) => {
+                let values = parts
+                    .iter()
+                    .map(|key| self.lookup_value(value, key, mode, span));
+                return values.fold(Value::new(Type::Never), Value::join);
+            }
+            _ => {}
+        }
         let default = match mode {
             Lookup::Optional(default) | Lookup::Path(default) => default,
             _ => None,
@@ -65,7 +76,7 @@ impl Checker<'_> {
         };
         let mut notes = value.notes.clone();
         let ty = match &value.known {
-            Type::Nil | Type::MapEntry(_) => default_type,
+            Type::Nil | Type::MapEntry(_) | Type::Vector(_) => default_type,
             Type::Never => Type::Never,
             Type::Unknown => Type::Unknown,
             Type::Union(xs) => {
@@ -77,18 +88,30 @@ impl Checker<'_> {
                 Type::union(values.into_iter().map(|v| v.known))
             }
             Type::Set(element) => {
-                let key_type = Type::Key(key.into());
+                let key_type = key.clone();
                 if matches!(mode, Lookup::Path(_))
-                    && !key_type.subtype_of(element)
+                    && !key_type.key_overlaps(element)
                     && !element.contains_unknown()
                 {
                     default_type
                 } else if matches!(mode, Lookup::Optional(_) | Lookup::Path(_)) {
                     Type::union([key_type, default_type])
-                } else if key_type.subtype_of(element) || element.contains_unknown() {
+                } else if key_type.key_overlaps(element) || element.contains_unknown() {
                     key_type
                 } else {
                     Type::Never
+                }
+            }
+            Type::Map(map) if !key.is_literal_map_key() => {
+                match map.possible_values(key) {
+                    Some(Type::Never) => default_type,
+                    Some(ty) if matches!(mode, Lookup::Required | Lookup::Presence) => ty,
+                    Some(ty) => {
+                        notes.push(format!("A key of type {key} may be absent; a missing key returns {default_type}"));
+                        Type::union([ty, default_type])
+                    }
+                    None if matches!(mode, Lookup::Presence) => Type::Unknown,
+                    None => self.undeclared_key(key, span),
                 }
             }
             Type::Map(map) => match map.slot(key) {
@@ -111,7 +134,7 @@ impl Checker<'_> {
                 self.error(
                     "PNX2322",
                     span,
-                    format!("Keyword lookup expects a map, set or Nil, got {}", value.ty),
+                    format!("Lookup expects a map, set or Nil, got {}", value.ty),
                 );
                 Type::Unknown
             }
@@ -122,7 +145,7 @@ impl Checker<'_> {
         Value::with_notes(ty, notes)
     }
 
-    fn undeclared_key(&mut self, key: &str, span: Span) -> Type {
+    fn undeclared_key(&mut self, key: &Type, span: Span) -> Type {
         self.error(
             "PNX9003",
             span,
@@ -137,14 +160,23 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let value = self.infer(target, env);
-        let key_value = self.infer(key, env);
-        let Type::Key(key) = key_value.known else {
-            return self.unsupported(key.span, "contains? currently requires a known keyword key");
+        let Some(key_type) = self.read_map_key(key, env, "contains?") else {
+            return Value::new(Type::Unknown);
         };
-        Value::new(self.contains_type(&value.known, &key, target.span))
+        Value::new(match env.presence(target, key) {
+            Some(present) => Type::Bool(present),
+            None => self.contains_type(&value.known, &key_type, target.span),
+        })
     }
 
-    fn contains_type(&mut self, ty: &Type, key: &str, span: Span) -> Type {
+    fn contains_type(&mut self, ty: &Type, key: &Type, span: Span) -> Type {
+        match key {
+            Type::Never | Type::Unknown => return key.clone(),
+            Type::Union(parts) => {
+                return Type::union(parts.iter().map(|key| self.contains_type(ty, key, span)));
+            }
+            _ => {}
+        }
         match ty {
             Type::Never | Type::Unknown => ty.clone(),
             Type::Union(parts) => {
@@ -167,18 +199,18 @@ impl Checker<'_> {
         }
     }
 
-    fn keyword_path(&mut self, form: &Form, name: &str) -> Option<Vec<(String, Span)>> {
+    fn literal_key_path(&mut self, form: &Form, name: &str) -> Option<Vec<(Type, Span)>> {
         if let Some(path) = form.vector()
             && let Some(keys) = path
                 .iter()
-                .map(|key| key.keyword().map(|name| (self.model.key(name), key.span)))
+                .map(|key| self.literal_map_key(key).map(|ty| (ty, key.span)))
                 .collect()
         {
             return Some(keys);
         }
         self.unsupported(
             form.span,
-            format!("{name} currently requires a vector of literal keywords"),
+            format!("{name} currently requires a vector of literal keyword or string keys"),
         );
         None
     }
@@ -194,7 +226,7 @@ impl Checker<'_> {
         }
         let value = self.infer(&xs[1], env);
         let default = xs.get(3).map(|form| self.infer(form, env));
-        let Some(path) = self.keyword_path(&xs[2], "get-in") else {
+        let Some(path) = self.literal_key_path(&xs[2], "get-in") else {
             return Value::new(Type::Unknown);
         };
         self.lookup_path(&value, &path, default.as_ref())
@@ -203,7 +235,7 @@ impl Checker<'_> {
     fn lookup_path(
         &mut self,
         value: &Value,
-        path: &[(String, Span)],
+        path: &[(Type, Span)],
         default: Option<&Value>,
     ) -> Value {
         let mut result = None;
@@ -235,27 +267,34 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let target_span = target.span;
+        let presence = env.presence(target, key);
         let target = self.infer(target, env);
         let path = if name.ends_with("-in") {
-            let Some(path) = self.keyword_path(key, name) else {
+            let Some(path) = self.literal_key_path(key, name) else {
                 return Value::new(Type::Unknown);
             };
             if path.is_empty() || path.len() > 32 {
                 return self.unsupported(
                     key.span,
-                    "update-in currently supports paths of 1 to 32 keywords",
+                    "update-in currently supports paths of 1 to 32 keys",
                 );
             }
             path
         } else {
-            let value = self.infer(key, env);
-            let Type::Key(name) = value.known else {
-                return self.unsupported(key.span, "update currently requires a known keyword key");
+            let Some(key_type) = self.read_map_key(key, env, name) else {
+                return Value::new(Type::Unknown);
             };
-            vec![(name, key.span)]
+            if matches!(key_type, Type::Never | Type::Unknown) {
+                return Value::new(key_type);
+            }
+            vec![(key_type, key.span)]
         };
         let (last_key, old_span) = path.last().unwrap();
-        let old = self.lookup_path(&target, &path, None);
+        let old = if name.ends_with("-in") || presence.is_none() {
+            self.lookup_path(&target, &path, None)
+        } else {
+            self.lookup_with_presence(&target, last_key, None, *old_span, presence)
+        };
         let unknown = old.known.contains_unknown();
         let mut args = Vec::with_capacity(extra.len() + 1);
         args.push((old, *old_span));
@@ -287,13 +326,13 @@ impl Checker<'_> {
         }
         let target = self.infer(&xs[1], env);
         let value = self.infer(&xs[3], env);
-        let Some(path) = self.keyword_path(&xs[2], "assoc-in") else {
+        let Some(path) = self.literal_key_path(&xs[2], "assoc-in") else {
             return Value::new(Type::Unknown);
         };
         if path.is_empty() || path.len() > 32 {
             return self.unsupported(
                 xs[2].span,
-                "assoc-in currently supports paths of 1 to 32 keywords",
+                "assoc-in currently supports paths of 1 to 32 keys",
             );
         }
         Value::new(self.assoc_path(target.known, &path, &value.known, xs[1].span, "assoc-in"))
@@ -302,7 +341,7 @@ impl Checker<'_> {
     fn assoc_path(
         &mut self,
         target: Type,
-        path: &[(String, Span)],
+        path: &[(Type, Span)],
         value: &Type,
         span: Span,
         name: &str,
@@ -330,7 +369,7 @@ impl Checker<'_> {
             };
             self.assoc_path(parent, &path[1..], value, *key_span, name)
         };
-        map.set_field(key.clone(), Field { ty, required: true });
+        map.associate(key, &ty);
         Type::Map(map)
     }
 
@@ -361,14 +400,14 @@ impl Checker<'_> {
         let target = self.infer(&xs[1], env);
         let mut updates = Vec::new();
         for pair in xs[2..].as_chunks::<2>().0 {
-            let key = self.infer(&pair[0], env);
+            let key = self.read_map_key(&pair[0], env, "assoc");
             let value = self.infer(&pair[1], env);
-            let Type::Key(key) = key.ty else {
-                return self.unsupported(
-                    pair[0].span,
-                    "assoc currently requires literal keyword keys",
-                );
+            let Some(key) = key else {
+                return Value::new(Type::Unknown);
             };
+            if matches!(key, Type::Never | Type::Unknown) {
+                return Value::new(key);
+            }
             updates.push((key, value.known));
         }
         let parts = match target.known {
@@ -385,13 +424,7 @@ impl Checker<'_> {
                 }
             };
             for (key, ty) in &updates {
-                map.set_field(
-                    key.clone(),
-                    Field {
-                        ty: ty.clone(),
-                        required: true,
-                    },
-                );
+                map.associate(key, ty);
             }
             results.push(Type::Map(map));
         }
@@ -400,24 +433,25 @@ impl Checker<'_> {
 }
 
 /// Presence is independent of the stored value's truthiness.
-fn key_presence(ty: &Type, key: &str) -> Option<bool> {
+fn key_presence(ty: &Type, key: &Type) -> Option<bool> {
     match ty {
+        Type::Map(map) if !key.is_literal_map_key() => {
+            (map.possible_values(key) == Some(Type::Never)).then_some(false)
+        }
         Type::Map(map) => match map.slot(key) {
             MapSlot::Present(_) => Some(true),
             MapSlot::Absent => Some(false),
             _ => None,
         },
-        Type::Nil | Type::Vector(_) | Type::MapEntry(_) => Some(false), // A keyword is not a vector index.
-        Type::Set(element)
-            if !Type::Key(key.to_owned()).subtype_of(element) && !element.contains_unknown() =>
-        {
+        Type::Nil | Type::Vector(_) | Type::MapEntry(_) => Some(false), // Keyword and string keys are never vector indices.
+        Type::Set(element) if !key.key_overlaps(element) && !element.contains_unknown() => {
             Some(false)
         }
         _ => None,
     }
 }
 
-pub(super) fn narrow_key_presence(ty: &Type, key: &str, present: bool) -> Type {
+pub(super) fn narrow_key_presence(ty: &Type, key: &Type, present: bool) -> Type {
     if let Type::Union(parts) = ty {
         return Type::union(
             parts

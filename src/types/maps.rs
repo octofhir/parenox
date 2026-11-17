@@ -5,7 +5,7 @@ use super::Type;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MapType {
-    pub fields: BTreeMap<String, Field>,
+    pub fields: BTreeMap<Type, Field>,
     pub extra: ExtraFields,
 }
 
@@ -52,21 +52,36 @@ impl ExtraFields {
         }
     }
 
-    fn accepts_field(&self, key: &str, ty: &Type) -> bool {
+    fn accepts_field(&self, key: &Type, ty: &Type) -> bool {
         match self {
             Self::Open => true,
             Self::Closed => false,
-            Self::Typed(types) => accepts_keyword(&types[0], key) && ty.subtype_of(&types[1]),
+            Self::Typed(types) => key.subtype_of(&types[0]) && ty.subtype_of(&types[1]),
         }
     }
 }
 
-fn accepts_keyword(domain: &Type, key: &str) -> bool {
-    match domain {
-        Type::Keyword => true,
-        Type::Key(name) => name == key,
-        Type::Union(parts) => parts.iter().any(|part| accepts_keyword(part, key)),
-        _ => false,
+impl Type {
+    pub fn is_literal_map_key(&self) -> bool {
+        matches!(self, Self::Key(_) | Self::Str(_))
+    }
+
+    pub fn is_lookup_key(&self) -> bool {
+        match self {
+            Self::Union(parts) => parts.iter().all(Self::is_lookup_key),
+            Self::String | Self::Keyword | Self::Unknown | Self::Never => true,
+            key => key.is_literal_map_key(),
+        }
+    }
+
+    pub fn key_overlaps(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Never, _) | (_, Self::Never) => false,
+            (Self::Unknown, _) | (_, Self::Unknown) => true,
+            (Self::Union(parts), other) => parts.iter().any(|key| key.key_overlaps(other)),
+            (key, Self::Union(parts)) => parts.iter().any(|other| key.key_overlaps(other)),
+            (key, other) => key.subtype_of(other) || other.subtype_of(key),
+        }
     }
 }
 
@@ -82,7 +97,7 @@ impl MapType {
         }
     }
 
-    pub fn slot(&self, key: &str) -> MapSlot<'_> {
+    pub fn slot(&self, key: &Type) -> MapSlot<'_> {
         match self.fields.get(key) {
             Some(field) if field.required => MapSlot::Present(&field.ty),
             Some(field) if field.ty != Type::Never => MapSlot::Optional(&field.ty),
@@ -90,9 +105,7 @@ impl MapType {
             None => match &self.extra {
                 ExtraFields::Closed => MapSlot::Absent,
                 ExtraFields::Open => MapSlot::Undeclared,
-                ExtraFields::Typed(types)
-                    if accepts_keyword(&types[0], key) || types[0].contains_unknown() =>
-                {
+                ExtraFields::Typed(types) if key.key_overlaps(&types[0]) => {
                     MapSlot::Optional(&types[1])
                 }
                 ExtraFields::Typed(_) => MapSlot::Absent,
@@ -100,26 +113,78 @@ impl MapType {
         }
     }
 
-    pub fn set_field(&mut self, key: String, field: Field) {
+    pub fn set_field(&mut self, key: Type, field: Field) {
         if let ExtraFields::Typed(types) = &mut self.extra {
             // A fixed field replaces that entry of a finite key domain.
             let keys = &mut types[0];
-            match keys {
-                Type::Key(existing) if *existing == key => *keys = Type::Never,
-                Type::Union(parts) => {
-                    let previous_len = parts.len();
-                    parts.retain(|part| !matches!(part, Type::Key(existing) if *existing == key));
-                    if parts.len() != previous_len {
-                        *keys = Type::union(std::mem::take(parts));
-                    }
+            if *keys == key {
+                *keys = Type::Never;
+            } else if let Type::Union(parts) = keys {
+                let previous_len = parts.len();
+                parts.retain(|part| *part != key);
+                if parts.len() != previous_len {
+                    *keys = Type::union(std::mem::take(parts));
                 }
-                _ => {}
             }
             if *keys == Type::Never {
                 self.extra = ExtraFields::Closed;
             }
         }
         self.fields.insert(key, field);
+    }
+
+    /// Possible values of a nonconstant key. Open shapes can contain undeclared values.
+    pub fn possible_values(&self, key: &Type) -> Option<Type> {
+        let extra_value = match &self.extra {
+            ExtraFields::Open => return None,
+            ExtraFields::Typed(types) if key.key_overlaps(&types[0]) => Some(types[1].clone()),
+            _ => None,
+        };
+        if self.fields.is_empty() {
+            return Some(extra_value.unwrap_or(Type::Never));
+        }
+        let values = self
+            .fields
+            .iter()
+            .filter(|(field_key, _)| key.key_overlaps(field_key))
+            .map(|(_, field)| field.ty.clone());
+        Some(Type::union(values.chain(extra_value)))
+    }
+
+    pub fn associate(&mut self, key: &Type, value: &Type) {
+        if key.is_literal_map_key() {
+            self.set_field(
+                key.clone(),
+                Field {
+                    ty: value.clone(),
+                    required: true,
+                },
+            );
+            return;
+        }
+        // A dynamic key may replace any overlapping fixed field or create a new entry.
+        for (field_key, field) in &mut self.fields {
+            if key.key_overlaps(field_key) {
+                field.ty =
+                    Type::union([std::mem::replace(&mut field.ty, Type::Never), value.clone()]);
+            }
+        }
+        match &mut self.extra {
+            ExtraFields::Open => {}
+            ExtraFields::Closed => {
+                self.extra = ExtraFields::Typed(Box::new([key.clone(), value.clone()]))
+            }
+            ExtraFields::Typed(types) => {
+                let [old_key, old_value] = types.as_mut();
+                if !key.subtype_of(old_key) {
+                    *old_key = Type::union([std::mem::replace(old_key, Type::Never), key.clone()]);
+                }
+                if !value.subtype_of(old_value) {
+                    *old_value =
+                        Type::union([std::mem::replace(old_value, Type::Never), value.clone()]);
+                }
+            }
+        }
     }
 
     pub fn into_entry_type(self) -> Option<Type> {
@@ -135,7 +200,7 @@ impl MapType {
             self.fields
                 .into_iter()
                 .filter(|(_, field)| field.ty != Type::Never)
-                .map(|(key, field)| Type::MapEntry(Box::new([Type::Key(key), field.ty])))
+                .map(|(key, field)| Type::MapEntry(Box::new([key, field.ty])))
                 .chain(additional),
         ))
     }

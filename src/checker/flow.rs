@@ -1,6 +1,5 @@
 //! Control flow, type narrowing and core threading forms.
 use super::calls::predicate_type;
-use super::maps::narrow_key_presence;
 use super::{Checker, Env, Value, nil_part};
 use crate::expand::{self, Threading};
 use crate::reader::{Form, Kind, Span};
@@ -447,16 +446,7 @@ impl Checker<'_> {
         }
         let op = self.model.resolve(op);
         if op == "clojure.core/contains?" {
-            if let [_, target, key] = xs.as_slice()
-                && let Some(key) = key.keyword()
-                && let Some(value) = target.symbol().and_then(|name| env.get_mut(name))
-            {
-                value.narrow(narrow_key_presence(
-                    &value.known,
-                    &self.model.key(key),
-                    truth,
-                ));
-            }
+            self.narrow_contains(&xs[1..], truth, env);
             return;
         }
         if xs.len() != 2 {

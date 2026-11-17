@@ -125,3 +125,8 @@ entries format="pretty" color="auto": build
 dictionaries format="pretty" color="auto": build
     @./target/release/parenox check examples/dictionaries.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/dictionaries_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check string keys and show explicit Nil and dictionary return-type errors.
+map-keys format="pretty" color="auto": build
+    @./target/release/parenox check examples/map_keys.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/map_keys_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

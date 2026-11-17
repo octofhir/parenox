@@ -310,3 +310,24 @@
            (try (demo.dictionaries-bad/increment-sku {"sku-1" 12}) :unexpected-success
                 (catch ClassCastException _ :throws))))
 (println "Clojure/JVM dictionaries: 9 assertions passed")
+
+(load-file "examples/map_keys.clj")
+(load-file "examples/map_keys_bad.clj")
+(assert (= 140 (demo.map-keys/quoted-price {"SKU-17" 140} "SKU-17" 100)))
+(assert (= 100 (demo.map-keys/quoted-price {} "SKU-17" 100)))
+(assert (= 110 (demo.map-keys/discounted-price {"SKU-17" 140} "SKU-17" 30)))
+(assert (= 0 (demo.map-keys/discounted-price {} "SKU-17" 30)))
+(assert (= {"SKU-17" 120 "SKU-18" 50}
+           (demo.map-keys/adjust-price {"SKU-17" 100 "SKU-18" 50} "SKU-17" 20)))
+(assert (= {"SKU-17" 20} (demo.map-keys/adjust-price {} "SKU-17" 20)))
+(assert (= 120 (demo.map-keys/catalog-price)))
+(assert (= [1 "two"] [(get {:x 1 "x" "two"} :x) (get {:x 1 "x" "two"} "x")]))
+(assert (nil? (get {"SKU-17" nil} "SKU-17" 120)))
+(assert (= :throws
+           (try (demo.map-keys-bad/next-price {"SKU-17" nil} "SKU-17")
+                :unexpected-success
+                (catch NullPointerException _ :throws))))
+(assert (not (clojure.spec.alpha/valid?
+               :demo.map-keys/prices
+               (demo.map-keys-bad/mark-pending {"SKU-17" 120} "SKU-17"))))
+(println "Clojure/JVM map keys: 11 assertions passed")

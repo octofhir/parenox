@@ -2,7 +2,6 @@
 mod inline;
 mod vectors;
 
-use super::maps::Lookup;
 use super::{Checker, Env, Value, model::Function, nil_part};
 use crate::Diagnostic;
 use crate::expand::Threading;
@@ -85,7 +84,12 @@ impl Checker<'_> {
             }
             let target = self.infer(&xs[1], env);
             let default = xs.get(2).map(|x| self.infer(x, env));
-            return self.lookup(&target, &self.model.key(key), default.as_ref(), xs[0].span);
+            return self.lookup(
+                &target,
+                &Type::Key(self.model.key(key)),
+                default.as_ref(),
+                xs[0].span,
+            );
         }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
@@ -113,38 +117,7 @@ impl Checker<'_> {
                     return self.short_circuit(xs, env, resolved.ends_with("/or"));
                 }
                 "clojure.core/get" | "clojure.core/req!" => {
-                    let required = resolved == "clojure.core/req!";
-                    let max_arity = if required { 3 } else { 4 };
-                    if !(3..=max_arity).contains(&xs.len()) {
-                        self.error(
-                            "PNX2554",
-                            span,
-                            format!(
-                                "Invalid arity for {resolved}: expected a collection and key{}",
-                                if required {
-                                    ""
-                                } else {
-                                    " and optional default"
-                                }
-                            ),
-                        );
-                        return Value::new(Type::Unknown);
-                    }
-                    let target = self.infer(&xs[1], env);
-                    let key = self.infer(&xs[2], env);
-                    let default = xs.get(3).map(|x| self.infer(x, env));
-                    return if let Type::Key(key) = key.ty {
-                        if required {
-                            self.checked_lookup(&target, &key, Lookup::Required, xs[2].span)
-                        } else {
-                            self.lookup(&target, &key, default.as_ref(), xs[2].span)
-                        }
-                    } else {
-                        self.unsupported(
-                            xs[2].span,
-                            format!("{resolved} currently requires a literal keyword"),
-                        )
-                    };
+                    return self.lookup_form(xs, span, env, &resolved);
                 }
                 "clojure.core/contains?" => return self.contains(xs, span, env),
                 "clojure.core/get-in" => return self.get_in(xs, span, env),

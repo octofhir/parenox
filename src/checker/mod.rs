@@ -1,10 +1,12 @@
 //! Source analysis for the supported Clojure subset.
 mod bindings;
 mod calls;
+mod env;
 mod flow;
 mod maps;
 mod model;
 
+use env::Env;
 use model::Function;
 pub(crate) use model::{Globals, Model};
 
@@ -89,8 +91,6 @@ impl Value {
         self.known = known;
     }
 }
-
-type Env = BTreeMap<String, Value>;
 
 struct Checker<'a> {
     model: &'a Model,
@@ -240,8 +240,7 @@ impl Checker<'_> {
                 let mut fields = BTreeMap::new();
                 for pair in xs.as_chunks::<2>().0 {
                     let value = self.infer(&pair[1], env);
-                    if let Some(key) = pair[0].keyword() {
-                        let key = self.model.key(key);
+                    if let Some(key) = self.literal_map_key(&pair[0]) {
                         if fields
                             .insert(
                                 key.clone(),
@@ -255,7 +254,7 @@ impl Checker<'_> {
                             self.error("PNX2790", pair[0].span, format!("Duplicate map key {key}"));
                         }
                     } else {
-                        self.unsupported(pair[0].span, "Only keyword map keys are supported");
+                        self.unsupported(pair[0].span, "Map literals currently require keyword or string keys");
                     }
                 }
                 Value::new(Type::Map(MapType {

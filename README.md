@@ -67,6 +67,7 @@ just updates         # update and update-in with callback diagnostics
 just vectors pretty always  # mapv and filterv with colored callback diagnostics
 just entries pretty always  # map entry pipelines and diagnostics
 just dictionaries pretty always  # map-of contracts and diagnostics
+just map-keys pretty always  # string and dynamic map keys
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -319,24 +320,27 @@ The fallback runs in the outer scope and defaults to nil. Run `just guards`
 to see the result type when no fallback is supplied and a type error when
 `if-some` passes `false` into a numeric call.
 
-`get-in` and `assoc-in` accept vectors of literal keywords. `get-in` applies its
-fallback when a path is absent and preserves a present terminal nil or false.
+`get-in` and `assoc-in` accept vectors of literal keyword or string keys.
+`get-in` applies its fallback when a path is absent and preserves a present terminal nil or false.
 `assoc-in` creates missing or nil intermediate maps, preserves sibling fields
 and flags scalar parents. The update supports paths of 1 to 32 keys. Runtime
 paths and numeric indices report an analysis gap. Run `just paths` to see both
 operations and their diagnostics.
 
-`contains?` checks a known keyword key. A guard such as `(contains? patient :name)`
+`contains?` checks keyword and string keys. A guard such as `(contains? patient :name)`
 refines a local map in each branch. The successful branch can read a declared
 optional field without adding nil for absence. The failure branch lets `get`
 or `get-in` use the fallback. A field declared nilable still accepts explicit
 nil, and the type of an undeclared field in an open map remains unknown.
+With `(contains? prices sku)`, the guard also refines a direct lookup using the
+same two local bindings. Rebinding either local removes the fact.
 Run `just presence` for examples and source diagnostics.
 
-`update` accepts a known keyword, and `update-in` accepts a vector of 1 to 32
-literal keywords. The updater receives the old value first, followed by any
-extra arguments. An absent entry passes nil. The updater's result becomes the
-new field type, and sibling fields retain their types. Supported updaters
+`update` accepts a keyword or string expression. `update-in` accepts a vector
+of 1 to 32 literal keyword or string keys. The updater receives the old value
+first, followed by any extra arguments. An absent entry passes nil. The updater's result becomes the
+new field type. A dynamic key may overlap a field, so Parenox combines the
+old and new value types for that field. Supported updaters
 include built-in functions, functions with signatures, and directly named
 private helpers. Inline `fnil` replaces nil arguments and preserves false.
 For example, `(update patient :visits (fnil inc 0))` works when visits is absent.
@@ -358,7 +362,7 @@ vector of callback results. It stops at the shortest input. `filterv` retains
 elements for which the callback returns a truthy value. Core scalar predicates
 narrow the retained type. `some?` removes nil and keeps false.
 
-Both support vectors, sets, strings (as characters), closed keyword maps,
+Both support vectors, sets, strings (as characters), closed maps,
 `s/map-of` dictionaries, and nil (as empty). User-defined predicates retain the
 input element type unless the callback is known to always return a falsey
 value. Run `just vectors pretty always` for a patient-label pipeline and
@@ -373,16 +377,16 @@ fields can have arbitrary types. Run `just entries pretty always` for examples.
 
 A contract of the form `(s/map-of key-spec value-spec)` types the entries of
 a dictionary. It allows empty maps. The key and value specs flow into
-`MapEntry<K, V>` when a dictionary is iterated. Literal keyword lookups
-use the value type if the key can occur, and preserve missing-key defaults.
+`MapEntry<K, V>` when a dictionary is iterated. Keyword and string lookups
+use the value type if the key can occur and preserve missing-key defaults.
 `contains?` narrows presence, and `assoc` and `update` track the updated
 entry while retaining the types of the remaining entries.
-Run `just dictionaries pretty always` for examples.
-Options on `s/map-of` and string-key lookup, update, and map literals remain
-unsupported.
+Run `just dictionaries pretty always` for contracts and
+`just map-keys pretty always` for dynamic key examples. Options on `s/map-of`,
+non-keyword and non-string lookup keys, and dynamic path segments report gaps.
 
-Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
-`:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.
+Clojure 1.13 checked lookups support keyword and string keys in `req!` and
+explicit map bindings, plus `:keys!` and its namespaced directives.
 Keys after `&` in a keys vector are not bound; checked directives require their
 presence. Ordinary keyword renaming and nested map patterns use the same binding
 analysis. Run `just checked` for passing examples and two deliberate errors.
@@ -410,7 +414,7 @@ or providing a default for a checked required key, produces `PNX1001` at the
 default. A default applies to the local value; `:as` retains the input collection.
 
 Map destructuring with `:missing`, `:select`, `:all` or `:excess` and
-string/symbol lookup keys remain unsupported. Positional destructuring currently
+symbol lookup keys remain unsupported. Positional destructuring currently
 covers map entries and nil; rest bindings report an analysis gap.
 
 Recursive helpers, unused helpers with no typed caller, and helpers used as
@@ -425,7 +429,7 @@ inferred helper work is included in the check of their callers.
 | Spec forms | `s/keys`, `s/map-of`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
-| Data operations | Keyword lookup, literal-key `get`/`req!`/`assoc`, keyword paths in `get-in` and `assoc-in`, nested keyword map destructuring and checked keys |
+| Data operations | Keyword calls, string and keyword lookups and updates, literal key paths, nested map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |
 | Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |
@@ -441,7 +445,7 @@ strings are shown as `String`, including inside maps and collections, while exac
 values remain available to check finite-value contracts.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
-recursive specs, multi-arity/variadic definitions, string-key map literals, full numeric
+recursive specs, multi-arity/variadic definitions, full numeric
 tower semantics and some reader forms. All numbers currently share `Number`.
 Externs currently declare qualified function signatures; they do not load JARs or
 resolve Maven/Git dependencies. There is no runtime, interpreter or VM yet.
