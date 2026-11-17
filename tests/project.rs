@@ -267,6 +267,42 @@ fn a_path_changing_from_externs_to_source_is_checked_in_its_new_role() {
 }
 
 #[test]
+fn an_extern_edit_only_invalidates_callers_of_its_namespace() {
+    let files = BTreeMap::from([
+        (
+            "caller.clj",
+            "(ns caller (:require [vendor.text :as text]))
+             (defn format-value {:t/sig '[:-> string?]} [] (text/label 42))"
+                .into(),
+        ),
+        (
+            "clock.clj",
+            "(ns clock (:require [vendor.clock :refer [now]]))
+             (defn read-clock {:t/sig '[:-> number?]} [] (now))"
+                .into(),
+        ),
+    ]);
+    let externs = "{vendor.text/label [number? :-> string?]
+                    vendor.clock/now [:-> number?]}";
+    let mut session = Session::default();
+    assert!(run(&mut session, &files, Some(externs)).ok);
+    let changed = externs.replace("clock/now [:-> number?]", "clock/now [:-> string?]");
+    let report = run(&mut session, &files, Some(&changed));
+    assert!(!report.ok && report.complete, "{report:#?}");
+    assert_eq!(report.stats.checked_functions, 1);
+    assert_eq!(report.stats.reused_functions, 1);
+    assert!(report.files[0].ok);
+    assert_eq!(
+        report.files[1].diagnostics[0].actual.as_deref(),
+        Some("String")
+    );
+
+    let restored = run(&mut session, &files, Some(externs));
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+    assert_eq!(restored.stats.checked_functions, 1);
+}
+
+#[test]
 fn namespace_graph_rejects_cycles_duplicates_and_private_imports() {
     let cycle = [
         Source {

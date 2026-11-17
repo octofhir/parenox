@@ -1,7 +1,11 @@
 //! Namespace resolution, project interfaces and cache dependencies.
 mod contracts;
+mod externs;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use externs::Externs;
 
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
@@ -32,6 +36,7 @@ pub(crate) struct Globals {
     pub(super) project_namespaces: BTreeSet<String>,
     functions: BTreeMap<String, Signature>,
     interfaces: BTreeMap<String, String>,
+    externs: Option<Arc<Externs>>,
 }
 
 impl Globals {
@@ -42,9 +47,23 @@ impl Globals {
     pub fn dependency_key(&self, dependencies: &[String]) -> String {
         dependencies
             .iter()
-            .map(|name| format!("{name}:{:?}", self.interfaces.get(name)))
+            .map(|name| {
+                let source = self.interfaces.get(name);
+                let external = self
+                    .externs
+                    .as_ref()
+                    .and_then(|table| table.interfaces.get(name));
+                format!("{name}:{source:?}:{external:?}")
+            })
             .collect::<Vec<_>>()
             .join("|")
+    }
+
+    fn signature(&self, name: &str) -> Option<&Signature> {
+        self.externs
+            .as_ref()
+            .and_then(|table| table.functions.get(name))
+            .or_else(|| self.functions.get(name))
     }
 }
 
@@ -53,7 +72,7 @@ pub(crate) struct Model {
     pub ns: String,
     pub dependencies: Vec<String>,
     refers: BTreeMap<String, String>,
-    externs: BTreeMap<String, Signature>,
+    externs: Option<Arc<Externs>>,
     aliases: BTreeMap<String, String>,
     raw_specs: BTreeMap<String, Form>,
     specs: BTreeMap<String, Type>,
@@ -260,50 +279,6 @@ impl Model {
         }
     }
 
-    pub fn externs(forms: &[Form], globals: &Globals) -> Self {
-        let mut model = Self {
-            ns: "externs".into(),
-            ..Self::default()
-        };
-        let [
-            Form {
-                kind: Kind::Map(entries),
-                ..
-            },
-        ] = forms
-        else {
-            model.error(
-                "PNX9001",
-                forms.first().map_or(Span::default(), |f| f.span),
-                "Externs must be one EDN map of qualified function names to signatures",
-            );
-            return model;
-        };
-        for [name, signature] in entries.as_chunks::<2>().0 {
-            let Some(name_string) = name.symbol().filter(|s| s.contains('/')) else {
-                model.error(
-                    "PNX9001",
-                    name.span,
-                    "Extern function names must be qualified symbols",
-                );
-                continue;
-            };
-            if let Some(signature) = model.parse_signature(signature, globals)
-                && model
-                    .externs
-                    .insert(name_string.into(), signature)
-                    .is_some()
-            {
-                model.error(
-                    "PNX2790",
-                    name.span,
-                    format!("Duplicate extern {name_string}"),
-                );
-            }
-        }
-        model
-    }
-
     pub fn publish(&self, globals: &mut Globals) {
         globals.specs.extend(self.specs.clone());
         let mut exported = BTreeMap::new();
@@ -320,24 +295,6 @@ impl Model {
         globals
             .interfaces
             .insert(self.ns.clone(), format!("{:?}|{exported:?}", self.specs));
-    }
-
-    pub fn publish_externs(&self, globals: &mut Globals) {
-        let mut external_namespaces: BTreeMap<&str, Vec<_>> = BTreeMap::new();
-        for (name, signature) in &self.externs {
-            globals.functions.insert(name.clone(), signature.clone());
-            external_namespaces
-                .entry(name.rsplit_once('/').unwrap().0)
-                .or_default()
-                .push((name, signature));
-        }
-        for (namespace, signatures) in external_namespaces {
-            globals
-                .interfaces
-                .entry(namespace.into())
-                .or_default()
-                .push_str(&format!("|{signatures:?}"));
-        }
     }
 
     pub fn external_specs_current(&self, globals: &Globals) -> bool {
@@ -495,9 +452,8 @@ impl Model {
             }
         } else {
             globals
-                .functions
-                .get(&qualified)
-                .or_else(|| globals.functions.get(&self.resolve(name)))
+                .signature(&qualified)
+                .or_else(|| globals.signature(&self.resolve(name)))
                 .map(|s| (s.args.as_slice(), &s.ret))
         }
     }
