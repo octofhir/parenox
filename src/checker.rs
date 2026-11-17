@@ -1435,7 +1435,14 @@ impl Checker<'_> {
                 "clojure.core/if" | "clojure.core/when" => {
                     return self.if_form(xs, span, env, resolved.ends_with("/when"));
                 }
+                "clojure.core/if-let"
+                | "clojure.core/when-let"
+                | "clojure.core/if-some"
+                | "clojure.core/when-some" => {
+                    return self.binding_conditional(xs, span, env, &resolved);
+                }
                 "clojure.core/do" => return self.body(&xs[1..], env),
+
                 "clojure.core/or" | "clojure.core/and" => {
                     return self.short_circuit(xs, env, resolved.ends_with("/or"));
                 }
@@ -1578,8 +1585,12 @@ impl Checker<'_> {
     }
 
     fn infer_path(&mut self, form: &Form, env: &Env, reachable: bool) -> Value {
+        self.check_path(reachable, |checker| checker.infer(form, env))
+    }
+
+    fn check_path(&mut self, reachable: bool, check: impl FnOnce(&mut Self) -> Value) -> Value {
         let start = self.diagnostics.len();
-        let mut value = self.infer(form, env);
+        let mut value = check(self);
         if !reachable {
             // Unexecuted forms must still resolve and pass compiler-level checks.
             let errors = self.diagnostics.split_off(start);
@@ -1813,6 +1824,80 @@ impl Checker<'_> {
         if condition.ty.falsey() == Type::Never {
             no.narrow(Type::Never);
         }
+        Value::with_notes(
+            Type::union([yes.known, no.known]),
+            [yes.notes, no.notes].concat(),
+        )
+    }
+
+    fn binding_conditional(&mut self, xs: &[Form], span: Span, env: &Env, name: &str) -> Value {
+        let when = name.starts_with("clojure.core/when-");
+        if xs.len() < 2 || (!when && !(3..=4).contains(&xs.len())) {
+            self.error("PNX2554", span, format!("Invalid arity for {name}"));
+            return Value::new(Type::Unknown);
+        }
+        let Some([pattern, init]) = xs[1].vector() else {
+            self.error(
+                "PNX1001",
+                xs[1].span,
+                format!("{name} requires a binding vector with exactly two forms"),
+            );
+            return Value::new(Type::Unknown);
+        };
+        let valid_pattern = match &pattern.without_metadata().kind {
+            Kind::Symbol(symbol) => symbol != "&" && !symbol.contains('/'),
+            Kind::Map(_) | Kind::Vector(_) => true,
+            _ => false,
+        };
+        if !valid_pattern {
+            self.error(
+                "PNX1001",
+                pattern.span,
+                format!("Invalid binding form for {name}"),
+            );
+            return Value::new(Type::Unknown);
+        }
+
+        let mut input = self.infer(init, env);
+        let non_nil = name.ends_with("-some");
+        let (matched, skipped) = if non_nil {
+            (input.known.without_nil(), nil_part(&input.known))
+        } else {
+            (input.known.truthy(), input.known.falsey())
+        };
+        let yes_reachable = matched != Type::Never;
+        let no_reachable = skipped != Type::Never;
+        let narrow = |truth, ty, scope: &mut Env| {
+            if non_nil {
+                if let Some(value) = init.symbol().and_then(|symbol| scope.get_mut(symbol)) {
+                    value.narrow(ty);
+                }
+            } else {
+                self.narrow(init, truth, scope);
+            }
+        };
+        let mut yes_env = env.clone();
+        narrow(true, matched.clone(), &mut yes_env);
+        let no_env = if !when && xs.len() == 4 {
+            let mut scope = env.clone();
+            narrow(false, skipped, &mut scope);
+            Some(scope)
+        } else {
+            None
+        };
+
+        input.narrow(matched);
+        let yes = self.check_path(yes_reachable, |checker| {
+            checker.bind(pattern, input, &mut yes_env);
+            checker.body(if when { &xs[2..] } else { &xs[2..3] }, &yes_env)
+        });
+        let no = if let Some(scope) = no_env {
+            self.infer_path(&xs[3], &scope, no_reachable)
+        } else if no_reachable {
+            Value::new(Type::Nil)
+        } else {
+            Value::new(Type::Never)
+        };
         Value::with_notes(
             Type::union([yes.known, no.known]),
             [yes.notes, no.notes].concat(),

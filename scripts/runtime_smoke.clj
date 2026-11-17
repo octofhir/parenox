@@ -178,3 +178,16 @@
            (try (demo.conditional-bad/bad-number "Ada") :unexpected-success
                 (catch ClassCastException _ :throws))))
 (println "Clojure/JVM conditional and named threading: 14 assertions passed")
+
+(load-file "examples/guards.clj")
+(assert (= "UNKNOWN" (demo.guards/display-name {})))
+(assert (= "ADA" (demo.guards/maybe-label {:name "Ada"})))
+(assert (= "inactive" (demo.guards/status false)))
+(assert (= "unknown" (demo.guards/status nil)))
+(assert (= "inactive" (demo.guards/maybe-status false)))
+(assert (nil? (demo.guards/maybe-status nil)))
+(assert (= [:outer 1]
+           (let [value :outer calls (atom 0)
+                 result (if-let [value (do (swap! calls inc) false)] value value)]
+             [result @calls])))
+(println "Clojure/JVM binding guards: 7 assertions passed")

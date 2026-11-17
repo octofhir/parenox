@@ -90,3 +90,8 @@ threading format="pretty": build
 conditional format="pretty": build
     @./target/release/parenox check examples/conditional.clj --format {{quote(format)}}
     @./target/release/parenox check examples/conditional_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check binding guards and show a missing fallback and a False argument error.
+guards format="pretty": build
+    @./target/release/parenox check examples/guards.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/guards_bad.clj --format {{quote(format)}} || test "$?" -eq 1

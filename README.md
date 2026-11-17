@@ -59,6 +59,7 @@ just checked         # Clojure 1.13 checked bindings and two deliberate errors
 just defaults        # destructuring defaults and three deliberate errors
 just threading       # ->, ->>, some->, some->> and three deliberate errors
 just conditional     # cond->, cond->>, as-> and three deliberate errors
+just guards          # if-let, when-let, if-some and when-some
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -300,6 +301,13 @@ inside transformed calls are withheld when source replacement could change the
 threading semantics. User macro execution, a general macroexpander and full
 expansion provenance remain future work.
 
+`if-let` and `when-let` bind truthy values. `if-some` and `when-some` also bind
+`false`. Each initializer is checked once. The successful branch can use the
+narrowed value through a local symbol or a supported map destructuring pattern.
+The fallback runs in the outer scope and defaults to nil. Run `just guards`
+to see the result type when no fallback is supplied and a type error when
+`if-some` passes `false` into a numeric call.
+
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
 `:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.
 Keys after `&` in a keys vector are not bound; checked directives require their
@@ -341,7 +349,7 @@ inferred helper work is included in the check of their callers.
 |---|---|
 | Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
 | Spec forms | `s/keys`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
-| Control flow | `let`, `do`, `if`, `when`, `or`, `and`; local predicate narrowing |
+| Control flow | `let`, `do`, `if`, `when`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
 | Data operations | Keyword lookup, literal-key `get`/`req!`/`assoc`, nested keyword map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
