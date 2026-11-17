@@ -58,6 +58,7 @@ just portable        # JVM branches in a .cljc source file
 just checked         # Clojure 1.13 checked bindings and two deliberate errors
 just defaults        # destructuring defaults and three deliberate errors
 just threading       # ->, ->>, some->, some->> and three deliberate errors
+just conditional     # cond->, cond->>, as-> and three deliberate errors
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -274,6 +275,23 @@ gap at the limit. Compiler-level resolution and arity checks still apply to skip
 steps; runtime type and missing-key errors are excluded from proven skipped paths.
 Run `just threading` for examples and three deliberate errors.
 
+`cond->` and `cond->>` process every condition/step pair, preserving the current
+value when a condition is false and continuing after nil. Unknown conditions join
+the executed and skipped result types. Branch-specific guards narrow outer locals
+for that step; a guard on the unchanged seed local also narrows its threaded input.
+After a potentially executed transformation, repeated tests are analyzed
+conservatively without correlating earlier branches. Scalar type predicates retain
+known true/false results, and joined causal notes are deduplicated. Inferred map
+alternatives are compacted into a shape with optional fields, keeping chains of
+conditional `assoc` operations bounded by the number of fields. Correlations
+between keys are not retained; declared contract unions keep their alternatives.
+
+`as->` supports a simple unqualified symbol binding. It rebinds that local before
+each original expression, allows the value in any argument position, and continues
+through nil and false. Its lexical binding does not escape to the outer scope.
+Clojure also permits destructuring bindings here; those remain an explicit analysis
+gap in Parenox. Run `just conditional` for examples and deliberate errors.
+
 [expand.rs](src/expand.rs) transforms individual threading steps using the shared
 `Form` representation, independently of the type checker. The consumer
 owns evaluation order, nil guards and temporary lifetime. Source steps and their
@@ -324,7 +342,7 @@ inferred helper work is included in the check of their callers.
 | Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
 | Spec forms | `s/keys`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`; local predicate narrowing |
-| Core macros | `->`, `->>`, `some->`, `some->>` with source diagnostics |
+| Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
 | Data operations | Keyword lookup, literal-key `get`/`req!`/`assoc`, nested keyword map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |

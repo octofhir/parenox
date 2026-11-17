@@ -85,3 +85,8 @@ defaults format="pretty": build
 threading format="pretty": build
     @./target/release/parenox check examples/threading.clj --format {{quote(format)}}
     @./target/release/parenox check examples/threading_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check conditional/named threading, then show union, Nil and argument errors.
+conditional format="pretty": build
+    @./target/release/parenox check examples/conditional.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/conditional_bad.clj --format {{quote(format)}} || test "$?" -eq 1

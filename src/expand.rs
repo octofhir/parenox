@@ -10,6 +10,8 @@ pub enum Threading {
     Last,
     SomeFirst,
     SomeLast,
+    ConditionalFirst,
+    ConditionalLast,
 }
 
 impl Threading {
@@ -19,8 +21,14 @@ impl Threading {
             "clojure.core/->>" => Some(Self::Last),
             "clojure.core/some->" => Some(Self::SomeFirst),
             "clojure.core/some->>" => Some(Self::SomeLast),
+            "clojure.core/cond->" => Some(Self::ConditionalFirst),
+            "clojure.core/cond->>" => Some(Self::ConditionalLast),
             _ => None,
         }
+    }
+
+    pub fn is_conditional(self) -> bool {
+        matches!(self, Self::ConditionalFirst | Self::ConditionalLast)
     }
 
     pub fn guards_nil(self) -> bool {
@@ -43,7 +51,7 @@ impl Threading {
                     kind: Kind::Nil,
                     span: step.span,
                 }));
-                if matches!(self, Self::First | Self::SomeFirst) {
+                if matches!(self, Self::First | Self::SomeFirst | Self::ConditionalFirst) {
                     call.push(input);
                     call.extend_from_slice(args);
                 } else {

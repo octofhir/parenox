@@ -34,6 +34,34 @@ pub struct Field {
     pub required: bool,
 }
 
+impl MapType {
+    fn join_values(mut self, mut other: Self) -> Self {
+        self.fields.retain(|key, field| {
+            if let Some(right) = other.fields.remove(key) {
+                let left = std::mem::replace(&mut field.ty, Type::Never);
+                field.ty = left.join_values(right.ty);
+                field.required &= right.required;
+                true
+            } else if other.open {
+                // The other path can have an arbitrary undeclared value here.
+                // Dropping the declaration keeps a later lookup an explicit gap.
+                false
+            } else {
+                field.required = false;
+                true
+            }
+        });
+        if !self.open {
+            for (key, mut field) in other.fields {
+                field.required = false;
+                self.fields.insert(key, field);
+            }
+        }
+        self.open |= other.open;
+        self
+    }
+}
+
 impl Type {
     /// General expression type. Exact string values remain available separately as refinements.
     /// Keywords and booleans retain precision for Clojure lookup and truthiness semantics.
@@ -110,6 +138,35 @@ impl Type {
             0 => Type::Never,
             1 => set.into_iter().next().unwrap(),
             _ => Type::Union(set.into_iter().collect()),
+        }
+    }
+
+    /// Conservative join of inferred values. Compact map alternatives into one
+    /// shape with optional fields; contract unions continue to use `union`.
+    pub fn join_values(self, other: Type) -> Type {
+        match (self, other) {
+            (Type::Map(left), Type::Map(right)) => Type::Map(left.join_values(right)),
+            (left, right) => match Type::union([left, right]) {
+                Type::Union(parts)
+                    if parts.iter().filter(|t| matches!(t, Type::Map(_))).count() > 1 =>
+                {
+                    let mut map: Option<MapType> = None;
+                    let mut rest = Vec::with_capacity(parts.len());
+                    for part in parts {
+                        if let Type::Map(next) = part {
+                            map = Some(match map {
+                                Some(map) => map.join_values(next),
+                                None => next,
+                            });
+                        } else {
+                            rest.push(part);
+                        }
+                    }
+                    rest.extend(map.map(Type::Map));
+                    Type::union(rest)
+                }
+                other => other,
+            },
         }
     }
 

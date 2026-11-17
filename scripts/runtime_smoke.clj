@@ -151,3 +151,30 @@
                 (catch ClassCastException _ :throws))))
 (assert (nil? (demo.threading-bad/optional-result nil)))
 (println "Clojure/JVM threading macros: 14 assertions passed")
+
+(load-file "examples/conditional.clj")
+(load-file "examples/conditional_bad.clj")
+(assert (= "ADA!" (demo.conditional/display-name " Ada " true)))
+(assert (= "PATIENT: ADA" (demo.conditional/prefixed-name "Ada" true)))
+(assert (= "ADA" (demo.conditional/prefixed-name "Ada" false)))
+(assert (= "UNKNOWN" (demo.conditional/defaulted-name nil)))
+(assert (= "ADA" (demo.conditional/defaulted-name "Ada")))
+(assert (= "7: ADA" (demo.conditional/flexible-name " Ada " 7)))
+(assert (= "AB" (demo.conditional/after-nil)))
+(assert (= "" (as-> nil value (str value) nil (str value))))
+(assert (= :name (as-> {} value :name)))
+(assert (= ["B" [:seed :a :b]]
+           (let [events (atom [])
+                 result (cond-> (do (swap! events conj :seed) nil)
+                          (do (swap! events conj :a) false) (str "A")
+                          (do (swap! events conj :b) true) (str "B"))]
+             [result @events])))
+(assert (= 42 (let [value 42 answer (as-> "seed" value (str value))] value)))
+(assert (= "1" (demo.conditional-bad/mixed-result true)))
+(assert (= :throws
+           (try (demo.conditional-bad/unsafe-name nil) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(assert (= :throws
+           (try (demo.conditional-bad/bad-number "Ada") :unexpected-success
+                (catch ClassCastException _ :throws))))
+(println "Clojure/JVM conditional and named threading: 14 assertions passed")
