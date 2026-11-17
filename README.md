@@ -265,7 +265,8 @@ process continues.
 - Public contract changes invalidate dependent namespaces.
 - Dependency invalidation is conservative at namespace granularity.
 - Removed files and externs disappear from the current environment immediately.
-- Source ranges are tied to exact source snapshots; moved functions are rechecked.
+- Unchanged functions with successful checks can be reused after their source ranges move.
+  Functions with diagnostics are rechecked if their own ranges or a helper's ranges move.
 - There is no disk cache, filesystem watcher, socket daemon or cache eviction yet.
   Retained file snapshots live until the process exits.
 
@@ -273,8 +274,10 @@ process continues.
 uses exact source, positions and interface comparisons.
 
 To measure the same clinic edit sequence with a larger extern file, run
-`just agent-loop 1000 target/release/parenox 512`. The last argument adds
-synthetic library contracts that refer to the clinic's patient spec.
+`just agent-loop 1000 target/release/parenox 512`. This adds synthetic library
+contracts that refer to the clinic's patient spec. Run
+`just agent-loop 1000 target/release/parenox 0 128` to append 128 typed functions
+whose ranges move as the agent edits the first function in their file.
 
 ## Current scope
 

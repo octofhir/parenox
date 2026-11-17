@@ -290,21 +290,14 @@ impl Model {
         names
     }
 
-    pub fn function_key(&self, function: &Function, source: &str) -> String {
-        let mut key = format!(
-            "{:?}|{}",
-            function.span,
-            &source[function.span.start.offset..function.span.end.offset]
-        );
-        for name in self.helpers(function) {
-            let helper = &self.functions[name];
-            key.push_str(&format!(
-                "|{name}:{:?}|{}",
-                helper.span,
-                &source[helper.span.start.offset..helper.span.end.offset]
-            ));
-        }
-        key
+    pub fn function_ranges(&self, function: &Function) -> Vec<Span> {
+        std::iter::once(function.span)
+            .chain(
+                self.helpers(function)
+                    .into_iter()
+                    .map(|name| self.functions[name].span),
+            )
+            .collect()
     }
 
     pub(super) fn signature<'a>(

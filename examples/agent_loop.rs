@@ -82,12 +82,20 @@ fn clinic(
     project: &str,
     iterations: usize,
     extra_externs: usize,
+    shifted_functions: usize,
 ) -> Result<Value> {
     let files: Vec<_> = ["http.clj", "model.clj", "service.clj", "store.clj"]
         .into_iter()
         .map(|name| {
             let path = Path::new(project).join(name);
-            Ok(json!({"path": path, "source": fs::read_to_string(root.join(&path))?}))
+            let mut source = fs::read_to_string(root.join(&path))?;
+            if name == "service.clj" {
+                for index in 0..shifted_functions {
+                    writeln!(source,
+                        "\n(defn bench-label-{index} {{:t/sig '[::model/patient :-> string?]}} [p]\n  (str/upper-case (or (:name p) \"Unnamed\")))")?;
+                }
+            }
+            Ok(json!({"path": path, "source": source}))
         })
         .collect::<Result<_>>()?;
     let extern_path = Path::new(project).join("externs.edn");
@@ -140,7 +148,8 @@ fn clinic(
     }
     let (fixed, fix_us) = agent.send(&mut payload)?;
     assert_eq!(fixed["ok"], true, "{fixed}");
-    assert_eq!(fixed["stats"]["checked_functions"], 2, "{fixed}");
+    let checks = fixed["stats"]["checked_functions"].as_u64().unwrap() as usize;
+    assert!((2..=2 + shifted_functions).contains(&checks), "{fixed}");
     let service = payload["files"]
         .as_array()
         .unwrap()
@@ -154,6 +163,11 @@ fn clinic(
         let (warm, elapsed) = agent.send(&mut payload)?;
         assert_eq!(warm["ok"], true, "{warm}");
         assert_eq!(warm["stats"]["checked_functions"], 0, "{warm}");
+        assert_eq!(
+            warm["stats"]["reused_functions"],
+            3 + shifted_functions,
+            "{warm}"
+        );
         assert_eq!(warm["stats"]["parsed_files"], 0, "{warm}");
         warm_times.push(elapsed);
         let (old, new) = if index % 2 == 0 {
@@ -165,19 +179,29 @@ fn clinic(
         *source = json!(source.as_str().unwrap().replace(old, new));
         let (report, elapsed) = agent.send(&mut payload)?;
         assert_eq!(report["ok"], true, "{report}");
-        assert_eq!(report["stats"]["checked_functions"], 1, "{report}");
-        assert_eq!(report["stats"]["reused_functions"], 2, "{report}");
+        let checks = report["stats"]["checked_functions"].as_u64().unwrap() as usize;
+        assert!((1..=1 + shifted_functions).contains(&checks), "{report}");
+        assert_eq!(
+            report["stats"]["reused_functions"],
+            3 + shifted_functions - checks,
+            "{report}"
+        );
         edit_times.push(elapsed);
         edited = report;
     }
     let source = &mut payload["files"][service]["source"];
-    *source = json!(source.as_str().unwrap().replace(
+    *source = json!(source.as_str().unwrap().replacen(
         "'[::model/patient :-> string?]",
-        "'[::model/patient :-> number?]"
+        "'[::model/patient :-> number?]",
+        1,
     ));
     let (changed, change_us) = agent.send(&mut payload)?;
     assert_eq!(changed["ok"], false, "{changed}");
-    assert_eq!(changed["stats"]["checked_functions"], 2, "{changed}");
+    assert_eq!(
+        changed["stats"]["checked_functions"],
+        2 + shifted_functions,
+        "{changed}"
+    );
     assert!(
         changed["files"]
             .as_array()
@@ -189,6 +213,7 @@ fn clinic(
     Ok(json!({
         "scenario": "clinic: 4 namespaces + 1 declared library contract",
         "extra_externs": extra_externs,
+        "shifted_functions": shifted_functions,
         "iterations": iterations, "initial_errors": errors,
         "first_round_trip_us": first_us, "fix_round_trip_us": fix_us,
         "after_fix": fixed["stats"],
@@ -300,6 +325,7 @@ fn main() -> Result<()> {
     let mut iterations = 100;
     let mut functions = 1000;
     let mut extra_externs = 0;
+    let mut shifted_functions = 0;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args
@@ -311,19 +337,27 @@ fn main() -> Result<()> {
             "--iterations" => iterations = value.parse::<usize>()?,
             "--functions" => functions = value.parse::<usize>()?,
             "--extra-externs" => extra_externs = value.parse::<usize>()?,
+            "--shifted-functions" => shifted_functions = value.parse::<usize>()?,
             _ => return Err(format!("Unknown option {flag}").into()),
         }
     }
     if iterations == 0 || functions == 0 {
         return Err("Iterations and functions must be positive".into());
     }
-    if extra_externs != 0 && project.is_none() {
-        return Err("--extra-externs requires --project".into());
+    if (extra_externs != 0 || shifted_functions != 0) && project.is_none() {
+        return Err("--extra-externs and --shifted-functions require --project".into());
     }
     let binary = root.join(binary);
     let mut agent = Agent::start(&binary, root)?;
     let mut report = if let Some(project) = project {
-        clinic(&mut agent, root, &project, iterations, extra_externs)?
+        clinic(
+            &mut agent,
+            root,
+            &project,
+            iterations,
+            extra_externs,
+            shifted_functions,
+        )?
     } else {
         synthetic(&mut agent, root, &binary, iterations, functions)?
     };

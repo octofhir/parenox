@@ -26,7 +26,8 @@ pub struct ProjectReport {
 
 #[derive(Default)]
 struct FileCache {
-    source: String,
+    source: Arc<str>,
+    source_hash: u64,
     parsed: bool,
     kind: FileKind,
     forms: Vec<Form>,
@@ -35,7 +36,27 @@ struct FileCache {
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
     interface: String,
-    functions: BTreeMap<String, (String, Vec<Diagnostic>)>,
+    functions: BTreeMap<String, CheckedFunction>,
+}
+
+struct CheckedFunction {
+    source: Arc<str>,
+    ranges: Vec<Span>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl CheckedFunction {
+    fn reusable(&self, source: &str, ranges: &[Span]) -> bool {
+        // Diagnostics and call-chain notes contain absolute source positions.
+        if !self.diagnostics.is_empty() && self.ranges != ranges {
+            return false;
+        }
+        self.ranges.len() == ranges.len()
+            && self.ranges.iter().zip(ranges).all(|(old, new)| {
+                self.source[old.start.offset..old.end.offset]
+                    == source[new.start.offset..new.end.offset]
+            })
+    }
 }
 
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
@@ -47,11 +68,13 @@ enum FileKind {
 
 impl FileCache {
     fn update(&mut self, source: &str, path: &str, kind: FileKind) -> bool {
-        if self.parsed && self.source == source && self.kind == kind {
+        if self.parsed && self.source.as_ref() == source && self.kind == kind {
             return false;
         }
-        self.source.clear();
-        self.source.push_str(source);
+        self.source = Arc::from(source);
+        let mut hasher = DefaultHasher::new();
+        source.hash(&mut hasher);
+        self.source_hash = hasher.finish();
         self.parsed = true;
         self.kind = kind;
         self.model = None;
@@ -139,8 +162,6 @@ impl Session {
             };
             let mut cache = self.files.remove(source.path).unwrap_or_default();
             let parsed = cache.update(source.source, source.path, kind);
-            let mut hasher = DefaultHasher::new();
-            source.source.hash(&mut hasher);
             let mut diagnostics: Vec<_> = cache.parse_error.iter().cloned().collect();
             if !paths.insert(source.path) {
                 diagnostics.push(Diagnostic::new(
@@ -152,7 +173,7 @@ impl Session {
             reports.push(Report {
                 version: 1,
                 path: source.path.into(),
-                source_hash: format!("{:016x}", hasher.finish()),
+                source_hash: format!("{:016x}", cache.source_hash),
                 ok: false,
                 complete: false,
                 diagnostics,
@@ -273,24 +294,32 @@ impl Session {
                         cache
                             .functions
                             .values()
-                            .flat_map(|(_, ds)| ds.iter().cloned()),
+                            .flat_map(|function| function.diagnostics.iter().cloned()),
                     );
                 } else {
                     let previous = std::mem::take(&mut cache.functions);
                     for function in model.functions.values().filter(|f| !f.inferred) {
-                        let key = model.function_key(function, source.source);
-                        let errors = if let Some((_, errors)) = previous
-                            .get(&function.name)
-                            .filter(|(old, _)| cache.interface == interface && old == &key)
-                        {
+                        let ranges = model.function_ranges(function);
+                        let diagnostics = if let Some(cached) =
+                            previous.get(&function.name).filter(|cached| {
+                                cache.interface == interface
+                                    && cached.reusable(source.source, &ranges)
+                            }) {
                             report.stats.reused_functions += 1;
-                            errors.clone()
+                            cached.diagnostics.clone()
                         } else {
                             report.stats.checked_functions += 1;
                             model.check_function(function, source.source, &globals)
                         };
-                        report.diagnostics.extend(errors.iter().cloned());
-                        cache.functions.insert(function.name.clone(), (key, errors));
+                        report.diagnostics.extend(diagnostics.iter().cloned());
+                        cache.functions.insert(
+                            function.name.clone(),
+                            CheckedFunction {
+                                source: cache.source.clone(),
+                                ranges,
+                                diagnostics,
+                            },
+                        );
                     }
                 }
                 cache.interface = interface;
