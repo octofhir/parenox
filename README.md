@@ -64,6 +64,7 @@ just guards          # if-let, when-let, if-some and when-some
 just paths           # nested map lookup and update with source diagnostics
 just presence        # presence guards for optional fields
 just updates         # update and update-in with callback diagnostics
+just vectors pretty always  # mapv and filterv with colored callback diagnostics
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -338,10 +339,10 @@ include built-in functions, functions with signatures, and directly named
 private helpers. Inline `fnil` replaces nil arguments and preserves false.
 For example, `(update patient :visits (fnil inc 0))` works when visits is absent.
 Parenox supports one to three defaults when the wrapper is called immediately
-or passed directly to `update` or `update-in`. Storing the wrapper for later use
+or passed directly as a supported callback. Storing the wrapper for later use
 reports an analysis gap.
 
-Inline `(fn [params] ...)` works in immediate calls and as an updater.
+Inline `(fn [params] ...)` works in immediate calls and as a supported callback.
 Its parameters take their types from the call, supported map destructuring
 works in the parameter vector, and the body can access outer locals.
 Diagnostics inside the body point at its original expressions and include
@@ -350,7 +351,16 @@ Local storage of the function itself, named functions, multiple arities,
 rest parameters and preconditions or postconditions report analysis gaps.
 Run `just updates` to see both an implicit old-value error and a body error.
 
+`mapv` takes one callback argument from each input collection and returns a
+vector of callback results. It stops at the shortest input. `filterv` retains
+elements for which the callback returns a truthy value. Core scalar predicates
+narrow the retained type. `some?` removes nil and keeps false.
 
+Both support vectors, sets, strings (as characters), and nil (as empty).
+Maps require map entry types and report an analysis gap. User-defined
+predicates retain the input element type unless the callback is known to
+always return a falsey value. Run `just vectors pretty always` to see a
+patient-label pipeline and diagnostics for two callback errors.
 
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
 `:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.
@@ -410,7 +420,7 @@ Inference separates a general expression type from precise known values. Ordinar
 strings are shown as `String`, including inside maps and collections, while exact
 values remain available to check finite-value contracts.
 
-Limitations include user macros, Java interop, generics, higher-order builtins,
+Limitations include user macros, Java interop, generics, lazy sequence functions,
 recursive specs, multi-arity/variadic definitions, string-key maps, full numeric
 tower semantics and some reader forms. All numbers currently share `Number`.
 Externs currently declare qualified function signatures; they do not load JARs or

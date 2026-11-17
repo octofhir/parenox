@@ -1,5 +1,6 @@
 //! Function resolution, call-site inference and built-in calls.
 mod inline;
+mod vectors;
 
 use super::maps::Lookup;
 use super::{Checker, Env, Value, model::Function, nil_part};
@@ -158,10 +159,16 @@ impl Checker<'_> {
                     return self.unsupported(span, "recur is not supported yet");
                 }
                 "clojure.core/fnil" => {
-                    return self.unsupported(span, "fnil is currently supported in direct calls and as an inline update callback");
+                    return self.unsupported(
+                        span,
+                        "fnil is currently supported in direct calls and inline callbacks",
+                    );
                 }
                 "clojure.core/update" | "clojure.core/update-in" => {
                     return self.update(xs, span, env, &resolved);
+                }
+                "clojure.core/mapv" | "clojure.core/filterv" => {
+                    return self.vector_transform(xs, span, env, &resolved);
                 }
                 _ if is_builtin(&resolved) => {
                     let args = self.typed_args(&xs[1..], env);
@@ -172,7 +179,7 @@ impl Checker<'_> {
         }
         if let Some(parts) = self.inline_callable(&xs[0], env) {
             let args = self.typed_args(&xs[1..], env);
-            return self.call_inline(parts, args, xs[0].span, span, env);
+            return self.call_inline(parts, args, xs[0].span, span, env, true);
         }
         let function = self.infer(&xs[0], env);
         let args = self.typed_args(&xs[1..], env);
@@ -230,33 +237,46 @@ impl Checker<'_> {
 
     pub(super) fn call_form(
         &mut self,
-        updater: &Form,
+        callee: &Form,
         args: Vec<(Value, Span)>,
         span: Span,
         env: &Env,
+        invoked: bool,
     ) -> Value {
-        if let Some(parts) = self.inline_callable(updater, env) {
-            return self.call_inline(parts, args, updater.span, span, env);
+        if let Some(parts) = self.inline_callable(callee, env) {
+            return self.call_inline(parts, args, callee.span, span, env, invoked);
         }
-        if let Some(name) = updater.symbol()
+        if let Some(name) = callee.symbol()
             && !env.contains_key(name)
         {
             if let Some(function) = self.model.local_function(name).filter(|f| f.inferred) {
-                return self.inferred_call(
-                    function,
-                    args.into_iter().map(|(value, _)| value).collect(),
-                    span,
-                );
+                return if invoked {
+                    self.inferred_call(
+                        function,
+                        args.into_iter().map(|(value, _)| value).collect(),
+                        span,
+                    )
+                } else {
+                    Value::new(Type::Never)
+                };
             }
             if self.model.signature(name, self.globals).is_none() {
                 let resolved = self.model.resolve(name);
                 if is_builtin(&resolved) {
-                    return self.builtin(&resolved, &args, span);
+                    return if invoked {
+                        self.builtin(&resolved, &args, span)
+                    } else {
+                        Value::new(Type::Never)
+                    };
                 }
             }
         }
-        let function = self.infer(updater, env);
-        self.call_value(function, &args, updater.span, span)
+        let function = self.infer(callee, env);
+        if invoked {
+            self.call_value(function, &args, callee.span, span)
+        } else {
+            Value::new(Type::Never)
+        }
     }
 
     fn builtin(&mut self, name: &str, args: &[(Value, Span)], span: Span) -> Value {
@@ -314,11 +334,6 @@ impl Checker<'_> {
                 }
                 Type::Number
             }
-            "clojure.core/string?" => predicate_result(&args[0].0.known, &Type::String),
-            "clojure.core/char?" => predicate_result(&args[0].0.known, &Type::Character),
-            "clojure.core/number?" => predicate_result(&args[0].0.known, &Type::Number),
-            "clojure.core/boolean?" => predicate_result(&args[0].0.known, &Type::Boolean),
-            "clojure.core/keyword?" => predicate_result(&args[0].0.known, &Type::Keyword),
             "clojure.core/nil?" => {
                 if args[0].0.ty == Type::Nil {
                     Type::Bool(true)
@@ -346,9 +361,22 @@ impl Checker<'_> {
                     Type::Boolean
                 }
             }
-            _ => Type::Boolean,
+            _ => predicate_type(name).map_or(Type::Boolean, |expected| {
+                predicate_result(&args[0].0.known, &expected)
+            }),
         };
         Value::new(ty)
+    }
+}
+
+pub(super) fn predicate_type(name: &str) -> Option<Type> {
+    match name {
+        "clojure.core/string?" => Some(Type::String),
+        "clojure.core/char?" => Some(Type::Character),
+        "clojure.core/number?" => Some(Type::Number),
+        "clojure.core/boolean?" => Some(Type::Boolean),
+        "clojure.core/keyword?" => Some(Type::Keyword),
+        _ => None,
     }
 }
 
@@ -375,16 +403,11 @@ fn is_builtin(name: &str) -> bool {
             | "clojure.core/identity"
             | "clojure.core/nil?"
             | "clojure.core/some?"
-            | "clojure.core/string?"
-            | "clojure.core/char?"
-            | "clojure.core/number?"
-            | "clojure.core/boolean?"
-            | "clojure.core/keyword?"
             | "clojure.core/not"
             | "clojure.core/="
             | "clojure.core/count"
             | "clojure.string/upper-case"
             | "clojure.string/lower-case"
             | "clojure.string/trim"
-    )
+    ) || predicate_type(name).is_some()
 }

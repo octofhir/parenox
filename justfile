@@ -110,3 +110,8 @@ presence format="pretty": build
 updates format="pretty" color="auto": build
     @./target/release/parenox check examples/updates.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/updates_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check vector pipelines and show direct and inline callback diagnostics.
+vectors format="pretty" color="auto": build
+    @./target/release/parenox check examples/vectors.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/vectors_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

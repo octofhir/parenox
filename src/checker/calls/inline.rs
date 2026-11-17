@@ -39,12 +39,15 @@ impl Checker<'_> {
         constructor: Span,
         call: Span,
         env: &Env,
+        invoked: bool,
     ) -> Value {
         match callable {
             InlineCallable::Function(parts) => {
-                self.call_inline_fn(parts, args, constructor, call, env)
+                self.call_inline_fn(parts, args, constructor, call, env, invoked)
             }
-            InlineCallable::Fnil(parts) => self.call_fnil(parts, args, constructor, call, env),
+            InlineCallable::Fnil(parts) => {
+                self.call_fnil(parts, args, constructor, call, env, invoked)
+            }
         }
     }
 
@@ -55,6 +58,7 @@ impl Checker<'_> {
         constructor: Span,
         call: Span,
         env: &Env,
+        invoked: bool,
     ) -> Value {
         let Some((params_form, body)) = parts.split_first() else {
             self.error("PNX1001", constructor, "fn requires a parameter vector");
@@ -119,7 +123,7 @@ impl Checker<'_> {
             }
             body
         };
-        if args.len() != params.len() {
+        if invoked && args.len() != params.len() {
             self.error(
                 "PNX2554",
                 call,
@@ -128,8 +132,13 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         }
         let start = self.diagnostics.len();
-        let local = self.bind_parameters(env.clone(), params, |index| args[index].0.clone());
-        let result = self.body(body, &local);
+        let result = self.check_path(invoked, |checker| {
+            let local = checker.bind_parameters(env.clone(), params, |index| {
+                args.get(index)
+                    .map_or_else(|| Value::new(Type::Never), |(value, _)| value.clone())
+            });
+            checker.body(body, &local)
+        });
         for diagnostic in &mut self.diagnostics[start..] {
             diagnostic.notes.push(format!(
                 "While checking inline fn called at {}:{}",
@@ -146,6 +155,7 @@ impl Checker<'_> {
         constructor: Span,
         call: Span,
         env: &Env,
+        invoked: bool,
     ) -> Value {
         if !(2..=4).contains(&parts.len()) {
             self.error(
@@ -157,7 +167,7 @@ impl Checker<'_> {
         }
         let defaults = self.typed_args(&parts[1..], env);
         // The three-default version also has a two-argument overload.
-        if args.len() < defaults.len().min(2) {
+        if invoked && args.len() < defaults.len().min(2) {
             self.error(
                 "PNX2554",
                 call,
@@ -181,6 +191,6 @@ impl Checker<'_> {
                 arg.notes.extend(default.notes);
             }
         }
-        self.call_form(&parts[0], args, call, env)
+        self.call_form(&parts[0], args, call, env, invoked)
     }
 }

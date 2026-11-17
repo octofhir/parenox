@@ -1,4 +1,5 @@
 //! Control flow, type narrowing and core threading forms.
+use super::calls::predicate_type;
 use super::maps::narrow_key_presence;
 use super::{Checker, Env, Value, nil_part};
 use crate::expand::{self, Threading};
@@ -57,7 +58,11 @@ impl Checker<'_> {
         self.check_path(reachable, |checker| checker.infer(form, env))
     }
 
-    fn check_path(&mut self, reachable: bool, check: impl FnOnce(&mut Self) -> Value) -> Value {
+    pub(super) fn check_path(
+        &mut self,
+        reachable: bool,
+        check: impl FnOnce(&mut Self) -> Value,
+    ) -> Value {
         let start = self.diagnostics.len();
         let mut value = check(self);
         if !reachable {
@@ -467,11 +472,6 @@ impl Checker<'_> {
         };
         let positive = match op.as_str() {
             "clojure.core/nil?" => Some(Type::Nil),
-            "clojure.core/string?" => Some(Type::String),
-            "clojure.core/char?" => Some(Type::Character),
-            "clojure.core/number?" => Some(Type::Number),
-            "clojure.core/boolean?" => Some(Type::Boolean),
-            "clojure.core/keyword?" => Some(Type::Keyword),
             "clojure.core/some?" => {
                 value.narrow(if truth {
                     value.known.without_nil()
@@ -480,22 +480,39 @@ impl Checker<'_> {
                 });
                 return;
             }
-            _ => None,
+            _ => predicate_type(&op),
         };
         if let Some(wanted) = positive {
-            let parts = match &value.known {
-                Type::Union(xs) => xs.clone(),
-                t => vec![t.clone()],
-            };
-            value.narrow(Type::union(parts.into_iter().filter_map(|t| {
-                if t.subtype_of(&wanted) {
-                    truth.then_some(t)
-                } else if wanted.subtype_of(&t) {
-                    Some(if truth { wanted.clone() } else { t })
-                } else {
-                    (!truth).then_some(t)
-                }
-            })));
+            value.narrow(narrow_by_type(&value.known, &wanted, truth));
+        }
+    }
+}
+
+pub(super) fn narrow_by_type(actual: &Type, wanted: &Type, truth: bool) -> Type {
+    match actual {
+        Type::Union(parts) => {
+            Type::union(parts.iter().map(|part| narrow_by_type(part, wanted, truth)))
+        }
+        actual if actual.subtype_of(wanted) => {
+            if truth {
+                actual.clone()
+            } else {
+                Type::Never
+            }
+        }
+        actual if *actual == Type::Unknown || wanted.subtype_of(actual) => {
+            if truth {
+                wanted.clone()
+            } else {
+                actual.clone()
+            }
+        }
+        actual => {
+            if truth {
+                Type::Never
+            } else {
+                actual.clone()
+            }
         }
     }
 }

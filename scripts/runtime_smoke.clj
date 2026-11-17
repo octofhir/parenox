@@ -253,3 +253,24 @@
 (assert (nil? ((fn [x]) 42)))
 (assert (= 1 ((fnil (fn [n] (inc n)) 0) nil)))
 (println "Clojure/JVM inline fn: 5 assertions passed")
+
+(load-file "examples/vectors.clj")
+(load-file "examples/vectors_bad.clj")
+(assert (= ["Patient ADA" "Patient LIN"]
+           (demo.vectors/display-labels [{:name "Ada"} {} {:name nil} {:name "Lin"}])))
+(assert (= [10 23] (demo.vectors/adjust-counts [nil 3 4] [10 20])))
+(assert (= [] (mapv inc [] [1])))
+(assert (= [] (mapv inc nil)))
+(assert (= [\a \b] (mapv identity "ab")))
+(assert (= [false 0 ""] (filterv some? [nil false 0 ""])))
+(assert (= [0 ""] (filterv identity [nil false 0 ""])))
+(assert (= :throws
+           (try (demo.vectors-bad/increment-counts) :unexpected-success
+                (catch ClassCastException _ :throws))))
+(assert (= :throws
+           (try (demo.vectors-bad/uppercase-names [nil]) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(assert (= :throws
+           (try (mapv (fnil inc (inc "bad")) []) :unexpected-success
+                (catch ClassCastException _ :throws))))
+(println "Clojure/JVM vector callbacks: 10 assertions passed")

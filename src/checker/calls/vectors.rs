@@ -1,0 +1,122 @@
+//! Contextual calls over collections that produce eager Clojure vectors.
+use super::super::{Checker, Env, Value, flow::narrow_by_type, nil_part};
+use super::predicate_type;
+use crate::reader::{Form, Span};
+use crate::types::Type;
+
+impl Checker<'_> {
+    pub(super) fn vector_transform(
+        &mut self,
+        xs: &[Form],
+        span: Span,
+        env: &Env,
+        name: &str,
+    ) -> Value {
+        let filter = name == "clojure.core/filterv";
+        if xs.len() < 3 || (filter && xs.len() != 3) {
+            let inputs = if filter {
+                "one collection"
+            } else {
+                "at least one collection"
+            };
+            self.error(
+                "PNX2554",
+                span,
+                format!("{name} expects a callback and {inputs}"),
+            );
+            return Value::new(Type::Unknown);
+        }
+
+        let callback = &xs[1];
+        let collections = &xs[2..];
+        let args: Vec<_> = collections
+            .iter()
+            .map(|form| (self.collection_element(form, env, name), form.span))
+            .collect();
+        let invoked = args.iter().all(|(element, _)| element.known != Type::Never);
+        let filtered = filter.then(|| args[0].0.known.clone());
+        let start = self.diagnostics.len();
+        let result = self.call_form(callback, args, span, env, invoked);
+        for diagnostic in &mut self.diagnostics[start..] {
+            if diagnostic.code == "PNX2322"
+                && collections.iter().any(|form| diagnostic.span == form.span)
+            {
+                diagnostic.suggestions.clear();
+                diagnostic.help = Some(
+                    "Use a callback that accepts these elements or convert the collection's elements before this call."
+                        .into(),
+                );
+            }
+        }
+        let element = match filtered {
+            _ if !invoked => Type::Never,
+            Some(_) if result.known.truthy() == Type::Never => Type::Never,
+            Some(element) => self.filtered_element(element, callback, env),
+            None => result.known,
+        };
+        Value::new(Type::Vector(Box::new(element)))
+    }
+
+    fn collection_element(&mut self, form: &Form, env: &Env, name: &str) -> Value {
+        let collection = self.infer(form, env);
+        match element_type(collection.known) {
+            Ok(element) => Value::with_notes(element, collection.notes),
+            Err(CollectionError::Map) => self.unsupported(
+                form.span,
+                format!("{name} over maps requires map entry types"),
+            ),
+            Err(CollectionError::NotSeqable) => {
+                self.error(
+                    "PNX2322",
+                    form.span,
+                    format!("{name} expects a seqable collection, got {}", collection.ty),
+                );
+                Value::new(Type::Unknown)
+            }
+        }
+    }
+
+    fn filtered_element(&self, element: Type, callback: &Form, env: &Env) -> Type {
+        let Some(name) = callback.symbol() else {
+            return element;
+        };
+        if env.contains_key(name)
+            || self.model.local_function(name).is_some()
+            || self.model.signature(name, self.globals).is_some()
+        {
+            return element;
+        }
+        let name = self.model.resolve(name);
+        match name.as_str() {
+            "clojure.core/some?" => element.without_nil(),
+            "clojure.core/nil?" => nil_part(&element),
+            "clojure.core/identity" => element.truthy(),
+            _ => match predicate_type(&name) {
+                Some(wanted) => narrow_by_type(&element, &wanted, true),
+                None => element,
+            },
+        }
+    }
+}
+
+enum CollectionError {
+    Map,
+    NotSeqable,
+}
+
+fn element_type(collection: Type) -> Result<Type, CollectionError> {
+    match collection {
+        Type::Vector(element) | Type::Set(element) => Ok(*element),
+        Type::Nil | Type::Never => Ok(Type::Never),
+        Type::Str(string) if string.is_empty() => Ok(Type::Never),
+        Type::String | Type::Str(_) => Ok(Type::Character),
+        Type::Unknown => Ok(Type::Unknown),
+        Type::Union(parts) => parts
+            .into_iter()
+            .map(element_type)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Type::union),
+        Type::Map(_) => Err(CollectionError::Map),
+        _ => Err(CollectionError::NotSeqable),
+    }
+}
