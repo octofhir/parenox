@@ -62,6 +62,7 @@ just conditional     # cond->, cond->>, as-> and three deliberate errors
 just guards          # if-let, when-let, if-some and when-some
 just paths           # nested map lookup and update with source diagnostics
 just presence        # presence guards for optional fields
+just updates         # update and update-in with callback diagnostics
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -323,6 +324,13 @@ optional field without adding nil for absence. The failure branch lets `get`
 or `get-in` use the fallback. A field declared nilable still accepts explicit
 nil, and the type of an undeclared field in an open map remains unknown.
 Run `just presence` for examples and source diagnostics.
+
+`update` accepts a known keyword, and `update-in` accepts a vector of 1 to 32
+literal keywords. The updater receives the old value first, followed by any
+extra arguments. An absent entry passes nil. The updater's result becomes the
+new field type, and sibling fields retain their types. Supported updaters
+include built-in functions, functions with signatures, and directly named
+private helpers. Run `just updates` to see callback errors at the affected key.
 
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
 `:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.

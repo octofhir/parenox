@@ -223,3 +223,19 @@
            (try (demo.presence-bad/missing-name {}) :unexpected-success
                 (catch RuntimeException e (.getMessage e)))))
 (println "Clojure/JVM map presence: 9 assertions passed")
+
+(load-file "examples/updates.clj")
+(load-file "examples/updates_bad.clj")
+(assert (= 5 (demo.updates/visits-after {:visits 3} 2)))
+(assert (= 2 (demo.updates/visits-after {} 2)))
+(assert (= "UNKNOWN" (demo.updates/display-name {})))
+(assert (= "ADA" (demo.updates/display-name {:patient {:name "Ada"}})))
+(assert (= {:x false} (update {:x false} :x identity)))
+(assert (= {:x {:y nil}} (update-in {:x nil} [:x :y] identity)))
+(assert (= :throws
+           (try (demo.updates-bad/increment-visits {}) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(assert (= :throws
+           (try (demo.updates-bad/normalize-name) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(println "Clojure/JVM map updates: 8 assertions passed")

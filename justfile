@@ -105,3 +105,8 @@ paths format="pretty": build
 presence format="pretty": build
     @./target/release/parenox check examples/presence.clj --format {{quote(format)}}
     @./target/release/parenox check examples/presence_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check update and update-in, then show callback errors at the updated keys.
+updates format="pretty": build
+    @./target/release/parenox check examples/updates.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/updates_bad.clj --format {{quote(format)}} || test "$?" -eq 1

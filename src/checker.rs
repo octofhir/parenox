@@ -1487,19 +1487,34 @@ impl Checker<'_> {
                 "clojure.core/get-in" => return self.get_in(xs, span, env),
                 "clojure.core/assoc" => return self.assoc(xs, span, env),
                 "clojure.core/assoc-in" => return self.assoc_in(xs, span, env),
-
-                _ => {
-                    if let Some(result) = self.builtin(&resolved, &xs[1..], span, env) {
-                        return result;
-                    }
+                "clojure.core/update" | "clojure.core/update-in" => {
+                    return self.update(xs, span, env, &resolved);
                 }
+                _ if is_builtin(&resolved) => {
+                    let args = self.typed_args(&xs[1..], env);
+                    return self.builtin(&resolved, &args, span);
+                }
+                _ => {}
             }
         }
         let function = self.infer(&xs[0], env);
-        let args = xs[1..]
-            .iter()
-            .map(|x| self.infer(x, env))
-            .collect::<Vec<_>>();
+        let args = self.typed_args(&xs[1..], env);
+        self.call_value(function, &args, xs[0].span, span)
+    }
+
+    fn typed_args(&mut self, args: &[Form], env: &Env) -> Vec<(Value, Span)> {
+        args.iter()
+            .map(|arg| (self.infer(arg, env), arg.span))
+            .collect()
+    }
+
+    fn call_value(
+        &mut self,
+        function: Value,
+        args: &[(Value, Span)],
+        head: Span,
+        span: Span,
+    ) -> Value {
         match function.known {
             Type::Function(expected, ret) => {
                 if args.len() != expected.len() {
@@ -1509,13 +1524,8 @@ impl Checker<'_> {
                         format!("Expected {} arguments, got {}", expected.len(), args.len()),
                     );
                 }
-                for (index, (actual, expected)) in args.iter().zip(&expected).enumerate() {
-                    self.expect(
-                        actual,
-                        expected,
-                        xs[index + 1].span,
-                        &format!("Argument {}", index + 1),
-                    );
+                for (index, ((actual, span), expected)) in args.iter().zip(&expected).enumerate() {
+                    self.expect(actual, expected, *span, &format!("Argument {}", index + 1));
                 }
                 Value::new(*ret)
             }
@@ -1531,16 +1541,13 @@ impl Checker<'_> {
                     );
                     Value::new(Type::Unknown)
                 } else {
-                    Value::with_notes(args[0].known.clone().nilable(), vec![
+                    Value::with_notes(args[0].0.known.clone().nilable(), vec![
                         "A set used as a function returns the matching value or Nil, not a Boolean.".into(),
                     ])
                 }
             }
             Type::Unknown | Type::Never => Value::new(function.known),
-            _ => self.unsupported(
-                xs[0].span,
-                format!("Calling {} is not supported", function.ty),
-            ),
+            _ => self.unsupported(head, format!("Calling {} is not supported", function.ty)),
         }
     }
 
@@ -2196,20 +2203,116 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         }
-        let mut value = self.infer(&xs[1], env);
+        let value = self.infer(&xs[1], env);
         let default = xs.get(3).map(|form| self.infer(form, env));
         let Some(path) = self.keyword_path(&xs[2], "get-in") else {
             return Value::new(Type::Unknown);
         };
-        // A miss on any intermediate hop can be represented as Nil. At the
-        // final hop, look up the caller's fallback only when that key is absent.
-        if let Some(((last, last_span), parents)) = path.split_last() {
-            for (key, span) in parents {
-                value = self.lookup_value(&value, key, Lookup::Path(None), *span);
-            }
-            value = self.lookup_value(&value, last, Lookup::Path(default.as_ref()), *last_span);
+        self.lookup_path(&value, &path, default.as_ref())
+    }
+
+    fn lookup_path(
+        &mut self,
+        value: &Value,
+        path: &[(String, Span)],
+        default: Option<&Value>,
+    ) -> Value {
+        let mut result = None;
+        // Intermediate misses become Nil. At the last key an absent entry uses
+        // the caller's fallback, while a present Nil value is preserved.
+        for (index, (key, span)) in path.iter().enumerate() {
+            let fallback = if index + 1 == path.len() {
+                default
+            } else {
+                None
+            };
+            result = Some(self.lookup_value(
+                result.as_ref().unwrap_or(value),
+                key,
+                Lookup::Path(fallback),
+                *span,
+            ));
         }
-        value
+        result.unwrap_or_else(|| value.clone())
+    }
+
+    fn update(&mut self, xs: &[Form], span: Span, env: &Env, name: &str) -> Value {
+        let [_, target, key, updater, extra @ ..] = xs else {
+            self.error(
+                "PNX2554",
+                span,
+                format!("{name} requires a target, key or path, and updater"),
+            );
+            return Value::new(Type::Unknown);
+        };
+        let target_span = target.span;
+        let target = self.infer(target, env);
+        let path = if name.ends_with("-in") {
+            let Some(path) = self.keyword_path(key, name) else {
+                return Value::new(Type::Unknown);
+            };
+            if path.is_empty() || path.len() > 32 {
+                return self.unsupported(
+                    key.span,
+                    "update-in currently supports paths of 1 to 32 keywords",
+                );
+            }
+            path
+        } else {
+            let value = self.infer(key, env);
+            let Type::Key(name) = value.known else {
+                return self.unsupported(key.span, "update currently requires a known keyword key");
+            };
+            vec![(name, key.span)]
+        };
+        let (last_key, old_span) = path.last().unwrap();
+        let old = self.lookup_path(&target, &path, None);
+        let unknown = old.known.contains_unknown();
+        let mut args = Vec::with_capacity(extra.len() + 1);
+        args.push((old, *old_span));
+        args.extend(extra.iter().map(|arg| (self.infer(arg, env), arg.span)));
+
+        let start = self.diagnostics.len();
+        let value = self.call_updater(updater, args, span, env);
+        for diagnostic in &mut self.diagnostics[start..] {
+            if diagnostic.span == *old_span && diagnostic.code == "PNX2322" {
+                diagnostic.suggestions.clear();
+                diagnostic.notes.push(format!("The updater receives the old value at {last_key}, or Nil if the key is missing."));
+                diagnostic.help = Some("Handle the old value in the updater or ensure the field has the required type before updating it.".into());
+            }
+        }
+        if unknown {
+            return Value::new(Type::Unknown);
+        }
+        Value::new(self.assoc_path(target.known, &path, &value.known, target_span, name))
+    }
+
+    fn call_updater(
+        &mut self,
+        updater: &Form,
+        args: Vec<(Value, Span)>,
+        span: Span,
+        env: &Env,
+    ) -> Value {
+        if let Some(name) = updater.symbol()
+            && !env.contains_key(name)
+        {
+            if let Some(function) = self.model.local_function(name).filter(|f| f.inferred) {
+                return self.inferred_call(
+                    function,
+                    args.into_iter().map(|(value, _)| value).collect(),
+                    span,
+                );
+            }
+            if self.model.signature(name, self.globals).is_none() {
+                let resolved = self.model.resolve(name);
+                if is_builtin(&resolved) {
+                    return self.builtin(&resolved, &args, span);
+                }
+            }
+        }
+        let function = self.infer(updater, env);
+        self.call_value(function, &args, updater.span, span)
     }
 
     fn assoc_in(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
@@ -2232,7 +2335,7 @@ impl Checker<'_> {
                 "assoc-in currently supports paths of 1 to 32 keywords",
             );
         }
-        Value::new(self.assoc_path(target.known, &path, &value.known, xs[1].span))
+        Value::new(self.assoc_path(target.known, &path, &value.known, xs[1].span, "assoc-in"))
     }
 
     fn assoc_path(
@@ -2241,15 +2344,16 @@ impl Checker<'_> {
         path: &[(String, Span)],
         value: &Type,
         span: Span,
+        name: &str,
     ) -> Type {
         if let Type::Union(parts) = target {
             return Type::union(
                 parts
                     .into_iter()
-                    .map(|part| self.assoc_path(part, path, value, span)),
+                    .map(|part| self.assoc_path(part, path, value, span, name)),
             );
         }
-        let mut map = match self.assoc_map(target, span, "assoc-in") {
+        let mut map = match self.assoc_map(target, span, name) {
             Ok(map) => map,
             Err(ty) => return ty,
         };
@@ -2270,7 +2374,7 @@ impl Checker<'_> {
                     Type::Unknown
                 }
             };
-            self.assoc_path(parent, &path[1..], value, *key_span)
+            self.assoc_path(parent, &path[1..], value, *key_span, name)
         };
         map.fields.insert(key.clone(), Field { ty, required: true });
         Type::Map(map)
@@ -2340,34 +2444,7 @@ impl Checker<'_> {
         Value::new(Type::union(results))
     }
 
-    fn builtin(&mut self, name: &str, args: &[Form], span: Span, env: &Env) -> Option<Value> {
-        let recognized = matches!(
-            name,
-            "clojure.core/+"
-                | "clojure.core/-"
-                | "clojure.core/*"
-                | "clojure.core/inc"
-                | "clojure.core/dec"
-                | "clojure.core/str"
-                | "clojure.core/identity"
-                | "clojure.core/nil?"
-                | "clojure.core/some?"
-                | "clojure.core/string?"
-                | "clojure.core/char?"
-                | "clojure.core/number?"
-                | "clojure.core/boolean?"
-                | "clojure.core/keyword?"
-                | "clojure.core/not"
-                | "clojure.core/="
-                | "clojure.core/count"
-                | "clojure.string/upper-case"
-                | "clojure.string/lower-case"
-                | "clojure.string/trim"
-        );
-        if !recognized {
-            return None;
-        }
-        let values = args.iter().map(|a| self.infer(a, env)).collect::<Vec<_>>();
+    fn builtin(&mut self, name: &str, args: &[(Value, Span)], span: Span) -> Value {
         let arity_ok = match name {
             "clojure.core/+" | "clojure.core/*" | "clojure.core/str" => true,
             "clojure.core/-" | "clojure.core/=" => !args.is_empty(),
@@ -2379,22 +2456,22 @@ impl Checker<'_> {
                 span,
                 format!("Invalid arity for {name}: {}", args.len()),
             );
-            return Some(Value::new(Type::Unknown));
+            return Value::new(Type::Unknown);
         }
         let ty = match name {
             "clojure.core/+" | "clojure.core/-" | "clojure.core/*" | "clojure.core/inc"
             | "clojure.core/dec" => {
-                for (arg, value) in args.iter().zip(&values) {
-                    self.expect(value, &Type::Number, arg.span, name);
+                for (value, span) in args {
+                    self.expect(value, &Type::Number, *span, name);
                 }
                 Type::Number
             }
             "clojure.string/upper-case" | "clojure.string/lower-case" | "clojure.string/trim" => {
-                self.expect(&values[0], &Type::String, args[0].span, name);
+                self.expect(&args[0].0, &Type::String, args[0].1, name);
                 Type::String
             }
             "clojure.core/str" => Type::String,
-            "clojure.core/identity" => return Some(values[0].clone()),
+            "clojure.core/identity" => return args[0].0.clone(),
             "clojure.core/count" => {
                 fn countable(t: &Type) -> bool {
                     match t {
@@ -2410,45 +2487,45 @@ impl Checker<'_> {
                         _ => false,
                     }
                 }
-                if !countable(&values[0].ty) {
+                if !countable(&args[0].0.ty) {
                     self.error(
                         "PNX2322",
-                        args[0].span,
+                        args[0].1,
                         format!(
                             "count expects a collection, string or Nil, got {}",
-                            values[0].ty
+                            args[0].0.ty
                         ),
                     );
                 }
                 Type::Number
             }
-            "clojure.core/string?" => predicate_result(&values[0].known, &Type::String),
-            "clojure.core/char?" => predicate_result(&values[0].known, &Type::Character),
-            "clojure.core/number?" => predicate_result(&values[0].known, &Type::Number),
-            "clojure.core/boolean?" => predicate_result(&values[0].known, &Type::Boolean),
-            "clojure.core/keyword?" => predicate_result(&values[0].known, &Type::Keyword),
+            "clojure.core/string?" => predicate_result(&args[0].0.known, &Type::String),
+            "clojure.core/char?" => predicate_result(&args[0].0.known, &Type::Character),
+            "clojure.core/number?" => predicate_result(&args[0].0.known, &Type::Number),
+            "clojure.core/boolean?" => predicate_result(&args[0].0.known, &Type::Boolean),
+            "clojure.core/keyword?" => predicate_result(&args[0].0.known, &Type::Keyword),
             "clojure.core/nil?" => {
-                if values[0].ty == Type::Nil {
+                if args[0].0.ty == Type::Nil {
                     Type::Bool(true)
-                } else if nil_part(&values[0].ty) == Type::Never {
+                } else if nil_part(&args[0].0.ty) == Type::Never {
                     Type::Bool(false)
                 } else {
                     Type::Boolean
                 }
             }
             "clojure.core/some?" => {
-                if values[0].ty == Type::Nil {
+                if args[0].0.ty == Type::Nil {
                     Type::Bool(false)
-                } else if nil_part(&values[0].ty) == Type::Never {
+                } else if nil_part(&args[0].0.ty) == Type::Never {
                     Type::Bool(true)
                 } else {
                     Type::Boolean
                 }
             }
             "clojure.core/not" => {
-                if values[0].ty.truthy() == Type::Never {
+                if args[0].0.ty.truthy() == Type::Never {
                     Type::Bool(true)
-                } else if values[0].ty.falsey() == Type::Never {
+                } else if args[0].0.ty.falsey() == Type::Never {
                     Type::Bool(false)
                 } else {
                     Type::Boolean
@@ -2456,7 +2533,7 @@ impl Checker<'_> {
             }
             _ => Type::Boolean,
         };
-        Some(Value::new(ty))
+        Value::new(ty)
     }
 }
 
@@ -2531,4 +2608,30 @@ fn narrow_key_presence(ty: &Type, key: &str, present: bool) -> Type {
         }
         _ => ty.clone(),
     }
+}
+
+fn is_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "clojure.core/+"
+            | "clojure.core/-"
+            | "clojure.core/*"
+            | "clojure.core/inc"
+            | "clojure.core/dec"
+            | "clojure.core/str"
+            | "clojure.core/identity"
+            | "clojure.core/nil?"
+            | "clojure.core/some?"
+            | "clojure.core/string?"
+            | "clojure.core/char?"
+            | "clojure.core/number?"
+            | "clojure.core/boolean?"
+            | "clojure.core/keyword?"
+            | "clojure.core/not"
+            | "clojure.core/="
+            | "clojure.core/count"
+            | "clojure.string/upper-case"
+            | "clojure.string/lower-case"
+            | "clojure.string/trim"
+    )
 }
