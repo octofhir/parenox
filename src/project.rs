@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::checker::{Globals, Model};
+use crate::checker::{Declarations, Globals, Model, SpecCache, SpecFingerprint, SpecSource};
 use crate::reader::{self, Form, Position, Span};
 use crate::{Diagnostic, Report, Stats};
 
@@ -30,10 +31,9 @@ struct FileCache {
     kind: FileKind,
     forms: Vec<Form>,
     parse_error: Option<Diagnostic>,
-    namespace: String,
-    dependencies: Vec<String>,
+    declarations: Option<Declarations>,
+    spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
-    build_key: String,
     interface: String,
     functions: BTreeMap<String, (String, Vec<Diagnostic>)>,
 }
@@ -56,8 +56,7 @@ impl FileCache {
         self.kind = kind;
         self.model = None;
         self.parse_error = None;
-        self.namespace.clear();
-        self.dependencies.clear();
+        self.declarations = None;
         let conditionals = if kind == FileKind::Source && path.ends_with(".cljc") {
             reader::Conditionals::Select(":clj")
         } else {
@@ -66,14 +65,20 @@ impl FileCache {
         match reader::read_with(source, conditionals) {
             Ok(forms) => {
                 if kind == FileKind::Source {
-                    let context = Model::context(&forms);
-                    self.namespace = context.ns;
-                    self.dependencies = context.dependencies;
+                    let declarations = Declarations::read(&forms);
+                    let fingerprint = declarations.spec_fingerprint(source);
+                    if self.spec_fingerprint.as_deref() != fingerprint.as_ref() {
+                        self.spec_fingerprint = fingerprint.map(Arc::new);
+                    }
+                    self.declarations = Some(declarations);
+                } else {
+                    self.spec_fingerprint = None;
                 }
                 self.forms = forms;
             }
             Err(error) => {
                 self.forms.clear();
+                self.spec_fingerprint = None;
                 self.parse_error = Some(error.into());
             }
         }
@@ -103,6 +108,7 @@ impl FileCache {
 #[derive(Default)]
 pub struct Session {
     files: BTreeMap<String, FileCache>,
+    specs: SpecCache,
 }
 
 impl Session {
@@ -160,43 +166,36 @@ impl Session {
         }
         let mut namespaces = BTreeMap::new();
         for (index, (_, cache, _)) in entries[..count].iter().enumerate() {
-            if cache.parse_error.is_none()
-                && namespaces.insert(cache.namespace.clone(), index).is_some()
+            if let Some(declarations) = &cache.declarations
+                && namespaces
+                    .insert(declarations.namespace().to_owned(), index)
+                    .is_some()
             {
                 reports[index].diagnostics.push(Diagnostic::new(
                     "PNX2790",
                     cache.start_span(),
-                    format!("Duplicate namespace {}", cache.namespace),
+                    format!("Duplicate namespace {}", declarations.namespace()),
                 ));
             }
         }
         let mut pending = vec![0; count];
         let mut consumers = vec![Vec::new(); count];
         for (index, (_, cache, _)) in entries[..count].iter().enumerate() {
-            for dependency in &cache.dependencies {
-                if let Some(&owner) = namespaces.get(dependency) {
-                    pending[index] += 1;
-                    consumers[owner].push(index);
+            if let Some(declarations) = &cache.declarations {
+                for dependency in &declarations.dependencies {
+                    if let Some(&owner) = namespaces.get(dependency) {
+                        pending[index] += 1;
+                        consumers[owner].push(index);
+                    }
                 }
             }
         }
         let mut ready: VecDeque<_> = (0..count).filter(|&i| pending[i] == 0).collect();
-        let mut globals = Globals::default();
-        for namespace in namespaces.keys() {
-            globals.register_namespace(namespace);
-        }
         let mut built = vec![false; count];
+        let mut order = Vec::with_capacity(count);
         while let Some(index) = ready.pop_front() {
             built[index] = true;
-            let (_, cache, _) = &mut entries[index];
-            let key = globals.dependency_key(&cache.dependencies);
-            if cache.parse_error.is_none() {
-                if cache.model.is_none() || cache.build_key != key {
-                    cache.model = Some(Model::build(&cache.forms, &globals));
-                    cache.build_key = key;
-                }
-                cache.model.as_ref().unwrap().publish(&mut globals);
-            }
+            order.push(index);
             for &consumer in &consumers[index] {
                 pending[consumer] -= 1;
                 if pending[consumer] == 0 {
@@ -211,6 +210,36 @@ impl Session {
                     entries[index].1.start_span(),
                     "Namespace dependency cycle; this file could not be checked",
                 ));
+            }
+        }
+        self.specs.update(
+            order
+                .iter()
+                .filter_map(|&index| {
+                    let (source, cache, _) = &entries[index];
+                    Some(SpecSource {
+                        path: source.path,
+                        declarations: cache.declarations.as_ref()?,
+                        fingerprint: cache.spec_fingerprint.as_ref()?,
+                    })
+                })
+                .collect(),
+        );
+        let mut globals = Globals::with_specs(self.specs.types.clone());
+        for namespace in namespaces.keys() {
+            globals.register_namespace(namespace);
+        }
+        for index in order {
+            let (_, cache, _) = &mut entries[index];
+            if let Some(declarations) = &cache.declarations {
+                if cache
+                    .model
+                    .as_ref()
+                    .is_none_or(|model| !model.external_specs_current(&globals))
+                {
+                    cache.model = Some(Model::build(declarations, &cache.forms, &globals));
+                }
+                cache.model.as_ref().unwrap().publish(&mut globals);
             }
         }
         if externs.is_some() {
@@ -233,6 +262,9 @@ impl Session {
             if (index >= count || built[index])
                 && let Some(model) = &cache.model
             {
+                if let Some(diagnostics) = self.specs.diagnostics.get(source.path) {
+                    report.diagnostics.extend(diagnostics.iter().cloned());
+                }
                 report.diagnostics.extend(model.diagnostics.iter().cloned());
                 let interface = model.interface_key(&globals);
                 if !changed && cache.interface == interface {

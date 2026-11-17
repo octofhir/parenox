@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{Globals, Model, Signature};
+use super::{Globals, Model, Names, Signature};
 use crate::reader::{Form, Kind, Span};
 
 pub(super) struct Externs {
@@ -13,7 +13,10 @@ pub(super) struct Externs {
 impl Model {
     pub fn externs(forms: &[Form], globals: &Globals) -> Self {
         let mut model = Self {
-            ns: "externs".into(),
+            names: Names {
+                namespace: "externs".into(),
+                ..Names::default()
+            },
             ..Self::default()
         };
         let [

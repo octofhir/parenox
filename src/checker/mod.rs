@@ -9,7 +9,7 @@ mod recur;
 
 use env::Env;
 use model::Function;
-pub(crate) use model::{Globals, Model};
+pub(crate) use model::{Declarations, Globals, Model, SpecCache, SpecFingerprint, SpecSource};
 use recur::RecurTarget;
 
 use std::collections::BTreeMap;
@@ -234,7 +234,7 @@ impl Checker<'_> {
                 } else {
                     let qualified = self.model.function_name(s);
                     let external = qualified.rsplit_once('/').is_some_and(|(namespace, _)| {
-                        namespace != self.model.ns
+                        namespace != self.model.namespace()
                             && !self.globals.project_namespaces.contains(namespace)
                     });
                     self.error(

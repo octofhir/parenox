@@ -1,12 +1,18 @@
 //! Namespace resolution, project interfaces and cache dependencies.
 mod contracts;
+mod declarations;
 mod externs;
 mod require;
+mod specs;
+mod type_forms;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+pub(crate) use declarations::Declarations;
+use declarations::Names;
 use externs::Externs;
+pub(crate) use specs::{SpecCache, SpecFingerprint, SpecSource};
 
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
@@ -33,7 +39,7 @@ pub(crate) struct Signature {
 
 #[derive(Default)]
 pub(crate) struct Globals {
-    specs: BTreeMap<String, Type>,
+    specs: Arc<BTreeMap<String, Type>>,
     pub(super) project_namespaces: BTreeSet<String>,
     functions: BTreeMap<String, Signature>,
     interfaces: BTreeMap<String, String>,
@@ -41,6 +47,13 @@ pub(crate) struct Globals {
 }
 
 impl Globals {
+    pub fn with_specs(specs: Arc<BTreeMap<String, Type>>) -> Self {
+        Self {
+            specs,
+            ..Self::default()
+        }
+    }
+
     pub fn register_namespace(&mut self, namespace: &str) {
         self.project_namespaces.insert(namespace.into());
     }
@@ -70,12 +83,9 @@ impl Globals {
 
 #[derive(Default)]
 pub(crate) struct Model {
-    pub ns: String,
-    pub dependencies: Vec<String>,
-    refers: BTreeMap<String, String>,
+    names: Names,
+    dependencies: Vec<String>,
     externs: Option<Arc<Externs>>,
-    aliases: BTreeMap<String, String>,
-    raw_specs: BTreeMap<String, Form>,
     specs: BTreeMap<String, Type>,
     external_specs: BTreeMap<String, Option<Type>>,
     pub functions: BTreeMap<String, Function>,
@@ -85,92 +95,26 @@ pub(crate) struct Model {
 }
 
 impl Model {
-    pub fn context(forms: &[Form]) -> Self {
+    pub fn build(declarations: &Declarations, forms: &[Form], globals: &Globals) -> Self {
         let mut model = Self {
-            ns: "user".into(),
+            names: declarations.names.clone(),
+            dependencies: declarations.dependencies.clone(),
+            diagnostics: declarations.diagnostics.clone(),
             ..Self::default()
         };
-        let mut seen_ns = false;
-        for form in forms {
-            if let Kind::List(xs) = &form.without_metadata().kind
-                && xs.first().and_then(Form::symbol) == Some("ns")
-            {
-                if seen_ns {
-                    model.error("PNX9001", form.span, "Only one ns declaration is supported");
-                }
-                seen_ns = true;
-                model.read_ns(xs, form.span);
-            }
+        for key in declarations.specs.keys() {
+            let ty = globals.specs.get(key).cloned();
+            model
+                .specs
+                .insert(key.clone(), ty.clone().unwrap_or(Type::Unknown));
+            model.external_specs.insert(key.clone(), ty);
         }
-        let mut dependencies: BTreeSet<_> = model.dependencies.iter().cloned().collect();
-        fn visit(form: &Form, model: &Model, dependencies: &mut BTreeSet<String>) {
-            match &form.kind {
-                Kind::Symbol(name) => {
-                    let resolved = model.resolve(name);
-                    if let Some((namespace, _)) = resolved.rsplit_once('/') {
-                        dependencies.insert(namespace.to_string());
-                    }
-                }
-                Kind::List(xs) | Kind::Vector(xs) | Kind::Map(xs) | Kind::Set(xs) => {
-                    for x in xs {
-                        visit(x, model, dependencies);
-                    }
-                }
-                Kind::Quote(x) => visit(x, model, dependencies),
-                Kind::Metadata(metadata, target) => {
-                    visit(metadata, model, dependencies);
-                    visit(target, model, dependencies);
-                }
-                _ => {}
-            }
-        }
-        for form in forms {
-            visit(form, &model, &mut dependencies);
-        }
-        dependencies.remove(&model.ns);
-        model.dependencies = dependencies.into_iter().collect();
-        model
-    }
-
-    pub fn build(forms: &[Form], globals: &Globals) -> Self {
-        let mut model = Self::context(forms);
-        let mut definitions = Vec::new();
-        for form in forms {
+        for &index in &declarations.functions {
+            let form = &forms[index];
             let Kind::List(xs) = &form.without_metadata().kind else {
-                model.error("PNX9001", form.span, "Unsupported top-level form");
-                continue;
+                unreachable!()
             };
-            let Some(op) = xs.first().and_then(Form::symbol) else {
-                model.error("PNX9001", form.span, "Expected a top-level declaration");
-                continue;
-            };
-            match model.resolve(op).as_str() {
-                "clojure.core/ns" => {}
-                "clojure.spec.alpha/def" if xs.len() == 3 => {
-                    if let Some(key) = xs[1].keyword() {
-                        let key = model.key(key);
-                        if model.raw_specs.insert(key.clone(), xs[2].clone()).is_some() {
-                            model.error("PNX2790", xs[1].span, format!("Duplicate spec {key}"));
-                        }
-                    } else {
-                        model.error("PNX9001", xs[1].span, "Spec name must be a keyword");
-                    }
-                }
-                "clojure.core/defn" | "clojure.core/defn-" => {
-                    definitions.push((xs, form.span));
-                }
-                _ => model.error(
-                    "PNX9001",
-                    form.span,
-                    format!("Unsupported top-level declaration {op}"),
-                ),
-            }
-        }
-        for key in model.raw_specs.keys().cloned().collect::<Vec<_>>() {
-            model.spec(&key, &mut Vec::new(), model.raw_specs[&key].span, globals);
-        }
-        for (xs, span) in definitions {
-            model.read_function(xs, span, globals);
+            model.read_function(xs, form.span, globals);
         }
         model.collect_helpers();
         model
@@ -180,80 +124,31 @@ impl Model {
         self.diagnostics.push(Diagnostic::new(code, span, message));
     }
 
+    pub(super) fn namespace(&self) -> &str {
+        &self.names.namespace
+    }
+
     pub(super) fn resolve(&self, name: &str) -> String {
-        if let Some((prefix, tail)) = name
-            .split_once('/')
-            .filter(|(prefix, _)| !prefix.is_empty())
-        {
-            format!(
-                "{}/{tail}",
-                self.aliases.get(prefix).map_or(prefix, String::as_str)
-            )
-        } else {
-            self.refers
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| format!("clojure.core/{name}"))
-        }
+        self.names.resolve(name)
+    }
+
+    pub(super) fn key(&self, key: &str) -> String {
+        self.names.key(key)
     }
 
     pub(super) fn function_name(&self, name: &str) -> String {
         if name.contains('/') && name != "/" {
             self.resolve(name)
         } else {
-            self.refers
+            self.names
+                .refers
                 .get(name)
                 .cloned()
-                .unwrap_or_else(|| format!("{}/{name}", self.ns))
-        }
-    }
-
-    pub(super) fn key(&self, key: &str) -> String {
-        if let Some(tail) = key.strip_prefix("::") {
-            if let Some((alias, name)) = tail.split_once('/') {
-                format!(
-                    ":{}/{name}",
-                    self.aliases.get(alias).map_or(alias, String::as_str)
-                )
-            } else {
-                format!(":{}/{tail}", self.ns)
-            }
-        } else {
-            key.to_string()
-        }
-    }
-
-    fn read_ns(&mut self, xs: &[Form], span: Span) {
-        let Some(name) = xs.get(1).and_then(Form::symbol) else {
-            self.error("PNX9001", span, "ns requires a namespace name");
-            return;
-        };
-        self.ns = name.to_string();
-        for clause in xs.iter().skip(2) {
-            // ns docstrings and attr-maps are declarations, not executable forms.
-            if matches!(clause.kind, Kind::String(_) | Kind::Map(_)) {
-                continue;
-            }
-            let Kind::List(items) = &clause.without_metadata().kind else {
-                self.error("PNX9001", clause.span, "Unsupported ns clause");
-                continue;
-            };
-            if items.first().and_then(Form::keyword) != Some(":require") {
-                self.error(
-                    "PNX9001",
-                    clause.span,
-                    "Only :require ns clauses are supported",
-                );
-                continue;
-            }
-            for lib in items.iter().skip(1) {
-                self.read_libspec(lib);
-            }
+                .unwrap_or_else(|| format!("{}/{name}", self.names.namespace))
         }
     }
 
     pub fn publish(&self, globals: &mut Globals) {
-        globals.specs.extend(self.specs.clone());
         let mut exported = BTreeMap::new();
         for function in self.functions.values().filter(|f| !f.private) {
             let signature = Signature {
@@ -265,9 +160,10 @@ impl Model {
                 .insert(function.name.clone(), signature.clone());
             exported.insert(function.name.clone(), signature);
         }
-        globals
-            .interfaces
-            .insert(self.ns.clone(), format!("{:?}|{exported:?}", self.specs));
+        globals.interfaces.insert(
+            self.names.namespace.clone(),
+            format!("{:?}|{exported:?}", self.specs),
+        );
     }
 
     pub fn external_specs_current(&self, globals: &Globals) -> bool {
@@ -284,9 +180,9 @@ impl Model {
             .collect();
         format!(
             "{:?}|{:?}|{:?}|{:?}|{sigs:?}|{}",
-            self.ns,
-            self.aliases,
-            self.refers,
+            self.names.namespace,
+            self.names.aliases,
+            self.names.refers,
             self.specs,
             globals.dependency_key(&self.dependencies)
         )

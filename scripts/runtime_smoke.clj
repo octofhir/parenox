@@ -439,3 +439,16 @@
 (assert (= :throws (try (demo.libspecs.bad/broken-counter)
                         (catch ClassCastException _ :throws))))
 (println "Clojure/JVM libspecs: 5 assertions passed")
+
+(load-file "examples/namespace_specs/config.clj")
+(assert (not (contains? (loaded-libs) 'demo.namespace-specs.handler)))
+(assert (= :demo.namespace-specs.handler/request-id
+           (demo.namespace-specs.config/request-key)))
+(load-file "examples/namespace_specs/handler.clj")
+(load-file "examples/namespace_specs/app.clj")
+(load-file "examples/namespace_specs/bad.clj")
+(assert (= :demo.namespace-specs.handler/request-id
+           (demo.namespace-specs.handler/header)))
+(assert (clojure.spec.alpha/valid? :wire/id (demo.namespace-specs.app/sample-id)))
+(assert (not (clojure.spec.alpha/valid? :wire/id (demo.namespace-specs.bad/sample-id))))
+(println "Clojure/JVM namespace specs: 5 assertions passed")

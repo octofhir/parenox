@@ -74,6 +74,7 @@ just indices pretty always  # indexed reads and out-of-bounds diagnostics
 just loops            # accumulators and recur diagnostics
 just cond             # ordered guards and fallthrough diagnostics
 just libspecs         # bare requires and renamed imports across files
+just namespace-specs # alias-only imports and project-wide named specs
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -142,6 +143,12 @@ and hidden directory entries are skipped. Supplied files form one project;
 namespace cycles and duplicate namespaces are reported. JSON output for a project
 is one object with per-file reports and aggregate statistics. Single-file JSON
 keeps the simpler file-report shape.
+
+Named specs resolve against the supplied project declarations, including keys
+whose namespace differs from the file that declares them. Input file order does
+not affect resolution. An alias created with `:as-alias` can qualify keywords
+without creating a namespace load dependency. Competing declarations of the
+same spec key in separate files report an analysis gap.
 
 ## Lossless syntax
 

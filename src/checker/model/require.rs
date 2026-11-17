@@ -1,10 +1,10 @@
 //! Namespace imports from Clojure ns declarations.
 use std::collections::BTreeMap;
 
-use super::Model;
+use super::Declarations;
 use crate::reader::{Form, Kind};
 
-impl Model {
+impl Declarations {
     pub(super) fn read_libspec(&mut self, lib: &Form) {
         if let Some(namespace) = lib.symbol() {
             self.dependencies.push(namespace.to_owned());
@@ -22,7 +22,6 @@ impl Model {
             self.error("PNX9001", name.span, "Expected a required namespace");
             return;
         };
-        self.dependencies.push(namespace.to_owned());
         let (pairs, unmatched) = options.as_chunks::<2>();
         if !unmatched.is_empty() {
             self.error("PNX9001", lib.span, "Expected require option/value pairs");
@@ -38,10 +37,15 @@ impl Model {
                 self.error("PNX9001", option.span, "Unsupported require option");
             }
         }
+        if !options.contains_key(":as-alias") || options.contains_key(":as") {
+            self.dependencies.push(namespace.to_owned());
+        }
         for key in [":as", ":as-alias"] {
             if let Some(form) = options.get(key) {
                 if let Some(alias) = form.symbol() {
-                    self.aliases.insert(alias.to_owned(), namespace.to_owned());
+                    self.names
+                        .aliases
+                        .insert(alias.to_owned(), namespace.to_owned());
                 } else {
                     self.error(
                         "PNX9001",
@@ -88,7 +92,7 @@ impl Model {
                 continue;
             };
             let qualified = format!("{namespace}/{name}");
-            if let Some(previous) = self.refers.get(alias)
+            if let Some(previous) = self.names.refers.get(alias)
                 && previous != &qualified
                 && !previous.starts_with("clojure.core/")
             {
@@ -99,7 +103,7 @@ impl Model {
                 );
                 continue;
             }
-            self.refers.insert(alias.to_owned(), qualified);
+            self.names.refers.insert(alias.to_owned(), qualified);
         }
     }
 

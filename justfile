@@ -160,3 +160,8 @@ cond format="pretty" color="auto": build
 libspecs format="pretty" color="auto": build
     @./target/release/parenox check examples/libspecs/provider.clj examples/libspecs/app.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/libspecs/provider.clj examples/libspecs/bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check alias-only imports and a named spec declared in another file.
+namespace-specs format="pretty" color="auto": build
+    @./target/release/parenox check examples/namespace_specs/config.clj examples/namespace_specs/app.clj examples/namespace_specs/handler.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/namespace_specs/config.clj examples/namespace_specs/bad.clj examples/namespace_specs/handler.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

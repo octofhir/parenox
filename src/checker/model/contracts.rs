@@ -1,197 +1,17 @@
-//! Spec declarations and annotated function signatures.
-use std::collections::BTreeMap;
-
-use super::{Function, Globals, Model, Signature};
+//! Annotated signatures and function declarations.
+use super::{Function, Globals, Model, Signature, type_forms::read_type};
 use crate::reader::{Form, Kind, Span};
-use crate::types::{ExtraFields, Field, MAX_TUPLE_ITEMS, MapType, Type};
+use crate::types::Type;
 
 impl Model {
-    pub(super) fn spec(
-        &mut self,
-        key: &str,
-        visiting: &mut Vec<String>,
-        span: Span,
-        globals: &Globals,
-    ) -> Type {
-        if let Some(ty) = self.specs.get(key) {
-            return ty.clone();
-        }
-        if !self.raw_specs.contains_key(key) {
-            let external = globals.specs.get(key);
+    fn contract_type(&mut self, form: &Form, globals: &Globals) -> Type {
+        read_type(&self.names, form, &mut self.diagnostics, |key, _| {
+            let ty = globals.specs.get(key);
             self.external_specs
-                .entry(key.into())
-                .or_insert_with(|| external.cloned());
-            if let Some(ty) = external {
-                return ty.clone();
-            }
-        }
-        if visiting.iter().any(|k| k == key) {
-            self.error(
-                "PNX9001",
-                span,
-                format!("Recursive spec {key} is not supported yet"),
-            );
-            return Type::Unknown;
-        }
-        if visiting.len() >= 128 {
-            self.error("PNX9001", span, "Spec expansion limit (128) exceeded");
-            return Type::Unknown;
-        }
-        let Some(form) = self.raw_specs.get(key).cloned() else {
-            self.error("PNX9001", span, format!("No declaration for spec {key}"));
-            return Type::Unknown;
-        };
-        visiting.push(key.to_string());
-        let ty = self.parse_type(&form, visiting, globals);
-        visiting.pop();
-        self.specs.insert(key.to_string(), ty.clone());
-        ty
-    }
-
-    fn parse_type(&mut self, form: &Form, visiting: &mut Vec<String>, globals: &Globals) -> Type {
-        match &form.without_metadata().kind {
-            Kind::Symbol(s) => match self.resolve(s).as_str() {
-                "clojure.core/string?" => Type::String,
-                "clojure.core/char?" => Type::Character,
-                "clojure.core/number?" => Type::Number,
-                "clojure.core/boolean?" => Type::Boolean,
-                "clojure.core/keyword?" => Type::Keyword,
-                "clojure.core/nil?" => Type::Nil,
-                "clojure.core/map?" => Type::Map(MapType {
-                    fields: BTreeMap::new(),
-                    extra: ExtraFields::Open,
-                }),
-                _ => {
-                    self.error("PNX9001", form.span, format!("Unsupported type {s}"));
-                    Type::Unknown
-                }
-            },
-            Kind::Keyword(key) => self.spec(&self.key(key), visiting, form.span, globals),
-            Kind::Set(xs) => {
-                let mut types = Vec::new();
-                for x in xs {
-                    types.push(match &x.kind {
-                        Kind::String(s) => Type::Str(s.clone()),
-                        Kind::Character(c) => Type::Char(*c),
-                        Kind::Keyword(k) => Type::Key(self.key(k)),
-                        Kind::Bool(b) => Type::Bool(*b),
-                        Kind::Nil => Type::Nil,
-                        _ => {
-                            self.error("PNX9001", x.span, "Unsupported literal union member");
-                            Type::Unknown
-                        }
-                    });
-                }
-                Type::union(types)
-            }
-            Kind::List(xs) => {
-                let op = xs.first().and_then(Form::symbol).map(|s| self.resolve(s));
-                match op.as_deref() {
-                    Some("clojure.spec.alpha/nilable") if xs.len() == 2 => {
-                        self.parse_type(&xs[1], visiting, globals).nilable()
-                    }
-                    Some("clojure.spec.alpha/or") if xs.len() >= 3 && xs.len() % 2 == 1 => {
-                        let mut types = Vec::new();
-                        for pair in xs[1..].as_chunks::<2>().0 {
-                            if pair[0].keyword().is_none() {
-                                self.error("PNX9001", pair[0].span, "s/or requires keyword tags");
-                            }
-                            types.push(self.parse_type(&pair[1], visiting, globals));
-                        }
-                        Type::union(types)
-                    }
-                    Some("clojure.spec.alpha/tuple")
-                        if (2..=MAX_TUPLE_ITEMS + 1).contains(&xs.len()) =>
-                    {
-                        Type::Tuple(
-                            xs[1..]
-                                .iter()
-                                .map(|item| self.parse_type(item, visiting, globals))
-                                .collect(),
-                        )
-                    }
-                    Some("clojure.spec.alpha/map-of") if xs.len() == 3 => {
-                        let key = self.parse_type(&xs[1], visiting, globals);
-                        let value = self.parse_type(&xs[2], visiting, globals);
-                        Type::Map(MapType::dictionary(key, value))
-                    }
-                    Some("clojure.spec.alpha/keys") if xs.len() % 2 == 1 => {
-                        let mut fields = BTreeMap::new();
-                        for pair in xs[1..].as_chunks::<2>().0 {
-                            let directive = pair[0].keyword().unwrap_or("");
-                            if !matches!(directive, ":req" | ":opt" | ":req-un" | ":opt-un") {
-                                self.error("PNX9001", pair[0].span, "Unsupported s/keys directive");
-                                continue;
-                            }
-                            let Some(keys) = pair[1].vector() else {
-                                self.error("PNX9001", pair[1].span, "s/keys requires key vectors");
-                                continue;
-                            };
-                            for key in keys {
-                                let Some(k) = key.keyword() else {
-                                    self.error("PNX9001", key.span, "Expected a spec keyword");
-                                    continue;
-                                };
-                                let qualified = self.key(k);
-                                if !qualified.contains('/') {
-                                    self.error(
-                                        "PNX9001",
-                                        key.span,
-                                        "s/keys needs qualified spec keys",
-                                    );
-                                }
-                                let ty = self.spec(&qualified, visiting, key.span, globals);
-                                let field_key = if directive.ends_with("-un") {
-                                    format!(":{}", qualified.rsplit('/').next().unwrap())
-                                } else {
-                                    qualified
-                                };
-                                let required = directive.starts_with(":req");
-                                if fields
-                                    .insert(Type::Key(field_key.clone()), Field { ty, required })
-                                    .is_some()
-                                {
-                                    self.error(
-                                        "PNX9001",
-                                        key.span,
-                                        format!("Repeated field {field_key}"),
-                                    );
-                                }
-                            }
-                        }
-                        Type::Map(MapType {
-                            fields,
-                            extra: ExtraFields::Open,
-                        })
-                    }
-                    Some("clojure.spec.alpha/coll-of")
-                        if xs.len() == 4
-                            && xs[2].keyword() == Some(":kind")
-                            && matches!(
-                                xs[3].symbol().map(|s| self.resolve(s)).as_deref(),
-                                Some("clojure.core/vector?" | "clojure.core/set?")
-                            ) =>
-                    {
-                        let element = Box::new(self.parse_type(&xs[1], visiting, globals));
-                        if xs[3].symbol().map(|s| self.resolve(s)).as_deref()
-                            == Some("clojure.core/set?")
-                        {
-                            Type::Set(element)
-                        } else {
-                            Type::Vector(element)
-                        }
-                    }
-                    _ => {
-                        self.error("PNX9001", form.span, "Unsupported type form");
-                        Type::Unknown
-                    }
-                }
-            }
-            _ => {
-                self.error("PNX9001", form.span, "Expected a type declaration");
-                Type::Unknown
-            }
-        }
+                .entry(key.to_owned())
+                .or_insert_with(|| ty.cloned());
+            ty.cloned()
+        })
     }
 
     pub(super) fn read_function(&mut self, xs: &[Form], span: Span, globals: &Globals) {
@@ -207,7 +27,7 @@ impl Model {
             );
             return;
         }
-        if let Some(referred) = self.refers.get(symbol)
+        if let Some(referred) = self.names.refers.get(symbol)
             && !referred.starts_with("clojure.core/")
         {
             self.error(
@@ -217,7 +37,7 @@ impl Model {
             );
             return;
         }
-        let name = format!("{}/{symbol}", self.ns);
+        let name = format!("{}/{symbol}", self.names.namespace);
         let mut index = 2;
         if xs
             .get(index)
@@ -323,7 +143,7 @@ impl Model {
             body: xs[index + 1..].to_vec(),
             span,
         };
-        self.refers.remove(symbol);
+        self.names.refers.remove(symbol);
         if self.functions.insert(name.clone(), function).is_some() {
             self.error("PNX2790", span, format!("Duplicate function {name}"));
         }
@@ -345,9 +165,9 @@ impl Model {
         }
         let args = types[..types.len() - 2]
             .iter()
-            .map(|t| self.parse_type(t, &mut Vec::new(), globals))
+            .map(|t| self.contract_type(t, globals))
             .collect();
-        let ret = self.parse_type(types.last().unwrap(), &mut Vec::new(), globals);
+        let ret = self.contract_type(types.last().unwrap(), globals);
         Some(Signature { args, ret })
     }
 }
