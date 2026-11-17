@@ -1,5 +1,5 @@
 //! Contextual inference for directly applied functions and fnil wrappers.
-use super::super::{Checker, Env, Value, nil_part};
+use super::super::{Checker, Env, Value, function_forms::fixed_clauses, nil_part};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
@@ -60,87 +60,48 @@ impl Checker<'_> {
         env: &Env,
         invoked: bool,
     ) -> Value {
-        let Some((params_form, body)) = parts.split_first() else {
-            self.error("PNX1001", constructor, "fn requires a parameter vector");
-            return Value::new(Type::Unknown);
-        };
-        let Some(params) = params_form.vector() else {
-            if matches!(
-                params_form.without_metadata().kind,
-                Kind::List(_) | Kind::Symbol(_)
-            ) {
-                return self.unsupported(
-                    params_form.span,
-                    "named and multi-arity fn forms are not supported yet",
-                );
-            }
-            self.error(
-                "PNX1001",
-                params_form.span,
-                "fn requires a parameter vector",
-            );
-            return Value::new(Type::Unknown);
-        };
-        for param in params {
-            match &param.without_metadata().kind {
-                Kind::Symbol(name) if name == "&" => {
-                    return self.unsupported(param.span, "variadic fn forms are not supported yet");
-                }
-                Kind::Symbol(name) if !name.contains('/') => {}
-                Kind::Map(_) | Kind::Vector(_) => {}
-                _ => {
-                    self.error("PNX1001", param.span, "Invalid fn parameter binding");
-                    return Value::new(Type::Unknown);
-                }
-            }
+        if let Some(name) = parts.first().filter(|form| form.symbol().is_some()) {
+            return self.unsupported(name.span, "Named fn forms are not supported yet");
         }
-        // In a multi-expression body a leading map is the condition map.
-        let body = if let [first, rest @ ..] = body
-            && !rest.is_empty()
-            && let Some(entries) = first.map()
-        {
-            if entries
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .any(|[key, _]| matches!(key.keyword(), Some(":pre" | ":post")))
-            {
-                return self.unsupported(
-                    first.span,
-                    "fn preconditions and postconditions are not supported yet",
-                );
+        let clauses = match fixed_clauses(parts, constructor) {
+            Ok(clauses) => clauses,
+            Err(diagnostic) => {
+                self.diagnostics.push(*diagnostic);
+                return Value::new(Type::Unknown);
             }
-            rest
-        } else {
-            if [":pre", ":post"]
-                .into_iter()
-                .any(|key| params_form.metadata(key).is_some())
-            {
-                return self.unsupported(
-                    params_form.span,
-                    "fn preconditions and postconditions are not supported yet",
-                );
-            }
-            body
         };
-        if invoked && args.len() != params.len() {
+        let missing_arity = invoked && !clauses.contains_key(&args.len());
+        if missing_arity {
             self.error(
                 "PNX2554",
                 call,
-                format!("fn expects {} arguments, got {}", params.len(), args.len()),
+                format!(
+                    "fn expects {} arguments, got {}",
+                    super::arity_counts(clauses.keys().copied()),
+                    args.len()
+                ),
             );
-            return Value::new(Type::Unknown);
         }
         let start = self.diagnostics.len();
-        let result = self.check_path(invoked, |checker| {
-            let args = (0..params.len())
-                .map(|index| {
-                    args.get(index)
-                        .map_or_else(|| Value::new(Type::Never), |(value, _)| value.clone())
-                })
-                .collect();
-            checker.function_body(params, body, args, env, constructor)
+        let mut result = Value::new(if missing_arity {
+            Type::Unknown
+        } else {
+            Type::Never
         });
+        for (count, clause) in clauses {
+            let selected = invoked && count == args.len();
+            let checked = self.check_path(selected, |checker| {
+                let parameters = if selected {
+                    args.iter().map(|(value, _)| value.clone()).collect()
+                } else {
+                    vec![Value::new(Type::Never); count]
+                };
+                checker.function_body(clause.params, clause.body, parameters, env, clause.span)
+            });
+            if selected {
+                result = checked;
+            }
+        }
         for diagnostic in &mut self.diagnostics[start..] {
             diagnostic.notes.push(format!(
                 "While checking inline fn called at {}:{}",

@@ -36,13 +36,45 @@ fn diagnoses_original_fn_body_and_unsupported_callable_forms() {
         ("((fn [x] x) 1 2)", "PNX2554"),
         ("((fn [:x] 1) 1)", "PNX1001"),
         ("((fn walk [x] x) 1)", "PNX9001"),
-        ("((fn ([x] x) ([x y] y)) 1)", "PNX9001"),
         ("((fn [x & rest] x) 1)", "PNX9001"),
         ("((fn [x] {:pre [false]} x) 1)", "PNX9001"),
         ("((fn ^{:post [false]} [x] x) 1)", "PNX9001"),
         ("(let [f (fn [x] x)] (f 1))", "PNX9001"),
     ] {
         let report = check(&format!("(defn f {{:t/sig '[:-> number?]}} [] {expr})"));
+        assert_eq!(report.diagnostics[0].code, code, "{expr}: {report:#?}");
+    }
+}
+
+#[test]
+fn inline_overloads_check_the_selected_body_and_compile_all_clauses() {
+    for (expr, result) in [
+        (r#"((fn ([] "ready") ([n] (inc n))))"#, "string?"),
+        (r#"((fn ([] "ready") ([n] (inc n))) 2)"#, "number?"),
+        (
+            "((fn ([x] x) ([x keep?] (if keep? (recur x false) x))) 2 true)",
+            "number?",
+        ),
+        (
+            "(mapv (fn ([] 0) ([n offset] (+ n offset))) [1] [2])",
+            "(s/coll-of number? :kind vector?)",
+        ),
+        (
+            "(mapv (fn ([] 0) ([n offset] (+ n offset))) [])",
+            "(s/coll-of number? :kind vector?)",
+        ),
+    ] {
+        let report = check(&format!("(defn f {{:t/sig '[:-> {result}]}} [] {expr})"));
+        assert!(report.ok && report.complete, "{expr}: {report:#?}");
+    }
+    for (expr, code) in [
+        ("((fn ([] 0) ([x] x)) 1 2)", "PNX2554"),
+        ("((fn ([x] x) ([y] y)) 1)", "PNX2554"),
+        ("((fn ([] 0) ([x] missing)))", "PNX2304"),
+        ("((fn ([] 0) ([x] (recur))))", "PNX2554"),
+    ] {
+        let report = check(&format!("(defn f {{:t/sig '[:-> number?]}} [] {expr})"));
+        assert_eq!(report.diagnostics.len(), 1, "{expr}: {report:#?}");
         assert_eq!(report.diagnostics[0].code, code, "{expr}: {report:#?}");
     }
 }

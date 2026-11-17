@@ -15,9 +15,9 @@ fn typed_overloads_use_the_selected_contract_and_recur_arity() {
     let mut session = Session::default();
     let project = session.check_project(&[APP, PROVIDER], None);
     assert!(project.ok && project.complete, "{project:#?}");
-    assert_eq!(project.stats.checked_functions, 5);
+    assert_eq!(project.stats.checked_functions, 6);
     let warm = session.check_project(&[APP, PROVIDER], None);
-    assert_eq!(warm.stats.reused_functions, 5);
+    assert_eq!(warm.stats.reused_functions, 6);
 
     let bad = Source {
         path: "bad.clj",

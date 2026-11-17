@@ -2,6 +2,7 @@
 use std::collections::BTreeMap;
 
 use super::{Function, FunctionArity, Globals, Model, Signature, type_forms::read_type};
+use crate::checker::function_forms::fixed_clauses;
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
@@ -94,9 +95,26 @@ impl Model {
             );
             return;
         }
-        let Some(arities) = self.read_arities(arms, span) else {
-            return;
+        let clauses = match fixed_clauses(arms, span) {
+            Ok(clauses) => clauses,
+            Err(diagnostic) => {
+                self.diagnostics.push(*diagnostic);
+                return;
+            }
         };
+        let arities: BTreeMap<_, _> = clauses
+            .into_iter()
+            .map(|(count, clause)| {
+                (
+                    count,
+                    FunctionArity {
+                        params: clause.params.to_vec(),
+                        body: clause.body.to_vec(),
+                        span: clause.span,
+                    },
+                )
+            })
+            .collect();
         if inferred && arities.len() > 1 {
             self.error(
                 "PNX9002",
@@ -146,115 +164,6 @@ impl Model {
         if self.functions.insert(name.clone(), function).is_some() {
             self.error("PNX2790", span, format!("Duplicate function {name}"));
         }
-    }
-
-    fn read_arities(
-        &mut self,
-        forms: &[Form],
-        span: Span,
-    ) -> Option<BTreeMap<usize, FunctionArity>> {
-        if forms.first().and_then(Form::vector).is_some() {
-            let arity = self.read_arity(forms, span)?;
-            return Some(BTreeMap::from([(arity.params.len(), arity)]));
-        }
-        let mut arities = BTreeMap::new();
-        for arm in forms {
-            let Kind::List(parts) = &arm.without_metadata().kind else {
-                self.error("PNX1001", arm.span, "Expected a function arity declaration");
-                return None;
-            };
-            let arity = self.read_arity(parts, arm.span)?;
-            let count = arity.params.len();
-            if arities.insert(count, arity).is_some() {
-                self.error(
-                    "PNX2554",
-                    arm.span,
-                    format!("Duplicate function arity {count}"),
-                );
-                return None;
-            }
-        }
-        if arities.is_empty() {
-            self.error(
-                "PNX1001",
-                span,
-                "defn requires a parameter vector or arity declarations",
-            );
-            return None;
-        }
-        Some(arities)
-    }
-
-    fn read_arity(&mut self, forms: &[Form], span: Span) -> Option<FunctionArity> {
-        let [parameters, body @ ..] = forms else {
-            self.error("PNX1001", span, "Expected a function parameter vector");
-            return None;
-        };
-        let Some(params) = parameters.vector() else {
-            self.error(
-                "PNX1001",
-                parameters.span,
-                "Expected a function parameter vector",
-            );
-            return None;
-        };
-        for param in params {
-            match &param.without_metadata().kind {
-                Kind::Symbol(name) if name == "&" => {
-                    self.error(
-                        "PNX9001",
-                        param.span,
-                        "Variadic definitions are not supported yet",
-                    );
-                    return None;
-                }
-                Kind::Symbol(name) if !name.contains('/') || name == "/" => {}
-                Kind::Map(_) | Kind::Vector(_) => {}
-                _ => {
-                    self.error("PNX1001", param.span, "Invalid function parameter binding");
-                    return None;
-                }
-            }
-        }
-        if params.len() > 20 {
-            self.error(
-                "PNX2554",
-                parameters.span,
-                "Clojure/JVM supports at most 20 fixed parameters",
-            );
-            return None;
-        }
-        let (conditions, body) = match body {
-            [head, rest @ ..] if !rest.is_empty() && head.map().is_some() => (Some(head), rest),
-            _ => (None, body),
-        };
-        let condition_span = if let Some(map) = conditions {
-            map.map()
-                .unwrap()
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .find_map(|[key, _]| {
-                    matches!(key.keyword(), Some(":pre" | ":post")).then_some(map.span)
-                })
-        } else {
-            [":pre", ":post"]
-                .iter()
-                .find_map(|key| parameters.metadata(key).map(|form| form.span))
-        };
-        if let Some(span) = condition_span {
-            self.error(
-                "PNX9001",
-                span,
-                "Function preconditions and postconditions are not supported yet",
-            );
-            return None;
-        }
-        Some(FunctionArity {
-            params: params.to_vec(),
-            body: body.to_vec(),
-            span,
-        })
     }
 
     pub(super) fn parse_signatures(

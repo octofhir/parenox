@@ -412,7 +412,9 @@ Inline `(fn [params] ...)` works in immediate calls and as a supported callback.
 Its parameters take their types from the call, supported map destructuring
 works in the parameter vector, and the body can access outer locals.
 Diagnostics inside the body point at its original expressions and include
-the call location. This covers anonymous functions with one fixed arity.
+the call location. Anonymous functions can define several fixed arities. An
+inline call checks the selected body with its argument types and checks compiler
+constraints across the other bodies.
 Local storage of the function itself, named functions, multiple arities,
 rest parameters and preconditions or postconditions report analysis gaps.
 Run `just updates` to see both an implicit old-value error and a body error.

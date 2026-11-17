@@ -5,6 +5,7 @@ mod case;
 mod env;
 mod exceptions;
 mod flow;
+mod function_forms;
 mod maps;
 mod model;
 mod recur;

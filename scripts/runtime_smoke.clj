@@ -585,3 +585,8 @@
 (assert (= :wrong-phase (try (demo.arities.bad/wrong-phase)
                             (catch IllegalArgumentException _ :wrong-phase))))
 (println "Clojure/JVM fixed arities: 6 assertions passed")
+
+(assert (= [3 2] (demo.arities.app/label-widths ["Ada" "Bo"])))
+(assert (= [] (demo.arities.app/label-widths [])))
+(assert (= 2 ((fn ([x] x) ([x keep?] (if keep? (recur x false) x))) 2 true)))
+(println "Clojure/JVM inline fixed arities: 3 assertions passed")
