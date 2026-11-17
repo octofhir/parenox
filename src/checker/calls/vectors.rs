@@ -106,7 +106,7 @@ enum CollectionError {
 
 fn element_type(collection: Type) -> Result<Type, CollectionError> {
     match collection {
-        Type::Vector(element) | Type::Set(element) => Ok(*element),
+        Type::Vector(element) | Type::Set(element) | Type::Seq(element) => Ok(*element),
         Type::Nil | Type::Never => Ok(Type::Never),
         Type::Str(string) if string.is_empty() => Ok(Type::Never),
         Type::String | Type::Str(_) => Ok(Type::Character),
@@ -118,7 +118,7 @@ fn element_type(collection: Type) -> Result<Type, CollectionError> {
             .map(Type::union),
         Type::Map(map) => map.into_entry_type().ok_or(CollectionError::OpenMap),
         Type::MapEntry(items) => Ok(Type::union(*items)),
-        Type::Tuple(items) => Ok(Type::union(items.into_vec())),
+        Type::Tuple(items) | Type::SeqTuple(items) => Ok(Type::union(items.into_vec())),
         _ => Err(CollectionError::NotSeqable),
     }
 }

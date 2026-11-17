@@ -18,6 +18,12 @@ fn checks_vector_pipelines_and_narrows_elements_with_core_predicates() {
         ("(mapv identity #{:active})", "keyword?"),
         (r#"(mapv identity "Ada")"#, "char?"),
         ("(mapv inc [] [1])", "string?"),
+        (r#"(mapv inc (next (seq ["skipped" 1 2])))"#, "number?"),
+        (
+            r#"(filterv string? (seq [nil "Ada" false]))"#,
+            r#"#{ "Ada" }"#,
+        ),
+        ("(mapv inc (next (seq [1])))", "string?"),
         ("(filterv (fn [x] false) [1])", "string?"),
     ] {
         let report = check(&format!(
@@ -58,6 +64,7 @@ fn empty_inputs_skip_invocation_but_still_check_callback_expressions() {
         ("(mapv inc [1] [2])", "PNX2554"),
         ("(mapv inc 42)", "PNX2322"),
         ("(mapv inc {:x 1})", "PNX2322"),
+        (r#"(mapv inc (seq [1 "wrong"]))"#, "PNX2322"),
         ("(filterv number? [1] [2])", "PNX2554"),
     ] {
         let report = check(&format!(

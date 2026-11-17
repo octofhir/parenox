@@ -567,3 +567,8 @@
                                                           "Unable to resolve symbol: inc")
                              :unbound)))))
 (println "Clojure/JVM core imports: 4 assertions passed")
+
+(assert (= [4 5] (demo.vectors/increment-after-first [1 nil 3 4])))
+(assert (= [] (demo.vectors/increment-after-first [1])))
+(assert (= [] (demo.vectors/increment-after-first [])))
+(println "Clojure/JVM vector callbacks over seqs: 3 assertions passed")

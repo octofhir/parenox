@@ -22,3 +22,8 @@
   {:t/sig '[::optional-counts ::counts :-> ::counts]}
   [counts deltas]
   (mapv (fnil + 0) counts deltas))
+
+(defn increment-after-first
+  {:t/sig '[::optional-counts :-> ::counts]}
+  [counts]
+  (mapv inc (filterv some? (next (seq counts)))))
