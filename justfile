@@ -61,3 +61,8 @@ inference: build
 # Inspect the lossless CST, including comments, punctuation and reader discards.
 syntax path="examples/syntax.clj": build
     @./target/release/parenox syntax {{quote(path)}}
+
+# Check metadata and character contracts, then inspect tagged EDN without executing readers.
+reader: build
+    @./target/release/parenox check examples/reader.clj
+    @./target/release/parenox syntax examples/reader.edn

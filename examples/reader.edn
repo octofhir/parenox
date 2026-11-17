@@ -1,0 +1,6 @@
+;; Tagged data is retained, not passed to executable reader functions.
+{:id #uuid "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+ :created #inst "2026-11-17T00:00:00Z"
+ :payload #app/value {:separator \space
+                      :closing-bracket \]
+                      :status #{:active :pending}}}

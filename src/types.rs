@@ -10,6 +10,8 @@ pub enum Type {
     Bool(bool),
     Number,
     String,
+    Character,
+    Char(char),
     Str(String),
     Keyword,
     Key(String),
@@ -38,6 +40,7 @@ impl Type {
     pub fn inferred(&self) -> Type {
         match self {
             Type::Str(_) => Type::String,
+            Type::Char(_) => Type::Character,
             Type::Union(xs) => Type::union(xs.iter().map(Type::inferred)),
             Type::Vector(t) => Type::Vector(Box::new(t.inferred())),
             Type::Set(t) => Type::Set(Box::new(t.inferred())),
@@ -61,14 +64,17 @@ impl Type {
         }
     }
 
-    pub fn constrains_string_values(&self) -> bool {
+    pub fn constrains_literal_values(&self) -> bool {
         match self {
-            Type::Str(_) => true,
-            Type::Union(xs) => xs.iter().any(Type::constrains_string_values),
-            Type::Vector(t) | Type::Set(t) => t.constrains_string_values(),
-            Type::Map(map) => map.fields.values().any(|f| f.ty.constrains_string_values()),
+            Type::Str(_) | Type::Char(_) => true,
+            Type::Union(xs) => xs.iter().any(Type::constrains_literal_values),
+            Type::Vector(t) | Type::Set(t) => t.constrains_literal_values(),
+            Type::Map(map) => map
+                .fields
+                .values()
+                .any(|f| f.ty.constrains_literal_values()),
             Type::Function(args, ret) => {
-                args.iter().any(Type::constrains_string_values) || ret.constrains_string_values()
+                args.iter().any(Type::constrains_literal_values) || ret.constrains_literal_values()
             }
             _ => false,
         }
@@ -87,6 +93,9 @@ impl Type {
         }
         if set.contains(&Type::String) {
             set.retain(|t| !matches!(t, Type::Str(_)));
+        }
+        if set.contains(&Type::Character) {
+            set.retain(|t| !matches!(t, Type::Char(_)));
         }
         if set.contains(&Type::Keyword) {
             set.retain(|t| !matches!(t, Type::Key(_)));
@@ -143,6 +152,7 @@ impl Type {
             (Type::Union(xs), e) => xs.iter().all(|t| t.subtype_of(e)),
             (a, Type::Union(xs)) => xs.iter().any(|e| a.subtype_of(e)),
             (Type::Str(_), Type::String)
+            | (Type::Char(_), Type::Character)
             | (Type::Key(_), Type::Keyword)
             | (Type::Bool(_), Type::Boolean) => true,
             (Type::Vector(a), Type::Vector(e)) | (Type::Set(a), Type::Set(e)) => a.subtype_of(e),
@@ -187,6 +197,17 @@ impl fmt::Display for Type {
             Type::Bool(b) => write!(f, "{b}"),
             Type::Number => write!(f, "Number"),
             Type::String => write!(f, "String"),
+            Type::Character => write!(f, "Character"),
+            Type::Char(c) => match c {
+                '\n' => write!(f, "\\newline"),
+                ' ' => write!(f, "\\space"),
+                '\t' => write!(f, "\\tab"),
+                '\r' => write!(f, "\\return"),
+                '\u{0008}' => write!(f, "\\backspace"),
+                '\u{000c}' => write!(f, "\\formfeed"),
+                c if c.is_control() => write!(f, "\\u{:04X}", u32::from(*c)),
+                c => write!(f, "\\{c}"),
+            },
             Type::Str(s) => write!(f, "{s:?}"),
             Type::Keyword => write!(f, "Keyword"),
             Type::Key(s) => write!(f, "{s}"),

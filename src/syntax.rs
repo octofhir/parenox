@@ -13,6 +13,8 @@ pub enum SyntaxKind {
     Set,
     Quote,
     Discard,
+    Metadata,
+    Tagged,
     Error,
     OpenParen,
     CloseParen,
@@ -22,6 +24,8 @@ pub enum SyntaxKind {
     CloseBrace,
     OpenSet,
     QuoteMark,
+    MetadataMark,
+    DispatchMark,
     DiscardMark,
     Whitespace,
     Comma,
@@ -29,6 +33,7 @@ pub enum SyntaxKind {
     Symbol,
     Keyword,
     String,
+    Character,
     Number,
     Boolean,
     Nil,
@@ -46,6 +51,8 @@ impl SyntaxKind {
                 | Self::Set
                 | Self::Quote
                 | Self::Discard
+                | Self::Metadata
+                | Self::Tagged
                 | Self::Error
         )
     }

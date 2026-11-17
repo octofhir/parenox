@@ -51,6 +51,7 @@ just errors plain
 just errors json
 just good            # passing example
 just syntax          # inspect source-preserving syntax
+just reader          # metadata, characters and tagged EDN
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -140,6 +141,49 @@ This does not implement a complete EDN reader, macro expansion, incremental
 reparsing or a formatter. A future formatter can consume the CST and verify
 that its output preserves significant tokens and comments.
 
+## Shared frontend and extension boundaries
+
+Parenox owns its reader and semantic forms. A single reading pass produces
+`Form` / `Kind` with source spans; optional capture also produces the lossless
+Rowan CST. Consumers reuse these representations rather than implementing a
+second parser. Forms and spans belong to an exact source snapshot. The source
+and CST retain lexical details that the current type-oriented forms normalize,
+including numeric spelling; the forms alone are not yet a runtime value model.
+
+| Layer | Responsibility | Extension point |
+|---|---|---|
+| Reader and forms | Recognize syntax, preserve spans and metadata, retain tag/payload pairs | More reader forms and literal decoding |
+| Optional CST | Preserve every byte, trivia and malformed input | Formatter and editor operations |
+| Analysis and sessions | Resolve names, infer types, track dependencies and cache checks | Library analysis and richer contracts |
+| Future expansion and lowering | Consume forms with source origins | Macro expansion, interpreter or compiled runtime |
+
+Expansion and execution will be separate semantic stages. Types, namespace
+resolution and mutable runtime state do not belong in the CST. Macro-generated
+code will need explicit expansion origins and its own cache dependencies; source
+spans alone cannot represent an expansion history. These are extension boundaries,
+not implemented runtime features. We keep one crate and add abstractions when
+there is a concrete consumer.
+
+`just reader` demonstrates name metadata (`^:private`, `^{:t/sig ...}`), parameter
+hints and character contracts. Metadata is a wrapper around a form, not an extra
+allocation on every ordinary node. Its descriptor is normalized to a map; the CST
+retains the original spelling. Outer metadata overrides inner metadata, and a
+`defn` attribute map overrides name metadata. JVM hints such as `^String` do not
+coerce a value or replace a type contract.
+
+Characters are distinct from strings. The reader accepts single JVM characters,
+named escapes, four-digit Unicode escapes and octal escapes. Tagged literals retain
+the tag and payload as data. The syntax command does not run data readers or Java
+constructors. Checking a tagged expression currently reports unsupported analysis
+instead of guessing a type from its payload. This is shared Clojure/EDN syntax
+support, not a strict or complete EDN validator.
+
+Design references include [clojure-reader](https://github.com/Grinkers/clojure-reader)
+for data reading, [Crabjure](https://github.com/ribelo/crabjure) for static analysis,
+and [clojurust](https://github.com/csm/clojurust) for future reader/expansion/runtime
+boundaries. Parenox implements its own APIs; these projects are references rather
+than runtime or frontend dependencies.
+
 ## Agent sessions
 
 ```sh
@@ -180,7 +224,7 @@ uses exact source, positions and interface comparisons.
 ## Current scope
 
 Types are read as data from `s/def` and quoted `:t/sig` metadata. Public functions
-need signatures. Direct calls to private helpers (`defn-` or `{:private true}`)
+need signatures. Direct calls to private helpers (`defn-`, `^:private` or `{:private true}`)
 can omit them: the checker uses the actual argument types to analyze the body and
 infer its result. This is inference for each call, not a generalized function signature.
 
@@ -206,7 +250,7 @@ inferred helper work is included in the check of their callers.
 
 | Area | Supported |
 |---|---|
-| Types | Strings, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
+| Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
 | Spec forms | `s/keys`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`; local predicate narrowing |
 | Data operations | Keyword lookup, literal-key `get` and `assoc`, simple map destructuring |

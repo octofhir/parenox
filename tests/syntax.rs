@@ -88,7 +88,7 @@ fn malformed_and_unsupported_reader_syntax_is_lossless_and_terminates() {
         "\"\\q\"",
         "\"unfinished",
         "#?(:clj :x)",
-        "\\space",
+        r"\unknown",
         "1/2",
     ] {
         let parsed = reader::parse(source);

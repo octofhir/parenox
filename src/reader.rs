@@ -26,6 +26,7 @@ pub enum Kind {
     Symbol(String),
     Keyword(String),
     String(String),
+    Character(char),
     Number,
     Bool(bool),
     Nil,
@@ -34,34 +35,70 @@ pub enum Kind {
     Map(Vec<Form>),
     Set(Vec<Form>),
     Quote(Box<Form>),
+    Metadata(Box<Form>, Box<Form>),
+    Tagged(Box<Form>, Box<Form>),
 }
 
 impl Form {
+    pub fn without_metadata(&self) -> &Form {
+        let mut form = self;
+        while let Kind::Metadata(_, target) = &form.kind {
+            form = target;
+        }
+        form
+    }
+
+    /// Reader metadata is normalized to maps. Outer entries override inner entries.
+    pub fn metadata(&self, key: &str) -> Option<&Form> {
+        let mut form = self;
+        while let Kind::Metadata(metadata, target) = &form.kind {
+            if let Kind::Map(entries) = &metadata.without_metadata().kind
+                && let Some(pair) = entries
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .rev()
+                    .find(|pair| pair[0].keyword() == Some(key))
+            {
+                return Some(&pair[1]);
+            }
+            form = target;
+        }
+        None
+    }
+
     pub fn symbol(&self) -> Option<&str> {
-        match &self.kind {
+        match &self.without_metadata().kind {
             Kind::Symbol(s) => Some(s),
             _ => None,
         }
     }
 
     pub fn keyword(&self) -> Option<&str> {
-        match &self.kind {
+        match &self.without_metadata().kind {
             Kind::Keyword(s) => Some(s),
             _ => None,
         }
     }
 
     pub fn vector(&self) -> Option<&[Form]> {
-        match &self.kind {
+        match &self.without_metadata().kind {
             Kind::Vector(xs) => Some(xs),
             _ => None,
         }
     }
 
+    pub fn map(&self) -> Option<&[Form]> {
+        match &self.without_metadata().kind {
+            Kind::Map(xs) => Some(xs),
+            _ => None,
+        }
+    }
+
     pub fn unquoted(&self) -> &Form {
-        match &self.kind {
-            Kind::Quote(inner) => inner,
-            _ => self,
+        match &self.without_metadata().kind {
+            Kind::Quote(inner) => inner.without_metadata(),
+            _ => self.without_metadata(),
         }
     }
 }
@@ -272,6 +309,9 @@ impl<'a> Reader<'a> {
                         Kind::Symbol(_) => SyntaxKind::Symbol,
                         Kind::Keyword(_) => SyntaxKind::Keyword,
                         Kind::String(_) => SyntaxKind::String,
+                        Kind::Character(_) => SyntaxKind::Character,
+                        Kind::Metadata(_, _) => SyntaxKind::Metadata,
+                        Kind::Tagged(_, _) => SyntaxKind::Tagged,
                         Kind::Number => SyntaxKind::Number,
                         Kind::Bool(_) => SyntaxKind::Boolean,
                         Kind::Nil => SyntaxKind::Nil,
@@ -304,6 +344,11 @@ impl<'a> Reader<'a> {
                 Kind::Map(xs)
             }
             Some('"') => Kind::String(self.string(start)?),
+            Some('\\') => Kind::Character(self.character(start)?),
+            Some('^') => {
+                self.token(SyntaxKind::MetadataMark, start);
+                self.metadata_form(start)?
+            }
             Some('\'') => {
                 self.token(SyntaxKind::QuoteMark, start);
                 Kind::Quote(Box::new(self.form()?))
@@ -313,17 +358,26 @@ impl<'a> Reader<'a> {
                 self.token(SyntaxKind::OpenSet, start);
                 Kind::Set(self.collection('}', start)?)
             }
+            Some('#') if self.peek().is_some_and(char::is_alphabetic) => {
+                self.token(SyntaxKind::DispatchMark, start);
+                let tag = self.form()?;
+                let Some(name) = tag.symbol() else {
+                    return Err(self.error(start, "Reader tag must be a symbol"));
+                };
+                if name.split('/').count() > 2 || name.split('/').any(str::is_empty) {
+                    return Err(self.error(start, "Invalid reader tag"));
+                }
+                let value = self.form()?;
+                Kind::Tagged(Box::new(tag), Box::new(value))
+            }
             Some(c @ (')' | ']' | '}')) => {
                 return Err(self.error(start, format!("Unexpected closing delimiter {c}")));
             }
-            Some(c @ ('#' | '`' | '~' | '@' | '^' | '\\')) => {
+            Some(c @ ('#' | '`' | '~' | '@')) => {
                 return Err(self.error(start, format!("Reader syntax {c} is not supported yet")));
             }
             Some(_) => {
-                while self
-                    .peek()
-                    .is_some_and(|c| !c.is_whitespace() && !"()[]{}\";,\'`~@^\\".contains(c))
-                {
+                while self.peek().is_some_and(|c| !Self::token_boundary(c)) {
                     self.bump();
                 }
                 let token = &self.source[start.offset..self.pos.offset];
@@ -355,6 +409,105 @@ impl<'a> Reader<'a> {
                 end: self.pos,
             },
         })
+    }
+
+    fn token_boundary(c: char) -> bool {
+        // Quote, # and % terminate only at the start of a form in Clojure.
+        c.is_whitespace() || "()[]{}\";,`~@^\\".contains(c)
+    }
+
+    fn metadata_form(&mut self, start: Position) -> Result<Kind, ReadError> {
+        let mut metadata = self.form()?;
+        let shorthand = match &metadata.without_metadata().kind {
+            Kind::Map(_) => None,
+            Kind::Keyword(key) => Some((key.clone(), true)),
+            Kind::Symbol(_) | Kind::String(_) => Some((":tag".into(), false)),
+            Kind::Vector(_) => Some((":param-tags".into(), false)),
+            _ => {
+                return Err(self.error(
+                    start,
+                    "Metadata requires a map, keyword, symbol, string or vector",
+                ));
+            }
+        };
+        if let Some((key, flag)) = shorthand {
+            let span = metadata.span;
+            let value = if flag {
+                Form {
+                    kind: Kind::Bool(true),
+                    span,
+                }
+            } else {
+                metadata
+            };
+            metadata = Form {
+                kind: Kind::Map(vec![
+                    Form {
+                        kind: Kind::Keyword(key),
+                        span,
+                    },
+                    value,
+                ]),
+                span,
+            };
+        }
+        let target = self.form()?;
+        if !matches!(
+            target.without_metadata().kind,
+            Kind::Symbol(_)
+                | Kind::List(_)
+                | Kind::Vector(_)
+                | Kind::Map(_)
+                | Kind::Set(_)
+                | Kind::Quote(_)
+                | Kind::Tagged(_, _)
+        ) {
+            return Err(self.error(
+                start,
+                "Metadata requires a symbol, collection or metadata-capable tagged value",
+            ));
+        }
+        Ok(Kind::Metadata(Box::new(metadata), Box::new(target)))
+    }
+
+    fn character(&mut self, start: Position) -> Result<char, ReadError> {
+        let token_start = self.pos.offset;
+        self.bump()
+            .ok_or_else(|| self.error(start, "Expected a character after backslash"))?;
+        while self.peek().is_some_and(|c| !Self::token_boundary(c)) {
+            self.bump();
+        }
+        let token = &self.source[token_start..self.pos.offset];
+        let mut chars = token.chars();
+        let first = chars.next().unwrap();
+        let value = if chars.next().is_none() {
+            (u32::from(first) <= 0xffff).then_some(first)
+        } else {
+            match token {
+                "newline" => Some('\n'),
+                "space" => Some(' '),
+                "tab" => Some('\t'),
+                "return" => Some('\r'),
+                "backspace" => Some('\u{0008}'),
+                "formfeed" => Some('\u{000c}'),
+                _ => {
+                    let decoded = if let Some(digits) = token
+                        .strip_prefix('u')
+                        .filter(|s| s.len() == 4 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                    {
+                        u32::from_str_radix(digits, 16).ok()
+                    } else if let Some(digits) = token.strip_prefix('o').filter(|s| {
+                        (1..=3).contains(&s.len()) && s.bytes().all(|b| (b'0'..=b'7').contains(&b))
+                    }) {
+                        u32::from_str_radix(digits, 8).ok().filter(|&n| n <= 0xff)
+                    } else {
+                        None
+                    };
+                    decoded.and_then(char::from_u32)
+                }
+            }
+        };
+        value.ok_or_else(|| self.error(start, "Invalid JVM character literal"))
     }
 
     fn collection(&mut self, end: char, start: Position) -> Result<Vec<Form>, ReadError> {

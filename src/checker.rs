@@ -68,7 +68,7 @@ impl Model {
         };
         let mut seen_ns = false;
         for form in forms {
-            if let Kind::List(xs) = &form.kind
+            if let Kind::List(xs) = &form.without_metadata().kind
                 && xs.first().and_then(Form::symbol) == Some("ns")
             {
                 if seen_ns {
@@ -93,6 +93,10 @@ impl Model {
                     }
                 }
                 Kind::Quote(x) => visit(x, model, dependencies),
+                Kind::Metadata(metadata, target) => {
+                    visit(metadata, model, dependencies);
+                    visit(target, model, dependencies);
+                }
                 _ => {}
             }
         }
@@ -108,7 +112,7 @@ impl Model {
         let mut model = Self::context(forms);
         let mut definitions = Vec::new();
         for form in forms {
-            let Kind::List(xs) = &form.kind else {
+            let Kind::List(xs) = &form.without_metadata().kind else {
                 model.error("PNX9001", form.span, "Unsupported top-level form");
                 continue;
             };
@@ -203,7 +207,7 @@ impl Model {
             if matches!(clause.kind, Kind::String(_) | Kind::Map(_)) {
                 continue;
             }
-            let Kind::List(items) = &clause.kind else {
+            let Kind::List(items) = &clause.without_metadata().kind else {
                 self.error("PNX9001", clause.span, "Unsupported ns clause");
                 continue;
             };
@@ -291,9 +295,10 @@ impl Model {
     }
 
     fn parse_type(&mut self, form: &Form, visiting: &mut Vec<String>, globals: &Globals) -> Type {
-        match &form.kind {
+        match &form.without_metadata().kind {
             Kind::Symbol(s) => match self.resolve(s).as_str() {
                 "clojure.core/string?" => Type::String,
+                "clojure.core/char?" => Type::Character,
                 "clojure.core/number?" => Type::Number,
                 "clojure.core/boolean?" => Type::Boolean,
                 "clojure.core/keyword?" => Type::Keyword,
@@ -313,6 +318,7 @@ impl Model {
                 for x in xs {
                     types.push(match &x.kind {
                         Kind::String(s) => Type::Str(s.clone()),
+                        Kind::Character(c) => Type::Char(*c),
                         Kind::Keyword(k) => Type::Key(self.key(k)),
                         Kind::Bool(b) => Type::Bool(*b),
                         Kind::Nil => Type::Nil,
@@ -429,31 +435,35 @@ impl Model {
         {
             index += 1;
         }
-        let attrs = if let Some(Form {
-            kind: Kind::Map(attrs),
-            ..
-        }) = xs.get(index)
-        {
+        let attrs = if let Some(attrs) = xs.get(index).and_then(Form::map) {
             index += 1;
-            attrs.as_slice()
+            attrs
         } else {
             &[]
         };
         let default_private = xs[0]
             .symbol()
             .is_some_and(|s| self.resolve(s) == "clojure.core/defn-");
-        let private = if let Some(pair) = attrs
+        let private_form = attrs
             .as_chunks::<2>()
             .0
             .iter()
             .find(|p| p[0].keyword() == Some(":private"))
-        {
-            match pair[1].kind {
+            .map(|p| &p[1])
+            .or_else(|| {
+                if default_private {
+                    None
+                } else {
+                    xs[1].metadata(":private")
+                }
+            });
+        let private = if let Some(form) = private_form {
+            match form.without_metadata().kind {
                 Kind::Bool(value) => value,
                 _ => {
                     self.error(
                         "PNX9001",
-                        pair[1].span,
+                        form.span,
                         ":private currently requires a literal boolean",
                     );
                     default_private
@@ -466,7 +476,9 @@ impl Model {
             .as_chunks::<2>()
             .0
             .iter()
-            .find(|p| p[0].keyword() == Some(":t/sig"));
+            .find(|p| p[0].keyword() == Some(":t/sig"))
+            .map(|p| &p[1])
+            .or_else(|| xs[1].metadata(":t/sig"));
         let inferred = signature.is_none();
         if inferred && !private {
             self.error(
@@ -477,10 +489,10 @@ impl Model {
             return;
         }
         let signature = if let Some(signature) = signature {
-            if !matches!(signature[1].kind, Kind::Quote(_)) {
-                self.error("PNX9001", signature[1].span, ":t/sig must be quoted data");
+            if !matches!(signature.without_metadata().kind, Kind::Quote(_)) {
+                self.error("PNX9001", signature.span, ":t/sig must be quoted data");
             }
-            let Some(signature) = self.parse_signature(&signature[1], globals) else {
+            let Some(signature) = self.parse_signature(signature, globals) else {
                 return;
             };
             Some(signature)
@@ -661,6 +673,7 @@ impl Model {
                         visit(xs, model, names)
                     }
                     Kind::Quote(x) => visit(std::slice::from_ref(x), model, names),
+                    Kind::Metadata(_, target) => visit(std::slice::from_ref(target), model, names),
                     _ => {}
                 }
             }
@@ -833,7 +846,7 @@ impl Checker<'_> {
             return; // The originating unsupported/unresolved form has its own diagnostic.
         }
         if !actual.known.subtype_of(expected) {
-            let reported_type = if expected.constrains_string_values() {
+            let reported_type = if expected.constrains_literal_values() {
                 &actual.known
             } else {
                 &actual.ty
@@ -896,7 +909,7 @@ impl Checker<'_> {
     }
 
     fn bind(&mut self, form: &Form, value: Value, env: &mut Env) {
-        match &form.kind {
+        match &form.without_metadata().kind {
             Kind::Symbol(name) => {
                 env.insert(name.clone(), value);
             }
@@ -945,6 +958,11 @@ impl Checker<'_> {
             Kind::Bool(b) => Value::new(Type::Bool(*b)),
             Kind::Number => Value::new(Type::Number),
             Kind::String(s) => Value::new(Type::Str(s.clone())),
+            Kind::Character(c) => Value::new(Type::Char(*c)),
+            Kind::Metadata(_, target) => self.infer(target, env),
+            Kind::Tagged(tag, _) => self.unsupported(form.span, format!(
+                "Tagged literal #{} has no declared reader semantics; its reader function was not executed",
+                tag.symbol().unwrap())),
             Kind::Keyword(k) => Value::new(Type::Key(self.model.key(k))),
             Kind::Symbol(s) => {
                 if let Some(value) = env.get(s) {
@@ -1292,7 +1310,9 @@ impl Checker<'_> {
             }
             return;
         }
-        let Kind::List(xs) = &test.kind else { return };
+        let Kind::List(xs) = &test.without_metadata().kind else {
+            return;
+        };
         if xs.len() != 2 {
             return;
         }
@@ -1316,6 +1336,7 @@ impl Checker<'_> {
         let positive = match op.as_str() {
             "clojure.core/nil?" => Some(Type::Nil),
             "clojure.core/string?" => Some(Type::String),
+            "clojure.core/char?" => Some(Type::Character),
             "clojure.core/number?" => Some(Type::Number),
             "clojure.core/boolean?" => Some(Type::Boolean),
             "clojure.core/keyword?" => Some(Type::Keyword),
@@ -1467,6 +1488,7 @@ impl Checker<'_> {
                 | "clojure.core/nil?"
                 | "clojure.core/some?"
                 | "clojure.core/string?"
+                | "clojure.core/char?"
                 | "clojure.core/number?"
                 | "clojure.core/boolean?"
                 | "clojure.core/keyword?"
