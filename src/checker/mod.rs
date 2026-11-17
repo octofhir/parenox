@@ -12,7 +12,9 @@ mod recur;
 use env::Env;
 use exceptions::Throws;
 use model::Function;
-pub(crate) use model::{Declarations, Globals, Model, SpecCache, SpecFingerprint, SpecSource};
+pub(crate) use model::{
+    Declarations, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
+};
 use recur::RecurTarget;
 
 use std::collections::BTreeMap;

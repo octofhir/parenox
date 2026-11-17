@@ -2,6 +2,7 @@
 mod contracts;
 mod declarations;
 mod externs;
+mod interfaces;
 mod require;
 mod specs;
 mod type_forms;
@@ -13,6 +14,8 @@ use std::sync::Arc;
 pub(crate) use declarations::Declarations;
 use declarations::Names;
 use externs::Externs;
+pub(crate) use interfaces::InterfaceKey;
+use interfaces::{Exports, LocalInterface};
 pub(crate) use specs::{SpecCache, SpecFingerprint, SpecSource};
 use vars::LiteralVar;
 
@@ -57,9 +60,7 @@ impl DeclaredValue<'_> {
 pub(crate) struct Globals {
     specs: Arc<BTreeMap<String, Type>>,
     pub(super) project_namespaces: BTreeSet<String>,
-    functions: BTreeMap<String, Signature>,
-    literals: BTreeMap<String, Type>,
-    interfaces: BTreeMap<String, String>,
+    exports: BTreeMap<String, Arc<Exports>>,
     externs: Option<Arc<Externs>>,
 }
 
@@ -75,33 +76,17 @@ impl Globals {
         self.project_namespaces.insert(namespace.into());
     }
 
-    pub fn dependency_key(&self, dependencies: &[String]) -> String {
-        dependencies
-            .iter()
-            .map(|name| {
-                let source = self.interfaces.get(name);
-                let external = self
-                    .externs
-                    .as_ref()
-                    .and_then(|table| table.interfaces.get(name));
-                format!("{name}:{source:?}:{external:?}")
-            })
-            .collect::<Vec<_>>()
-            .join("|")
-    }
-
-    fn signature(&self, name: &str) -> Option<&Signature> {
-        self.externs
-            .as_ref()
-            .and_then(|table| table.functions.get(name))
-            .or_else(|| self.functions.get(name))
-    }
-
     fn declared_value(&self, name: &str) -> Option<DeclaredValue<'_>> {
-        if let Some(ty) = self.literals.get(name) {
+        let (namespace, _) = name.split_once('/')?;
+        let source = self.exports.get(namespace);
+        if let Some(ty) = source.and_then(|exports| exports.literals.get(name)) {
             return Some(DeclaredValue::Literal(ty));
         }
-        self.signature(name)
+        self.externs
+            .as_ref()
+            .and_then(|table| table.namespaces.get(namespace))
+            .and_then(|functions| functions.get(name))
+            .or_else(|| source.and_then(|exports| exports.functions.get(name)))
             .map(|sig| DeclaredValue::Function(&sig.args, &sig.ret))
     }
 }
@@ -109,10 +94,10 @@ impl Globals {
 #[derive(Default)]
 pub(crate) struct Model {
     names: Names,
-    dependencies: Vec<String>,
     externs: Option<Arc<Externs>>,
     literals: BTreeMap<String, LiteralVar>,
-    specs: BTreeMap<String, Type>,
+    exports: Arc<Exports>,
+    local_interface: Arc<LocalInterface>,
     external_specs: BTreeMap<String, Option<Type>>,
     pub functions: BTreeMap<String, Function>,
     // Conservative references to unannotated helpers, including transitive cache dependencies.
@@ -129,15 +114,13 @@ impl Model {
     ) -> Self {
         let mut model = Self {
             names: declarations.names.clone(),
-            dependencies: declarations.dependencies.clone(),
             diagnostics: declarations.diagnostics.clone(),
             ..Self::default()
         };
+        let mut specs = BTreeMap::new();
         for key in declarations.specs.keys() {
             let ty = globals.specs.get(key).cloned();
-            model
-                .specs
-                .insert(key.clone(), ty.clone().unwrap_or(Type::Unknown));
+            specs.insert(key.clone(), ty.clone().unwrap_or(Type::Unknown));
             model.external_specs.insert(key.clone(), ty);
         }
         for &index in &declarations.literal_vars {
@@ -155,6 +138,7 @@ impl Model {
             model.read_function(xs, form.span, globals);
         }
         model.collect_helpers();
+        model.freeze_interfaces(specs, declarations.dependencies.clone());
         model
     }
 
@@ -186,48 +170,10 @@ impl Model {
         }
     }
 
-    pub fn publish(&self, globals: &mut Globals) {
-        let mut exported = BTreeMap::new();
-        for function in self.functions.values().filter(|f| !f.private) {
-            let signature = Signature {
-                args: function.args.clone(),
-                ret: function.ret.clone(),
-            };
-            globals
-                .functions
-                .insert(function.name.clone(), signature.clone());
-            exported.insert(function.name.clone(), signature);
-        }
-        let mut literals = BTreeMap::new();
-        for (name, value) in self.literals.iter().filter(|(_, value)| !value.private) {
-            globals.literals.insert(name.clone(), value.ty.clone());
-            literals.insert(name, &value.ty);
-        }
-        globals.interfaces.insert(
-            self.names.namespace.clone(),
-            format!("{:?}|{exported:?}|{literals:?}", self.specs),
-        );
-    }
-
     pub fn external_specs_current(&self, globals: &Globals) -> bool {
         self.external_specs
             .iter()
             .all(|(key, previous)| globals.specs.get(key) == previous.as_ref())
-    }
-
-    pub fn interface_key(&self, globals: &Globals) -> String {
-        let sigs: Vec<_> = self
-            .functions
-            .values()
-            .map(|f| (&f.name, &f.args, &f.ret))
-            .collect();
-        format!(
-            "{:?}|{:?}|{sigs:?}|{:?}|{}",
-            self.names,
-            self.specs,
-            self.literals,
-            globals.dependency_key(&self.dependencies)
-        )
     }
 
     pub(super) fn local_function(&self, name: &str) -> Option<&Function> {

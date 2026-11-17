@@ -4,7 +4,7 @@ use super::{Globals, Model};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct LiteralVar {
     pub ty: Type,
     pub private: bool,

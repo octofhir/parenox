@@ -5,7 +5,9 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::checker::{Declarations, Globals, Model, SpecCache, SpecFingerprint, SpecSource};
+use crate::checker::{
+    Declarations, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
+};
 use crate::reader::{self, Form, Position, Span};
 use crate::{Diagnostic, Report, Stats};
 
@@ -35,7 +37,7 @@ struct FileCache {
     declarations: Option<Declarations>,
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
-    interface: String,
+    interface: Option<InterfaceKey>,
     functions: BTreeMap<String, CheckedFunction>,
 }
 
@@ -293,7 +295,8 @@ impl Session {
                 }
                 report.diagnostics.extend(model.diagnostics.iter().cloned());
                 let interface = model.interface_key(&globals);
-                if !changed && cache.interface == interface {
+                let same_interface = cache.interface.as_ref() == Some(&interface);
+                if !changed && same_interface {
                     report.stats.reused_functions = cache.functions.len();
                     report.diagnostics.extend(
                         cache
@@ -307,8 +310,7 @@ impl Session {
                         let ranges = model.function_ranges(function);
                         let diagnostics = if let Some(cached) =
                             previous.get(&function.name).filter(|cached| {
-                                cache.interface == interface
-                                    && cached.reusable(source.source, &ranges)
+                                same_interface && cached.reusable(source.source, &ranges)
                             }) {
                             report.stats.reused_functions += 1;
                             cached.diagnostics.clone()
@@ -327,7 +329,7 @@ impl Session {
                         );
                     }
                 }
-                cache.interface = interface;
+                cache.interface = Some(interface);
             }
             report.diagnostics.sort_by(|a, b| {
                 (a.span.start.offset, &a.code).cmp(&(b.span.start.offset, &b.code))

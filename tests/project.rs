@@ -480,3 +480,53 @@ fn qualified_slash_names_follow_source_and_extern_interface_edits() {
         Some("String")
     );
 }
+
+#[test]
+fn equivalent_rebuilt_interfaces_reuse_the_callers_check() {
+    let app = Source {
+        path: "app.clj",
+        source: "(ns app (:require [rates :as rates] [fees :as fees]))
+                 (defn total {:t/sig '[:-> number?]} [] (+ (rates/base) (fees/current)))",
+    };
+    let provider = Source {
+        path: "rates.clj",
+        source: "(ns rates) (defn base {:t/sig '[:-> number?]} [] 5)",
+    };
+    let externs = Source {
+        path: "externs.edn",
+        source: "{fees/current [:-> number?] fees/other [:-> string?]}",
+    };
+    let mut session = Session::default();
+    let first = session.check_project(&[app, provider], Some(externs));
+    assert!(first.ok && first.complete, "{first:#?}");
+    let reordered = Source {
+        source: "{fees/other [:-> string?]\n fees/current [:-> number?]}",
+        ..externs
+    };
+    let edited = Source {
+        source: "(ns rates) (defn base {:t/sig '[:-> number?]} [] 6)",
+        ..provider
+    };
+    let same_interface = session.check_project(&[app, edited], Some(reordered));
+    assert!(
+        same_interface.ok && same_interface.complete,
+        "{same_interface:#?}"
+    );
+    assert_eq!(same_interface.stats.parsed_files, 2);
+    assert_eq!(same_interface.stats.checked_functions, 1);
+    assert_eq!(same_interface.stats.reused_functions, 1);
+    let changed = Source {
+        source: "{fees/current [:-> string?]}",
+        ..externs
+    };
+    let new_interface = session.check_project(&[app, edited], Some(changed));
+    assert!(
+        !new_interface.ok && new_interface.complete,
+        "{new_interface:#?}"
+    );
+    assert_eq!(new_interface.stats.checked_functions, 1);
+    assert_eq!(
+        new_interface.files[0].diagnostics[0].actual.as_deref(),
+        Some("String")
+    );
+}

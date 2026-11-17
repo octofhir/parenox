@@ -2,12 +2,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{Globals, Model, Names, Signature};
+use super::interfaces::Signatures;
+use super::{Globals, Model, Names};
 use crate::reader::{Form, Kind, Span};
 
 pub(super) struct Externs {
-    pub(super) functions: BTreeMap<String, Signature>,
-    pub(super) interfaces: BTreeMap<String, String>,
+    pub(super) namespaces: BTreeMap<String, Arc<Signatures>>,
 }
 
 impl Model {
@@ -33,7 +33,7 @@ impl Model {
             );
             return model;
         };
-        let mut functions = BTreeMap::new();
+        let mut namespaces = BTreeMap::<String, Signatures>::new();
         for [name, signature] in entries.as_chunks::<2>().0 {
             let Some(name_string) = name.symbol().filter(|symbol| {
                 symbol
@@ -47,9 +47,12 @@ impl Model {
                 );
                 continue;
             };
+            let (namespace, _) = name_string.split_once('/').unwrap();
             if let Some(signature) = model.parse_signature(signature, globals)
-                && functions
-                    .insert(name_string.to_owned(), signature)
+                && namespaces
+                    .entry(namespace.into())
+                    .or_default()
+                    .insert(name_string.to_owned(), Arc::new(signature))
                     .is_some()
             {
                 model.error(
@@ -59,20 +62,11 @@ impl Model {
                 );
             }
         }
-        let mut namespaces: BTreeMap<&str, Vec<_>> = BTreeMap::new();
-        for (name, signature) in &functions {
-            namespaces
-                .entry(name.split_once('/').unwrap().0)
-                .or_default()
-                .push((name, signature));
-        }
-        let interfaces = namespaces
-            .into_iter()
-            .map(|(namespace, signatures)| (namespace.to_owned(), format!("{signatures:?}")))
-            .collect();
         model.externs = Some(Arc::new(Externs {
-            functions,
-            interfaces,
+            namespaces: namespaces
+                .into_iter()
+                .map(|(name, functions)| (name, Arc::new(functions)))
+                .collect(),
         }));
         model
     }
