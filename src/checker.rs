@@ -822,6 +822,13 @@ impl Value {
 
 type Env = BTreeMap<String, Value>;
 
+#[derive(Clone, Copy)]
+enum Lookup<'a> {
+    Optional(Option<&'a Value>),
+    Required,
+    Presence,
+}
+
 struct Checker<'a> {
     model: &'a Model,
     globals: &'a Globals,
@@ -914,41 +921,155 @@ impl Checker<'_> {
                 env.insert(name.clone(), value);
             }
             Kind::Map(xs) => {
+                // :missing changes checked lookups into collection of absent keys.
+                // Do not apply throwing semantics before this mode is implemented.
+                if xs
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .any(|p| p[0].keyword() == Some(":missing"))
+                {
+                    self.error(
+                        "PNX9001",
+                        form.span,
+                        "Destructuring with :missing is not supported yet",
+                    );
+                    return;
+                }
                 for pair in xs.as_chunks::<2>().0 {
-                    match pair[0].keyword() {
-                        Some(":keys") => {
-                            let Some(keys) = pair[1].vector() else {
-                                self.error("PNX9001", pair[1].span, ":keys requires a vector");
-                                continue;
-                            };
-                            for key in keys {
-                                if let Some(name) = key.symbol()
-                                    && !name.contains('/')
-                                {
-                                    let field =
-                                        self.lookup(&value, &format!(":{name}"), None, key.span);
-                                    env.insert(name.to_string(), field);
-                                } else {
-                                    self.error(
-                                        "PNX9001",
-                                        key.span,
-                                        "Only simple :keys bindings are supported",
-                                    );
-                                }
-                            }
-                        }
+                    let directive = pair[0].keyword().map(|key| self.model.key(key));
+                    match directive.as_deref() {
                         Some(":as") if pair[1].symbol().is_some() => {
                             env.insert(pair[1].symbol().unwrap().into(), value.clone());
                         }
-                        _ => self.error(
-                            "PNX9001",
-                            pair[0].span,
-                            "Unsupported destructuring directive",
-                        ),
+                        Some(":req!") => {
+                            let Some(entries) = pair[1].map() else {
+                                self.error(
+                                    "PNX9001",
+                                    pair[1].span,
+                                    ":req! requires a map of bindings to keys",
+                                );
+                                continue;
+                            };
+                            for entry in entries.as_chunks::<2>().0 {
+                                self.bind_entry(entry, &value, true, env);
+                            }
+                        }
+                        Some(directive)
+                            if matches!(
+                                directive.rsplit('/').next(),
+                                Some(":keys" | ":keys!" | "keys" | "keys!")
+                            ) =>
+                        {
+                            self.bind_keys(directive, &pair[1], &value, env);
+                        }
+                        _ => self.bind_entry(pair, &value, false, env),
                     }
                 }
             }
             _ => self.error("PNX9001", form.span, "Unsupported binding pattern"),
+        }
+    }
+
+    fn bind_entry(&mut self, pair: &[Form; 2], value: &Value, required: bool, env: &mut Env) {
+        if !matches!(
+            pair[0].without_metadata().kind,
+            Kind::Symbol(_) | Kind::Map(_) | Kind::Vector(_)
+        ) {
+            self.error(
+                "PNX9001",
+                pair[0].span,
+                "Unsupported destructuring directive",
+            );
+            return;
+        }
+        let Some(key) = pair[1].keyword() else {
+            self.error(
+                "PNX9001",
+                pair[1].span,
+                "Destructuring currently requires literal keyword keys",
+            );
+            return;
+        };
+        let key = self.model.key(key);
+        let field = if required {
+            self.checked_lookup(value, &key, Lookup::Required, pair[1].span)
+        } else {
+            self.lookup(value, &key, None, pair[1].span)
+        };
+        self.bind(&pair[0], field, env);
+    }
+
+    fn bind_keys(&mut self, directive: &str, form: &Form, value: &Value, env: &mut Env) {
+        let Some(keys) = form.vector() else {
+            self.error(
+                "PNX9001",
+                form.span,
+                format!("{directive} requires a vector"),
+            );
+            return;
+        };
+        let namespace = directive.rsplit_once('/').map(|(ns, _)| ns);
+        let required = directive.ends_with("keys!");
+        let mut presence_only = false;
+        for key in keys {
+            if key.symbol() == Some("&") {
+                if presence_only {
+                    self.error("PNX9001", key.span, "A keys binding can contain only one &");
+                }
+                presence_only = true;
+                continue;
+            }
+            let (local, mut lookup_key) = if presence_only {
+                let Some(key_name) = key.keyword() else {
+                    self.error(
+                        "PNX9001",
+                        key.span,
+                        "Keys after & must be literal keywords; they do not bind locals",
+                    );
+                    continue;
+                };
+                (None, self.model.key(key_name))
+            } else {
+                let Some(name) = key.symbol() else {
+                    self.error(
+                        "PNX9001",
+                        key.span,
+                        "A keys binding requires symbols before &",
+                    );
+                    continue;
+                };
+                if namespace.is_some() && name.contains('/') {
+                    self.error(
+                        "PNX9001",
+                        key.span,
+                        "Namespaced keys directives require unqualified binding symbols",
+                    );
+                    continue;
+                }
+                if name.starts_with('/') || name.ends_with('/') || name.matches('/').count() > 1 {
+                    self.error("PNX9001", key.span, "Invalid symbol in keys binding");
+                    continue;
+                }
+                let local = name.rsplit('/').next().unwrap();
+
+                (Some(local), format!(":{name}"))
+            };
+            if let Some(ns) = namespace
+                && !lookup_key.contains('/')
+            {
+                lookup_key = format!("{ns}/{}", lookup_key.trim_start_matches(':'));
+            }
+            if let Some(local) = local {
+                let field = if required {
+                    self.checked_lookup(value, &lookup_key, Lookup::Required, key.span)
+                } else {
+                    self.lookup(value, &lookup_key, None, key.span)
+                };
+                env.insert(local.into(), field);
+            } else if required {
+                self.checked_lookup(value, &lookup_key, Lookup::Presence, key.span);
+            }
         }
     }
 
@@ -1137,12 +1258,21 @@ impl Checker<'_> {
                 "clojure.core/or" | "clojure.core/and" => {
                     return self.short_circuit(xs, env, resolved.ends_with("/or"));
                 }
-                "clojure.core/get" => {
-                    if !(3..=4).contains(&xs.len()) {
+                "clojure.core/get" | "clojure.core/req!" => {
+                    let required = resolved == "clojure.core/req!";
+                    let max_arity = if required { 3 } else { 4 };
+                    if !(3..=max_arity).contains(&xs.len()) {
                         self.error(
                             "PNX2554",
                             span,
-                            "get requires a map, key and optional default",
+                            format!(
+                                "Invalid arity for {resolved}: expected a collection and key{}",
+                                if required {
+                                    ""
+                                } else {
+                                    " and optional default"
+                                }
+                            ),
                         );
                         return Value::new(Type::Unknown);
                     }
@@ -1150,9 +1280,16 @@ impl Checker<'_> {
                     let key = self.infer(&xs[2], env);
                     let default = xs.get(3).map(|x| self.infer(x, env));
                     return if let Type::Key(key) = key.ty {
-                        self.lookup(&target, &key, default.as_ref(), xs[2].span)
+                        if required {
+                            self.checked_lookup(&target, &key, Lookup::Required, xs[2].span)
+                        } else {
+                            self.lookup(&target, &key, default.as_ref(), xs[2].span)
+                        }
                     } else {
-                        self.unsupported(xs[2].span, "get currently requires a literal keyword")
+                        self.unsupported(
+                            xs[2].span,
+                            format!("{resolved} currently requires a literal keyword"),
+                        )
                     };
                 }
                 "clojure.core/assoc" => return self.assoc(xs, span, env),
@@ -1369,7 +1506,39 @@ impl Checker<'_> {
     }
 
     fn lookup(&mut self, value: &Value, key: &str, default: Option<&Value>, span: Span) -> Value {
-        let default_type = default.map_or(Type::Nil, |v| v.known.clone());
+        self.lookup_value(value, key, Lookup::Optional(default), span)
+    }
+
+    fn checked_lookup(&mut self, value: &Value, key: &str, mode: Lookup<'_>, span: Span) -> Value {
+        let mut result = self.lookup_value(value, key, mode, span);
+        if !result.known.contains_unknown() && nil_part(&result.known) == Type::Nil {
+            result.notes.push("A checked lookup requires the key to exist; an explicitly present Nil remains Nil.".into());
+        }
+        if result.known == Type::Never && value.known != Type::Never {
+            let mut diagnostic = Diagnostic::new(
+                "PNX2741",
+                span,
+                format!("Required key {key} is absent; checked lookup would throw"),
+            );
+            diagnostic.notes = value.notes.clone();
+            diagnostic.help = Some(format!(
+                "Provide {key} in the input collection. An explicitly present Nil still satisfies the presence check."
+            ));
+            self.diagnostics.push(diagnostic);
+        }
+        result
+    }
+
+    fn lookup_value(&mut self, value: &Value, key: &str, mode: Lookup<'_>, span: Span) -> Value {
+        let default = match mode {
+            Lookup::Optional(default) => default,
+            _ => None,
+        };
+
+        let default_type = match mode {
+            Lookup::Optional(default) => default.map_or(Type::Nil, |v| v.known.clone()),
+            Lookup::Required | Lookup::Presence => Type::Never,
+        };
         let mut notes = value.notes.clone();
         let ty = match &value.known {
             Type::Nil => default_type,
@@ -1378,14 +1547,25 @@ impl Checker<'_> {
             Type::Union(xs) => {
                 let values = xs
                     .iter()
-                    .map(|t| self.lookup(&Value::new(t.clone()), key, default, span))
+                    .map(|t| self.lookup_value(&Value::new(t.clone()), key, mode, span))
                     .collect::<Vec<_>>();
                 notes.extend(values.iter().flat_map(|v| v.notes.clone()));
                 Type::union(values.into_iter().map(|v| v.known))
             }
-            Type::Set(_) => Type::union([Type::Key(key.into()), default_type]),
+            Type::Set(element) => {
+                let key_type = Type::Key(key.into());
+                if matches!(mode, Lookup::Optional(_)) {
+                    Type::union([key_type, default_type])
+                } else if key_type.subtype_of(element) || element.contains_unknown() {
+                    key_type
+                } else {
+                    Type::Never
+                }
+            }
             Type::Map(map) => match map.fields.get(key) {
-                Some(field) if field.required => field.ty.clone(),
+                Some(field) if field.required || !matches!(mode, Lookup::Optional(_)) => {
+                    field.ty.clone()
+                }
                 Some(field) => {
                     notes.push(format!(
                         "Field {key} is optional; a missing key returns {}",
@@ -1394,6 +1574,7 @@ impl Checker<'_> {
                     Type::union([field.ty.clone(), default_type])
                 }
                 None if !map.open => default_type,
+                None if matches!(mode, Lookup::Presence) => Type::Unknown,
                 None => {
                     self.error(
                         "PNX9003",

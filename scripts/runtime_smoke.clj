@@ -80,3 +80,26 @@
   (assert (try (read-clj "#?(:cljs #?(:other 1) :clj 2)") false (catch RuntimeException _ true)))
   (assert (try (read-clj "#?(:clj 1 :cljs #?(:else 2))") false (catch RuntimeException _ true))))
 (println "Clojure/JVM reader conditionals: 12 assertions passed")
+
+(load-file "examples/checked.clj")
+(load-file "examples/checked_bad.clj")
+(assert (= "ADA" (demo.checked/display-name {:id "p-1" :name "Ada"})))
+(assert (= "p-1: Unknown" (demo.checked/label {:id "p-1"})))
+(assert (= "p-1" (demo.checked/request-id {:patient {:id "p-1"}})))
+(assert (= "Missing required key: :name"
+           (try (demo.checked/display-name {:id "p-1"}) nil
+                (catch RuntimeException e (.getMessage e)))))
+(assert (= "Missing required key: :name"
+           (try (demo.checked-bad/missing-name) nil
+                (catch RuntimeException e (.getMessage e)))))
+(assert (= :throws
+           (try (demo.checked-bad/nil-name) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(assert (nil? (req! {:name nil} :name)))
+(assert (false? (req! {:active false} :active)))
+(assert (= :active (req! #{:active} :active)))
+(assert (= "Ada" (let [{:person/keys! [name & :id]} {:person/name "Ada" :person/id nil}] name)))
+(assert (= "Ada" (let [{:keys! [person/name]} {:person/name "Ada"}] name)))
+;; This changes throwing semantics and remains explicitly unsupported by Parenox.
+(assert (= [nil {:name nil}] (let [{:req! {n :name} :missing absent} {}] [n absent])))
+(println "Clojure/JVM checked bindings: 12 assertions passed")

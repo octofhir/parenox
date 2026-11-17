@@ -55,6 +55,7 @@ just good            # passing example
 just syntax          # inspect source-preserving syntax
 just reader          # metadata, characters and tagged EDN
 just portable        # JVM branches in a .cljc source file
+just checked         # Clojure 1.13 checked bindings and two deliberate errors
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -261,6 +262,24 @@ Run `just inference` for passing and failing patient-label examples. Errors poin
 to the helper body and include notes showing its call chain. Repeated calls with
 the same inputs reuse inferred results within the checked entry function.
 
+Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
+`:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.
+Keys after `&` in a keys vector are not bound; checked directives require their
+presence. Ordinary keyword renaming and nested map patterns use the same binding
+analysis. Run `just checked` for passing examples and two deliberate errors.
+
+A presence check keeps the declared value type, including explicit nil. For an
+optional `String` field, a successful checked lookup yields `String`; an optional
+nilable field still yields `Nil | String`. Checks describe successful execution;
+runtime presence guards remain in the program. A key proven absent produces
+`PNX2741` at the binding or lookup key. An undeclared value type in an open map
+remains an explicit analysis gap; presence-only checks after `&` need no value type.
+Refinement applies to bound locals and checked lookup results. Source-map aliases
+keep their declared types.
+
+Map destructuring with `:or`, `:missing`, `:select`, `:all` or `:excess`, sequential
+patterns, and string/symbol lookup keys remain unsupported and are reported.
+
 Recursive helpers, unused helpers with no typed caller, and helpers used as
 function values currently require `:t/sig`. Private inference is bounded to 32
 nested calls and 256 specializations per checked entry function; hitting a limit
@@ -272,7 +291,7 @@ inferred helper work is included in the check of their callers.
 | Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
 | Spec forms | `s/keys`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`; local predicate narrowing |
-| Data operations | Keyword lookup, literal-key `get` and `assoc`, simple map destructuring |
+| Data operations | Keyword lookup, literal-key `get`/`req!`/`assoc`, nested keyword map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |
 | Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |

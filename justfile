@@ -70,3 +70,8 @@ reader: build
 # Check the JVM branches of a portable source file.
 portable: build
     @./target/release/parenox check examples/portable.cljc
+
+# Check Clojure 1.13 bindings, then show missing-key and explicit-Nil errors.
+checked format="pretty": build
+    @./target/release/parenox check examples/checked.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/checked_bad.clj --format {{quote(format)}} || test "$?" -eq 1
