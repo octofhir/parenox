@@ -77,7 +77,7 @@ impl Checker<'_> {
         };
         let mut notes = value.notes.clone();
         let ty = match &value.known {
-            Type::Nil | Type::MapEntry(_) | Type::Vector(_) => default_type,
+            Type::Nil | Type::MapEntry(_) | Type::Vector(_) | Type::Tuple(_) => default_type,
             Type::Never => Type::Never,
             Type::Unknown => Type::Unknown,
             Type::Union(xs) => {
@@ -183,9 +183,12 @@ impl Checker<'_> {
             Type::Union(parts) => {
                 Type::union(parts.iter().map(|part| self.contains_type(part, key, span)))
             }
-            Type::Map(_) | Type::MapEntry(_) | Type::Nil | Type::Set(_) | Type::Vector(_) => {
-                key_presence(ty, key).map_or(Type::Boolean, Type::Bool)
-            }
+            Type::Map(_)
+            | Type::MapEntry(_)
+            | Type::Nil
+            | Type::Set(_)
+            | Type::Vector(_)
+            | Type::Tuple(_) => key_presence(ty, key).map_or(Type::Boolean, Type::Bool),
             _ => {
                 self.error(
                     "PNX2322",
@@ -271,7 +274,7 @@ fn key_presence(ty: &Type, key: &Type) -> Option<bool> {
             MapSlot::Absent => Some(false),
             _ => None,
         },
-        Type::Nil | Type::Vector(_) | Type::MapEntry(_) => Some(false), // Keyword and string keys are never vector indices.
+        Type::Nil | Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => Some(false), // Keyword and string keys are never vector indices.
         Type::Set(element) if !key.key_overlaps(element) && !element.contains_unknown() => {
             Some(false)
         }

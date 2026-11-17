@@ -284,7 +284,7 @@ impl Checker<'_> {
             "clojure.core/key" | "clojure.core/val" => {
                 let (entry, span) = &args[0];
                 let index = usize::from(name == "clojure.core/val");
-                if let Some(item) = entry.known.entry_item(index, false) {
+                if let Some(item) = entry.known.entry_item(index) {
                     return Value::with_notes(item, entry.notes.clone());
                 }
                 let mut diagnostic =
@@ -302,6 +302,7 @@ impl Checker<'_> {
                         | Type::Map(_)
                         | Type::MapEntry(_)
                         | Type::Vector(_)
+                        | Type::Tuple(_)
                         | Type::Set(_)
                         | Type::Never
                         | Type::Unknown => true,

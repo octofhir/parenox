@@ -62,11 +62,7 @@ fn nested_assoc_creates_maps_and_preserves_unmodified_fields() {
 
 #[test]
 fn nested_paths_report_unsupported_shapes_and_open_map_intermediates() {
-    for expression in [
-        "(get-in {} [0])",
-        "(assoc-in {} [] 1)",
-        "(let [path [:a]] (get-in {:a 1} path))",
-    ] {
+    for expression in ["(get-in {} [0])", "(assoc-in {} [] 1)"] {
         let report = check(expression, "number?");
         assert!(!report.ok && !report.complete, "{report:#?}");
         assert_eq!(report.diagnostics[0].code, "PNX9001");

@@ -135,3 +135,8 @@ map-keys format="pretty" color="auto": build
 dynamic-paths format="pretty" color="auto": build
     @./target/release/parenox check examples/dynamic_paths.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/dynamic_paths_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check fixed vector positions and show reversed and missing items.
+ordered-paths format="pretty" color="auto": build
+    @./target/release/parenox check examples/ordered_paths.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/ordered_paths_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

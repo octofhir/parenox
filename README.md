@@ -69,6 +69,7 @@ just entries pretty always  # map entry pipelines and diagnostics
 just dictionaries pretty always  # map-of contracts and diagnostics
 just map-keys pretty always  # string and dynamic map keys
 just dynamic-paths pretty always  # nested maps with dynamic path segments
+just ordered-paths pretty always  # saved vector paths and positional contracts
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -321,13 +322,16 @@ The fallback runs in the outer scope and defaults to nil. Run `just guards`
 to see the result type when no fallback is supplied and a type error when
 `if-some` passes `false` into a numeric call.
 
-`get-in`, `assoc-in`, and `update-in` accept vector expressions with keyword
-or string keys, including computed segments such as `[sku tier]`. A missing
-path uses the `get-in` fallback. A present terminal nil or false is preserved.
-Writes create missing or nil intermediate maps, preserve sibling fields,
-and report scalar parents. Write paths support 1 to 32 keys. Paths supplied
-through a variable and numeric indices report an analysis gap. Run
-`just dynamic-paths pretty always` for examples and diagnostics.
+`get-in`, `assoc-in`, and `update-in` accept vector paths with keyword or
+string keys, including computed segments such as `[sku tier]`. A path can
+be passed through a local or a function contract when its positions are
+known. A conditional path is checked for each complete alternative.
+A missing path uses the `get-in` fallback and a present terminal nil or
+false is preserved. Writes create missing or nil intermediate maps, preserve
+sibling fields, and report scalar parents. Write paths support 1 to 32 keys.
+Unknown-length paths and numeric indices report an analysis gap.
+Run `just dynamic-paths pretty always` for inline examples and
+`just ordered-paths pretty always` for saved paths and diagnostics.
 
 `contains?` checks keyword and string keys. A guard such as `(contains? patient :name)`
 refines a local map in each branch. The successful branch can read a declared
@@ -417,8 +421,12 @@ or providing a default for a checked required key, produces `PNX1001` at the
 default. A default applies to the local value; `:as` retains the input collection.
 
 Map destructuring with `:missing`, `:select`, `:all` or `:excess` and
-symbol lookup keys remain unsupported. Positional destructuring currently
-covers map entries and nil; rest bindings report an analysis gap.
+symbol lookup keys remain unsupported. Positional destructuring covers
+vectors, map entries and nil. Vector literals of at most 32 elements retain
+their positions, and `(s/tuple ...)` describes a vector with 1 to 32 position
+types. Longer literals retain an element type. Missing positions bind nil.
+A vector with unknown length contributes nil as a possible value at each
+position. Rest bindings report an analysis gap.
 
 Recursive helpers, unused helpers with no typed caller, and helpers used as
 function values currently require `:t/sig`. Private inference is bounded to 32
@@ -429,10 +437,10 @@ inferred helper work is included in the check of their callers.
 | Area | Supported |
 |---|---|
 | Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
-| Spec forms | `s/keys`, `s/map-of`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
+| Spec forms | `s/keys`, `s/map-of`, `s/tuple`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
-| Data operations | Keyword calls, string and keyword lookups and updates, computed keys in vector paths, nested map destructuring and checked keys |
+| Data operations | Keyword calls, string and keyword lookups and updates, ordered vector paths, positional and nested map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |
 | Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |

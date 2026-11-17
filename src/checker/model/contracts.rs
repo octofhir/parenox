@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use super::{Function, Globals, Model, Signature};
 use crate::reader::{Form, Kind, Span};
-use crate::types::{ExtraFields, Field, MapType, Type};
+use crate::types::{ExtraFields, Field, MAX_TUPLE_ITEMS, MapType, Type};
 
 impl Model {
     pub(super) fn spec(
@@ -95,6 +95,16 @@ impl Model {
                             types.push(self.parse_type(&pair[1], visiting, globals));
                         }
                         Type::union(types)
+                    }
+                    Some("clojure.spec.alpha/tuple")
+                        if (2..=MAX_TUPLE_ITEMS + 1).contains(&xs.len()) =>
+                    {
+                        Type::Tuple(
+                            xs[1..]
+                                .iter()
+                                .map(|item| self.parse_type(item, visiting, globals))
+                                .collect(),
+                        )
                     }
                     Some("clojure.spec.alpha/map-of") if xs.len() == 3 => {
                         let key = self.parse_type(&xs[1], visiting, globals);

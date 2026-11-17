@@ -6,40 +6,122 @@ use crate::types::{MapSlot, MapType, Type};
 
 type KeyPath = Vec<(Type, Span)>;
 
+enum KeyPaths {
+    Single(KeyPath),
+    Alternatives(Vec<KeyPath>),
+}
+
+impl KeyPaths {
+    fn as_slice(&self) -> &[KeyPath] {
+        match self {
+            Self::Single(path) => std::slice::from_ref(path),
+            Self::Alternatives(paths) => paths,
+        }
+    }
+}
+
 impl Checker<'_> {
-    fn key_path(
+    fn key_paths(
         &mut self,
         form: &Form,
         env: &Env,
         name: &str,
         writing: bool,
-    ) -> Result<KeyPath, Type> {
-        let Some(keys) = form.vector() else {
-            self.unsupported(
-                form.span,
-                format!("{name} currently requires a vector expression as its key path"),
-            );
-            return Err(Type::Unknown);
-        };
-        if writing && !(1..=32).contains(&keys.len()) {
-            self.unsupported(
-                form.span,
-                format!("{name} currently supports paths of 1 to 32 keys"),
-            );
-            return Err(Type::Unknown);
+    ) -> Result<KeyPaths, Type> {
+        if let Some(keys) = form.vector() {
+            self.check_path_length(keys.len(), form.span, name, writing)?;
+            let path = keys
+                .iter()
+                .map(|form| {
+                    let key = self
+                        .literal_map_key(form)
+                        .or_else(|| self.read_map_key(form, env, name));
+                    match key {
+                        Some(ty) if !ty.contains_unknown() && ty != Type::Never => {
+                            Ok((ty, form.span))
+                        }
+                        Some(Type::Never) => Err(Type::Never),
+                        _ => Err(Type::Unknown),
+                    }
+                })
+                .collect::<Result<_, _>>()?;
+            return Ok(KeyPaths::Single(path));
         }
-        keys.iter()
-            .map(|form| {
-                let key = self
-                    .literal_map_key(form)
-                    .or_else(|| self.read_map_key(form, env, name));
-                match key {
-                    Some(ty) if !ty.contains_unknown() && ty != Type::Never => Ok((ty, form.span)),
-                    Some(Type::Never) => Err(Type::Never),
-                    _ => Err(Type::Unknown),
+        let inferred = self.infer(form, env).known;
+        if let Type::Union(parts) = inferred {
+            let alternatives = parts
+                .into_iter()
+                .map(|part| self.path_from_type(part, form.span, name, writing))
+                .collect::<Result<_, _>>()?;
+            Ok(KeyPaths::Alternatives(alternatives))
+        } else {
+            self.path_from_type(inferred, form.span, name, writing)
+                .map(KeyPaths::Single)
+        }
+    }
+
+    fn path_from_type(
+        &mut self,
+        ty: Type,
+        span: Span,
+        name: &str,
+        writing: bool,
+    ) -> Result<KeyPath, Type> {
+        let items: Box<[Type]> = match ty {
+            Type::Tuple(items) => items,
+            Type::MapEntry(items) => items,
+            Type::Vector(element) if *element == Type::Never => Box::new([]),
+            Type::Unknown | Type::Never => return Err(ty),
+            _ => {
+                self.unsupported(
+                    span,
+                    format!("{name} requires a vector path with known positions"),
+                );
+                return Err(Type::Unknown);
+            }
+        };
+        self.check_path_length(items.len(), span, name, writing)?;
+        items
+            .into_vec()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                if key.contains_unknown() || key == Type::Never {
+                    return Err(if key == Type::Never {
+                        Type::Never
+                    } else {
+                        Type::Unknown
+                    });
                 }
+                if !key.is_lookup_key() {
+                    self.unsupported(span, format!(
+                    "{name} analysis supports keyword and string keys; path item {} has type {}",
+                    index + 1,
+                    key.inferred(),
+                ));
+                    return Err(Type::Unknown);
+                }
+                Ok((key, span))
             })
             .collect()
+    }
+
+    fn check_path_length(
+        &mut self,
+        length: usize,
+        span: Span,
+        name: &str,
+        writing: bool,
+    ) -> Result<(), Type> {
+        if writing && !(1..=32).contains(&length) {
+            self.unsupported(
+                span,
+                format!("{name} currently supports paths of 1 to 32 keys"),
+            );
+            Err(Type::Unknown)
+        } else {
+            Ok(())
+        }
     }
 
     pub(in crate::checker) fn get_in(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
@@ -52,7 +134,7 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         }
         let value = self.infer(&xs[1], env);
-        let path = self.key_path(&xs[2], env, "get-in", false);
+        let path = self.key_paths(&xs[2], env, "get-in", false);
         let default = xs.get(3).map(|form| self.infer(form, env));
         match path {
             Ok(path) => {
@@ -60,9 +142,34 @@ impl Checker<'_> {
                     .vector()
                     .and_then(|keys| keys.first())
                     .and_then(|key| env.presence(&xs[1], key));
-                self.lookup_path(&value, &path, default.as_ref(), presence)
+                self.lookup_paths(&value, &path, default.as_ref(), presence)
             }
             Err(ty) => Value::new(ty),
+        }
+    }
+
+    fn lookup_paths(
+        &mut self,
+        value: &Value,
+        paths: &KeyPaths,
+        default: Option<&Value>,
+        presence: Option<bool>,
+    ) -> Value {
+        match paths {
+            KeyPaths::Single(path) => self.lookup_path(value, path, default, presence),
+            KeyPaths::Alternatives(paths) => {
+                let mut notes = Vec::new();
+                let types = paths.iter().map(|path| {
+                    let result = self.lookup_path(value, path, default, presence);
+                    for note in result.notes {
+                        if !notes.contains(&note) {
+                            notes.push(note);
+                        }
+                    }
+                    result.known
+                });
+                Value::with_notes(Type::union(types), notes)
+            }
         }
     }
 
@@ -116,7 +223,7 @@ impl Checker<'_> {
         };
         let target = self.infer(target, env);
         let path = if nested {
-            match self.key_path(key, env, name, true) {
+            match self.key_paths(key, env, name, true) {
                 Ok(path) => path,
                 Err(ty) => return Value::new(ty),
             }
@@ -127,10 +234,10 @@ impl Checker<'_> {
             if matches!(key_type, Type::Never | Type::Unknown) {
                 return Value::new(key_type);
             }
-            vec![(key_type, key.span)]
+            KeyPaths::Single(vec![(key_type, key.span)])
         };
-        let (last_key, old_span) = path.last().unwrap();
-        let old = self.lookup_path(&target, &path, None, presence);
+        let (last_key, old_span) = path.as_slice()[0].last().unwrap();
+        let old = self.lookup_paths(&target, &path, None, presence);
         let unknown = old.known.contains_unknown();
         let mut args = Vec::with_capacity(extra.len() + 1);
         args.push((old, *old_span));
@@ -141,13 +248,13 @@ impl Checker<'_> {
         for diagnostic in &mut self.diagnostics[start..] {
             if diagnostic.span == *old_span && diagnostic.code == "PNX2322" {
                 diagnostic.suggestions.clear();
-                let key = if last_key.is_literal_map_key() {
+                let key = if (!nested || key.vector().is_some()) && last_key.is_literal_map_key() {
                     last_key.to_string()
                 } else {
                     self.source[old_span.start.offset..old_span.end.offset].to_owned()
                 };
                 diagnostic.notes.push(format!(
-                    "The updater receives the old value at {key}, or Nil if the key is missing."
+                    "The updater receives the old value at {key}, or Nil if the entry is missing."
                 ));
                 diagnostic.help = Some("Handle the old value in the updater or ensure the field has the required type before updating it.".into());
             }
@@ -155,7 +262,7 @@ impl Checker<'_> {
         if unknown {
             return Value::new(Type::Unknown);
         }
-        Value::new(self.assoc_path(
+        Value::new(self.assoc_paths(
             target.known,
             &path,
             &value.known,
@@ -179,13 +286,13 @@ impl Checker<'_> {
             .and_then(|keys| keys.first())
             .and_then(|key| env.presence(&xs[1], key));
         let target = self.infer(&xs[1], env);
-        let path = self.key_path(&xs[2], env, "assoc-in", true);
+        let path = self.key_paths(&xs[2], env, "assoc-in", true);
         let value = self.infer(&xs[3], env);
         let path = match path {
             Ok(path) => path,
             Err(ty) => return Value::new(ty),
         };
-        Value::new(self.assoc_path(
+        Value::new(self.assoc_paths(
             target.known,
             &path,
             &value.known,
@@ -193,6 +300,25 @@ impl Checker<'_> {
             "assoc-in",
             presence,
         ))
+    }
+
+    fn assoc_paths(
+        &mut self,
+        target: Type,
+        paths: &KeyPaths,
+        value: &Type,
+        span: Span,
+        name: &str,
+        presence: Option<bool>,
+    ) -> Type {
+        match paths {
+            KeyPaths::Single(path) => self.assoc_path(target, path, value, span, name, presence),
+            KeyPaths::Alternatives(paths) => Type::union(
+                paths
+                    .iter()
+                    .map(|path| self.assoc_path(target.clone(), path, value, span, name, presence)),
+            ),
+        }
     }
 
     fn assoc_path(

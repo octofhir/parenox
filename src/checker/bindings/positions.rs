@@ -1,4 +1,4 @@
-//! Positional bindings for inferred map entries.
+//! Positional bindings for vectors and map entries.
 use super::super::{Checker, Env, Value};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
@@ -32,7 +32,7 @@ impl Checker<'_> {
                     continue;
                 }
             }
-            let ty = value.known.entry_item(index, true).unwrap_or_else(|| {
+            let ty = value.known.sequential_item(index).unwrap_or_else(|| {
                 if !reported_unsupported {
                     self.error(
                         "PNX9001",

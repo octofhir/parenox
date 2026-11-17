@@ -13,7 +13,7 @@ pub(crate) use model::{Globals, Model};
 use std::collections::BTreeMap;
 
 use crate::reader::{Form, Kind, Span};
-use crate::types::{ExtraFields, Field, MapType, Type};
+use crate::types::{ExtraFields, Field, MAX_TUPLE_ITEMS, MapType, Type};
 use crate::{Diagnostic, Suggestion};
 
 impl Model {
@@ -117,7 +117,7 @@ impl Checker<'_> {
             return; // The originating unsupported/unresolved form has its own diagnostic.
         }
         if !actual.known.subtype_of(expected) {
-            let reported_type = if expected.constrains_literal_values() {
+            let reported_type = if expected.requires_precise_type() {
                 &actual.known
             } else {
                 &actual.ty
@@ -224,6 +224,9 @@ impl Checker<'_> {
                     Value::new(Type::Unknown)
                 }
             }
+            Kind::Vector(xs) if xs.len() <= MAX_TUPLE_ITEMS => Value::new(Type::Tuple(
+                xs.iter().map(|x| self.infer(x, env).known).collect(),
+            )),
             Kind::Vector(xs) | Kind::Set(xs) => {
                 let types = xs
                     .iter()

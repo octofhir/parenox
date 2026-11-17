@@ -4,6 +4,8 @@ pub use maps::{ExtraFields, Field, MapSlot, MapType};
 use std::collections::BTreeSet;
 use std::fmt;
 
+pub const MAX_TUPLE_ITEMS: usize = 32;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type {
     Unknown,
@@ -21,6 +23,7 @@ pub enum Type {
     Map(MapType),
     MapEntry(Box<[Type; 2]>),
     Vector(Box<Type>),
+    Tuple(Box<[Type]>),
     Set(Box<Type>),
     Function(Vec<Type>, Box<Type>),
     Union(Vec<Type>),
@@ -39,21 +42,24 @@ impl Type {
                 Type::MapEntry(Box::new([key.inferred(), value.inferred()]))
             }
             Type::Vector(t) => Type::Vector(Box::new(t.inferred())),
+            Type::Tuple(items) => {
+                Type::Vector(Box::new(Type::union(items.iter().map(Type::inferred))))
+            }
             Type::Set(t) => Type::Set(Box::new(t.inferred())),
             Type::Map(map) => Type::Map(map.inferred()),
             t => t.clone(),
         }
     }
 
-    pub fn constrains_literal_values(&self) -> bool {
+    pub fn requires_precise_type(&self) -> bool {
         match self {
-            Type::Str(_) | Type::Char(_) => true,
-            Type::Union(xs) => xs.iter().any(Type::constrains_literal_values),
-            Type::MapEntry(items) => items.iter().any(Type::constrains_literal_values),
-            Type::Vector(t) | Type::Set(t) => t.constrains_literal_values(),
-            Type::Map(map) => map.any_type(Type::constrains_literal_values),
+            Type::Str(_) | Type::Char(_) | Type::Tuple(_) => true,
+            Type::Union(xs) => xs.iter().any(Type::requires_precise_type),
+            Type::MapEntry(items) => items.iter().any(Type::requires_precise_type),
+            Type::Vector(t) | Type::Set(t) => t.requires_precise_type(),
+            Type::Map(map) => map.any_type(Type::requires_precise_type),
             Type::Function(args, ret) => {
-                args.iter().any(Type::constrains_literal_values) || ret.constrains_literal_values()
+                args.iter().any(Type::requires_precise_type) || ret.requires_precise_type()
             }
             _ => false,
         }
@@ -159,18 +165,30 @@ impl Type {
         }
     }
 
-    /// Project an entry by position. Sequential binding also accepts nil.
-    pub fn entry_item(&self, index: usize, allow_nil: bool) -> Option<Type> {
+    pub fn entry_item(&self, index: usize) -> Option<Type> {
         match self {
             Type::MapEntry(items) => Some(items.get(index).cloned().unwrap_or(Type::Nil)),
             Type::Never | Type::Unknown => Some(self.clone()),
-            Type::Nil if allow_nil => Some(Type::Nil),
             Type::Union(parts) => parts
                 .iter()
-                .map(|part| part.entry_item(index, allow_nil))
+                .map(|part| part.entry_item(index))
                 .collect::<Option<Vec<_>>>()
                 .map(Type::union),
             _ => None,
+        }
+    }
+
+    pub fn sequential_item(&self, index: usize) -> Option<Type> {
+        match self {
+            Type::Tuple(items) => Some(items.get(index).cloned().unwrap_or(Type::Nil)),
+            Type::Vector(element) => Some((**element).clone().nilable()),
+            Type::Nil => Some(Type::Nil),
+            Type::Union(parts) => parts
+                .iter()
+                .map(|part| part.sequential_item(index))
+                .collect::<Option<Vec<_>>>()
+                .map(Type::union),
+            other => other.entry_item(index),
         }
     }
 
@@ -189,6 +207,13 @@ impl Type {
                 a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
             }
             (Type::MapEntry(items), Type::Vector(e)) => items.iter().all(|item| item.subtype_of(e)),
+            (Type::Tuple(items), Type::Vector(e)) => items.iter().all(|item| item.subtype_of(e)),
+            (Type::Tuple(a), Type::Tuple(e)) => {
+                a.len() == e.len() && a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
+            }
+            (Type::MapEntry(a), Type::Tuple(e)) => {
+                e.len() == 2 && a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
+            }
             (Type::Vector(a), Type::Vector(e)) | (Type::Set(a), Type::Set(e)) => a.subtype_of(e),
             (Type::Function(args, ret), Type::Function(e_args, e_ret)) => {
                 args.len() == e_args.len()
@@ -205,6 +230,7 @@ impl Type {
             Type::Unknown => true,
             Type::Union(xs) => xs.iter().any(Type::contains_unknown),
             Type::MapEntry(items) => items.iter().any(Type::contains_unknown),
+            Type::Tuple(items) => items.iter().any(Type::contains_unknown),
             Type::Vector(t) | Type::Set(t) => t.contains_unknown(),
             Type::Map(m) => m.any_type(Type::contains_unknown),
             Type::Function(args, ret) => {
@@ -241,6 +267,10 @@ impl fmt::Display for Type {
             Type::Key(s) => write!(f, "{s}"),
             Type::MapEntry(items) => write!(f, "MapEntry<{}, {}>", items[0], items[1]),
             Type::Vector(t) => write!(f, "Vector<{t}>"),
+            Type::Tuple(items) => {
+                let items = items.iter().map(ToString::to_string).collect::<Vec<_>>();
+                write!(f, "Tuple<{}>", items.join(", "))
+            }
             Type::Set(t) => write!(f, "Set<{t}>"),
             Type::Function(args, ret) => {
                 let args = args.iter().map(ToString::to_string).collect::<Vec<_>>();

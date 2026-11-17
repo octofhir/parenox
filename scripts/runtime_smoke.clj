@@ -351,3 +351,21 @@
            (try (demo.dynamic-paths-bad/add-retail-tier {"SKU-17" 140} "SKU-17") :unexpected-success
                 (catch ClassCastException _ :throws))))
 (println "Clojure/JVM dynamic paths: 9 assertions passed")
+
+(load-file "examples/ordered_paths.clj")
+(load-file "examples/ordered_paths_bad.clj")
+(assert (= 140 (demo.ordered-paths/retail-quote {"SKU-17" {:retail 140}} "SKU-17")))
+(assert (= 100 (demo.ordered-paths/quote-price {} ["SKU-17" :wholesale] 100)))
+(assert (= {"SKU-17" {:retail 150 :wholesale 80} "SKU-18" {:retail 25}}
+           (demo.ordered-paths/adjust-both-prices
+             {"SKU-17" {:retail 140} "SKU-18" {:retail 25}} "SKU-17" 80 10)))
+(assert (= "SKU-17: 140" (demo.ordered-paths/price-label ["SKU-17" 140])))
+(assert (clojure.spec.alpha/valid? :demo.ordered-paths/route ["SKU-17" :retail]))
+(assert (not (clojure.spec.alpha/valid? :demo.ordered-paths/route [:retail "SKU-17"])))
+(assert (= 2 (let [path (if false [:east :retail] [:west :wholesale])]
+               (get-in {:east {:retail 1} :west {:wholesale 2}} path))))
+(assert (= [:retail 140 nil] (let [[k v missing] [:retail 140]] [k v missing])))
+(assert (= :throws
+           (try (demo.ordered-paths-bad/increment-quantity) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(println "Clojure/JVM ordered paths: 9 assertions passed")

@@ -118,6 +118,7 @@ fn element_type(collection: Type) -> Result<Type, CollectionError> {
             .map(Type::union),
         Type::Map(map) => map.into_entry_type().ok_or(CollectionError::OpenMap),
         Type::MapEntry(items) => Ok(Type::union(*items)),
+        Type::Tuple(items) => Ok(Type::union(items.into_vec())),
         _ => Err(CollectionError::NotSeqable),
     }
 }
