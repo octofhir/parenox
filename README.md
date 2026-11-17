@@ -68,6 +68,7 @@ just vectors pretty always  # mapv and filterv with colored callback diagnostics
 just entries pretty always  # map entry pipelines and diagnostics
 just dictionaries pretty always  # map-of contracts and diagnostics
 just map-keys pretty always  # string and dynamic map keys
+just dynamic-paths pretty always  # nested maps with dynamic path segments
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -320,26 +321,28 @@ The fallback runs in the outer scope and defaults to nil. Run `just guards`
 to see the result type when no fallback is supplied and a type error when
 `if-some` passes `false` into a numeric call.
 
-`get-in` and `assoc-in` accept vectors of literal keyword or string keys.
-`get-in` applies its fallback when a path is absent and preserves a present terminal nil or false.
-`assoc-in` creates missing or nil intermediate maps, preserves sibling fields
-and flags scalar parents. The update supports paths of 1 to 32 keys. Runtime
-paths and numeric indices report an analysis gap. Run `just paths` to see both
-operations and their diagnostics.
+`get-in`, `assoc-in`, and `update-in` accept vector expressions with keyword
+or string keys, including computed segments such as `[sku tier]`. A missing
+path uses the `get-in` fallback. A present terminal nil or false is preserved.
+Writes create missing or nil intermediate maps, preserve sibling fields,
+and report scalar parents. Write paths support 1 to 32 keys. Paths supplied
+through a variable and numeric indices report an analysis gap. Run
+`just dynamic-paths pretty always` for examples and diagnostics.
 
 `contains?` checks keyword and string keys. A guard such as `(contains? patient :name)`
 refines a local map in each branch. The successful branch can read a declared
 optional field without adding nil for absence. The failure branch lets `get`
 or `get-in` use the fallback. A field declared nilable still accepts explicit
 nil, and the type of an undeclared field in an open map remains unknown.
-With `(contains? prices sku)`, the guard also refines a direct lookup using the
-same two local bindings. Rebinding either local removes the fact.
+With `(contains? prices sku)`, the guard also refines a direct lookup or the
+first segment of a nested operation using the same two bindings. Rebinding
+either local removes the fact.
 Run `just presence` for examples and source diagnostics.
 
-`update` accepts a keyword or string expression. `update-in` accepts a vector
-of 1 to 32 literal keyword or string keys. The updater receives the old value
-first, followed by any extra arguments. An absent entry passes nil. The updater's result becomes the
-new field type. A dynamic key may overlap a field, so Parenox combines the
+`update` accepts a keyword or string expression, and `update-in` uses a key
+path. The updater receives the old value first, followed by any extra
+arguments. An absent entry passes nil. The updater's result becomes the new
+field type. A dynamic key may overlap a field, so Parenox combines the
 old and new value types for that field. Supported updaters
 include built-in functions, functions with signatures, and directly named
 private helpers. Inline `fnil` replaces nil arguments and preserves false.
@@ -382,8 +385,8 @@ use the value type if the key can occur and preserve missing-key defaults.
 `contains?` narrows presence, and `assoc` and `update` track the updated
 entry while retaining the types of the remaining entries.
 Run `just dictionaries pretty always` for contracts and
-`just map-keys pretty always` for dynamic key examples. Options on `s/map-of`,
-non-keyword and non-string lookup keys, and dynamic path segments report gaps.
+`just map-keys pretty always` for dynamic key examples. Options on `s/map-of` and lookup
+keys outside keywords and strings report gaps.
 
 Clojure 1.13 checked lookups support keyword and string keys in `req!` and
 explicit map bindings, plus `:keys!` and its namespaced directives.
@@ -429,7 +432,7 @@ inferred helper work is included in the check of their callers.
 | Spec forms | `s/keys`, `s/map-of`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
-| Data operations | Keyword calls, string and keyword lookups and updates, literal key paths, nested map destructuring and checked keys |
+| Data operations | Keyword calls, string and keyword lookups and updates, computed keys in vector paths, nested map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |
 | Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |

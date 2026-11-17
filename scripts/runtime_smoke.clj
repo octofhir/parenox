@@ -331,3 +331,23 @@
                :demo.map-keys/prices
                (demo.map-keys-bad/mark-pending {"SKU-17" 120} "SKU-17"))))
 (println "Clojure/JVM map keys: 11 assertions passed")
+
+(load-file "examples/dynamic_paths.clj")
+(load-file "examples/dynamic_paths_bad.clj")
+(assert (= 140 (demo.dynamic-paths/quote-price {"SKU-17" {:retail 140}} "SKU-17" :retail 100)))
+(assert (= 100 (demo.dynamic-paths/quote-price {} "SKU-17" :retail 100)))
+(assert (= {"SKU-17" {:retail 140 :wholesale 80}}
+           (demo.dynamic-paths/reprice {"SKU-17" {:wholesale 80}} "SKU-17" 140)))
+(assert (= {"SKU-17" {:retail 20}} (demo.dynamic-paths/adjust-price {} "SKU-17" 20)))
+(assert (= {"SKU-17" {:price 141 :stock 3}}
+           (demo.dynamic-paths/raise-current-price {"SKU-17" {:price 140 :stock 3}} "SKU-17")))
+(assert (= {} (demo.dynamic-paths/raise-current-price {} "SKU-17")))
+(assert (nil? (let [sku "SKU-17" tier :retail]
+                (get-in {"SKU-17" {:retail nil}} [sku tier] 100))))
+(assert (= :throws
+           (try (demo.dynamic-paths-bad/raise-price {} "SKU-17") :unexpected-success
+                (catch NullPointerException _ :throws))))
+(assert (= :throws
+           (try (demo.dynamic-paths-bad/add-retail-tier {"SKU-17" 140} "SKU-17") :unexpected-success
+                (catch ClassCastException _ :throws))))
+(println "Clojure/JVM dynamic paths: 9 assertions passed")

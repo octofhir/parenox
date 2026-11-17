@@ -130,3 +130,8 @@ dictionaries format="pretty" color="auto": build
 map-keys format="pretty" color="auto": build
     @./target/release/parenox check examples/map_keys.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/map_keys_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check nested operations using computed keys and show two deliberate errors.
+dynamic-paths format="pretty" color="auto": build
+    @./target/release/parenox check examples/dynamic_paths.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/dynamic_paths_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

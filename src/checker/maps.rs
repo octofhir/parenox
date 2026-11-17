@@ -1,5 +1,6 @@
 //! Map lookup, path updates and key presence.
 mod keys;
+mod paths;
 use std::collections::BTreeMap;
 
 use super::{Checker, Env, Value, nil_part};
@@ -199,180 +200,6 @@ impl Checker<'_> {
         }
     }
 
-    fn literal_key_path(&mut self, form: &Form, name: &str) -> Option<Vec<(Type, Span)>> {
-        if let Some(path) = form.vector()
-            && let Some(keys) = path
-                .iter()
-                .map(|key| self.literal_map_key(key).map(|ty| (ty, key.span)))
-                .collect()
-        {
-            return Some(keys);
-        }
-        self.unsupported(
-            form.span,
-            format!("{name} currently requires a vector of literal keyword or string keys"),
-        );
-        None
-    }
-
-    pub(super) fn get_in(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
-        if !(3..=4).contains(&xs.len()) {
-            self.error(
-                "PNX2554",
-                span,
-                "get-in requires a target, key path and optional default",
-            );
-            return Value::new(Type::Unknown);
-        }
-        let value = self.infer(&xs[1], env);
-        let default = xs.get(3).map(|form| self.infer(form, env));
-        let Some(path) = self.literal_key_path(&xs[2], "get-in") else {
-            return Value::new(Type::Unknown);
-        };
-        self.lookup_path(&value, &path, default.as_ref())
-    }
-
-    fn lookup_path(
-        &mut self,
-        value: &Value,
-        path: &[(Type, Span)],
-        default: Option<&Value>,
-    ) -> Value {
-        let mut result = None;
-        // Intermediate misses become Nil. At the last key an absent entry uses
-        // the caller's fallback, while a present Nil value is preserved.
-        for (index, (key, span)) in path.iter().enumerate() {
-            let fallback = if index + 1 == path.len() {
-                default
-            } else {
-                None
-            };
-            result = Some(self.lookup_value(
-                result.as_ref().unwrap_or(value),
-                key,
-                Lookup::Path(fallback),
-                *span,
-            ));
-        }
-        result.unwrap_or_else(|| value.clone())
-    }
-
-    pub(super) fn update(&mut self, xs: &[Form], span: Span, env: &Env, name: &str) -> Value {
-        let [_, target, key, updater, extra @ ..] = xs else {
-            self.error(
-                "PNX2554",
-                span,
-                format!("{name} requires a target, key or path, and updater"),
-            );
-            return Value::new(Type::Unknown);
-        };
-        let target_span = target.span;
-        let presence = env.presence(target, key);
-        let target = self.infer(target, env);
-        let path = if name.ends_with("-in") {
-            let Some(path) = self.literal_key_path(key, name) else {
-                return Value::new(Type::Unknown);
-            };
-            if path.is_empty() || path.len() > 32 {
-                return self.unsupported(
-                    key.span,
-                    "update-in currently supports paths of 1 to 32 keys",
-                );
-            }
-            path
-        } else {
-            let Some(key_type) = self.read_map_key(key, env, name) else {
-                return Value::new(Type::Unknown);
-            };
-            if matches!(key_type, Type::Never | Type::Unknown) {
-                return Value::new(key_type);
-            }
-            vec![(key_type, key.span)]
-        };
-        let (last_key, old_span) = path.last().unwrap();
-        let old = if name.ends_with("-in") || presence.is_none() {
-            self.lookup_path(&target, &path, None)
-        } else {
-            self.lookup_with_presence(&target, last_key, None, *old_span, presence)
-        };
-        let unknown = old.known.contains_unknown();
-        let mut args = Vec::with_capacity(extra.len() + 1);
-        args.push((old, *old_span));
-        args.extend(extra.iter().map(|arg| (self.infer(arg, env), arg.span)));
-
-        let start = self.diagnostics.len();
-        let value = self.call_form(updater, args, span, env, true);
-        for diagnostic in &mut self.diagnostics[start..] {
-            if diagnostic.span == *old_span && diagnostic.code == "PNX2322" {
-                diagnostic.suggestions.clear();
-                diagnostic.notes.push(format!("The updater receives the old value at {last_key}, or Nil if the key is missing."));
-                diagnostic.help = Some("Handle the old value in the updater or ensure the field has the required type before updating it.".into());
-            }
-        }
-        if unknown {
-            return Value::new(Type::Unknown);
-        }
-        Value::new(self.assoc_path(target.known, &path, &value.known, target_span, name))
-    }
-
-    pub(super) fn assoc_in(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
-        if xs.len() != 4 {
-            self.error(
-                "PNX2554",
-                span,
-                "assoc-in requires a target, key path and value",
-            );
-            return Value::new(Type::Unknown);
-        }
-        let target = self.infer(&xs[1], env);
-        let value = self.infer(&xs[3], env);
-        let Some(path) = self.literal_key_path(&xs[2], "assoc-in") else {
-            return Value::new(Type::Unknown);
-        };
-        if path.is_empty() || path.len() > 32 {
-            return self.unsupported(
-                xs[2].span,
-                "assoc-in currently supports paths of 1 to 32 keys",
-            );
-        }
-        Value::new(self.assoc_path(target.known, &path, &value.known, xs[1].span, "assoc-in"))
-    }
-
-    fn assoc_path(
-        &mut self,
-        target: Type,
-        path: &[(Type, Span)],
-        value: &Type,
-        span: Span,
-        name: &str,
-    ) -> Type {
-        if let Type::Union(parts) = target {
-            return Type::union(
-                parts
-                    .into_iter()
-                    .map(|part| self.assoc_path(part, path, value, span, name)),
-            );
-        }
-        let mut map = match self.assoc_map(target, span, name) {
-            Ok(map) => map,
-            Err(ty) => return ty,
-        };
-        let (key, key_span) = &path[0];
-        let ty = if path.len() == 1 {
-            value.clone()
-        } else {
-            let parent = match map.slot(key) {
-                MapSlot::Present(ty) => ty.clone(),
-                MapSlot::Optional(ty) => ty.clone().nilable(),
-                MapSlot::Absent => Type::Nil,
-                MapSlot::Undeclared => self.undeclared_key(key, *key_span),
-            };
-            self.assoc_path(parent, &path[1..], value, *key_span, name)
-        };
-        map.associate(key, &ty);
-        Type::Map(map)
-    }
-
     fn assoc_map(&mut self, target: Type, span: Span, name: &str) -> Result<MapType, Type> {
         match target {
             Type::Map(map) => Ok(map),
@@ -382,11 +209,12 @@ impl Checker<'_> {
             }),
             Type::Unknown | Type::Never => Err(target),
             _ => {
-                self.error(
-                    "PNX2322",
+                self.diagnostics.push(Diagnostic::type_mismatch(
                     span,
-                    format!("{name} expects a map or Nil, got {}", target.inferred()),
-                );
+                    name,
+                    "Map | Nil".into(),
+                    target.inferred().to_string(),
+                ));
                 Err(Type::Unknown)
             }
         }

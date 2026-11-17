@@ -14,13 +14,16 @@ impl Checker<'_> {
     }
 
     pub(super) fn read_map_key(&mut self, form: &Form, env: &Env, name: &str) -> Option<Type> {
-        let key = self.infer(form, env).known;
-        if key.is_lookup_key() {
-            Some(key)
+        let key = self.infer(form, env);
+        if key.known.is_lookup_key() {
+            Some(key.known)
         } else {
             self.unsupported(
                 form.span,
-                format!("{name} currently supports keyword and string keys"),
+                format!(
+                    "{name} analysis supports keyword and string keys, got {}",
+                    key.ty
+                ),
             );
             None
         }

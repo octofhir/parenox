@@ -62,7 +62,11 @@ fn nested_assoc_creates_maps_and_preserves_unmodified_fields() {
 
 #[test]
 fn nested_paths_report_unsupported_shapes_and_open_map_intermediates() {
-    for expression in ["(get-in {} [0])", "(assoc-in {} [] 1)"] {
+    for expression in [
+        "(get-in {} [0])",
+        "(assoc-in {} [] 1)",
+        "(let [path [:a]] (get-in {:a 1} path))",
+    ] {
         let report = check(expression, "number?");
         assert!(!report.ok && !report.complete, "{report:#?}");
         assert_eq!(report.diagnostics[0].code, "PNX9001");
@@ -77,4 +81,76 @@ fn nested_paths_report_unsupported_shapes_and_open_map_intermediates() {
     let report = Session::default().check("open.clj", source);
     assert!(!report.ok && !report.complete, "{report:#?}");
     assert_eq!(report.diagnostics[0].code, "PNX9003");
+}
+
+#[test]
+fn checks_dynamic_catalog_paths_and_highlights_the_failing_segment() {
+    let mut session = Session::default();
+    let report = session.check(
+        "dynamic_paths.clj",
+        include_str!("../examples/dynamic_paths.clj"),
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let source = include_str!("../examples/dynamic_paths_bad.clj");
+    let report = session.check("dynamic_paths_bad.clj", source);
+    assert!(!report.ok && report.complete, "{report:#?}");
+    let [callback, parent] = &report.diagnostics[..] else {
+        panic!("{report:#?}");
+    };
+    let fragment = |d: &parenox::Diagnostic| &source[d.span.start.offset..d.span.end.offset];
+    assert_eq!(fragment(callback), ":retail");
+    assert_eq!(callback.actual.as_deref(), Some("Nil | Number"));
+    assert_eq!(fragment(parent), "sku");
+    assert_eq!(parent.expected.as_deref(), Some("Map | Nil"));
+    assert_eq!(parent.actual.as_deref(), Some("Number"));
+}
+
+#[test]
+fn dynamic_paths_preserve_nil_and_use_the_guard_for_the_first_segment() {
+    let cases: [(&str, &str, &str, &[&str]); 3] = [
+        (
+            "(s/map-of string? (s/map-of keyword? (s/nilable number?)))",
+            "number?",
+            "(get-in m [(str sku) :price] 0)",
+            &["PNX2322"],
+        ),
+        (
+            r#"(s/map-of #{"known"} (s/map-of keyword? number?))"#,
+            "boolean?",
+            "(if (contains? m sku) false (get-in m [sku :price] false))",
+            &[],
+        ),
+        (
+            "(s/map-of string? (s/map-of keyword? number?))",
+            "number?",
+            r#"(get-in m [sku (inc "bad")] 0)"#,
+            &["PNX9001", "PNX2322"],
+        ),
+    ];
+    for (argument, ret, expression, expected) in cases {
+        let source = format!(
+            "(ns demo (:require [clojure.spec.alpha :as s]))
+             (defn f {{:t/sig '[{argument} string? :-> {ret}]}} [m sku] {expression})"
+        );
+        let report = Session::default().check("paths.clj", &source);
+        let codes: Vec<_> = report.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert_eq!(codes, expected, "{expression}: {report:#?}");
+        assert_eq!(
+            report.complete,
+            !expected.contains(&"PNX9001"),
+            "{report:#?}"
+        );
+    }
+
+    let source = "(defn f {:t/sig '[number? :-> number?]} [sku] (get-in {} [:catalog sku] 0))";
+    let report = Session::default().check("paths.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    let [diagnostic] = &report.diagnostics[..] else {
+        panic!("{report:#?}");
+    };
+    let span = diagnostic.span;
+    assert_eq!(&source[span.start.offset..span.end.offset], "sku");
+    assert_eq!(diagnostic.code, "PNX9001");
+    assert!(diagnostic.message.contains("got Number"), "{report:#?}");
 }
