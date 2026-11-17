@@ -6,13 +6,13 @@ default:
 build:
     cargo build --locked --release
 
-# Check a file or directory: just check path [pretty|plain|json].
-check path="examples/good.clj" format="pretty": build
-    @./target/release/parenox check {{quote(path)}} --format {{quote(format)}}
+# Check a file or directory: just check path [pretty|plain|json] [auto|always|never].
+check path="examples/good.clj" format="pretty" color="auto": build
+    @./target/release/parenox check {{quote(path)}} --format {{quote(format)}} --color {{quote(color)}}
 
 # Show the three deliberate clinic errors; diagnostic exit 1 is expected.
-errors format="pretty": build
-    @./target/release/parenox check examples/clinic --externs examples/clinic/externs.edn --format {{quote(format)}} || test "$?" -eq 1
+errors format="pretty" color="auto": build
+    @./target/release/parenox check examples/clinic --externs examples/clinic/externs.edn --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
 
 # Check the passing single-file example.
 good: build
@@ -107,6 +107,6 @@ presence format="pretty": build
     @./target/release/parenox check examples/presence_bad.clj --format {{quote(format)}} || test "$?" -eq 1
 
 # Check update and update-in, then show callback errors at the updated keys.
-updates format="pretty": build
-    @./target/release/parenox check examples/updates.clj --format {{quote(format)}}
-    @./target/release/parenox check examples/updates_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+updates format="pretty" color="auto": build
+    @./target/release/parenox check examples/updates.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/updates_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

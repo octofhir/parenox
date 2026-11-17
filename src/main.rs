@@ -23,7 +23,8 @@ Project requests: {\"id\":1,\"files\":[{\"path\":\"a.clj\",\"source\":\"...\"}],
 Directories are checked recursively as one project; externs contain declared library contracts.
 check exits 0 on success, 1 on diagnostics, 2 on I/O or usage errors.
 Default format: pretty (stderr). plain and json use stdout; --json aliases --format json.
-Color defaults to auto; NO_COLOR and TERM=dumb disable automatic color.
+Color defaults to auto. NO_COLOR disables auto styling; CLICOLOR_FORCE can force it.
+Without CLICOLOR_FORCE, auto requires a terminal and honors TERM=dumb.
 Positions use 1-based Unicode scalar columns and 0-based UTF-8 byte offsets.
 ";
 
@@ -73,6 +74,7 @@ fn check(args: &[String]) -> Result<u8, String> {
         return Err(HELP.into());
     }
     let files = read_sources(&options.paths)?;
+    let color = options.format == Format::Pretty && options.color.enabled();
     let externs = options
         .externs
         .as_ref()
@@ -87,16 +89,16 @@ fn check(args: &[String]) -> Result<u8, String> {
         .transpose()?;
     if files.len() == 1 && externs.is_none() {
         let (path, source) = files.first_key_value().unwrap();
+        if options.format == Format::Pretty {
+            eprint!("{}", output::checking(&format!("`{path}`"), color));
+        }
         let report = Session::default().check(path, source);
         match options.format {
             Format::Json => println!(
                 "{}",
                 serde_json::to_string(&report).map_err(|e| e.to_string())?
             ),
-            Format::Pretty => eprint!(
-                "{}",
-                output::pretty(&report, source, options.color.enabled())
-            ),
+            Format::Pretty => eprint!("{}", output::pretty(&report, source, color)),
             Format::Plain => print!("{}", output::plain(&report)),
         }
         return Ok(u8::from(!report.ok));
@@ -105,6 +107,14 @@ fn check(args: &[String]) -> Result<u8, String> {
         .iter()
         .map(|(path, source)| Source { path, source })
         .collect();
+    let target = format!(
+        "project ({} source file{})",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" }
+    );
+    if options.format == Format::Pretty {
+        eprint!("{}", output::checking(&target, color));
+    }
     let result =
         Session::default().check_project(&sources, externs.as_ref().map(Snapshot::as_source));
     if options.format == Format::Json {
@@ -127,23 +137,22 @@ fn check(args: &[String]) -> Result<u8, String> {
             match options.format {
                 Format::Pretty => eprint!(
                     "{}",
-                    output::pretty(report, source, options.color.enabled())
+                    output::diagnostics(&report.path, source, &report.diagnostics, color)
                 ),
                 Format::Plain => print!("{}", output::plain(report)),
                 Format::Json => unreachable!(),
             }
         }
-        let summary = format!(
-            "Project: {} source files, {} checked, {} reused, {:.3} ms",
-            files.len(),
-            result.stats.checked_functions,
-            result.stats.reused_functions,
-            result.stats.elapsed_us as f64 / 1000.0
-        );
         if options.format == Format::Pretty {
-            eprintln!("{summary}");
+            eprint!("{}", output::project_summary(&result, &target, color));
         } else {
-            println!("{summary}");
+            println!(
+                "Project: {} source files, {} checked, {} reused, {:.3} ms",
+                files.len(),
+                result.stats.checked_functions,
+                result.stats.reused_functions,
+                result.stats.elapsed_us as f64 / 1000.0
+            );
         }
     }
     Ok(u8::from(!result.ok))
@@ -206,9 +215,11 @@ impl Color {
             Color::Always => true,
             Color::Never => false,
             Color::Auto => {
-                io::stderr().is_terminal()
-                    && env::var_os("NO_COLOR").is_none()
-                    && env::var_os("TERM").is_none_or(|term| term != "dumb")
+                env::var_os("NO_COLOR").is_none()
+                    && (env::var_os("CLICOLOR_FORCE")
+                        .is_some_and(|value| !value.is_empty() && value != "0")
+                        || (io::stderr().is_terminal()
+                            && env::var_os("TERM").is_none_or(|term| term != "dumb")))
             }
         }
     }

@@ -17,6 +17,8 @@ pub struct Diagnostic {
     pub severity: &'static str,
     pub span: Span,
     pub message: String,
+    #[serde(skip)]
+    pub(crate) headline: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,6 +53,7 @@ impl Diagnostic {
             severity: "error",
             span,
             message: message.into(),
+            headline: None,
             expected: None,
             actual: None,
             notes: Vec::new(),

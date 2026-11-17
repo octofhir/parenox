@@ -51,6 +51,7 @@ just                 # list commands
 just errors          # three clinic errors with highlighted source
 just errors plain
 just errors json
+just errors pretty always  # force color in a captured terminal
 just good            # passing example
 just syntax          # inspect source-preserving syntax
 just reader          # metadata, characters and tagged EDN
@@ -73,11 +74,11 @@ The second single-file example deliberately fails with three type errors. Defaul
 shows source, highlighted expressions, expected/found types, and proposed diffs:
 
 ```text
-error[PNX2322]: Argument 1: expected Number, got String
+error[PNX2322]: Argument 1: mismatched types
   --> examples/bad.clj:27:14
    |
 27 |   (increment "not a number"))
-   |              ^^^^^^^^^^^^^^ this expression has type `String`
+   |              ^^^^^^^^^^^^^^ expected `Number`, found `String`
 ```
 
 ```sh
@@ -87,8 +88,12 @@ parenox check examples/bad.clj --color always
 ```
 
 Use the built binary's full path if it is not on `PATH`. Pretty output goes to
-stderr; plain and JSON go to stdout. Colors are automatic in terminals and
-respect `NO_COLOR` and `TERM=dumb`. `--color always|never` overrides auto.
+stderr. Plain and JSON go to stdout. Pretty output uses Cargo-style checking
+and finish lines, red errors, blue source gutters, cyan patch help and
+red/green edits. A project check prints a single final summary.
+Color is automatic in a terminal. In a pipe, `CLICOLOR_FORCE=1` enables ANSI
+unless `NO_COLOR` is set. `TERM=dumb` disables terminal auto-detection.
+`--color always|never` takes precedence, including in `just errors pretty always`.
 `--json` remains an alias for `--format json`.
 
 Exit codes: **0** successful check, **1** diagnostics, **2** usage or I/O failure.

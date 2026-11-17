@@ -67,11 +67,8 @@ fn default_output_shows_cargo_style_source_and_suggested_edit_on_stderr() {
         "{text}"
     );
     assert!(text.contains("due to 3 previous errors"), "{text}");
-    assert!(
-        text.contains("Argument 1: expected Number, got String"),
-        "{text}"
-    );
-    assert!(text.contains("this expression has type `String`"), "{text}");
+    assert!(text.contains("Argument 1: mismatched types"), "{text}");
+    assert!(text.contains("expected `Number`, found `String`"), "{text}");
     assert!(!text.contains('\u{1b}'));
 }
 
@@ -92,11 +89,50 @@ fn pretty_can_force_color_or_disable_it_explicitly() {
         let text = String::from_utf8(output.stderr).unwrap();
         assert_eq!(text.contains('\u{1b}'), colored, "{text}");
         if colored {
-            assert!(
-                text.contains("31m"),
-                "Expected red error highlighting: {text}"
-            );
+            for part in [
+                "\x1b[1m\x1b[92m    Checking\x1b[0m",
+                "\x1b[1m\x1b[91merror[PNX2322]\x1b[0m\x1b[1m:",
+                "\x1b[1m\x1b[94m--> ",
+                "\x1b[1m\x1b[91m^^^^^^^^^^^^^^^",
+                "\x1b[1m\x1b[96mhelp",
+                "\x1b[92m(or ",
+                "\x1b[1m\x1b[91merror\x1b[0m\x1b[1m: could not check",
+            ] {
+                assert!(text.contains(part), "Missing {part:?} in {text:?}");
+            }
         }
+    }
+}
+
+#[test]
+fn project_pretty_reports_a_single_colored_summary_when_forced_in_a_pipe() {
+    for no_color in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_parenox"));
+        command
+            .args([
+                "check",
+                "examples/clinic",
+                "--externs",
+                "examples/clinic/externs.edn",
+            ])
+            .env("TERM", "dumb")
+            .env("CLICOLOR_FORCE", "1")
+            .env_remove("NO_COLOR");
+        if no_color {
+            command.env("NO_COLOR", "1");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let text = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(text.contains('\u{1b}'), !no_color);
+        assert_eq!(text.matches("Checking").count(), 1);
+        assert_eq!(text.matches("could not check").count(), 1);
+        assert!(
+            text.contains("project (4 source files) due to 3 previous errors"),
+            "{text}"
+        );
+        assert!(!text.contains("Finished"));
     }
 }
 

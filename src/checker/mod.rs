@@ -127,6 +127,7 @@ impl Checker<'_> {
                 span,
                 format!("{context}: expected {expected}, got {reported_type}"),
             );
+            diagnostic.headline = Some(format!("{context}: mismatched types"));
             diagnostic.expected = Some(expected.to_string());
             diagnostic.actual = Some(reported_type.to_string());
             diagnostic.notes = actual.notes.clone();

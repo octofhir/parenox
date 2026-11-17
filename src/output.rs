@@ -4,35 +4,40 @@ use std::fmt::Write;
 
 use annotate_snippets::{AnnotationKind, Group, Level, Patch, Renderer, Snippet};
 
-use crate::{Diagnostic, Report};
+use annotate_snippets::renderer::{AnsiColor, Effects, Style};
 
-pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: bool) -> String {
-    let renderer = if color {
+use crate::{Diagnostic, ProjectReport, Report, Stats};
+
+fn renderer(color: bool) -> Renderer {
+    if color {
         Renderer::styled()
     } else {
         Renderer::plain()
-    };
+    }
+}
+
+pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: bool) -> String {
+    let renderer = renderer(color);
     let mut output = String::new();
     for diagnostic in diagnostics {
-        let label = match &diagnostic.actual {
-            Some(actual) => format!("this expression has type `{actual}`"),
-            None => diagnostic.message.clone(),
-        };
+        let title = diagnostic
+            .headline
+            .as_deref()
+            .unwrap_or(&diagnostic.message);
+        let mut annotation =
+            AnnotationKind::Primary.span(diagnostic.span.start.offset..diagnostic.span.end.offset);
+        if let (Some(expected), Some(actual)) = (&diagnostic.expected, &diagnostic.actual) {
+            annotation = annotation.label(format!("expected `{expected}`, found `{actual}`"));
+        }
         let mut primary = Level::ERROR
-            .primary_title(&diagnostic.message)
+            .primary_title(title)
             .id(&diagnostic.code)
             .element(
-                Snippet::source(source).path(path).fold(true).annotation(
-                    AnnotationKind::Primary
-                        .span(diagnostic.span.start.offset..diagnostic.span.end.offset)
-                        .label(label),
-                ),
+                Snippet::source(source)
+                    .path(path)
+                    .fold(true)
+                    .annotation(annotation),
             );
-        if let (Some(expected), Some(actual)) = (&diagnostic.expected, &diagnostic.actual) {
-            primary = primary.element(
-                Level::NOTE.message(format!("expected `{expected}`\n   found `{actual}`")),
-            );
-        }
         for note in &diagnostic.notes {
             primary = primary.element(Level::NOTE.message(note));
         }
@@ -58,51 +63,75 @@ pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: 
     output
 }
 
-pub fn pretty(report: &Report, source: &str, color: bool) -> String {
-    let mut output = diagnostics(&report.path, source, &report.diagnostics, color);
-    if !report.complete {
-        writeln!(
-            output,
-            "note: check is incomplete; some constructs could not be analyzed\n"
-        )
-        .unwrap();
-    }
-    if report.ok {
-        let finished = if color {
-            "\x1b[1;32m    Finished\x1b[0m"
-        } else {
-            "    Finished"
-        };
-        writeln!(
-            output,
-            "{finished} checking `{}` — no type errors",
-            report.path
-        )
-        .unwrap();
+fn status(label: &str, message: std::fmt::Arguments<'_>, color: bool) -> String {
+    let style = if color {
+        AnsiColor::BrightGreen.on_default().effects(Effects::BOLD)
     } else {
-        let error = if color {
-            "\x1b[1;31merror\x1b[0m"
-        } else {
-            "error"
-        };
-        let count = report.diagnostics.len();
-        writeln!(
-            output,
-            "{error}: could not check `{}` due to {count} previous error{}",
-            report.path,
-            if count == 1 { "" } else { "s" }
-        )
-        .unwrap();
+        Style::new()
+    };
+    format!("{style}{label:>12}{style:#} {message}\n")
+}
+
+pub fn checking(target: &str, color: bool) -> String {
+    status("Checking", format_args!("{target}"), color)
+}
+
+fn summary(target: &str, count: usize, complete: bool, stats: &Stats, color: bool) -> String {
+    if count == 0 {
+        return status(
+            "Finished",
+            format_args!(
+                "checking {target} — no type errors ({} checked, {} reused, {:.3} ms)",
+                stats.checked_functions,
+                stats.reused_functions,
+                stats.elapsed_us as f64 / 1000.0
+            ),
+            color,
+        );
     }
+
+    let renderer = renderer(color);
+    let mut output = String::new();
+    if !complete {
+        let note = Group::with_title(
+            Level::NOTE
+                .secondary_title("check is incomplete; some constructs could not be analyzed"),
+        );
+        writeln!(output, "{}", renderer.render(&[note])).unwrap();
+    }
+    let message = format!(
+        "could not check {target} due to {count} previous error{}",
+        if count == 1 { "" } else { "s" }
+    );
     writeln!(
         output,
-        "    {} checked, {} reused, {:.3} ms",
-        report.stats.checked_functions,
-        report.stats.reused_functions,
-        report.stats.elapsed_us as f64 / 1000.0
+        "{}",
+        renderer.render(&[Group::with_title(Level::ERROR.primary_title(&message))])
     )
     .unwrap();
     output
+}
+
+pub fn pretty(report: &Report, source: &str, color: bool) -> String {
+    let mut output = diagnostics(&report.path, source, &report.diagnostics, color);
+    output.push_str(&summary(
+        &format!("`{}`", report.path),
+        report.diagnostics.len(),
+        report.complete,
+        &report.stats,
+        color,
+    ));
+    output
+}
+
+pub fn project_summary(report: &ProjectReport, target: &str, color: bool) -> String {
+    summary(
+        target,
+        report.files.iter().map(|file| file.diagnostics.len()).sum(),
+        report.complete,
+        &report.stats,
+        color,
+    )
 }
 
 pub fn plain(report: &Report) -> String {
