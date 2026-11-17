@@ -9,19 +9,94 @@ use std::sync::Arc;
 
 pub const MAX_TUPLE_ITEMS: usize = 32;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Arity {
+    Fixed(usize),
+    Variadic(usize),
+}
+
+impl Arity {
+    pub fn new(count: usize, variadic: bool) -> Self {
+        if variadic {
+            Self::Variadic(count)
+        } else {
+            Self::Fixed(count)
+        }
+    }
+
+    pub fn required(self) -> usize {
+        match self {
+            Self::Fixed(count) | Self::Variadic(count) => count,
+        }
+    }
+
+    pub fn accepts(self, actual: usize) -> bool {
+        match self {
+            Self::Fixed(count) => actual == count,
+            Self::Variadic(count) => actual >= count,
+        }
+    }
+
+    pub fn bindings(self) -> usize {
+        match self {
+            Self::Fixed(count) => count,
+            Self::Variadic(count) => count + 1,
+        }
+    }
+
+    pub fn valid_set(arities: impl Iterator<Item = Self>) -> bool {
+        let mut fixed = 0;
+        let mut variadic = None;
+        for arity in arities {
+            match arity {
+                Self::Fixed(count) => fixed = fixed.max(count),
+                Self::Variadic(count) if variadic.is_none() => variadic = Some(count),
+                Self::Variadic(_) => return false,
+            }
+        }
+        variadic.is_none_or(|count| fixed <= count)
+    }
+}
+
+impl fmt::Display for Arity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fixed(count) => write!(f, "{count}"),
+            Self::Variadic(count) => write!(f, "at least {count}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Signature {
     pub args: Vec<Type>,
+    pub rest: Option<Type>,
     pub ret: Type,
+}
+
+impl Signature {
+    pub fn arity(&self) -> Arity {
+        Arity::new(self.args.len(), self.rest.is_some())
+    }
+
+    pub fn types(&self) -> impl Iterator<Item = &Type> {
+        self.args
+            .iter()
+            .chain(self.rest.as_ref())
+            .chain([&self.ret])
+    }
 }
 
 impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let args = self
+        let mut args = self
             .args
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
+        if let Some(rest) = &self.rest {
+            args.push(format!("& {rest}"));
+        }
         write!(f, "[{} -> {}]", args.join(", "), self.ret)
     }
 }
@@ -93,9 +168,9 @@ impl Type {
                 t.requires_precise_type()
             }
             Type::Map(map) => map.any_type(Type::requires_precise_type),
-            Type::Function(signatures) => signatures.iter().any(|sig| {
-                sig.args.iter().any(Type::requires_precise_type) || sig.ret.requires_precise_type()
-            }),
+            Type::Function(signatures) => signatures
+                .iter()
+                .any(|sig| sig.types().any(Type::requires_precise_type)),
             _ => false,
         }
     }
@@ -247,8 +322,12 @@ impl Type {
             | (Type::ExceptionInfo(a), Type::ExceptionInfo(e)) => a.subtype_of(e),
             (Type::Function(actual), Type::Function(expected)) => expected.iter().all(|e| {
                 actual.iter().any(|a| {
-                    a.args.len() == e.args.len()
+                    a.arity() == e.arity()
                         && a.args.iter().zip(&e.args).all(|(a, e)| e.subtype_of(a))
+                        && a.rest
+                            .as_ref()
+                            .zip(e.rest.as_ref())
+                            .is_none_or(|(a, e)| e.subtype_of(a))
                         && a.ret.subtype_of(&e.ret)
                 })
             }),
@@ -267,9 +346,9 @@ impl Type {
                 t.contains_unknown()
             }
             Type::Map(m) => m.any_type(Type::contains_unknown),
-            Type::Function(signatures) => signatures.iter().any(|sig| {
-                sig.args.iter().any(Type::contains_unknown) || sig.ret.contains_unknown()
-            }),
+            Type::Function(signatures) => signatures
+                .iter()
+                .any(|sig| sig.types().any(Type::contains_unknown)),
             _ => false,
         }
     }

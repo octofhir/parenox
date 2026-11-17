@@ -2,9 +2,9 @@
 use std::collections::BTreeMap;
 
 use super::{Function, FunctionArity, Globals, Model, Signature, type_forms::read_type};
-use crate::checker::function_forms::fixed_clauses;
+use crate::checker::function_forms::{function_clauses, split_rest};
 use crate::reader::{Form, Kind, Span};
-use crate::types::Type;
+use crate::types::{Arity, Type};
 
 impl Model {
     fn contract_type(&mut self, form: &Form, globals: &Globals) -> Type {
@@ -95,7 +95,7 @@ impl Model {
             );
             return;
         }
-        let clauses = match fixed_clauses(arms, span) {
+        let clauses = match function_clauses(arms, span) {
             Ok(clauses) => clauses,
             Err(diagnostic) => {
                 self.diagnostics.push(*diagnostic);
@@ -108,7 +108,7 @@ impl Model {
                 (
                     count,
                     FunctionArity {
-                        params: clause.params.to_vec(),
+                        params: clause.bindings().into_owned(),
                         body: clause.body.to_vec(),
                         span: clause.span,
                     },
@@ -133,7 +133,7 @@ impl Model {
             if !arities
                 .keys()
                 .copied()
-                .eq(signatures.iter().map(|sig| sig.args.len()))
+                .eq(signatures.iter().map(Signature::arity))
             {
                 self.error(
                     "PNX2554",
@@ -146,8 +146,9 @@ impl Model {
         } else {
             arities
                 .keys()
-                .map(|count| Signature {
-                    args: vec![Type::Unknown; *count],
+                .map(|arity| Signature {
+                    args: vec![Type::Unknown; arity.required()],
+                    rest: matches!(arity, Arity::Variadic(_)).then_some(Type::Unknown),
                     ret: Type::Unknown,
                 })
                 .collect()
@@ -182,7 +183,7 @@ impl Model {
         let mut signatures = BTreeMap::new();
         for arm in arms {
             let signature = self.parse_signature(arm, globals)?;
-            let count = signature.args.len();
+            let count = signature.arity();
             if signatures.insert(count, signature).is_some() {
                 self.error(
                     "PNX2554",
@@ -191,6 +192,11 @@ impl Model {
                 );
                 return None;
             }
+        }
+        if !Arity::valid_set(signatures.keys().copied()) {
+            self.error("PNX2554", form.span,
+                "A variadic signature must be unique and require at least as many arguments as every fixed signature");
+            return None;
         }
         Some(signatures.into_values().collect())
     }
@@ -209,11 +215,27 @@ impl Model {
             self.error("PNX9001", form.span, "Expected [Arg ... :-> Result]");
             return None;
         }
-        let args = types[..types.len() - 2]
+        let (args, rest) = match split_rest(&types[..types.len() - 2]) {
+            Ok(parts) => parts,
+            Err(span) => {
+                self.error("PNX1001", span, "& requires exactly one rest element type");
+                return None;
+            }
+        };
+        if args.len() > 20 {
+            self.error(
+                "PNX2554",
+                form.span,
+                "Clojure/JVM supports at most 20 fixed parameters",
+            );
+            return None;
+        }
+        let args = args
             .iter()
             .map(|t| self.contract_type(t, globals))
             .collect();
         let ret = self.contract_type(types.last().unwrap(), globals);
-        Some(Signature { args, ret })
+        let rest = rest.map(|form| self.contract_type(form, globals));
+        Some(Signature { args, rest, ret })
     }
 }

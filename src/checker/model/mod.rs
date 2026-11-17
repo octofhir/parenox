@@ -21,7 +21,7 @@ use vars::LiteralVar;
 
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Signature, Type};
+use crate::types::{Arity, Signature, Type};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Function {
@@ -29,7 +29,7 @@ pub(crate) struct Function {
     pub private: bool,
     // Private definitions without a signature are analyzed through direct typed callers.
     pub inferred: bool,
-    pub arities: BTreeMap<usize, FunctionArity>,
+    pub arities: BTreeMap<Arity, FunctionArity>,
     pub signatures: Arc<[Signature]>,
     pub span: Span,
 }

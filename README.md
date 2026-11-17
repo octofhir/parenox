@@ -302,12 +302,19 @@ need signatures. Direct calls to single-arity private helpers (`defn-`, `^:priva
 can omit them: the checker uses the actual argument types to analyze the body and
 infer its result. This is inference for each call, not a generalized function signature.
 
-For a multi-arity definition, write one signature per fixed argument count in a
+For a multi-arity definition, write one signature per clause in a
 quoted vector, for example `:t/sig '[[:-> string?] [string? :-> number?]]`.
 Each body is checked against its signature. Calls select the signature for their
 argument count, including when the function is passed as a callback. Externs
 accept the same vector of signatures as EDN data. Run `just arities` for a
 multi-namespace example with arity and argument diagnostics.
+
+A variadic signature uses `&` followed by the type of each extra argument, for
+example `:t/sig '[number? & string? :-> number?]`. Clojure supplies extra arguments
+as a seq, or nil when there are none. An exact fixed clause takes precedence
+over a variadic clause at the same argument count. Inside the variadic body
+`recur` takes one argument for the rest binding. Run `just variadic` for examples.
+Map destructuring of rest arguments reports an analysis gap.
 
 ```clojure
 (defn- normalized [name]
@@ -496,7 +503,7 @@ inferred helper work is included in the check of their callers.
 | Control flow | `let`, `do`, `if`, `when`, `cond`, `case`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, `loop`/`recur`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
 | Data operations | Keyword calls, string and keyword lookups and updates, ordered vector paths, indexed reads, positional and nested map destructuring and checked keys |
-| Functions | Fixed arities, forward calls, bare requires, namespace aliases, `:as-alias`, explicit `:refer` with `:exclude` and `:rename`, private-var boundaries, direct private-helper inference |
+| Functions | Fixed and variadic arities, forward calls, bare requires, namespace aliases, `:as-alias`, explicit `:refer` with `:exclude` and `:rename`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |
 | Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |
 
@@ -544,7 +551,7 @@ can target a loop or function defined inside a `try`, and Parenox diagnoses
 transfers to targets outside the `try`.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
-recursive specs, variadic definitions, full numeric
+recursive specs, full numeric
 tower semantics and some reader forms. Numeric expressions use `Number`,
 with decimal integer literals retaining their value for indexed reads.
 Externs currently declare qualified function signatures; they do not load JARs or

@@ -1,5 +1,9 @@
 //! Contextual inference for directly applied functions and fnil wrappers.
-use super::super::{Checker, Env, Value, function_forms::fixed_clauses, nil_part};
+use super::super::{
+    Checker, Env, Value,
+    function_forms::{function_clauses, pack_arguments},
+    nil_part,
+};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
@@ -63,14 +67,18 @@ impl Checker<'_> {
         if let Some(name) = parts.first().filter(|form| form.symbol().is_some()) {
             return self.unsupported(name.span, "Named fn forms are not supported yet");
         }
-        let clauses = match fixed_clauses(parts, constructor) {
+        let clauses = match function_clauses(parts, constructor) {
             Ok(clauses) => clauses,
             Err(diagnostic) => {
                 self.diagnostics.push(*diagnostic);
                 return Value::new(Type::Unknown);
             }
         };
-        let missing_arity = invoked && !clauses.contains_key(&args.len());
+        let selected_arity = clauses
+            .keys()
+            .copied()
+            .find(|arity| arity.accepts(args.len()));
+        let missing_arity = invoked && selected_arity.is_none();
         if missing_arity {
             self.error(
                 "PNX2554",
@@ -88,15 +96,21 @@ impl Checker<'_> {
         } else {
             Type::Never
         });
-        for (count, clause) in clauses {
-            let selected = invoked && count == args.len();
+        for (arity, clause) in clauses {
+            let selected = invoked && Some(arity) == selected_arity;
             let checked = self.check_path(selected, |checker| {
                 let parameters = if selected {
-                    args.iter().map(|(value, _)| value.clone()).collect()
+                    pack_arguments(arity, args.iter().map(|(value, _)| value.clone()).collect())
                 } else {
-                    vec![Value::new(Type::Never); count]
+                    vec![Value::new(Type::Never); arity.bindings()]
                 };
-                checker.function_body(clause.params, clause.body, parameters, env, clause.span)
+                checker.function_body(
+                    &clause.bindings(),
+                    clause.body,
+                    parameters,
+                    env,
+                    clause.span,
+                )
             });
             if selected {
                 result = checked;

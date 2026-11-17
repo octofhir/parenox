@@ -21,7 +21,7 @@ use recur::RecurTarget;
 use std::collections::BTreeMap;
 
 use crate::reader::{Form, Kind, Span};
-use crate::types::{ExtraFields, Field, MAX_TUPLE_ITEMS, MapType, Type};
+use crate::types::{Arity, ExtraFields, Field, MAX_TUPLE_ITEMS, MapType, Type};
 use crate::{Diagnostic, Suggestion};
 
 impl Model {
@@ -33,8 +33,21 @@ impl Model {
     ) -> Vec<Diagnostic> {
         let mut checker = Checker::new(self, globals, source);
         for signature in function.signatures.iter() {
-            let arity = &function.arities[&signature.args.len()];
-            let args = signature.args.iter().cloned().map(Value::new).collect();
+            let arity = &function.arities[&signature.arity()];
+            let mut args: Vec<_> = signature.args.iter().cloned().map(Value::new).collect();
+            if let Some(rest) = &signature.rest {
+                let seq = Type::Seq(Box::new(rest.clone()));
+                // At the required count Clojure invokes a matching fixed clause first.
+                let rest = if function
+                    .arities
+                    .contains_key(&Arity::Fixed(signature.args.len()))
+                {
+                    seq
+                } else {
+                    seq.nilable()
+                };
+                args.push(Value::new(rest));
+            }
             let result =
                 checker.function_body(&arity.params, &arity.body, args, &Env::new(), arity.span);
             checker.expect(

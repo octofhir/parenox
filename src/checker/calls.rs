@@ -4,18 +4,22 @@ mod inline;
 mod sequences;
 mod vectors;
 
-use super::{Checker, Env, Value, model::Function, nil_part};
+use super::{Checker, Env, Value, function_forms::pack_arguments, model::Function, nil_part};
 use crate::Diagnostic;
 use crate::expand::Threading;
 use crate::reader::{Form, Span};
-use crate::types::Type;
+use crate::types::{Arity, Signature, Type};
 
 impl Checker<'_> {
     fn inferred_call(&mut self, function: &Function, args: Vec<Value>, span: Span) -> Value {
         if self.throws.is_some() && args.iter().all(|arg| arg.known != Type::Never) {
             self.may_throw();
         }
-        let Some(arity) = function.arities.get(&args.len()) else {
+        let Some((&arity, clause)) = function
+            .arities
+            .iter()
+            .find(|(arity, _)| arity.accepts(args.len()))
+        else {
             self.error(
                 "PNX2554",
                 span,
@@ -54,11 +58,11 @@ impl Checker<'_> {
             }
             self.active_helpers.push(function.name.clone());
             let result = self.function_body(
-                &arity.params,
-                &arity.body,
-                key.1.clone(),
+                &clause.params,
+                &clause.body,
+                pack_arguments(arity, key.1.clone()),
                 &Env::new(),
-                arity.span,
+                clause.span,
             );
             self.active_helpers.pop();
             self.specializations
@@ -223,22 +227,27 @@ impl Checker<'_> {
         }
         match function.known {
             Type::Function(signatures) => {
-                let Some(signature) = signatures.iter().find(|sig| sig.args.len() == args.len())
+                let Some(signature) = signatures
+                    .iter()
+                    .find(|sig| sig.arity().accepts(args.len()))
                 else {
                     self.error(
                         "PNX2554",
                         span,
                         format!(
                             "Expected {} arguments, got {}",
-                            arity_counts(signatures.iter().map(|sig| sig.args.len())),
+                            arity_counts(signatures.iter().map(Signature::arity)),
                             args.len()
                         ),
                     );
                     return Value::new(Type::Unknown);
                 };
-                for (index, ((actual, span), expected)) in
-                    args.iter().zip(&signature.args).enumerate()
-                {
+                for (index, (actual, span)) in args.iter().enumerate() {
+                    let expected = signature
+                        .args
+                        .get(index)
+                        .or(signature.rest.as_ref())
+                        .unwrap();
                     self.expect(actual, expected, *span, &format!("Argument {}", index + 1));
                 }
                 Value::new(signature.ret.clone())
@@ -498,8 +507,15 @@ pub(super) fn is_builtin(name: &str) -> bool {
     ) || predicate_type(name).is_some()
 }
 
-fn arity_counts(counts: impl Iterator<Item = usize>) -> String {
+fn arity_counts(counts: impl Iterator<Item = Arity>) -> String {
+    let counts: Vec<_> = counts.collect();
+    let minimum = counts.last().and_then(|arity| match arity {
+        Arity::Variadic(minimum) => Some(*minimum),
+        Arity::Fixed(_) => None,
+    });
     counts
+        .into_iter()
+        .filter(|arity| !matches!(arity, Arity::Fixed(count) if Some(*count) == minimum))
         .map(|count| count.to_string())
         .collect::<Vec<_>>()
         .join(" or ")

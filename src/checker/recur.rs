@@ -297,9 +297,9 @@ fn bounded_state(state: &[Value]) -> bool {
             Type::Vector(part) | Type::Set(part) | Type::Seq(part) | Type::ExceptionInfo(part) => {
                 visit(part, remaining)
             }
-            Type::Function(signatures) => signatures.iter().all(|sig| {
-                sig.args.iter().all(|arg| visit(arg, remaining)) && visit(&sig.ret, remaining)
-            }),
+            Type::Function(signatures) => signatures
+                .iter()
+                .all(|sig| sig.types().all(|arg| visit(arg, remaining))),
             Type::Map(map) => {
                 map.fields
                     .iter()

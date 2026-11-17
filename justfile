@@ -205,3 +205,8 @@ core-imports format="pretty" color="auto": build
 arities format="pretty": build
     @./target/release/parenox check examples/arities/provider.clj examples/arities/app.clj --format {{quote(format)}}
     @./target/release/parenox check examples/arities/provider.clj examples/arities/bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check variadic declarations and show wrong rest arguments.
+variadic format="pretty": build
+    @./target/release/parenox check examples/variadic.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/variadic.clj examples/variadic_bad.clj --format {{quote(format)}} || test "$?" -eq 1
