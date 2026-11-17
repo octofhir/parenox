@@ -190,3 +190,8 @@ exceptions format="pretty" color="auto": build
 handlers format="pretty" color="auto": build
     @./target/release/parenox check examples/handlers.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/handlers_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check imported configuration values and show private var access.
+literal-vars format="pretty" color="auto": build
+    @./target/release/parenox check examples/literal_vars/config.clj examples/literal_vars/app.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/literal_vars/config.clj examples/literal_vars/bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

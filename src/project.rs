@@ -258,7 +258,12 @@ impl Session {
                     .as_ref()
                     .is_none_or(|model| !model.external_specs_current(&globals))
                 {
-                    cache.model = Some(Model::build(declarations, &cache.forms, &globals));
+                    cache.model = Some(Model::build(
+                        declarations,
+                        &cache.forms,
+                        &cache.source,
+                        &globals,
+                    ));
                 }
                 cache.model.as_ref().unwrap().publish(&mut globals);
             }

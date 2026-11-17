@@ -543,3 +543,16 @@
 (assert (= "req-1" (demo.handlers/request-code "req-1")))
 (assert (= "CLEANUP" (demo.handlers/cleanup-code)))
 (println "Clojure/JVM handlers: 11 assertions passed")
+
+(load-file "examples/literal_vars/config.clj")
+(load-file "examples/literal_vars/app.clj")
+(assert (= 5 (demo.literal-vars.app/next-limit)))
+(assert (= :demo.literal-vars.config/online (demo.literal-vars.app/plan-mode)))
+(assert (= :active (demo.literal-vars.app/status-code)))
+(assert (= "Unknown" (demo.literal-vars.config/fallback-name)))
+(assert (= :not-public
+           (try (load-file "examples/literal_vars/bad.clj")
+                (catch clojure.lang.Compiler$CompilerException e
+                  (when (clojure.string/includes? (ex-message (ex-cause e)) "is not public")
+                    :not-public)))))
+(println "Clojure/JVM literal vars: 5 assertions passed")

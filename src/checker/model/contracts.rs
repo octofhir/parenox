@@ -19,25 +19,13 @@ impl Model {
             self.error("PNX9001", span, "defn requires a function name");
             return;
         };
-        if symbol.contains('/') && symbol != "/" {
-            self.error(
-                "PNX1001",
-                xs[1].span,
-                "A defn name must be an unqualified symbol",
-            );
+        let Some(name) = self.definition_name(symbol, xs[1].span, "defn") else {
+            return;
+        };
+        if self.literals.contains_key(&name) {
+            self.error("PNX2790", xs[1].span, format!("Duplicate var {name}"));
             return;
         }
-        if let Some(referred) = self.names.refers.get(symbol)
-            && !referred.starts_with("clojure.core/")
-        {
-            self.error(
-                "PNX2790",
-                xs[1].span,
-                format!("{symbol} already refers to {referred}"),
-            );
-            return;
-        }
-        let name = format!("{}/{symbol}", self.names.namespace);
         let mut index = 2;
         if xs
             .get(index)

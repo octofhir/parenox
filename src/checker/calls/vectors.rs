@@ -82,7 +82,7 @@ impl Checker<'_> {
         };
         if env.contains_key(name)
             || self.model.local_function(name).is_some()
-            || self.model.signature(name, self.globals).is_some()
+            || self.model.declared_value(name, self.globals).is_some()
         {
             return element;
         }

@@ -503,7 +503,7 @@ impl Checker<'_> {
         // Locals and project functions may shadow core predicates.
         if env.contains_key(op)
             || self.model.local_function(op).is_some()
-            || self.model.signature(op, self.globals).is_some()
+            || self.model.declared_value(op, self.globals).is_some()
         {
             return;
         }

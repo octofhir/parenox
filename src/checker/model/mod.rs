@@ -5,6 +5,7 @@ mod externs;
 mod require;
 mod specs;
 mod type_forms;
+mod vars;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -13,6 +14,7 @@ pub(crate) use declarations::Declarations;
 use declarations::Names;
 use externs::Externs;
 pub(crate) use specs::{SpecCache, SpecFingerprint, SpecSource};
+use vars::LiteralVar;
 
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
@@ -37,11 +39,26 @@ pub(crate) struct Signature {
     pub ret: Type,
 }
 
+pub(super) enum DeclaredValue<'a> {
+    Literal(&'a Type),
+    Function(&'a [Type], &'a Type),
+}
+
+impl DeclaredValue<'_> {
+    pub(super) fn known(self) -> Type {
+        match self {
+            Self::Literal(ty) => ty.clone(),
+            Self::Function(args, ret) => Type::Function(args.to_vec(), Box::new(ret.clone())),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Globals {
     specs: Arc<BTreeMap<String, Type>>,
     pub(super) project_namespaces: BTreeSet<String>,
     functions: BTreeMap<String, Signature>,
+    literals: BTreeMap<String, Type>,
     interfaces: BTreeMap<String, String>,
     externs: Option<Arc<Externs>>,
 }
@@ -79,6 +96,14 @@ impl Globals {
             .and_then(|table| table.functions.get(name))
             .or_else(|| self.functions.get(name))
     }
+
+    fn declared_value(&self, name: &str) -> Option<DeclaredValue<'_>> {
+        if let Some(ty) = self.literals.get(name) {
+            return Some(DeclaredValue::Literal(ty));
+        }
+        self.signature(name)
+            .map(|sig| DeclaredValue::Function(&sig.args, &sig.ret))
+    }
 }
 
 #[derive(Default)]
@@ -86,6 +111,7 @@ pub(crate) struct Model {
     names: Names,
     dependencies: Vec<String>,
     externs: Option<Arc<Externs>>,
+    literals: BTreeMap<String, LiteralVar>,
     specs: BTreeMap<String, Type>,
     external_specs: BTreeMap<String, Option<Type>>,
     pub functions: BTreeMap<String, Function>,
@@ -95,7 +121,12 @@ pub(crate) struct Model {
 }
 
 impl Model {
-    pub fn build(declarations: &Declarations, forms: &[Form], globals: &Globals) -> Self {
+    pub fn build(
+        declarations: &Declarations,
+        forms: &[Form],
+        source: &str,
+        globals: &Globals,
+    ) -> Self {
         let mut model = Self {
             names: declarations.names.clone(),
             dependencies: declarations.dependencies.clone(),
@@ -108,6 +139,13 @@ impl Model {
                 .specs
                 .insert(key.clone(), ty.clone().unwrap_or(Type::Unknown));
             model.external_specs.insert(key.clone(), ty);
+        }
+        for &index in &declarations.literal_vars {
+            let form = &forms[index];
+            let Kind::List(xs) = &form.without_metadata().kind else {
+                unreachable!()
+            };
+            model.read_def(xs, form.span, source, globals);
         }
         for &index in &declarations.functions {
             let form = &forms[index];
@@ -160,9 +198,14 @@ impl Model {
                 .insert(function.name.clone(), signature.clone());
             exported.insert(function.name.clone(), signature);
         }
+        let mut literals = BTreeMap::new();
+        for (name, value) in self.literals.iter().filter(|(_, value)| !value.private) {
+            globals.literals.insert(name.clone(), value.ty.clone());
+            literals.insert(name, &value.ty);
+        }
         globals.interfaces.insert(
             self.names.namespace.clone(),
-            format!("{:?}|{exported:?}", self.specs),
+            format!("{:?}|{exported:?}|{literals:?}", self.specs),
         );
     }
 
@@ -179,11 +222,12 @@ impl Model {
             .map(|f| (&f.name, &f.args, &f.ret))
             .collect();
         format!(
-            "{:?}|{:?}|{:?}|{:?}|{sigs:?}|{}",
+            "{:?}|{:?}|{:?}|{:?}|{sigs:?}|{:?}|{}",
             self.names.namespace,
             self.names.aliases,
             self.names.refers,
             self.specs,
+            self.literals,
             globals.dependency_key(&self.dependencies)
         )
     }
@@ -300,23 +344,21 @@ impl Model {
             .collect()
     }
 
-    pub(super) fn signature<'a>(
+    pub(super) fn declared_value<'a>(
         &'a self,
         name: &str,
         globals: &'a Globals,
-    ) -> Option<(&'a [Type], &'a Type)> {
+    ) -> Option<DeclaredValue<'a>> {
         let qualified = self.function_name(name);
-        if let Some(function) = self.functions.get(&qualified) {
-            if function.inferred {
-                None
-            } else {
-                Some((&function.args, &function.ret))
-            }
-        } else {
-            globals
-                .signature(&qualified)
-                .or_else(|| globals.signature(&self.resolve(name)))
-                .map(|s| (s.args.as_slice(), &s.ret))
+        if let Some(value) = self.literals.get(&qualified) {
+            return Some(DeclaredValue::Literal(&value.ty));
         }
+        if let Some(function) = self.functions.get(&qualified) {
+            return (!function.inferred)
+                .then_some(DeclaredValue::Function(&function.args, &function.ret));
+        }
+        globals
+            .declared_value(&qualified)
+            .or_else(|| globals.declared_value(&self.resolve(name)))
     }
 }

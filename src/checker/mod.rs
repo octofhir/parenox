@@ -28,18 +28,7 @@ impl Model {
         source: &str,
         globals: &Globals,
     ) -> Vec<Diagnostic> {
-        let mut checker = Checker {
-            model: self,
-            globals,
-            source,
-            diagnostics: Vec::new(),
-            active_helpers: Vec::new(),
-            thread_depth: 0,
-            specializations: BTreeMap::new(),
-            recur_target: None,
-            recur_checks: 0,
-            throws: None,
-        };
+        let mut checker = Checker::new(self, globals, source);
         let args = function.args.iter().cloned().map(Value::new).collect();
         let result = checker.function_body(
             &function.params,
@@ -115,6 +104,23 @@ struct Checker<'a> {
     recur_target: Option<RecurTarget>,
     recur_checks: usize,
     throws: Option<Throws>,
+}
+
+impl<'a> Checker<'a> {
+    fn new(model: &'a Model, globals: &'a Globals, source: &'a str) -> Self {
+        Self {
+            model,
+            globals,
+            source,
+            diagnostics: Vec::new(),
+            active_helpers: Vec::new(),
+            thread_depth: 0,
+            specializations: BTreeMap::new(),
+            recur_target: None,
+            recur_checks: 0,
+            throws: None,
+        }
+    }
 }
 
 impl Checker<'_> {
@@ -248,8 +254,8 @@ impl Checker<'_> {
                         ),
                     );
                     Value::new(Type::Unknown)
-                } else if let Some((args, ret)) = self.model.signature(s, self.globals) {
-                    Value::new(Type::Function(args.to_vec(), Box::new(ret.clone())))
+                } else if let Some(value) = self.model.declared_value(s, self.globals) {
+                    Value::new(value.known())
                 } else {
                     let qualified = self.model.function_name(s);
                     let external = qualified.rsplit_once('/').is_some_and(|(namespace, _)| {

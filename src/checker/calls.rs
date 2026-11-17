@@ -117,7 +117,7 @@ impl Checker<'_> {
         }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
-            && self.model.signature(name, self.globals).is_none()
+            && self.model.declared_value(name, self.globals).is_none()
         {
             let resolved = self.model.resolve(name);
             if self.throws.is_some()
@@ -282,7 +282,7 @@ impl Checker<'_> {
                     Value::new(Type::Never)
                 };
             }
-            if self.model.signature(name, self.globals).is_none() {
+            if self.model.declared_value(name, self.globals).is_none() {
                 let resolved = self.model.resolve(name);
                 if is_builtin(&resolved) {
                     return if invoked {

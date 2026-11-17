@@ -80,6 +80,7 @@ just sequences        # seq traversal, precise positions and empty inputs
 just accumulators     # growing vectors with retained element types
 just exceptions       # explicit errors and structured exception data
 just handlers         # try/catch/finally and recur boundaries
+just literal-vars     # literal config values across namespaces
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -154,6 +155,11 @@ whose namespace differs from the file that declares them. Input file order does
 not affect resolution. An alias created with `:as-alias` can qualify keywords
 without creating a namespace load dependency. Competing declarations of the
 same spec key in separate files report an analysis gap.
+
+`def` supports literal maps, vectors, sets and scalar values. Their inferred
+types are available to importing namespaces, subject to `^:private`. Changes
+to exported values invalidate their consumers. Dynamic vars, unbound vars and
+computed initializers report an analysis gap.
 
 ## Lossless syntax
 
