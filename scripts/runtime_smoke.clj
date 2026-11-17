@@ -191,3 +191,18 @@
                  result (if-let [value (do (swap! calls inc) false)] value value)]
              [result @calls])))
 (println "Clojure/JVM binding guards: 7 assertions passed")
+
+(load-file "examples/paths.clj")
+(load-file "examples/paths_bad.clj")
+(assert (= "UNKNOWN" (demo.paths/display-name {})))
+(assert (= "ADA" (demo.paths/display-name {:patient {:name "Ada"}})))
+(assert (= "Ada" (demo.paths/normalized-name {} " Ada ")))
+(assert (nil? (get-in {:patient {:name nil}} [:patient :name] "Unknown")))
+(assert (false? (get-in {:patient {:active false}} [:patient :active] true)))
+(assert (= "Unknown" (get-in {:patient 42} [:patient :name] "Unknown")))
+(assert (= {:patient {:id 42 :name "Ada"}}
+           (assoc-in {:patient {:id 42}} [:patient :name] "Ada")))
+(assert (= :throws
+           (try (demo.paths-bad/wrong-parent) :unexpected-success
+                (catch ClassCastException _ :throws))))
+(println "Clojure/JVM nested paths: 8 assertions passed")

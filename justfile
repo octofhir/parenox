@@ -95,3 +95,8 @@ conditional format="pretty": build
 guards format="pretty": build
     @./target/release/parenox check examples/guards.clj --format {{quote(format)}}
     @./target/release/parenox check examples/guards_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check nested map paths and show the errors for an explicit Nil and a scalar parent.
+paths format="pretty": build
+    @./target/release/parenox check examples/paths.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/paths_bad.clj --format {{quote(format)}} || test "$?" -eq 1

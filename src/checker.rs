@@ -871,6 +871,7 @@ type Defaults = BTreeMap<String, (Value, Span)>;
 #[derive(Clone, Copy)]
 enum Lookup<'a> {
     Optional(Option<&'a Value>),
+    Path(Option<&'a Value>),
     Required,
     Presence,
 }
@@ -1237,7 +1238,9 @@ impl Checker<'_> {
         }
         let default = by_local.or(by_key);
         match mode {
-            Lookup::Optional(_) => self.lookup(value, key, default.map(|(value, _)| value), span),
+            Lookup::Optional(_) | Lookup::Path(_) => {
+                self.lookup(value, key, default.map(|(value, _)| value), span)
+            }
             Lookup::Required | Lookup::Presence => {
                 if let Some((_, span)) = default {
                     self.error(
@@ -1480,7 +1483,10 @@ impl Checker<'_> {
                         )
                     };
                 }
+                "clojure.core/get-in" => return self.get_in(xs, span, env),
                 "clojure.core/assoc" => return self.assoc(xs, span, env),
+                "clojure.core/assoc-in" => return self.assoc_in(xs, span, env),
+
                 _ => {
                     if let Some(result) = self.builtin(&resolved, &xs[1..], span, env) {
                         return result;
@@ -2034,12 +2040,14 @@ impl Checker<'_> {
 
     fn lookup_value(&mut self, value: &Value, key: &str, mode: Lookup<'_>, span: Span) -> Value {
         let default = match mode {
-            Lookup::Optional(default) => default,
+            Lookup::Optional(default) | Lookup::Path(default) => default,
             _ => None,
         };
 
         let default_type = match mode {
-            Lookup::Optional(default) => default.map_or(Type::Nil, |v| v.known.clone()),
+            Lookup::Optional(default) | Lookup::Path(default) => {
+                default.map_or(Type::Nil, |v| v.known.clone())
+            }
             Lookup::Required | Lookup::Presence => Type::Never,
         };
         let mut notes = value.notes.clone();
@@ -2057,7 +2065,12 @@ impl Checker<'_> {
             }
             Type::Set(element) => {
                 let key_type = Type::Key(key.into());
-                if matches!(mode, Lookup::Optional(_)) {
+                if matches!(mode, Lookup::Path(_))
+                    && !key_type.subtype_of(element)
+                    && !element.contains_unknown()
+                {
+                    default_type
+                } else if matches!(mode, Lookup::Optional(_) | Lookup::Path(_)) {
                     Type::union([key_type, default_type])
                 } else if key_type.subtype_of(element) || element.contains_unknown() {
                     key_type
@@ -2066,7 +2079,9 @@ impl Checker<'_> {
                 }
             }
             Type::Map(map) => match map.fields.get(key) {
-                Some(field) if field.required || !matches!(mode, Lookup::Optional(_)) => {
+                Some(field)
+                    if field.required || matches!(mode, Lookup::Required | Lookup::Presence) =>
+                {
                     field.ty.clone()
                 }
                 Some(field) => {
@@ -2087,6 +2102,7 @@ impl Checker<'_> {
                     Type::Unknown
                 }
             },
+            _ if matches!(mode, Lookup::Path(_)) => default_type,
             _ => {
                 self.error(
                     "PNX2322",
@@ -2100,6 +2116,130 @@ impl Checker<'_> {
             notes.extend(default.notes.clone());
         }
         Value::with_notes(ty, notes)
+    }
+
+    fn keyword_path(&mut self, form: &Form, name: &str) -> Option<Vec<(String, Span)>> {
+        if let Some(path) = form.vector()
+            && let Some(keys) = path
+                .iter()
+                .map(|key| key.keyword().map(|name| (self.model.key(name), key.span)))
+                .collect()
+        {
+            return Some(keys);
+        }
+        self.unsupported(
+            form.span,
+            format!("{name} currently requires a vector of literal keywords"),
+        );
+        None
+    }
+
+    fn get_in(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
+        if !(3..=4).contains(&xs.len()) {
+            self.error(
+                "PNX2554",
+                span,
+                "get-in requires a target, key path and optional default",
+            );
+            return Value::new(Type::Unknown);
+        }
+        let mut value = self.infer(&xs[1], env);
+        let default = xs.get(3).map(|form| self.infer(form, env));
+        let Some(path) = self.keyword_path(&xs[2], "get-in") else {
+            return Value::new(Type::Unknown);
+        };
+        // A miss on any intermediate hop can be represented as Nil. At the
+        // final hop, look up the caller's fallback only when that key is absent.
+        if let Some(((last, last_span), parents)) = path.split_last() {
+            for (key, span) in parents {
+                value = self.lookup_value(&value, key, Lookup::Path(None), *span);
+            }
+            value = self.lookup_value(&value, last, Lookup::Path(default.as_ref()), *last_span);
+        }
+        value
+    }
+
+    fn assoc_in(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
+        if xs.len() != 4 {
+            self.error(
+                "PNX2554",
+                span,
+                "assoc-in requires a target, key path and value",
+            );
+            return Value::new(Type::Unknown);
+        }
+        let target = self.infer(&xs[1], env);
+        let value = self.infer(&xs[3], env);
+        let Some(path) = self.keyword_path(&xs[2], "assoc-in") else {
+            return Value::new(Type::Unknown);
+        };
+        if path.is_empty() || path.len() > 32 {
+            return self.unsupported(
+                xs[2].span,
+                "assoc-in currently supports paths of 1 to 32 keywords",
+            );
+        }
+        Value::new(self.assoc_path(target.known, &path, &value.known, xs[1].span))
+    }
+
+    fn assoc_path(
+        &mut self,
+        target: Type,
+        path: &[(String, Span)],
+        value: &Type,
+        span: Span,
+    ) -> Type {
+        if let Type::Union(parts) = target {
+            return Type::union(
+                parts
+                    .into_iter()
+                    .map(|part| self.assoc_path(part, path, value, span)),
+            );
+        }
+        let mut map = match self.assoc_map(target, span, "assoc-in") {
+            Ok(map) => map,
+            Err(ty) => return ty,
+        };
+        let (key, key_span) = &path[0];
+        let ty = if path.len() == 1 {
+            value.clone()
+        } else {
+            let parent = match map.fields.remove(key) {
+                Some(field) if field.required => field.ty,
+                Some(field) => field.ty.nilable(),
+                None if !map.open => Type::Nil,
+                None => {
+                    self.error(
+                        "PNX9003",
+                        *key_span,
+                        format!("No declared type for {key} in this open map"),
+                    );
+                    Type::Unknown
+                }
+            };
+            self.assoc_path(parent, &path[1..], value, *key_span)
+        };
+        map.fields.insert(key.clone(), Field { ty, required: true });
+        Type::Map(map)
+    }
+
+    fn assoc_map(&mut self, target: Type, span: Span, name: &str) -> Result<MapType, Type> {
+        match target {
+            Type::Map(map) => Ok(map),
+            Type::Nil => Ok(MapType {
+                fields: BTreeMap::new(),
+                open: false,
+            }),
+            Type::Unknown | Type::Never => Err(target),
+            _ => {
+                self.error(
+                    "PNX2322",
+                    span,
+                    format!("{name} expects a map or Nil, got {}", target.inferred()),
+                );
+                Err(Type::Unknown)
+            }
+        }
     }
 
     fn assoc(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
@@ -2126,23 +2266,10 @@ impl Checker<'_> {
         };
         let mut results = Vec::new();
         for part in parts {
-            let mut map = match part {
-                Type::Map(map) => map,
-                Type::Nil => MapType {
-                    fields: BTreeMap::new(),
-                    open: false,
-                },
-                Type::Unknown | Type::Never => {
-                    results.push(part);
-                    continue;
-                }
-                _ => {
-                    self.error(
-                        "PNX2322",
-                        xs[1].span,
-                        format!("assoc expects a map or Nil, got {part}"),
-                    );
-                    results.push(Type::Unknown);
+            let mut map = match self.assoc_map(part, xs[1].span, "assoc") {
+                Ok(map) => map,
+                Err(ty) => {
+                    results.push(ty);
                     continue;
                 }
             };

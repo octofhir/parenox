@@ -60,6 +60,7 @@ just defaults        # destructuring defaults and three deliberate errors
 just threading       # ->, ->>, some->, some->> and three deliberate errors
 just conditional     # cond->, cond->>, as-> and three deliberate errors
 just guards          # if-let, when-let, if-some and when-some
+just paths           # nested map lookup and update with source diagnostics
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -308,6 +309,13 @@ The fallback runs in the outer scope and defaults to nil. Run `just guards`
 to see the result type when no fallback is supplied and a type error when
 `if-some` passes `false` into a numeric call.
 
+`get-in` and `assoc-in` accept vectors of literal keywords. `get-in` applies its
+fallback when a path is absent and preserves a present terminal nil or false.
+`assoc-in` creates missing or nil intermediate maps, preserves sibling fields
+and flags scalar parents. The update supports paths of 1 to 32 keys. Runtime
+paths and numeric indices report an analysis gap. Run `just paths` to see both
+operations and their diagnostics.
+
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
 `:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.
 Keys after `&` in a keys vector are not bound; checked directives require their
@@ -351,7 +359,7 @@ inferred helper work is included in the check of their callers.
 | Spec forms | `s/keys`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
-| Data operations | Keyword lookup, literal-key `get`/`req!`/`assoc`, nested keyword map destructuring and checked keys |
+| Data operations | Keyword lookup, literal-key `get`/`req!`/`assoc`, keyword paths in `get-in` and `assoc-in`, nested keyword map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |
 | Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |
