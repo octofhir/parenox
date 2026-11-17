@@ -48,11 +48,11 @@ impl Model {
                 continue;
             };
             let (namespace, _) = name_string.split_once('/').unwrap();
-            if let Some(signature) = model.parse_signature(signature, globals)
+            if let Some(signatures) = model.parse_signatures(signature, globals)
                 && namespaces
                     .entry(namespace.into())
                     .or_default()
-                    .insert(name_string.to_owned(), Arc::new(signature))
+                    .insert(name_string.to_owned(), signatures.into())
                     .is_some()
             {
                 model.error(

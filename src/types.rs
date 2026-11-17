@@ -5,8 +5,26 @@ pub use indexing::IndexedItem;
 pub use maps::{ExtraFields, Field, MapSlot, MapType};
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::Arc;
 
 pub const MAX_TUPLE_ITEMS: usize = 32;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Signature {
+    pub args: Vec<Type>,
+    pub ret: Type,
+}
+
+impl fmt::Display for Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let args = self
+            .args
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        write!(f, "[{} -> {}]", args.join(", "), self.ret)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type {
@@ -34,7 +52,7 @@ pub enum Type {
     Set(Box<Type>),
     Throwable,
     ExceptionInfo(Box<Type>),
-    Function(Vec<Type>, Box<Type>),
+    Function(Arc<[Signature]>),
     Union(Vec<Type>),
 }
 
@@ -75,9 +93,9 @@ impl Type {
                 t.requires_precise_type()
             }
             Type::Map(map) => map.any_type(Type::requires_precise_type),
-            Type::Function(args, ret) => {
-                args.iter().any(Type::requires_precise_type) || ret.requires_precise_type()
-            }
+            Type::Function(signatures) => signatures.iter().any(|sig| {
+                sig.args.iter().any(Type::requires_precise_type) || sig.ret.requires_precise_type()
+            }),
             _ => false,
         }
     }
@@ -227,11 +245,13 @@ impl Type {
             | (Type::Set(a), Type::Set(e))
             | (Type::Seq(a), Type::Seq(e))
             | (Type::ExceptionInfo(a), Type::ExceptionInfo(e)) => a.subtype_of(e),
-            (Type::Function(args, ret), Type::Function(e_args, e_ret)) => {
-                args.len() == e_args.len()
-                    && args.iter().zip(e_args).all(|(a, e)| e.subtype_of(a))
-                    && ret.subtype_of(e_ret)
-            }
+            (Type::Function(actual), Type::Function(expected)) => expected.iter().all(|e| {
+                actual.iter().any(|a| {
+                    a.args.len() == e.args.len()
+                        && a.args.iter().zip(&e.args).all(|(a, e)| e.subtype_of(a))
+                        && a.ret.subtype_of(&e.ret)
+                })
+            }),
             (Type::Map(a), Type::Map(e)) => a.subtype_of(e),
             _ => false,
         }
@@ -247,9 +267,9 @@ impl Type {
                 t.contains_unknown()
             }
             Type::Map(m) => m.any_type(Type::contains_unknown),
-            Type::Function(args, ret) => {
-                args.iter().any(Type::contains_unknown) || ret.contains_unknown()
-            }
+            Type::Function(signatures) => signatures.iter().any(|sig| {
+                sig.args.iter().any(Type::contains_unknown) || sig.ret.contains_unknown()
+            }),
             _ => false,
         }
     }
@@ -295,9 +315,12 @@ impl fmt::Display for Type {
             Type::Set(t) => write!(f, "Set<{t}>"),
             Type::Throwable => write!(f, "Throwable"),
             Type::ExceptionInfo(data) => write!(f, "ExceptionInfo<{data}>"),
-            Type::Function(args, ret) => {
-                let args = args.iter().map(ToString::to_string).collect::<Vec<_>>();
-                write!(f, "[{} -> {ret}]", args.join(", "))
+            Type::Function(signatures) => {
+                let cases = signatures
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                write!(f, "{}", cases.join(" or "))
             }
             Type::Union(xs) => {
                 let xs = xs.iter().map(ToString::to_string).collect::<Vec<_>>();

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::{Globals, LiteralVar, Model, Names, Signature};
 use crate::types::Type;
 
-pub(super) type Signatures = BTreeMap<String, Arc<Signature>>;
+pub(super) type Signatures = BTreeMap<String, Arc<[Signature]>>;
 
 #[derive(Default, PartialEq, Eq)]
 pub(super) struct Exports {
@@ -26,7 +26,7 @@ pub(super) struct LocalInterface {
 #[derive(PartialEq, Eq)]
 struct LocalFunction {
     name: String,
-    signature: Arc<Signature>,
+    signatures: Arc<[Signature]>,
     private: bool,
     inferred: bool,
 }
@@ -56,16 +56,14 @@ impl Model {
         };
         let mut functions = Vec::with_capacity(self.functions.len());
         for f in self.functions.values() {
-            let signature = Arc::new(Signature {
-                args: f.args.clone(),
-                ret: f.ret.clone(),
-            });
             if !f.private {
-                exports.functions.insert(f.name.clone(), signature.clone());
+                exports
+                    .functions
+                    .insert(f.name.clone(), f.signatures.clone());
             }
             functions.push(LocalFunction {
                 name: f.name.clone(),
-                signature,
+                signatures: f.signatures.clone(),
                 private: f.private,
                 inferred: f.inferred,
             });

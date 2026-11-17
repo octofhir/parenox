@@ -21,7 +21,7 @@ use vars::LiteralVar;
 
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
-use crate::types::Type;
+use crate::types::{Signature, Type};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Function {
@@ -29,29 +29,28 @@ pub(crate) struct Function {
     pub private: bool,
     // Private definitions without a signature are analyzed through direct typed callers.
     pub inferred: bool,
+    pub arities: BTreeMap<usize, FunctionArity>,
+    pub signatures: Arc<[Signature]>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FunctionArity {
     pub params: Vec<Form>,
-    pub args: Vec<Type>,
-    pub ret: Type,
     pub body: Vec<Form>,
     pub span: Span,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Signature {
-    pub args: Vec<Type>,
-    pub ret: Type,
-}
-
 pub(super) enum DeclaredValue<'a> {
     Literal(&'a Type),
-    Function(&'a [Type], &'a Type),
+    Function(&'a Arc<[Signature]>),
 }
 
 impl DeclaredValue<'_> {
     pub(super) fn known(self) -> Type {
         match self {
             Self::Literal(ty) => ty.clone(),
-            Self::Function(args, ret) => Type::Function(args.to_vec(), Box::new(ret.clone())),
+            Self::Function(signatures) => Type::Function(signatures.clone()),
         }
     }
 }
@@ -87,7 +86,7 @@ impl Globals {
             .and_then(|table| table.namespaces.get(namespace))
             .and_then(|functions| functions.get(name))
             .or_else(|| source.and_then(|exports| exports.functions.get(name)))
-            .map(|sig| DeclaredValue::Function(&sig.args, &sig.ret))
+            .map(DeclaredValue::Function)
     }
 }
 
@@ -228,11 +227,12 @@ impl Model {
         }
         for function in self.functions.values() {
             let mut names = BTreeSet::new();
-            for param in &function.params {
-                visit_defaults(param, self, &mut names);
+            for arity in function.arities.values() {
+                for param in &arity.params {
+                    visit_defaults(param, self, &mut names);
+                }
+                visit(&arity.body, self, &mut names);
             }
-
-            visit(&function.body, self, &mut names);
             self.helper_dependencies
                 .insert(function.name.clone(), names);
         }
@@ -298,8 +298,7 @@ impl Model {
             return Some(DeclaredValue::Literal(&value.ty));
         }
         if let Some(function) = self.functions.get(&qualified) {
-            return (!function.inferred)
-                .then_some(DeclaredValue::Function(&function.args, &function.ret));
+            return (!function.inferred).then_some(DeclaredValue::Function(&function.signatures));
         }
         globals
             .declared_value(&qualified)

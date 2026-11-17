@@ -200,3 +200,8 @@ literal-vars format="pretty" color="auto": build
 core-imports format="pretty" color="auto": build
     @./target/release/parenox check examples/core_imports.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/core_imports_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check fixed arities across a namespace boundary and show bad calls.
+arities format="pretty": build
+    @./target/release/parenox check examples/arities/provider.clj examples/arities/app.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/arities/provider.clj examples/arities/bad.clj --format {{quote(format)}} || test "$?" -eq 1

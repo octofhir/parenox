@@ -1,5 +1,7 @@
 //! Annotated signatures and function declarations.
-use super::{Function, Globals, Model, Signature, type_forms::read_type};
+use std::collections::BTreeMap;
+
+use super::{Function, FunctionArity, Globals, Model, Signature, type_forms::read_type};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
@@ -39,22 +41,34 @@ impl Model {
         } else {
             &[]
         };
+        let mut arms = &xs[index..];
+        let trailing_attrs = if arms.first().and_then(Form::vector).is_none()
+            && let Some(attrs) = arms.last().and_then(Form::map)
+        {
+            arms = &arms[..arms.len() - 1];
+            attrs
+        } else {
+            &[]
+        };
+        let attribute = |key| {
+            trailing_attrs
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .chain(attrs.as_chunks::<2>().0)
+                .find(|[name, _]| name.keyword() == Some(key))
+                .map(|[_, value]| value)
+        };
         let default_private = xs[0]
             .symbol()
             .is_some_and(|s| self.resolve(s) == "clojure.core/defn-");
-        let private_form = attrs
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .find(|p| p[0].keyword() == Some(":private"))
-            .map(|p| &p[1])
-            .or_else(|| {
-                if default_private {
-                    None
-                } else {
-                    xs[1].metadata(":private")
-                }
-            });
+        let private_form = attribute(":private").or_else(|| {
+            if default_private {
+                None
+            } else {
+                xs[1].metadata(":private")
+            }
+        });
         let private = if let Some(form) = private_form {
             match form.without_metadata().kind {
                 Kind::Bool(value) => value,
@@ -70,13 +84,7 @@ impl Model {
         } else {
             default_private
         };
-        let signature = attrs
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .find(|p| p[0].keyword() == Some(":t/sig"))
-            .map(|p| &p[1])
-            .or_else(|| xs[1].metadata(":t/sig"));
+        let signature = attribute(":t/sig").or_else(|| xs[1].metadata(":t/sig"));
         let inferred = signature.is_none();
         if inferred && !private {
             self.error(
@@ -86,55 +94,196 @@ impl Model {
             );
             return;
         }
-        let signature = if let Some(signature) = signature {
+        let Some(arities) = self.read_arities(arms, span) else {
+            return;
+        };
+        if inferred && arities.len() > 1 {
+            self.error(
+                "PNX9002",
+                span,
+                format!("Multi-arity private function {name} needs a :t/sig annotation"),
+            );
+            return;
+        }
+        let signatures = if let Some(signature) = signature {
             if !matches!(signature.without_metadata().kind, Kind::Quote(_)) {
                 self.error("PNX9001", signature.span, ":t/sig must be quoted data");
             }
-            let Some(signature) = self.parse_signature(signature, globals) else {
+            let Some(signatures) = self.parse_signatures(signature, globals) else {
                 return;
             };
-            Some(signature)
+            if !arities
+                .keys()
+                .copied()
+                .eq(signatures.iter().map(|sig| sig.args.len()))
+            {
+                self.error(
+                    "PNX2554",
+                    signature.span,
+                    "Signature arities must match the function's parameters",
+                );
+                return;
+            }
+            signatures
         } else {
-            None
+            arities
+                .keys()
+                .map(|count| Signature {
+                    args: vec![Type::Unknown; *count],
+                    ret: Type::Unknown,
+                })
+                .collect()
         };
-        let Some(params) = xs.get(index).and_then(Form::vector) else {
-            self.error("PNX9001", span, "Only single-arity defn is supported");
-            return;
-        };
-        if params.iter().any(|p| p.symbol() == Some("&")) {
-            self.error(
-                "PNX9001",
-                xs[index].span,
-                "Variadic definitions are not supported yet",
-            );
-            return;
-        }
-        let signature = signature.unwrap_or_else(|| Signature {
-            args: vec![Type::Unknown; params.len()],
-            ret: Type::Unknown,
-        });
-        if params.len() != signature.args.len() || xs.len() <= index + 1 {
-            self.error(
-                "PNX2554",
-                span,
-                "Signature arity must match parameters; body is required",
-            );
-            return;
-        }
         let function = Function {
             name: name.clone(),
             private,
             inferred,
-            params: params.to_vec(),
-            args: signature.args,
-            ret: signature.ret,
-            body: xs[index + 1..].to_vec(),
+            arities,
+            signatures: signatures.into(),
             span,
         };
         self.names.refers.remove(symbol);
         if self.functions.insert(name.clone(), function).is_some() {
             self.error("PNX2790", span, format!("Duplicate function {name}"));
         }
+    }
+
+    fn read_arities(
+        &mut self,
+        forms: &[Form],
+        span: Span,
+    ) -> Option<BTreeMap<usize, FunctionArity>> {
+        if forms.first().and_then(Form::vector).is_some() {
+            let arity = self.read_arity(forms, span)?;
+            return Some(BTreeMap::from([(arity.params.len(), arity)]));
+        }
+        let mut arities = BTreeMap::new();
+        for arm in forms {
+            let Kind::List(parts) = &arm.without_metadata().kind else {
+                self.error("PNX1001", arm.span, "Expected a function arity declaration");
+                return None;
+            };
+            let arity = self.read_arity(parts, arm.span)?;
+            let count = arity.params.len();
+            if arities.insert(count, arity).is_some() {
+                self.error(
+                    "PNX2554",
+                    arm.span,
+                    format!("Duplicate function arity {count}"),
+                );
+                return None;
+            }
+        }
+        if arities.is_empty() {
+            self.error(
+                "PNX1001",
+                span,
+                "defn requires a parameter vector or arity declarations",
+            );
+            return None;
+        }
+        Some(arities)
+    }
+
+    fn read_arity(&mut self, forms: &[Form], span: Span) -> Option<FunctionArity> {
+        let [parameters, body @ ..] = forms else {
+            self.error("PNX1001", span, "Expected a function parameter vector");
+            return None;
+        };
+        let Some(params) = parameters.vector() else {
+            self.error(
+                "PNX1001",
+                parameters.span,
+                "Expected a function parameter vector",
+            );
+            return None;
+        };
+        for param in params {
+            match &param.without_metadata().kind {
+                Kind::Symbol(name) if name == "&" => {
+                    self.error(
+                        "PNX9001",
+                        param.span,
+                        "Variadic definitions are not supported yet",
+                    );
+                    return None;
+                }
+                Kind::Symbol(name) if !name.contains('/') || name == "/" => {}
+                Kind::Map(_) | Kind::Vector(_) => {}
+                _ => {
+                    self.error("PNX1001", param.span, "Invalid function parameter binding");
+                    return None;
+                }
+            }
+        }
+        if params.len() > 20 {
+            self.error(
+                "PNX2554",
+                parameters.span,
+                "Clojure/JVM supports at most 20 fixed parameters",
+            );
+            return None;
+        }
+        let (conditions, body) = match body {
+            [head, rest @ ..] if !rest.is_empty() && head.map().is_some() => (Some(head), rest),
+            _ => (None, body),
+        };
+        let condition_span = if let Some(map) = conditions {
+            map.map()
+                .unwrap()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .find_map(|[key, _]| {
+                    matches!(key.keyword(), Some(":pre" | ":post")).then_some(map.span)
+                })
+        } else {
+            [":pre", ":post"]
+                .iter()
+                .find_map(|key| parameters.metadata(key).map(|form| form.span))
+        };
+        if let Some(span) = condition_span {
+            self.error(
+                "PNX9001",
+                span,
+                "Function preconditions and postconditions are not supported yet",
+            );
+            return None;
+        }
+        Some(FunctionArity {
+            params: params.to_vec(),
+            body: body.to_vec(),
+            span,
+        })
+    }
+
+    pub(super) fn parse_signatures(
+        &mut self,
+        form: &Form,
+        globals: &Globals,
+    ) -> Option<Vec<Signature>> {
+        let types = form.unquoted().vector();
+        let Some(arms) =
+            types.filter(|arms| !arms.is_empty() && arms.iter().all(|arm| arm.vector().is_some()))
+        else {
+            return self
+                .parse_signature(form, globals)
+                .map(|signature| vec![signature]);
+        };
+        let mut signatures = BTreeMap::new();
+        for arm in arms {
+            let signature = self.parse_signature(arm, globals)?;
+            let count = signature.args.len();
+            if signatures.insert(count, signature).is_some() {
+                self.error(
+                    "PNX2554",
+                    arm.span,
+                    format!("Duplicate signature arity {count}"),
+                );
+                return None;
+            }
+        }
+        Some(signatures.into_values().collect())
     }
 
     pub(super) fn parse_signature(&mut self, form: &Form, globals: &Globals) -> Option<Signature> {

@@ -31,20 +31,18 @@ impl Model {
         globals: &Globals,
     ) -> Vec<Diagnostic> {
         let mut checker = Checker::new(self, globals, source);
-        let args = function.args.iter().cloned().map(Value::new).collect();
-        let result = checker.function_body(
-            &function.params,
-            &function.body,
-            args,
-            &Env::new(),
-            function.span,
-        );
-        checker.expect(
-            &result,
-            &function.ret,
-            function.body.last().unwrap().span,
-            &format!("Return value of {}", function.name),
-        );
+        for signature in function.signatures.iter() {
+            let arity = &function.arities[&signature.args.len()];
+            let args = signature.args.iter().cloned().map(Value::new).collect();
+            let result =
+                checker.function_body(&arity.params, &arity.body, args, &Env::new(), arity.span);
+            checker.expect(
+                &result,
+                &signature.ret,
+                arity.body.last().map_or(arity.span, |form| form.span),
+                &format!("Return value of {}", function.name),
+            );
+        }
         checker.diagnostics
     }
 }

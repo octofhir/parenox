@@ -15,19 +15,19 @@ impl Checker<'_> {
         if self.throws.is_some() && args.iter().all(|arg| arg.known != Type::Never) {
             self.may_throw();
         }
-        if args.len() != function.params.len() {
+        let Some(arity) = function.arities.get(&args.len()) else {
             self.error(
                 "PNX2554",
                 span,
                 format!(
                     "{} expects {} arguments, got {}",
                     function.name,
-                    function.params.len(),
+                    arity_counts(function.arities.keys().copied()),
                     args.len()
                 ),
             );
             return Value::new(Type::Unknown);
-        }
+        };
         if self.active_helpers.contains(&function.name) {
             self.error(
                 "PNX9002",
@@ -54,11 +54,11 @@ impl Checker<'_> {
             }
             self.active_helpers.push(function.name.clone());
             let result = self.function_body(
-                &function.params,
-                &function.body,
+                &arity.params,
+                &arity.body,
                 key.1.clone(),
                 &Env::new(),
-                function.span,
+                arity.span,
             );
             self.active_helpers.pop();
             self.specializations
@@ -222,18 +222,26 @@ impl Checker<'_> {
             self.may_throw();
         }
         match function.known {
-            Type::Function(expected, ret) => {
-                if args.len() != expected.len() {
+            Type::Function(signatures) => {
+                let Some(signature) = signatures.iter().find(|sig| sig.args.len() == args.len())
+                else {
                     self.error(
                         "PNX2554",
                         span,
-                        format!("Expected {} arguments, got {}", expected.len(), args.len()),
+                        format!(
+                            "Expected {} arguments, got {}",
+                            arity_counts(signatures.iter().map(|sig| sig.args.len())),
+                            args.len()
+                        ),
                     );
-                }
-                for (index, ((actual, span), expected)) in args.iter().zip(&expected).enumerate() {
+                    return Value::new(Type::Unknown);
+                };
+                for (index, ((actual, span), expected)) in
+                    args.iter().zip(&signature.args).enumerate()
+                {
                     self.expect(actual, expected, *span, &format!("Argument {}", index + 1));
                 }
-                Value::new(*ret)
+                Value::new(signature.ret.clone())
             }
             Type::Set(_) => {
                 if args.len() != 1 {
@@ -488,4 +496,11 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.string/lower-case"
             | "clojure.string/trim"
     ) || predicate_type(name).is_some()
+}
+
+fn arity_counts(counts: impl Iterator<Item = usize>) -> String {
+    counts
+        .map(|count| count.to_string())
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
