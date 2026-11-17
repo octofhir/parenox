@@ -1,40 +1,42 @@
 {
-  "platform": {
-    "os": "Darwin",
-    "arch": "arm64"
-  },
-  "iterations": 100,
   "agent_edit_fix_recheck": "passed",
-  "small_file": {
-    "bytes": 633,
-    "functions": 4,
-    "first_round_trip_us": 120.8,
-    "warm_round_trip": {
-      "p50_us": 23.0,
-      "p95_us": 41.4,
-      "max_us": 71.8
+  "fresh_cli_process": {
+    "iterations": 30,
+    "timings": {
+      "max_us": 2689.3,
+      "p50_us": 1885.9,
+      "p95_us": 2010.9
     }
   },
   "generated_file": {
-    "bytes": 55904,
+    "bytes": 55905,
+    "first_round_trip_us": 7638.375,
     "functions": 1000,
-    "first_round_trip_us": 5025.8,
-    "warm_round_trip": {
-      "p50_us": 698.5,
-      "p95_us": 748.9,
-      "max_us": 780.6
-    },
     "single_body_edit_round_trip": {
-      "p50_us": 5126.4,
-      "p95_us": 5367.1,
-      "max_us": 5495.1
+      "max_us": 5316.1,
+      "p50_us": 4999.5,
+      "p95_us": 5074.0
+    },
+    "warm_round_trip": {
+      "max_us": 653.5,
+      "p50_us": 577.3,
+      "p95_us": 604.5
     }
   },
-  "fresh_cli_process": {
-    "iterations": 30,
-    "p50_us": 2767.2,
-    "p95_us": 4248.7,
-    "max_us": 6104.6
+  "iterations": 100,
+  "platform": {
+    "arch": "aarch64",
+    "os": "macos"
   },
-  "scope": "Synthetic single-file fixtures. Round trips include Python JSON encoding, pipes, full source transfer, parsing, checking and response decoding. Fresh CLI includes process startup and file I/O. No JVM or macro expansion."
+  "scope": "Synthetic single-file fixtures. Rust JSON encoding, pipes, full source transfer and response decoding. Fresh CLI includes process startup and file I/O. No JVM or macro expansion.",
+  "small_file": {
+    "bytes": 633,
+    "first_round_trip_us": 276.708,
+    "functions": 4,
+    "warm_round_trip": {
+      "max_us": 114.2,
+      "p50_us": 58.8,
+      "p95_us": 82.8
+    }
+  }
 }

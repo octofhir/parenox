@@ -100,12 +100,12 @@ Externs are trusted declarations, not independently verified library implementat
 ./target/release/parenox check examples/clinic \
   --externs examples/clinic/externs.edn
 
-python3 scripts/agent_loop.py --project examples/clinic --iterations 100
+cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations 100
 ```
 
 The CLI shows three planted mistakes: a number passed as a patient id, a number
 passed to a string-library function, and an optional patient name used without
-handling nil. The script fixes all three in memory, checks the result, measures
+handling nil. The Rust example fixes all three in memory, checks the result, measures
 warm round trips and body edits, then changes a public signature and verifies
 that its caller is checked again. It leaves example files unchanged.
 
@@ -194,11 +194,11 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 
 ./target/release/parenox bench examples/good.clj --iterations 1000
-python3 scripts/agent_loop.py --iterations 100 --functions 1000
-python3 scripts/agent_loop.py --project examples/clinic --iterations 100
+cargo run --locked --release --example agent_loop -- --iterations 100 --functions 1000
+cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations 100
 ```
 
-`bench` measures in-process checking. The Python scripts measure full JSON round
+`bench` measures in-process checking. The Rust example measures full JSON round
 trips including source transfer, encoding, pipes and decoding. Measurements are
 local examples, not claims about large production projects. Recorded results are
 in [benchmarks](benchmarks).

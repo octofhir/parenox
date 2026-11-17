@@ -1,0 +1,305 @@
+//! End-to-end agent scenarios over the CLI's JSON Lines protocol.
+use std::error::Error;
+use std::fs;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::Instant;
+
+use serde_json::{Value, json};
+
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+struct Agent {
+    child: Child,
+    input: BufWriter<ChildStdin>,
+    output: BufReader<ChildStdout>,
+    sequence: u64,
+}
+
+impl Agent {
+    fn start(binary: &Path, root: &Path) -> Result<Self> {
+        let mut child = Command::new(binary)
+            .arg("serve")
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        Ok(Self {
+            input: BufWriter::new(child.stdin.take().unwrap()),
+            output: BufReader::new(child.stdout.take().unwrap()),
+            child,
+            sequence: 0,
+        })
+    }
+
+    fn send(&mut self, payload: &mut Value) -> Result<(Value, f64)> {
+        self.sequence += 1;
+        payload["id"] = json!(self.sequence);
+        let started = Instant::now();
+        serde_json::to_writer(&mut self.input, payload)?;
+        writeln!(self.input)?;
+        self.input.flush()?;
+        let mut line = String::new();
+        if self.output.read_line(&mut line)? == 0 {
+            return Err("Checker exited without a response".into());
+        }
+        let mut response: Value = serde_json::from_str(&line)?;
+        let elapsed = started.elapsed().as_secs_f64() * 1_000_000.0;
+        assert_eq!(response["id"], self.sequence, "{response}");
+        assert!(response["result"].is_object(), "{response}");
+        Ok((response["result"].take(), elapsed))
+    }
+
+    fn file(&mut self, path: &str, source: &str) -> Result<(Value, f64)> {
+        self.send(&mut json!({"path": path, "source": source}))
+    }
+}
+
+impl Drop for Agent {
+    fn drop(&mut self) {
+        // Reap the child on success, I/O failure and assertion panic alike.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn summarize(mut samples: Vec<f64>) -> Value {
+    samples.sort_unstable_by(f64::total_cmp);
+    let n = samples.len();
+    let round = |value: f64| (value * 10.0).round() / 10.0;
+    json!({
+        "p50_us": round((samples[(n - 1) / 2] + samples[n / 2]) / 2.0),
+        "p95_us": round(samples[(n * 95).div_ceil(100) - 1]),
+        "max_us": round(samples[n - 1]),
+    })
+}
+
+fn clinic(agent: &mut Agent, root: &Path, project: &str, iterations: usize) -> Result<Value> {
+    let files: Vec<_> = ["http.clj", "model.clj", "service.clj", "store.clj"]
+        .into_iter()
+        .map(|name| {
+            let path = Path::new(project).join(name);
+            Ok(json!({"path": path, "source": fs::read_to_string(root.join(&path))?}))
+        })
+        .collect::<Result<_>>()?;
+    let extern_path = Path::new(project).join("externs.edn");
+    let mut payload = json!({"files": files, "externs": {
+        "path": extern_path, "source": fs::read_to_string(root.join(&extern_path))?,
+    }});
+    let (initial, first_us) = agent.send(&mut payload)?;
+    let errors: Vec<_> = initial["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|file| {
+            file["diagnostics"].as_array().unwrap().iter().map(|d| {
+                json!({
+                    "file": file["path"], "line": d["span"]["start"]["line"],
+                    "code": d["code"], "message": d["message"],
+                })
+            })
+        })
+        .collect();
+    assert_eq!(errors.len(), 3, "{initial}");
+    assert_eq!(initial["complete"], true, "{initial}");
+    for file in payload["files"].as_array_mut().unwrap() {
+        file["source"] = json!(
+            file["source"]
+                .as_str()
+                .unwrap()
+                .replace(
+                    "(str/upper-case (:name patient))",
+                    "(str/upper-case (or (:name patient) \"Unknown\"))"
+                )
+                .replace("(store/find-patient 42)", "(store/find-patient id)")
+                .replace("(str/starts-with? 42", "(str/starts-with? id")
+        );
+    }
+    let (fixed, fix_us) = agent.send(&mut payload)?;
+    assert_eq!(fixed["ok"], true, "{fixed}");
+    assert_eq!(fixed["stats"]["checked_functions"], 2, "{fixed}");
+    let service = payload["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|f| f["path"].as_str().unwrap().ends_with("service.clj"))
+        .unwrap();
+    let mut warm_times = Vec::with_capacity(iterations);
+    let mut edit_times = Vec::with_capacity(iterations);
+    let mut edited = Value::Null;
+    for index in 0..iterations {
+        let (warm, elapsed) = agent.send(&mut payload)?;
+        assert_eq!(warm["ok"], true, "{warm}");
+        assert_eq!(warm["stats"]["checked_functions"], 0, "{warm}");
+        assert_eq!(warm["stats"]["parsed_files"], 0, "{warm}");
+        warm_times.push(elapsed);
+        let (old, new) = if index % 2 == 0 {
+            ("Unknown", "Anonymous")
+        } else {
+            ("Anonymous", "Unknown")
+        };
+        let source = &mut payload["files"][service]["source"];
+        *source = json!(source.as_str().unwrap().replace(old, new));
+        let (report, elapsed) = agent.send(&mut payload)?;
+        assert_eq!(report["ok"], true, "{report}");
+        assert_eq!(report["stats"]["checked_functions"], 1, "{report}");
+        assert_eq!(report["stats"]["reused_functions"], 2, "{report}");
+        edit_times.push(elapsed);
+        edited = report;
+    }
+    let source = &mut payload["files"][service]["source"];
+    *source = json!(source.as_str().unwrap().replace(
+        "'[::model/patient :-> string?]",
+        "'[::model/patient :-> number?]"
+    ));
+    let (changed, change_us) = agent.send(&mut payload)?;
+    assert_eq!(changed["ok"], false, "{changed}");
+    assert_eq!(changed["stats"]["checked_functions"], 2, "{changed}");
+    assert!(
+        changed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["ok"] == false && f["path"].as_str().unwrap().ends_with("http.clj")),
+        "{changed}"
+    );
+    Ok(json!({
+        "scenario": "clinic: 4 namespaces + 1 declared library contract",
+        "iterations": iterations, "initial_errors": errors,
+        "first_round_trip_us": first_us, "fix_round_trip_us": fix_us,
+        "after_fix": fixed["stats"],
+        "warm_round_trip": summarize(warm_times),
+        "body_edit_round_trip": summarize(edit_times), "body_edit": edited["stats"],
+        "signature_change": {"round_trip_us": change_us, "stats": changed["stats"]},
+        "scope": "Release CLI process; Rust JSON encoding, pipes, full project snapshots and response decoding. Local fixture, not a production-scale benchmark.",
+    }))
+}
+
+fn synthetic(
+    agent: &mut Agent,
+    root: &Path,
+    binary: &Path,
+    iterations: usize,
+    functions: usize,
+) -> Result<Value> {
+    let bad = "(ns demo (:require [clojure.spec.alpha :as s] [clojure.string :as str]))\n\
+               (defn label {:t/sig '[(s/nilable string?) :-> string?]} [name] (str/upper-case name))";
+    let (report, _) = agent.file("edit.clj", bad)?;
+    assert_eq!(report["ok"], false, "{report}");
+    assert_eq!(report["complete"], true, "{report}");
+    assert_eq!(report["diagnostics"][0]["code"], "PNX2322", "{report}");
+    let fixed = bad.replace(
+        "(str/upper-case name)",
+        "(str/upper-case (or name \"Unknown\"))",
+    );
+    let (report, _) = agent.file("edit.clj", &fixed)?;
+    assert_eq!(report["ok"], true, "{report}");
+    assert_eq!(report["stats"]["checked_functions"], 1, "{report}");
+    let (report, _) = agent.file("edit.clj", &fixed)?;
+    assert_eq!(report["ok"], true, "{report}");
+    assert_eq!(report["stats"]["reused_functions"], 1, "{report}");
+
+    let small = fs::read_to_string(root.join("examples/good.clj"))?;
+    let (report, small_first) = agent.file("small.clj", &small)?;
+    assert_eq!(report["ok"], true, "{report}");
+    let mut small_times = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let (report, elapsed) = agent.file("small.clj", &small)?;
+        assert_eq!(report["ok"], true, "{report}");
+        assert_eq!(report["stats"]["reused_functions"], 4, "{report}");
+        small_times.push(elapsed);
+    }
+    let mut large = String::from("(ns generated)\n");
+    for index in 0..functions {
+        large.push_str(&format!(
+            "(defn f{index} {{:t/sig '[number? :-> number?]}} [x] (+ x 1))\n"
+        ));
+    }
+    let (report, large_first) = agent.file("large.clj", &large)?;
+    assert_eq!(report["ok"], true, "{report}");
+    assert_eq!(report["stats"]["checked_functions"], functions, "{report}");
+    let mut warm_times = Vec::with_capacity(iterations);
+    let mut edit_times = Vec::with_capacity(iterations);
+    for index in 0..iterations {
+        let (report, elapsed) = agent.file("large.clj", &large)?;
+        assert_eq!(report["ok"], true, "{report}");
+        assert_eq!(report["stats"]["reused_functions"], functions, "{report}");
+        warm_times.push(elapsed);
+        // A same-width edit in the last body preserves all other source ranges.
+        let position = large.rfind("(+ x ").unwrap() + "(+ x ".len();
+        large.replace_range(
+            position..position + 1,
+            if index % 2 == 0 { "2" } else { "1" },
+        );
+        let (report, elapsed) = agent.file("large.clj", &large)?;
+        assert_eq!(report["ok"], true, "{report}");
+        assert_eq!(report["stats"]["checked_functions"], 1, "{report}");
+        assert_eq!(
+            report["stats"]["reused_functions"],
+            functions - 1,
+            "{report}"
+        );
+        edit_times.push(elapsed);
+    }
+    let mut cold_times = Vec::new();
+    for _ in 0..iterations.min(30) {
+        let started = Instant::now();
+        let output = Command::new(binary)
+            .args(["check", "examples/good.clj", "--json"])
+            .current_dir(root)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(report["ok"], true, "{report}");
+        cold_times.push(started.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+    Ok(json!({
+        "iterations": iterations, "agent_edit_fix_recheck": "passed",
+        "small_file": {"bytes": small.len(), "functions": 4, "first_round_trip_us": small_first,
+            "warm_round_trip": summarize(small_times)},
+        "generated_file": {"bytes": large.len(), "functions": functions,
+            "first_round_trip_us": large_first, "warm_round_trip": summarize(warm_times),
+            "single_body_edit_round_trip": summarize(edit_times)},
+        "fresh_cli_process": {"iterations": iterations.min(30), "timings": summarize(cold_times)},
+        "scope": "Synthetic single-file fixtures. Rust JSON encoding, pipes, full source transfer and response decoding. Fresh CLI includes process startup and file I/O. No JVM or macro expansion.",
+    }))
+}
+
+fn main() -> Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut binary = PathBuf::from("target/release/parenox");
+    let mut project = None;
+    let mut iterations = 100;
+    let mut functions = 1000;
+    let mut args = std::env::args().skip(1);
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or("Expected --binary PATH, --project DIR, --iterations N or --functions N")?;
+        match flag.as_str() {
+            "--binary" => binary = value.into(),
+            "--project" => project = Some(value),
+            "--iterations" => iterations = value.parse::<usize>()?,
+            "--functions" => functions = value.parse::<usize>()?,
+            _ => return Err(format!("Unknown option {flag}").into()),
+        }
+    }
+    if iterations == 0 || functions == 0 {
+        return Err("Iterations and functions must be positive".into());
+    }
+    let binary = root.join(binary);
+    let mut agent = Agent::start(&binary, root)?;
+    let mut report = if let Some(project) = project {
+        clinic(&mut agent, root, &project, iterations)?
+    } else {
+        synthetic(&mut agent, root, &binary, iterations, functions)?
+    };
+    report["platform"] = json!({"os": std::env::consts::OS, "arch": std::env::consts::ARCH});
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}

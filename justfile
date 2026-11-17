@@ -24,11 +24,11 @@ serve: build
 
 # Fix clinic errors in memory, then measure warm checks and edits.
 agent-loop iterations="100": build
-    python3 scripts/agent_loop.py --project examples/clinic --iterations {{quote(iterations)}}
+    cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations {{quote(iterations)}}
 
 # Measure synthetic single-file sessions and fresh CLI processes.
 bench iterations="100" functions="1000": build
-    python3 scripts/agent_loop.py --iterations {{quote(iterations)}} --functions {{quote(functions)}}
+    cargo run --locked --release --example agent_loop -- --iterations {{quote(iterations)}} --functions {{quote(functions)}}
 
 # Run the Rust tests.
 test:
