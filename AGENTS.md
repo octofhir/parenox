@@ -3,6 +3,7 @@
 - Use Rust for implementation, developer tools and performance scenarios. Do not add Python.
 - Use `justfile` for common commands and Clojure/EDN for language fixtures and contracts.
 - Keep one crate until a concrete need justifies splitting it.
+- Organize checker code by responsibility. Extend its existing model, binding, flow, call or map modules as appropriate.
 - Prefer small, maintainable code and few dependencies. Measure performance changes.
 - Add tests for meaningful behavior and regressions; avoid tests that mirror implementation.
 - Target Clojure 1.13 semantics; pin the JVM reference in deps.edn and report unsupported features explicitly.
