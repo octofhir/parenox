@@ -73,7 +73,8 @@ impl Checker<'_> {
         let mut destructures = false;
         for [pattern, _] in bindings {
             match &pattern.without_metadata().kind {
-                Kind::Symbol(name) if name != "&" && !name.contains('/') => {}
+                Kind::Symbol(name) | Kind::AnonymousArgument(name)
+                    if name != "&" && !name.contains('/') => {}
                 Kind::Map(_) | Kind::Vector(_) if !raw => destructures = true,
                 _ => {
                     self.error("PNX1001", pattern.span, "Invalid loop binding");

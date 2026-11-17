@@ -118,6 +118,11 @@ impl Declarations {
                         visit(x, names, dependencies);
                     }
                 }
+                Kind::AnonymousFunction(function) => {
+                    for form in &function.body {
+                        visit(form, names, dependencies);
+                    }
+                }
                 Kind::Quote(x) => visit(x, names, dependencies),
                 Kind::Metadata(metadata, target) => {
                     visit(metadata, names, dependencies);

@@ -7,6 +7,8 @@ use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, MAX_TUPLE_ITEMS, Type};
 
+pub(super) const MAX_FIXED_PARAMETERS: usize = 20;
+
 pub(super) struct Clause<'a> {
     params: &'a [Form],
     rest: Option<&'a Form>,
@@ -130,7 +132,8 @@ fn function_clause(forms: &[Form], span: Span) -> Result<Clause<'_>, Box<Diagnos
     }
     for param in params.iter().chain(rest) {
         match &param.without_metadata().kind {
-            Kind::Symbol(name) if !name.contains('/') || name == "/" => {}
+            Kind::Symbol(name) | Kind::AnonymousArgument(name)
+                if !name.contains('/') || name == "/" => {}
             Kind::Map(_) | Kind::Vector(_) => {}
             _ => {
                 return Err(error(
@@ -141,7 +144,7 @@ fn function_clause(forms: &[Form], span: Span) -> Result<Clause<'_>, Box<Diagnos
             }
         }
     }
-    if params.len() > 20 {
+    if params.len() > MAX_FIXED_PARAMETERS {
         return Err(error(
             "PNX2554",
             parameters.span,

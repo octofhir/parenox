@@ -386,7 +386,9 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let valid_pattern = match &pattern.without_metadata().kind {
-            Kind::Symbol(symbol) => symbol != "&" && !symbol.contains('/'),
+            Kind::Symbol(symbol) | Kind::AnonymousArgument(symbol) => {
+                symbol != "&" && !symbol.contains('/')
+            }
             Kind::Map(_) | Kind::Vector(_) => true,
             _ => false,
         };

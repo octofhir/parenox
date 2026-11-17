@@ -25,7 +25,7 @@ impl Checker<'_> {
         let mut reported_unsupported = false;
         for (index, pattern) in positions.iter().enumerate() {
             match &pattern.without_metadata().kind {
-                Kind::Symbol(name) if !name.contains('/') => {}
+                Kind::Symbol(name) | Kind::AnonymousArgument(name) if !name.contains('/') => {}
                 Kind::Map(_) | Kind::Vector(_) => {}
                 _ => {
                     self.error("PNX1001", pattern.span, "Invalid positional binding");

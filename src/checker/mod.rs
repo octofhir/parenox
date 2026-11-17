@@ -256,7 +256,7 @@ impl Checker<'_> {
                 "Tagged literal #{} has no declared reader semantics; its reader function was not executed",
                 tag.symbol().unwrap())),
             Kind::Keyword(k) => Value::new(Type::Key(self.model.key(k))),
-            Kind::Symbol(s) => {
+            Kind::Symbol(s) | Kind::AnonymousArgument(s) => {
                 if let Some(value) = env.get(s) {
                     value.clone()
                 } else if self.model.local_function(s).is_some_and(|f| f.inferred) {
@@ -341,6 +341,10 @@ impl Checker<'_> {
                 self.unsupported(form.span, "Empty list values are not supported yet")
             }
             Kind::List(xs) => self.list(xs, form.span, env, tail),
+            Kind::AnonymousFunction(_) => self.unsupported(
+                form.span,
+                "#() is currently supported in direct calls and inline callbacks",
+            ),
             Kind::Quote(_) => self.unsupported(form.span, "Quoted data is not supported yet"),
         }
     }

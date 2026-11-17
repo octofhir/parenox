@@ -37,7 +37,7 @@ impl Checker<'_> {
 
     pub(super) fn bind(&mut self, form: &Form, value: Value, env: &mut Env) {
         match &form.without_metadata().kind {
-            Kind::Symbol(name) => {
+            Kind::Symbol(name) | Kind::AnonymousArgument(name) => {
                 env.insert(name.clone(), value);
             }
             Kind::Vector(xs) => {
@@ -116,7 +116,7 @@ impl Checker<'_> {
     ) {
         if !matches!(
             pair[0].without_metadata().kind,
-            Kind::Symbol(_) | Kind::Map(_) | Kind::Vector(_)
+            Kind::Symbol(_) | Kind::AnonymousArgument(_) | Kind::Map(_) | Kind::Vector(_)
         ) {
             self.error(
                 "PNX9001",
@@ -188,6 +188,15 @@ impl Checker<'_> {
                     );
                     continue;
                 };
+                if matches!(key.without_metadata().kind, Kind::AnonymousArgument(_)) {
+                    self.error(
+                        "PNX9001",
+                        key.span,
+                        "Keyword inference for a generated #() argument name is not supported",
+                    );
+                    env.insert(name.into(), Value::new(Type::Unknown));
+                    continue;
+                }
                 if namespace.is_some() && name.contains('/') {
                     self.error(
                         "PNX9001",

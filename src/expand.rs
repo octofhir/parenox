@@ -73,7 +73,7 @@ impl Threading {
 pub fn temporary(forms: &[Form], is_bound: impl Fn(&str) -> bool) -> String {
     fn symbols<'a>(form: &'a Form, names: &mut BTreeSet<&'a str>) {
         match &form.kind {
-            Kind::Symbol(name) | Kind::Keyword(name) => {
+            Kind::Symbol(name) | Kind::AnonymousArgument(name) | Kind::Keyword(name) => {
                 let name = name.trim_start_matches(':');
                 names.insert(name);
                 if let Some((_, local)) = name.rsplit_once('/') {
@@ -82,6 +82,11 @@ pub fn temporary(forms: &[Form], is_bound: impl Fn(&str) -> bool) -> String {
             }
             Kind::List(forms) | Kind::Vector(forms) | Kind::Map(forms) | Kind::Set(forms) => {
                 for form in forms {
+                    symbols(form, names);
+                }
+            }
+            Kind::AnonymousFunction(function) => {
+                for form in &function.body {
                     symbols(form, names);
                 }
             }

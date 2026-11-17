@@ -215,3 +215,8 @@ variadic format="pretty": build
 spread format="pretty": build
     @./target/release/parenox check examples/arities/provider.clj examples/variadic.clj examples/apply.clj --format {{quote(format)}}
     @./target/release/parenox check examples/arities/provider.clj examples/variadic.clj examples/apply_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check shorthand callbacks and show positional/type errors.
+anonymous format="pretty": build
+    @./target/release/parenox check examples/anonymous.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/anonymous_bad.clj --format {{quote(format)}} || test "$?" -eq 1

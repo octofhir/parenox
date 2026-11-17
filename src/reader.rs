@@ -24,6 +24,7 @@ pub struct Form {
 #[derive(Clone, Debug)]
 pub enum Kind {
     Symbol(String),
+    AnonymousArgument(String),
     Keyword(String),
     String(String),
     Character(char),
@@ -31,6 +32,7 @@ pub enum Kind {
     Bool(bool),
     Nil,
     List(Vec<Form>),
+    AnonymousFunction(AnonymousFunction),
     Vector(Vec<Form>),
     Map(Vec<Form>),
     Set(Vec<Form>),
@@ -38,6 +40,13 @@ pub enum Kind {
     Metadata(Box<Form>, Box<Form>),
     Tagged(Box<Form>, Box<Form>),
     Conditional { splicing: bool, form: Box<Form> },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AnonymousFunction {
+    pub body: Vec<Form>,
+    pub required: usize,
+    pub variadic: bool,
 }
 
 impl Form {
@@ -70,7 +79,7 @@ impl Form {
 
     pub fn symbol(&self) -> Option<&str> {
         match &self.without_metadata().kind {
-            Kind::Symbol(s) => Some(s),
+            Kind::Symbol(s) | Kind::AnonymousArgument(s) => Some(s),
             _ => None,
         }
     }
@@ -189,6 +198,7 @@ struct Reader<'a> {
     source: &'a str,
     pos: Position,
     depth: usize,
+    arguments: Option<AnonymousFunction>,
     tree: Option<Builder<'a>>,
     conditionals: Conditionals<'a>,
 }
@@ -209,6 +219,7 @@ impl<'a> Reader<'a> {
                 column: 1,
             },
             depth: 0,
+            arguments: None,
             tree: capture.then(|| Builder::new(source)),
             conditionals,
         }
@@ -362,11 +373,12 @@ impl<'a> Reader<'a> {
                         match item {
                             Item::Form(form) => match form.kind {
                                 Kind::List(_) => SyntaxKind::List,
+                                Kind::AnonymousFunction(_) => SyntaxKind::AnonymousFunction,
                                 Kind::Vector(_) => SyntaxKind::Vector,
                                 Kind::Map(_) => SyntaxKind::Map,
                                 Kind::Set(_) => SyntaxKind::Set,
                                 Kind::Quote(_) => SyntaxKind::Quote,
-                                Kind::Symbol(_) => SyntaxKind::Symbol,
+                                Kind::Symbol(_) | Kind::AnonymousArgument(_) => SyntaxKind::Symbol,
                                 Kind::Keyword(_) => SyntaxKind::Keyword,
                                 Kind::String(_) => SyntaxKind::String,
                                 Kind::Character(_) => SyntaxKind::Character,
@@ -422,6 +434,7 @@ impl<'a> Reader<'a> {
                 self.token(SyntaxKind::QuoteMark, start);
                 Kind::Quote(Box::new(self.form()?))
             }
+            Some('#') if self.peek() == Some('(') => self.anonymous_function(start)?,
             Some('#') if self.peek() == Some('{') => {
                 self.bump();
                 self.token(SyntaxKind::OpenSet, start);
@@ -452,6 +465,9 @@ impl<'a> Reader<'a> {
                 }
                 let token = &self.source[start.offset..self.pos.offset];
                 match token {
+                    arg if self.arguments.is_some() && arg.starts_with('%') => {
+                        self.anonymous_argument(arg, start)?
+                    }
                     "nil" => Kind::Nil,
                     "true" => Kind::Bool(true),
                     "false" => Kind::Bool(false),
@@ -481,6 +497,43 @@ impl<'a> Reader<'a> {
         }))
     }
 
+    fn anonymous_function(&mut self, start: Position) -> Result<Kind, ReadError> {
+        if self.arguments.is_some() {
+            return Err(self.error(start, "Nested #() forms are not allowed"));
+        }
+        self.bump(); // (
+        self.token(SyntaxKind::OpenAnonymousFunction, start);
+        self.arguments = Some(AnonymousFunction::default());
+        let body = self.collection(')', start);
+        let mut function = self.arguments.take().unwrap();
+        function.body = body?;
+        Ok(Kind::AnonymousFunction(function))
+    }
+
+    fn anonymous_argument(&mut self, token: &str, start: Position) -> Result<Kind, ReadError> {
+        let function = self.arguments.as_mut().unwrap();
+        if token == "%&" {
+            function.variadic = true;
+            return Ok(Kind::AnonymousArgument(token.into()));
+        }
+        let index = if token == "%" {
+            Some(1)
+        } else {
+            let digits = &token[1..];
+            (!digits.starts_with('0') && digits.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| digits.parse::<usize>().ok())
+                .flatten()
+        };
+        let Some(index) = index else {
+            return Err(self.error(start, "Argument literal must be %, %& or %integer"));
+        };
+        function.required = function.required.max(index);
+        // % and %1 are two spellings of one binding inside this reader scope.
+        Ok(Kind::AnonymousArgument(
+            if token == "%" { "%1" } else { token }.into(),
+        ))
+    }
+
     fn token_boundary(c: char) -> bool {
         // Quote, # and % terminate only at the start of a form in Clojure.
         c.is_whitespace() || "()[]{}\";,`~@^\\".contains(c)
@@ -492,7 +545,9 @@ impl<'a> Reader<'a> {
             Kind::Map(_) => None,
             Kind::Conditional { .. } if matches!(self.conditionals, Conditionals::Preserve) => None,
             Kind::Keyword(key) => Some((key.clone(), true)),
-            Kind::Symbol(_) | Kind::String(_) => Some((":tag".into(), false)),
+            Kind::Symbol(_) | Kind::AnonymousArgument(_) | Kind::String(_) => {
+                Some((":tag".into(), false))
+            }
             Kind::Vector(_) => Some((":param-tags".into(), false)),
             _ => {
                 return Err(self.error(
@@ -526,6 +581,8 @@ impl<'a> Reader<'a> {
         if !matches!(
             target.without_metadata().kind,
             Kind::Symbol(_)
+                | Kind::AnonymousArgument(_)
+                | Kind::AnonymousFunction(_)
                 | Kind::List(_)
                 | Kind::Vector(_)
                 | Kind::Map(_)

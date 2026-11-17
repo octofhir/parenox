@@ -620,3 +620,23 @@
                             (throw (ex-info "spread" {:which :spread})))
                      (catch clojure.lang.ExceptionInfo e (:which (ex-data e))))))
 (println "Clojure/JVM apply: 7 assertions passed")
+
+(load-file "examples/anonymous.clj")
+(load-file "examples/anonymous_bad.clj")
+(assert (= [2 8] (demo.anonymous/offsets [1 4])))
+(assert (= "Ada:3" (demo.anonymous/label-id 3 "Ada")))
+(assert (= "ready" (demo.anonymous/first-extra)))
+(assert (= "settled" (demo.anonymous/settle)))
+(assert (= :wrong-element (try (demo.anonymous-bad/increment-labels ["Ada"])
+                               (catch ClassCastException _ :wrong-element))))
+(assert (= :wrong-arity (try (demo.anonymous-bad/missing-slot)
+                             (catch clojure.lang.ArityException _ :wrong-arity))))
+(assert (= "shadow" (#(let [% "shadow"] %) 1)))
+(assert (= 6 (#(inc #_ %2 %) 5 :ignored)))
+(assert (= 5 ((eval (read-string {:read-cond :allow}
+                                  "#(identity #?(:clj % :cljs %3))"))
+              5 :second :third)))
+(doseq [bad ["#(inc %0)" "#(inc %01)" "#(str %x)" "#(str #_ #(str %) %)"]]
+  (assert (= :reader-error (try (read-string bad)
+                                (catch IllegalStateException _ :reader-error)))))
+(println "Clojure/JVM shorthand callbacks: 13 assertions passed")

@@ -39,6 +39,8 @@ pub enum SyntaxKind {
     Number,
     Boolean,
     Nil,
+    AnonymousFunction,
+    OpenAnonymousFunction,
     ErrorToken,
 }
 
@@ -48,6 +50,7 @@ impl SyntaxKind {
             self,
             Self::Root
                 | Self::List
+                | Self::AnonymousFunction
                 | Self::Vector
                 | Self::Map
                 | Self::Set

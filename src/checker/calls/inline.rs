@@ -1,15 +1,16 @@
 //! Contextual inference for directly applied functions and fnil wrappers.
 use super::super::{
     Checker, Env, Value,
-    function_forms::{function_clauses, pack_arguments},
+    function_forms::{MAX_FIXED_PARAMETERS, function_clauses, pack_arguments},
     nil_part,
 };
-use crate::reader::{Form, Kind, Span};
+use crate::reader::{AnonymousFunction, Form, Kind, Span};
 use crate::types::Type;
 
 #[derive(Clone, Copy)]
 pub(super) enum InlineCallable<'a> {
     Function(&'a [Form]),
+    Literal(&'a AnonymousFunction),
     Fnil(&'a [Form]),
 }
 
@@ -19,8 +20,10 @@ impl Checker<'_> {
         form: &'a Form,
         env: &Env,
     ) -> Option<InlineCallable<'a>> {
-        let Kind::List(forms) = &form.without_metadata().kind else {
-            return None;
+        let forms = match &form.without_metadata().kind {
+            Kind::List(forms) => forms,
+            Kind::AnonymousFunction(function) => return Some(InlineCallable::Literal(function)),
+            _ => return None,
         };
         let (head, parts) = forms.split_first()?;
         let name = head.symbol()?;
@@ -49,6 +52,18 @@ impl Checker<'_> {
         match callable {
             InlineCallable::Function(parts) => {
                 self.call_inline_fn(parts, args, constructor, call, env, invoked)
+            }
+            InlineCallable::Literal(function) => {
+                if function.required > MAX_FIXED_PARAMETERS {
+                    self.error(
+                        "PNX2554",
+                        constructor,
+                        "Clojure/JVM supports at most 20 fixed parameters",
+                    );
+                    return Value::new(Type::Unknown);
+                }
+                let clauses = literal_clause(function, constructor);
+                self.call_inline_fn(&clauses, args, constructor, call, env, invoked)
             }
             InlineCallable::Fnil(parts) => {
                 self.call_fnil(parts, args, constructor, call, env, invoked)
@@ -172,4 +187,27 @@ impl Checker<'_> {
         }
         self.call_form(&parts[0], args, call, env, invoked)
     }
+}
+
+fn literal_clause(function: &AnonymousFunction, span: Span) -> [Form; 2] {
+    let symbol = |name| Form {
+        kind: Kind::Symbol(name),
+        span,
+    };
+    let mut bindings: Vec<_> = (1..=function.required)
+        .map(|index| symbol(format!("%{index}")))
+        .collect();
+    if function.variadic {
+        bindings.extend([symbol("&".into()), symbol("%&".into())]);
+    }
+    [
+        Form {
+            kind: Kind::Vector(bindings),
+            span,
+        },
+        Form {
+            kind: Kind::List(function.body.clone()),
+            span,
+        },
+    ]
 }

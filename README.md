@@ -340,6 +340,11 @@ over a variadic clause at the same argument count. Inside the variadic body
 `apply` checks positional arguments from nil, vectors and seqs whose positions
 are known. It checks every possible exact shape and picks a signature for each
 shape's argument count. Run `just spread` for examples.
+
+Use `#(...)` in immediate calls and supported callbacks. `%` and `%1` name the
+first argument, `%2` and later positions set the required count, and `%&` holds
+the remaining arguments. The reader preserves the original shorthand tokens
+and spans. Run `just anonymous` for examples.
 Map destructuring of rest arguments reports an analysis gap.
 
 ```clojure
