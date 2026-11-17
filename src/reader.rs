@@ -37,6 +37,7 @@ pub enum Kind {
     Quote(Box<Form>),
     Metadata(Box<Form>, Box<Form>),
     Tagged(Box<Form>, Box<Form>),
+    Conditional { splicing: bool, form: Box<Form> },
 }
 
 impl Form {
@@ -109,9 +110,24 @@ pub struct ReadError {
     pub message: String,
 }
 
-/// Fast semantic forms for checking. Uses the same reader without capturing a CST.
+/// Reader conditionals are forbidden in ordinary .clj/EDN input, preserved for
+/// syntax consumers, or selected for an explicit platform feature such as :clj.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum Conditionals<'a> {
+    #[default]
+    Reject,
+    Preserve,
+    Select(&'a str),
+}
+
+/// Fast semantic forms without capturing a CST. Rejects reader conditionals.
 pub fn read(source: &str) -> Result<Vec<Form>, ReadError> {
-    let mut reader = Reader::new(source, false);
+    read_with(source, Conditionals::Reject)
+}
+
+/// The same reader with an explicit conditional policy; no project code is executed.
+pub fn read_with(source: &str, conditionals: Conditionals<'_>) -> Result<Vec<Form>, ReadError> {
+    let mut reader = Reader::new(source, false, conditionals);
     let mut forms = Vec::new();
     while let Some(form) = reader.next_form()? {
         forms.push(form);
@@ -136,7 +152,13 @@ impl Parse {
 /// Retains all source bytes, including invalid and unsupported reader syntax.
 /// Forms contain only successfully read top-level values; errors must be checked before analysis.
 pub fn parse(source: &str) -> Parse {
-    let mut reader = Reader::new(source, true);
+    parse_with(source, Conditionals::Preserve)
+}
+
+/// Captures the whole CST and applies the requested policy to semantic forms in one pass.
+pub fn parse_with(source: &str, conditionals: Conditionals<'_>) -> Parse {
+    let mut reader = Reader::new(source, true, conditionals);
+
     let mut forms = Vec::new();
     let mut errors = Vec::new();
     loop {
@@ -168,10 +190,17 @@ struct Reader<'a> {
     pos: Position,
     depth: usize,
     tree: Option<Builder<'a>>,
+    conditionals: Conditionals<'a>,
+}
+
+enum Item {
+    Form(Form),
+    Omit,
+    Splice { forms: Vec<Form>, span: Span },
 }
 
 impl<'a> Reader<'a> {
-    fn new(source: &'a str, capture: bool) -> Self {
+    fn new(source: &'a str, capture: bool, conditionals: Conditionals<'a>) -> Self {
         Self {
             source,
             pos: Position {
@@ -181,15 +210,26 @@ impl<'a> Reader<'a> {
             },
             depth: 0,
             tree: capture.then(|| Builder::new(source)),
+            conditionals,
         }
     }
 
     fn next_form(&mut self) -> Result<Option<Form>, ReadError> {
-        self.skip()?;
-        if self.peek().is_none() {
-            Ok(None)
-        } else {
-            self.form().map(Some)
+        loop {
+            self.skip()?;
+            if self.peek().is_none() {
+                return Ok(None);
+            }
+            match self.item()? {
+                Item::Form(form) => return Ok(Some(form)),
+                Item::Omit => {}
+                Item::Splice { span, .. } => {
+                    return Err(self.error(
+                        span.start,
+                        "Reader conditional splicing is not allowed at top level",
+                    ));
+                }
+            }
         }
     }
 
@@ -290,32 +330,57 @@ impl<'a> Reader<'a> {
     }
 
     fn form(&mut self) -> Result<Form, ReadError> {
+        loop {
+            match self.item()? {
+                Item::Form(form) => return Ok(form),
+                Item::Omit => {}
+                Item::Splice { span, .. } => {
+                    return Err(self.error(
+                        span.start,
+                        "Reader conditional splicing requires a surrounding collection",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn item(&mut self) -> Result<Item, ReadError> {
         if self.depth >= 128 {
             return Err(self.error(self.pos, "Reader nesting limit (128) exceeded"));
         }
         self.depth += 1;
         let result = self.skip().and_then(|()| {
-            self.start_node(self.pos);
+            let start = self.pos;
+            self.start_node(start);
             let result = self.form_inner();
             if let Some(tree) = &mut self.tree {
-                let kind = result
-                    .as_ref()
-                    .map_or(SyntaxKind::Error, |form| match form.kind {
-                        Kind::List(_) => SyntaxKind::List,
-                        Kind::Vector(_) => SyntaxKind::Vector,
-                        Kind::Map(_) => SyntaxKind::Map,
-                        Kind::Set(_) => SyntaxKind::Set,
-                        Kind::Quote(_) => SyntaxKind::Quote,
-                        Kind::Symbol(_) => SyntaxKind::Symbol,
-                        Kind::Keyword(_) => SyntaxKind::Keyword,
-                        Kind::String(_) => SyntaxKind::String,
-                        Kind::Character(_) => SyntaxKind::Character,
-                        Kind::Metadata(_, _) => SyntaxKind::Metadata,
-                        Kind::Tagged(_, _) => SyntaxKind::Tagged,
-                        Kind::Number => SyntaxKind::Number,
-                        Kind::Bool(_) => SyntaxKind::Boolean,
-                        Kind::Nil => SyntaxKind::Nil,
-                    });
+                let conditional = self.source[start.offset..].starts_with("#?");
+                let kind = result.as_ref().map_or(SyntaxKind::Error, |item| {
+                    if conditional {
+                        SyntaxKind::Conditional
+                    } else {
+                        match item {
+                            Item::Form(form) => match form.kind {
+                                Kind::List(_) => SyntaxKind::List,
+                                Kind::Vector(_) => SyntaxKind::Vector,
+                                Kind::Map(_) => SyntaxKind::Map,
+                                Kind::Set(_) => SyntaxKind::Set,
+                                Kind::Quote(_) => SyntaxKind::Quote,
+                                Kind::Symbol(_) => SyntaxKind::Symbol,
+                                Kind::Keyword(_) => SyntaxKind::Keyword,
+                                Kind::String(_) => SyntaxKind::String,
+                                Kind::Character(_) => SyntaxKind::Character,
+                                Kind::Metadata(_, _) => SyntaxKind::Metadata,
+                                Kind::Tagged(_, _) => SyntaxKind::Tagged,
+                                Kind::Conditional { .. } => SyntaxKind::Conditional,
+                                Kind::Number => SyntaxKind::Number,
+                                Kind::Bool(_) => SyntaxKind::Boolean,
+                                Kind::Nil => SyntaxKind::Nil,
+                            },
+                            Item::Omit | Item::Splice { .. } => SyntaxKind::Conditional,
+                        }
+                    }
+                });
                 tree.finish(kind, self.pos.offset);
             }
             result
@@ -324,7 +389,7 @@ impl<'a> Reader<'a> {
         result
     }
 
-    fn form_inner(&mut self) -> Result<Form, ReadError> {
+    fn form_inner(&mut self) -> Result<Item, ReadError> {
         let start = self.pos;
         let kind = match self.bump() {
             Some('(') => {
@@ -338,7 +403,11 @@ impl<'a> Reader<'a> {
             Some('{') => {
                 self.token(SyntaxKind::OpenBrace, start);
                 let xs = self.collection('}', start)?;
-                if xs.len() % 2 != 0 {
+                if xs.len() % 2 != 0
+                    && !xs
+                        .iter()
+                        .any(|form| matches!(form.kind, Kind::Conditional { .. }))
+                {
                     return Err(self.error(start, "Map literal requires an even number of forms"));
                 }
                 Kind::Map(xs)
@@ -358,6 +427,7 @@ impl<'a> Reader<'a> {
                 self.token(SyntaxKind::OpenSet, start);
                 Kind::Set(self.collection('}', start)?)
             }
+            Some('#') if self.peek() == Some('?') => return self.conditional(start),
             Some('#') if self.peek().is_some_and(char::is_alphabetic) => {
                 self.token(SyntaxKind::DispatchMark, start);
                 let tag = self.form()?;
@@ -402,13 +472,13 @@ impl<'a> Reader<'a> {
             }
             None => return Err(self.error(start, "Unexpected end of input")),
         };
-        Ok(Form {
+        Ok(Item::Form(Form {
             kind,
             span: Span {
                 start,
                 end: self.pos,
             },
-        })
+        }))
     }
 
     fn token_boundary(c: char) -> bool {
@@ -420,6 +490,7 @@ impl<'a> Reader<'a> {
         let mut metadata = self.form()?;
         let shorthand = match &metadata.without_metadata().kind {
             Kind::Map(_) => None,
+            Kind::Conditional { .. } if matches!(self.conditionals, Conditionals::Preserve) => None,
             Kind::Keyword(key) => Some((key.clone(), true)),
             Kind::Symbol(_) | Kind::String(_) => Some((":tag".into(), false)),
             Kind::Vector(_) => Some((":param-tags".into(), false)),
@@ -461,6 +532,7 @@ impl<'a> Reader<'a> {
                 | Kind::Set(_)
                 | Kind::Quote(_)
                 | Kind::Tagged(_, _)
+                | Kind::Conditional { .. }
         ) {
             return Err(self.error(
                 start,
@@ -511,26 +583,155 @@ impl<'a> Reader<'a> {
     }
 
     fn collection(&mut self, end: char, start: Position) -> Result<Vec<Form>, ReadError> {
-        let mut xs = Vec::new();
+        let mut forms = Vec::new();
+        while let Some(item) = self.collection_item(end, start)? {
+            match item {
+                Item::Form(form) => forms.push(form),
+                Item::Omit => {}
+                Item::Splice { forms: values, .. } => forms.extend(values),
+            }
+        }
+        Ok(forms)
+    }
+
+    fn collection_item(&mut self, end: char, start: Position) -> Result<Option<Item>, ReadError> {
+        self.skip()?;
+        match self.peek() {
+            Some(c) if c == end => {
+                let close = self.pos;
+                self.bump();
+                self.token(
+                    match end {
+                        ')' => SyntaxKind::CloseParen,
+                        ']' => SyntaxKind::CloseBracket,
+                        '}' => SyntaxKind::CloseBrace,
+                        _ => unreachable!(),
+                    },
+                    close,
+                );
+                Ok(None)
+            }
+            None => Err(self.error(start, format!("Unclosed form; expected {end}"))),
+            _ => self.item().map(Some),
+        }
+    }
+
+    fn conditional(&mut self, start: Position) -> Result<Item, ReadError> {
+        self.bump(); // ?
+        let splicing = self.peek() == Some('@');
+        if splicing {
+            self.bump();
+        }
+        self.token(SyntaxKind::ConditionalMark, start);
+        self.skip()?;
+        if self.peek() != Some('(') {
+            return Err(self.error(start, "Reader conditional requires a list"));
+        }
+        let feature = match self.conditionals {
+            Conditionals::Reject => {
+                return Err(self.error(
+                    start,
+                    "Reader conditionals require .cljc input or an explicit reader policy",
+                ));
+            }
+            Conditionals::Preserve => {
+                let form = Box::new(self.form()?);
+                return Ok(Item::Form(Form {
+                    kind: Kind::Conditional { splicing, form },
+                    span: Span {
+                        start,
+                        end: self.pos,
+                    },
+                }));
+            }
+            Conditionals::Select(feature) => feature,
+        };
+        let open = self.pos;
+        self.start_node(open);
+        self.bump(); // (
+        self.token(SyntaxKind::OpenParen, open);
+        let result = self.select_conditional(start, feature, splicing);
+        self.finish_node(if result.is_ok() {
+            SyntaxKind::List
+        } else {
+            SyntaxKind::Error
+        });
+        result
+    }
+
+    fn select_conditional(
+        &mut self,
+        start: Position,
+        feature: &str,
+        splicing: bool,
+    ) -> Result<Item, ReadError> {
         loop {
-            self.skip()?;
-            match self.peek() {
-                Some(c) if c == end => {
-                    let close = self.pos;
-                    self.bump();
-                    self.token(
-                        match end {
-                            ')' => SyntaxKind::CloseParen,
-                            ']' => SyntaxKind::CloseBracket,
-                            '}' => SyntaxKind::CloseBrace,
-                            _ => unreachable!(),
-                        },
-                        close,
-                    );
-                    return Ok(xs);
+            let Some(key) = self.conditional_form(start)? else {
+                return Ok(Item::Omit);
+            };
+            let Some(key_name) = key.keyword() else {
+                return Err(self.error(
+                    key.span.start,
+                    "Reader conditional feature must be a keyword",
+                ));
+            };
+            if matches!(key_name, ":else" | ":none") {
+                return Err(self.error(key.span.start, "Reader conditional feature is reserved"));
+            }
+            let selected = key_name == feature || key_name == ":default";
+            let Some(mut value) = self.conditional_form(start)? else {
+                return if selected {
+                    Err(self.error(
+                        start,
+                        "Reader conditional requires a value for each feature",
+                    ))
+                } else {
+                    Ok(Item::Omit)
+                };
+            };
+            if selected {
+                // Still read the tail for syntax errors. Nested conditionals
+                // keep their selection semantics even in inactive branches.
+                while self.collection_item(')', start)?.is_some() {}
+                if !splicing {
+                    return Ok(Item::Form(value));
                 }
-                None => return Err(self.error(start, format!("Unclosed form; expected {end}"))),
-                _ => xs.push(self.form()?),
+                loop {
+                    match value.kind {
+                        Kind::Metadata(_, target) => value = *target,
+                        Kind::List(values) | Kind::Vector(values) => {
+                            return Ok(Item::Splice {
+                                forms: values,
+                                span: Span {
+                                    start,
+                                    end: self.pos,
+                                },
+                            });
+                        }
+                        _ => {
+                            return Err(self.error(
+                                value.span.start,
+                                "Splicing reader conditional requires a list or vector",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn conditional_form(&mut self, start: Position) -> Result<Option<Form>, ReadError> {
+        loop {
+            match self.collection_item(')', start)? {
+                Some(Item::Form(form)) => return Ok(Some(form)),
+                Some(Item::Omit) => {}
+                Some(Item::Splice { span, .. }) => {
+                    return Err(self.error(
+                        span.start,
+                        "Splicing is not supported in reader conditional feature/value pairs",
+                    ));
+                }
+                None => return Ok(None),
             }
         }
     }

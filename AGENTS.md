@@ -5,6 +5,7 @@
 - Keep one crate until a concrete need justifies splitting it.
 - Prefer small, maintainable code and few dependencies. Measure performance changes.
 - Add tests for meaningful behavior and regressions; avoid tests that mirror implementation.
+- Target Clojure 1.13 semantics; pin the JVM reference in deps.edn and report unsupported features explicitly.
 - Keep Clojure semantics explicit, including nil, truthiness, maps, vectors and sets.
 - Use Rowan for lossless CST storage and keep one reader for semantic forms and syntax capture.
 - Own the frontend API; share forms and source spans across consumers. Keep name resolution, macro expansion and execution outside the reader.

@@ -38,7 +38,7 @@ struct FileCache {
 }
 
 impl FileCache {
-    fn update(&mut self, source: &str) -> bool {
+    fn update(&mut self, source: &str, path: &str) -> bool {
         if self.parsed && self.source == source {
             return false;
         }
@@ -47,7 +47,12 @@ impl FileCache {
         self.parsed = true;
         self.model = None;
         self.parse_error = None;
-        match reader::read(source) {
+        let conditionals = if path.ends_with(".cljc") {
+            reader::Conditionals::Select(":clj")
+        } else {
+            reader::Conditionals::Reject
+        };
+        match reader::read_with(source, conditionals) {
             Ok(forms) => {
                 let context = Model::context(&forms);
                 self.namespace = context.ns;
@@ -110,7 +115,7 @@ impl Session {
         let mut paths = BTreeSet::new();
         for source in sources.iter().copied().chain(externs) {
             let mut cache = self.files.remove(source.path).unwrap_or_default();
-            let parsed = cache.update(source.source);
+            let parsed = cache.update(source.source, source.path);
             let mut hasher = DefaultHasher::new();
             source.source.hash(&mut hasher);
             let mut diagnostics: Vec<_> = cache.parse_error.iter().cloned().collect();

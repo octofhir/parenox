@@ -15,6 +15,7 @@ pub enum SyntaxKind {
     Discard,
     Metadata,
     Tagged,
+    Conditional,
     Error,
     OpenParen,
     CloseParen,
@@ -26,6 +27,7 @@ pub enum SyntaxKind {
     QuoteMark,
     MetadataMark,
     DispatchMark,
+    ConditionalMark,
     DiscardMark,
     Whitespace,
     Comma,
@@ -53,6 +55,7 @@ impl SyntaxKind {
                 | Self::Discard
                 | Self::Metadata
                 | Self::Tagged
+                | Self::Conditional
                 | Self::Error
         )
     }

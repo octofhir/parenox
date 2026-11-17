@@ -87,14 +87,14 @@ fn malformed_and_unsupported_reader_syntax_is_lossless_and_terminates() {
         "{1}",
         "\"\\q\"",
         "\"unfinished",
-        "#?(:clj :x)",
+        "#?(:clj :x",
         r"\unknown",
         "1/2",
     ] {
         let parsed = reader::parse(source);
         assert!(!parsed.errors.is_empty(), "{source:?}");
         assert_lossless(source, &parsed);
-        let first = reader::read(source).unwrap_err();
+        let first = reader::read_with(source, reader::Conditionals::Preserve).unwrap_err();
         assert_eq!(parsed.errors[0].message, first.message);
         assert_eq!(parsed.errors[0].span, first.span);
     }

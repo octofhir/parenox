@@ -31,7 +31,9 @@ with readable terminal diagnostics and a persistent JSON Lines interface for age
 ## Quick start
 
 Requires Rust; the current development toolchain is Rust 1.100.0. No JVM is needed
-for static checking. One crate, one CLI binary.
+for static checking. One crate, one CLI binary. The language compatibility target
+is Clojure 1.13; the optional JVM reference is pinned to 1.13.0-alpha11 in
+[deps.edn](deps.edn). This target does not imply complete language support.
 
 ```sh
 git clone https://github.com/octofhir/parenox.git
@@ -52,6 +54,7 @@ just errors json
 just good            # passing example
 just syntax          # inspect source-preserving syntax
 just reader          # metadata, characters and tagged EDN
+just portable        # JVM branches in a .cljc source file
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -129,12 +132,28 @@ errors to stderr. It uses [Rowan](https://github.com/rust-analyzer/rowan)
 0.18.0-alpha.2, pinned exactly while its trivia APIs evolve. The same reader
 serves the checker and the CST. The library exposes `reader::parse(source)`:
 its `syntax()` view preserves every input byte, including whitespace, comments,
-commas, discarded forms and malformed input. Valid top-level forms and reader
-errors are returned separately. Check the errors before using recovered forms.
+commas, discarded forms, all reader-conditional branches and malformed input.
+Valid top-level forms and reader errors are returned separately. Check the errors before using recovered forms.
 
 `reader::read(source)` is the strict semantic path used by checking: it stops at
 the first reader error and does not construct a CST. CST capture is optional;
 ordinary checks keep using semantic forms and their existing caches.
+
+The checker selects `:clj` branches in `.cljc` files. First matching feature wins;
+`:default` matches in order, an unmatched `#?` contributes no form, and `#?@`
+inserts a selected list or vector into its surrounding collection. Selected forms
+retain their original spans for diagnostics. Inactive definitions and requires do
+not enter the checked interface or dependency graph. Ordinary `.clj` input rejects
+reader conditionals, while `syntax` preserves them for tooling.
+
+The library also exposes `reader::read_with(source, Conditionals::Select(":clj"))`
+and `Conditionals::Preserve`. `reader::parse_with(source, policy)` produces both
+selected semantic forms and the complete CST in one pass. Selection is a reader
+policy, separate from type analysis; selecting `:cljs` in the reader does not make the checker a ClojureScript
+analyzer. Preserved forms still need selection and validation before checking.
+Unsupported reader syntax remains a reported gap even in inactive branches.
+Splicing directly through a quote, metadata prefix, tag or conditional feature/value
+pair is currently unsupported; ordinary collection splicing is supported.
 
 The same reader handles the currently supported common Clojure/EDN syntax.
 This does not implement a complete EDN reader, macro expansion, incremental
@@ -270,7 +289,7 @@ values remain available to check finite-value contracts.
 
 Limitations include user macros, Java interop, generics, higher-order builtins,
 recursive specs, multi-arity/variadic definitions, string-key maps, full numeric
-tower semantics and reader conditionals. All numbers currently share `Number`.
+tower semantics and some reader forms. All numbers currently share `Number`.
 Externs currently declare qualified function signatures; they do not load JARs or
 resolve Maven/Git dependencies. There is no runtime, interpreter or VM yet.
 
@@ -295,7 +314,8 @@ trips including source transfer, encoding, pipes and decoding. Measurements are
 local examples, not claims about large production projects. Recorded results are
 in [benchmarks](benchmarks).
 
-Optional independent runtime smoke checks require Clojure:
+Optional independent runtime smoke checks use the pinned Clojure 1.13 reference
+and require the Clojure CLI with Java 17 or newer:
 
 ```sh
 clojure -M scripts/runtime_smoke.clj

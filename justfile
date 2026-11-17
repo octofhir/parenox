@@ -66,3 +66,7 @@ syntax path="examples/syntax.clj": build
 reader: build
     @./target/release/parenox check examples/reader.clj
     @./target/release/parenox syntax examples/reader.edn
+
+# Check the JVM branches of a portable source file.
+portable: build
+    @./target/release/parenox check examples/portable.cljc

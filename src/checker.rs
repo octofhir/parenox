@@ -960,6 +960,7 @@ impl Checker<'_> {
             Kind::String(s) => Value::new(Type::Str(s.clone())),
             Kind::Character(c) => Value::new(Type::Char(*c)),
             Kind::Metadata(_, target) => self.infer(target, env),
+            Kind::Conditional { .. } => self.unsupported(form.span, "Reader conditional must be selected before type analysis"),
             Kind::Tagged(tag, _) => self.unsupported(form.span, format!(
                 "Tagged literal #{} has no declared reader semantics; its reader function was not executed",
                 tag.symbol().unwrap())),
