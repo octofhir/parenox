@@ -115,3 +115,8 @@ updates format="pretty" color="auto": build
 vectors format="pretty" color="auto": build
     @./target/release/parenox check examples/vectors.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/vectors_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check map entry pipelines and show a bad entry value and a bad key argument.
+entries format="pretty" color="auto": build
+    @./target/release/parenox check examples/entries.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/entries_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

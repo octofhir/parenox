@@ -4,6 +4,7 @@ mod vectors;
 
 use super::maps::Lookup;
 use super::{Checker, Env, Value, model::Function, nil_part};
+use crate::Diagnostic;
 use crate::expand::Threading;
 use crate::reader::{Form, Span};
 use crate::types::Type;
@@ -307,6 +308,18 @@ impl Checker<'_> {
             }
             "clojure.core/str" => Type::String,
             "clojure.core/identity" => return args[0].0.clone(),
+            "clojure.core/key" | "clojure.core/val" => {
+                let (entry, span) = &args[0];
+                let index = usize::from(name == "clojure.core/val");
+                if let Some(item) = entry.known.entry_item(index, false) {
+                    return Value::with_notes(item, entry.notes.clone());
+                }
+                let mut diagnostic =
+                    Diagnostic::type_mismatch(*span, name, "MapEntry".into(), entry.ty.to_string());
+                diagnostic.notes = entry.notes.clone();
+                self.diagnostics.push(diagnostic);
+                Type::Unknown
+            }
             "clojure.core/count" => {
                 fn countable(t: &Type) -> bool {
                     match t {
@@ -314,6 +327,7 @@ impl Checker<'_> {
                         | Type::String
                         | Type::Str(_)
                         | Type::Map(_)
+                        | Type::MapEntry(_)
                         | Type::Vector(_)
                         | Type::Set(_)
                         | Type::Never
@@ -405,6 +419,8 @@ fn is_builtin(name: &str) -> bool {
             | "clojure.core/some?"
             | "clojure.core/not"
             | "clojure.core/="
+            | "clojure.core/key"
+            | "clojure.core/val"
             | "clojure.core/count"
             | "clojure.string/upper-case"
             | "clojure.string/lower-case"

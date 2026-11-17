@@ -61,9 +61,9 @@ impl Checker<'_> {
         let collection = self.infer(form, env);
         match element_type(collection.known) {
             Ok(element) => Value::with_notes(element, collection.notes),
-            Err(CollectionError::Map) => self.unsupported(
+            Err(CollectionError::OpenMap) => self.unsupported(
                 form.span,
-                format!("{name} over maps requires map entry types"),
+                format!("{name} cannot infer entry types for an open map"),
             ),
             Err(CollectionError::NotSeqable) => {
                 self.error(
@@ -100,7 +100,7 @@ impl Checker<'_> {
 }
 
 enum CollectionError {
-    Map,
+    OpenMap,
     NotSeqable,
 }
 
@@ -116,7 +116,14 @@ fn element_type(collection: Type) -> Result<Type, CollectionError> {
             .map(element_type)
             .collect::<Result<Vec<_>, _>>()
             .map(Type::union),
-        Type::Map(_) => Err(CollectionError::Map),
+        Type::Map(map) if !map.open => Ok(Type::union(
+            map.fields
+                .into_iter()
+                .filter(|(_, field)| field.ty != Type::Never)
+                .map(|(key, field)| Type::MapEntry(Box::new([Type::Key(key), field.ty]))),
+        )),
+        Type::Map(_) => Err(CollectionError::OpenMap),
+        Type::MapEntry(items) => Ok(Type::union(*items)),
         _ => Err(CollectionError::NotSeqable),
     }
 }

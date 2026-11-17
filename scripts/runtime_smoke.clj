@@ -274,3 +274,22 @@
            (try (mapv (fnil inc (inc "bad")) []) :unexpected-success
                 (catch ClassCastException _ :throws))))
 (println "Clojure/JVM vector callbacks: 10 assertions passed")
+
+(load-file "examples/entries.clj")
+(load-file "examples/entries_bad.clj")
+(assert (= [":patient ADA"] (demo.entries/display-labels "Ada" "")))
+(assert (= [:patient] (demo.entries/recorded-roles "Ada")))
+(assert (= [nil] (mapv val {:admitted nil})))
+(assert (= [] (mapv val {})))
+(assert (= [[:admitted 12 nil 2 :missing false]]
+           (mapv (fn [[k v extra :as entry]]
+                   [k v extra (count entry) (get entry :other :missing)
+                    (contains? entry :admitted)])
+                 {:admitted 12})))
+(assert (= :throws
+           (try (demo.entries-bad/increment-counts) :unexpected-success
+                (catch ClassCastException _ :throws))))
+(assert (= :throws
+           (try (demo.entries-bad/key-of-pair) :unexpected-success
+                (catch ClassCastException _ :throws))))
+(println "Clojure/JVM map entries: 7 assertions passed")

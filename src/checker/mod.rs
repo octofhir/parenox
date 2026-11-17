@@ -122,14 +122,12 @@ impl Checker<'_> {
             } else {
                 &actual.ty
             };
-            let mut diagnostic = Diagnostic::new(
-                "PNX2322",
+            let mut diagnostic = Diagnostic::type_mismatch(
                 span,
-                format!("{context}: expected {expected}, got {reported_type}"),
+                context,
+                expected.to_string(),
+                reported_type.to_string(),
             );
-            diagnostic.headline = Some(format!("{context}: mismatched types"));
-            diagnostic.expected = Some(expected.to_string());
-            diagnostic.actual = Some(reported_type.to_string());
             diagnostic.notes = actual.notes.clone();
             let expression = &self.source[span.start.offset..span.end.offset];
             if *expected == Type::String
@@ -144,6 +142,7 @@ impl Checker<'_> {
                     applicability: "requires-review",
                 });
             } else if *expected == Type::Number
+                && expression.starts_with('"')
                 && let Type::Str(value) = &actual.known
                 && value
                     .chars()

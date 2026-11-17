@@ -47,6 +47,18 @@ impl From<reader::ReadError> for Diagnostic {
 }
 
 impl Diagnostic {
+    fn type_mismatch(span: Span, context: &str, expected: String, actual: String) -> Self {
+        let mut diagnostic = Self::new(
+            "PNX2322",
+            span,
+            format!("{context}: expected {expected}, got {actual}"),
+        );
+        diagnostic.headline = Some(format!("{context}: mismatched types"));
+        diagnostic.expected = Some(expected);
+        diagnostic.actual = Some(actual);
+        diagnostic
+    }
+
     fn new(code: &str, span: Span, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),

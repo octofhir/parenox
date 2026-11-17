@@ -16,6 +16,7 @@ pub enum Type {
     Keyword,
     Key(String),
     Map(MapType),
+    MapEntry(Box<[Type; 2]>),
     Vector(Box<Type>),
     Set(Box<Type>),
     Function(Vec<Type>, Box<Type>),
@@ -70,6 +71,10 @@ impl Type {
             Type::Str(_) => Type::String,
             Type::Char(_) => Type::Character,
             Type::Union(xs) => Type::union(xs.iter().map(Type::inferred)),
+            Type::MapEntry(items) => {
+                let [key, value] = items.as_ref();
+                Type::MapEntry(Box::new([key.inferred(), value.inferred()]))
+            }
             Type::Vector(t) => Type::Vector(Box::new(t.inferred())),
             Type::Set(t) => Type::Set(Box::new(t.inferred())),
             Type::Map(map) => Type::Map(MapType {
@@ -96,6 +101,7 @@ impl Type {
         match self {
             Type::Str(_) | Type::Char(_) => true,
             Type::Union(xs) => xs.iter().any(Type::constrains_literal_values),
+            Type::MapEntry(items) => items.iter().any(Type::constrains_literal_values),
             Type::Vector(t) | Type::Set(t) => t.constrains_literal_values(),
             Type::Map(map) => map
                 .fields
@@ -201,6 +207,21 @@ impl Type {
         }
     }
 
+    /// Project an entry by position. Sequential binding also accepts nil.
+    pub fn entry_item(&self, index: usize, allow_nil: bool) -> Option<Type> {
+        match self {
+            Type::MapEntry(items) => Some(items.get(index).cloned().unwrap_or(Type::Nil)),
+            Type::Never | Type::Unknown => Some(self.clone()),
+            Type::Nil if allow_nil => Some(Type::Nil),
+            Type::Union(parts) => parts
+                .iter()
+                .map(|part| part.entry_item(index, allow_nil))
+                .collect::<Option<Vec<_>>>()
+                .map(Type::union),
+            _ => None,
+        }
+    }
+
     pub fn subtype_of(&self, expected: &Type) -> bool {
         if self == &Type::Never || self == expected {
             return true;
@@ -212,6 +233,10 @@ impl Type {
             | (Type::Char(_), Type::Character)
             | (Type::Key(_), Type::Keyword)
             | (Type::Bool(_), Type::Boolean) => true,
+            (Type::MapEntry(a), Type::MapEntry(e)) => {
+                a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
+            }
+            (Type::MapEntry(items), Type::Vector(e)) => items.iter().all(|item| item.subtype_of(e)),
             (Type::Vector(a), Type::Vector(e)) | (Type::Set(a), Type::Set(e)) => a.subtype_of(e),
             (Type::Function(args, ret), Type::Function(e_args, e_ret)) => {
                 args.len() == e_args.len()
@@ -234,6 +259,7 @@ impl Type {
         match self {
             Type::Unknown => true,
             Type::Union(xs) => xs.iter().any(Type::contains_unknown),
+            Type::MapEntry(items) => items.iter().any(Type::contains_unknown),
             Type::Vector(t) | Type::Set(t) => t.contains_unknown(),
             Type::Map(m) => m.fields.values().any(|f| f.ty.contains_unknown()),
             Type::Function(args, ret) => {
@@ -268,6 +294,7 @@ impl fmt::Display for Type {
             Type::Str(s) => write!(f, "{s:?}"),
             Type::Keyword => write!(f, "Keyword"),
             Type::Key(s) => write!(f, "{s}"),
+            Type::MapEntry(items) => write!(f, "MapEntry<{}, {}>", items[0], items[1]),
             Type::Vector(t) => write!(f, "Vector<{t}>"),
             Type::Set(t) => write!(f, "Set<{t}>"),
             Type::Function(args, ret) => {

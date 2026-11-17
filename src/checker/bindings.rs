@@ -1,4 +1,5 @@
-//! Lexical bindings, map destructuring and defaults.
+//! Lexical bindings and destructuring.
+mod positions;
 use std::collections::BTreeMap;
 
 use super::maps::Lookup;
@@ -39,6 +40,7 @@ impl Checker<'_> {
             Kind::Symbol(name) => {
                 env.insert(name.clone(), value);
             }
+            Kind::Vector(xs) => self.bind_positions(xs, form.span, value, env),
             Kind::Map(xs) => {
                 // :missing changes checked lookups into collection of absent keys.
                 // Do not apply throwing semantics before this mode is implemented.

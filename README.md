@@ -65,6 +65,7 @@ just paths           # nested map lookup and update with source diagnostics
 just presence        # presence guards for optional fields
 just updates         # update and update-in with callback diagnostics
 just vectors pretty always  # mapv and filterv with colored callback diagnostics
+just entries pretty always  # map entry pipelines and diagnostics
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -356,11 +357,18 @@ vector of callback results. It stops at the shortest input. `filterv` retains
 elements for which the callback returns a truthy value. Core scalar predicates
 narrow the retained type. `some?` removes nil and keeps false.
 
-Both support vectors, sets, strings (as characters), and nil (as empty).
-Maps require map entry types and report an analysis gap. User-defined
-predicates retain the input element type unless the callback is known to
-always return a falsey value. Run `just vectors pretty always` to see a
-patient-label pipeline and diagnostics for two callback errors.
+Both support vectors, sets, strings (as characters), closed keyword maps, and
+nil (as empty). User-defined predicates retain the input element type unless
+the callback is known to always return a falsey value. Run
+`just vectors pretty always` to see a patient-label pipeline and diagnostics
+for two callback errors.
+
+A closed map supplies a `MapEntry<K, V>` for each present field. Use `key`,
+`val`, or fixed positional bindings such as `(fn [[k v :as entry]] ...)`.
+Optional fields contribute entries only when present, and a present nil remains
+nil. An entry satisfies vector contracts for its two items. Iterating an open
+map, including an `s/keys` contract, reports an analysis gap because undeclared
+fields can have arbitrary types. Run `just entries pretty always` for examples.
 
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,
 `:keys!`, namespaced keys directives and `:req!` renamed/nested bindings.
@@ -390,8 +398,9 @@ Providing both a local-symbol default and a keyword default for the same binding
 or providing a default for a checked required key, produces `PNX1001` at the
 default. A default applies to the local value; `:as` retains the input collection.
 
-Map destructuring with `:missing`, `:select`, `:all` or `:excess`, sequential
-patterns, and string/symbol lookup keys remain unsupported and are reported.
+Map destructuring with `:missing`, `:select`, `:all` or `:excess` and
+string/symbol lookup keys remain unsupported. Positional destructuring currently
+covers map entries and nil; rest bindings report an analysis gap.
 
 Recursive helpers, unused helpers with no typed caller, and helpers used as
 function values currently require `:t/sig`. Private inference is bounded to 32

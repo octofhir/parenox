@@ -65,7 +65,7 @@ impl Checker<'_> {
         };
         let mut notes = value.notes.clone();
         let ty = match &value.known {
-            Type::Nil => default_type,
+            Type::Nil | Type::MapEntry(_) => default_type,
             Type::Never => Type::Never,
             Type::Unknown => Type::Unknown,
             Type::Union(xs) => {
@@ -150,7 +150,7 @@ impl Checker<'_> {
             Type::Union(parts) => {
                 Type::union(parts.iter().map(|part| self.contains_type(part, key, span)))
             }
-            Type::Map(_) | Type::Nil | Type::Set(_) | Type::Vector(_) => {
+            Type::Map(_) | Type::MapEntry(_) | Type::Nil | Type::Set(_) | Type::Vector(_) => {
                 key_presence(ty, key).map_or(Type::Boolean, Type::Bool)
             }
             _ => {
@@ -415,7 +415,7 @@ fn key_presence(ty: &Type, key: &str) -> Option<bool> {
             None if !map.open => Some(false),
             _ => None,
         },
-        Type::Nil | Type::Vector(_) => Some(false), // A keyword is not a vector index.
+        Type::Nil | Type::Vector(_) | Type::MapEntry(_) => Some(false), // A keyword is not a vector index.
         Type::Set(element)
             if !Type::Key(key.to_owned()).subtype_of(element) && !element.contains_unknown() =>
         {

@@ -57,7 +57,7 @@ fn empty_inputs_skip_invocation_but_still_check_callback_expressions() {
         ("(mapv (fn [x y] missing) [])", "PNX2304"),
         ("(mapv inc [1] [2])", "PNX2554"),
         ("(mapv inc 42)", "PNX2322"),
-        ("(mapv inc {:x 1})", "PNX9001"),
+        ("(mapv inc {:x 1})", "PNX2322"),
         ("(filterv number? [1] [2])", "PNX2554"),
     ] {
         let report = check(&format!(
@@ -82,4 +82,84 @@ fn some_predicate_preserves_false_and_respects_shadowing() {
         assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
         assert_eq!(report.diagnostics[0].code, "PNX2322", "{report:#?}");
     }
+}
+
+#[test]
+fn closed_map_entries_preserve_key_value_and_absence_semantics() {
+    let report = Session::default().check("entries.clj", include_str!("../examples/entries.clj"));
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (args, params, expr, element) in [
+        (
+            "boolean?",
+            "[include?]",
+            r#"(mapv val (if include? {:x "Ada"} {}))"#,
+            "string?",
+        ),
+        ("", "[]", "(mapv val {:x nil})", "nil?"),
+        ("", "[]", "(mapv inc {})", "string?"),
+        (
+            "",
+            "[]",
+            "(mapv (fn [[_ _ missing]] missing) {:x 12})",
+            "nil?",
+        ),
+        (
+            "",
+            "[]",
+            "(mapv (fn [[_ _ :as entry]] (count entry)) {:x 12})",
+            "number?",
+        ),
+        (
+            "",
+            "[]",
+            "(mapv (fn [[_ {:keys [n]}]] (inc n)) {:x {:n 12}})",
+            "number?",
+        ),
+        (
+            "",
+            "[]",
+            "(mapv identity {:x 12})",
+            "(s/coll-of (s/or :k keyword? :v number?) :kind vector?)",
+        ),
+    ] {
+        let report = check(&format!(
+            "(defn f {{:t/sig '[{args} :-> (s/coll-of {element} :kind vector?)]}} {params} {expr})"
+        ));
+        assert!(report.ok && report.complete, "{expr}: {report:#?}");
+    }
+}
+
+#[test]
+fn map_entry_diagnostics_distinguish_vectors_and_open_maps() {
+    let source = include_str!("../examples/entries_bad.clj");
+    let report = Session::default().check("entries_bad.clj", source);
+    assert!(report.complete && !report.ok, "{report:#?}");
+    let [element, vector] = &report.diagnostics[..] else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(element.code, "PNX2322");
+    assert_eq!(
+        &source[element.span.start.offset..element.span.end.offset],
+        "total"
+    );
+    assert_eq!(element.expected.as_deref(), Some("Number"));
+    assert_eq!(element.actual.as_deref(), Some("String"));
+    assert!(element.suggestions.is_empty(), "{element:#?}");
+    assert_eq!(vector.code, "PNX2322");
+    assert_eq!(vector.expected.as_deref(), Some("MapEntry"));
+    assert_eq!(vector.actual.as_deref(), Some("Vector<Number | :admitted>"));
+
+    let report = check(
+        "(s/def :sample/n number?)
+         (defn f {:t/sig '[(s/keys :req-un [:sample/n]) :-> (s/coll-of number? :kind vector?)]}
+           [counts] (mapv val counts))",
+    );
+    assert!(!report.complete && !report.ok, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX9001");
+    assert!(
+        report.diagnostics[0].message.contains("open map"),
+        "{report:#?}"
+    );
 }
