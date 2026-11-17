@@ -71,6 +71,7 @@ just map-keys pretty always  # string and dynamic map keys
 just dynamic-paths pretty always  # nested maps with dynamic path segments
 just ordered-paths pretty always  # saved vector paths and positional contracts
 just indices pretty always  # indexed reads and out-of-bounds diagnostics
+just loops            # accumulators and recur diagnostics
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -450,7 +451,7 @@ inferred helper work is included in the check of their callers.
 |---|---|
 | Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
 | Spec forms | `s/keys`, `s/map-of`, `s/tuple`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
-| Control flow | `let`, `do`, `if`, `when`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, local predicate narrowing |
+| Control flow | `let`, `do`, `if`, `when`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, `loop`/`recur`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
 | Data operations | Keyword calls, string and keyword lookups and updates, ordered vector paths, indexed reads, positional and nested map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
@@ -466,6 +467,12 @@ results are currently conservative.
 Inference separates a general expression type from precise known values. Ordinary
 strings are shown as `String`, including inside maps and collections, while exact
 values remain available to check finite-value contracts.
+
+`recur` transfers values to the nearest loop or supported function body. Each
+iteration is checked with the types of its incoming arguments. Structural
+errors such as wrong arity and non-tail use are reported even in branches that
+will not run. Inference reports a gap if a loop keeps generating distinct or
+growing types beyond its analysis budget.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
 recursive specs, multi-arity/variadic definitions, full numeric

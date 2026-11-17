@@ -38,7 +38,6 @@ fn diagnoses_original_fn_body_and_unsupported_callable_forms() {
         ("((fn walk [x] x) 1)", "PNX9001"),
         ("((fn ([x] x) ([x y] y)) 1)", "PNX9001"),
         ("((fn [x & rest] x) 1)", "PNX9001"),
-        ("((fn [x] (recur x)) 1)", "PNX9001"),
         ("((fn [x] {:pre [false]} x) 1)", "PNX9001"),
         ("((fn ^{:post [false]} [x] x) 1)", "PNX9001"),
         ("(let [f (fn [x] x)] (f 1))", "PNX9001"),

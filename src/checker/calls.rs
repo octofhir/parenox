@@ -49,9 +49,13 @@ impl Checker<'_> {
                 return Value::new(Type::Unknown);
             }
             self.active_helpers.push(function.name.clone());
-            let env =
-                self.bind_parameters(Env::new(), &function.params, |index| key.1[index].clone());
-            let result = self.body(&function.body, &env);
+            let result = self.function_body(
+                &function.params,
+                &function.body,
+                key.1.clone(),
+                &Env::new(),
+                function.span,
+            );
             self.active_helpers.pop();
             self.specializations
                 .insert(key, (result.clone(), self.diagnostics[start..].to_vec()));
@@ -66,7 +70,14 @@ impl Checker<'_> {
         result
     }
 
-    pub(super) fn list(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
+    pub(super) fn list(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
+        match xs[0].symbol() {
+            Some("recur") => return self.recur_form(&xs[1..], span, env, tail),
+            Some("loop*") => return self.loop_form(xs, span, env, true),
+            Some("if") => return self.if_form(xs, span, env, false, tail),
+            Some("do") => return self.body(&xs[1..], env, tail),
+            _ => {}
+        }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
             && let Some(function) = self.model.local_function(name).filter(|f| f.inferred)
@@ -98,24 +109,25 @@ impl Checker<'_> {
         {
             let resolved = self.model.resolve(name);
             if let Some(threading) = Threading::from_core_symbol(&resolved) {
-                return self.thread_form(xs, span, env, threading, &resolved);
+                return self.thread_form(xs, span, env, threading, &resolved, tail);
             }
             match resolved.as_str() {
-                "clojure.core/as->" => return self.named_thread(xs, span, env),
-                "clojure.core/let" => return self.let_form(xs, span, env),
+                "clojure.core/as->" => return self.named_thread(xs, span, env, tail),
+                "clojure.core/let" => return self.let_form(xs, span, env, tail),
+                "clojure.core/loop" => return self.loop_form(xs, span, env, false),
                 "clojure.core/if" | "clojure.core/when" => {
-                    return self.if_form(xs, span, env, resolved.ends_with("/when"));
+                    return self.if_form(xs, span, env, resolved.ends_with("/when"), tail);
                 }
                 "clojure.core/if-let"
                 | "clojure.core/when-let"
                 | "clojure.core/if-some"
                 | "clojure.core/when-some" => {
-                    return self.binding_conditional(xs, span, env, &resolved);
+                    return self.binding_conditional(xs, span, env, &resolved, tail);
                 }
-                "clojure.core/do" => return self.body(&xs[1..], env),
+                "clojure.core/do" => return self.body(&xs[1..], env, tail),
 
                 "clojure.core/or" | "clojure.core/and" => {
-                    return self.short_circuit(xs, env, resolved.ends_with("/or"));
+                    return self.short_circuit(xs, env, resolved.ends_with("/or"), tail);
                 }
                 "clojure.core/get" | "clojure.core/req!" => {
                     return self.lookup_form(xs, span, env, &resolved);
@@ -129,9 +141,6 @@ impl Checker<'_> {
                         span,
                         "fn is currently supported in direct calls and inline callbacks",
                     );
-                }
-                "clojure.core/recur" => {
-                    return self.unsupported(span, "recur is not supported yet");
                 }
                 "clojure.core/fnil" => {
                     return self.unsupported(

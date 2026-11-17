@@ -13,6 +13,7 @@ impl Checker<'_> {
         env: &Env,
         threading: Threading,
         name: &str,
+        tail: bool,
     ) -> Value {
         if xs.len() < 2 {
             self.error(
@@ -32,9 +33,9 @@ impl Checker<'_> {
         }
         self.with_thread_expansion(span, |checker| {
             if threading.is_conditional() {
-                checker.conditional_steps(xs, env, threading, name, span)
+                checker.conditional_steps(xs, env, threading, name, span, tail)
             } else {
-                checker.thread_steps(xs, env, threading, name, span)
+                checker.thread_steps(xs, env, threading, name, span, tail)
             }
         })
     }
@@ -53,8 +54,14 @@ impl Checker<'_> {
         result
     }
 
-    fn infer_path(&mut self, form: &Form, env: &Env, reachable: bool) -> Value {
-        self.check_path(reachable, |checker| checker.infer(form, env))
+    pub(super) fn infer_path(
+        &mut self,
+        form: &Form,
+        env: &Env,
+        reachable: bool,
+        tail: bool,
+    ) -> Value {
+        self.check_path(reachable, |checker| checker.infer_position(form, env, tail))
     }
 
     pub(super) fn check_path(
@@ -62,18 +69,26 @@ impl Checker<'_> {
         reachable: bool,
         check: impl FnOnce(&mut Self) -> Value,
     ) -> Value {
-        let start = self.diagnostics.len();
-        let mut value = check(self);
-        if !reachable {
-            // Unexecuted forms must still resolve and pass compiler-level checks.
-            let errors = self.diagnostics.split_off(start);
-            self.diagnostics.extend(
-                errors
-                    .into_iter()
-                    .filter(|d| !matches!(d.code.as_str(), "PNX2322" | "PNX2741" | "PNX2801")),
-            );
-            value.narrow(Type::Never);
+        if reachable {
+            return check(self);
         }
+        let start = self.diagnostics.len();
+        let old = self
+            .recur_target
+            .as_mut()
+            .map(|target| std::mem::replace(&mut target.reachable, false));
+        let mut value = check(self);
+        if let Some((target, old)) = self.recur_target.as_mut().zip(old) {
+            target.reachable = old;
+        }
+        // Unexecuted forms must still resolve and pass compiler-level checks.
+        let errors = self.diagnostics.split_off(start);
+        self.diagnostics.extend(
+            errors
+                .into_iter()
+                .filter(|d| !matches!(d.code.as_str(), "PNX2322" | "PNX2741" | "PNX2801")),
+        );
+        value.narrow(Type::Never);
         value
     }
 
@@ -99,17 +114,18 @@ impl Checker<'_> {
         threading: Threading,
         name: &str,
         span: Span,
+        tail: bool,
     ) -> Value {
-        let mut current = self.infer(&xs[1], env);
         if xs.len() == 2 {
-            return current;
+            return self.infer_position(&xs[1], env, tail && !threading.guards_nil());
         }
+        let mut current = self.infer(&xs[1], env);
         let temporary = expand::temporary(&xs[1..], |name| env.contains_key(name));
         let mut local = env.clone();
         local.insert(temporary.clone(), Value::new(Type::Never));
         let mut origin = xs[1].span;
         let mut skipped_nil = false;
-        for step in &xs[2..] {
+        for (index, step) in xs[2..].iter().enumerate() {
             if threading.guards_nil() {
                 skipped_nil |= nil_part(&current.known) == Type::Nil;
                 current.narrow(current.known.without_nil());
@@ -124,7 +140,7 @@ impl Checker<'_> {
                 },
             );
             let start = self.diagnostics.len();
-            current = self.infer_path(&call, &local, reachable);
+            current = self.infer_path(&call, &local, reachable, tail && index + 3 == xs.len());
             self.expansion_origin(start, name, span, true);
             origin = step.span;
         }
@@ -143,6 +159,7 @@ impl Checker<'_> {
         threading: Threading,
         name: &str,
         span: Span,
+        tail: bool,
     ) -> Value {
         let mut current = self.infer(&xs[1], env);
         if xs.len() == 2 {
@@ -152,9 +169,9 @@ impl Checker<'_> {
         let mut origin = xs[1].span;
         let mut aliases_seed = true;
         let mut joined_branches = false;
-        for [test, step] in xs[2..].as_chunks::<2>().0 {
+        for (index, [test, step]) in xs[2..].as_chunks::<2>().0.iter().enumerate() {
             let start = self.diagnostics.len();
-            let condition = self.infer_path(test, env, current.known != Type::Never);
+            let condition = self.infer_path(test, env, current.known != Type::Never, false);
             self.expansion_origin(start, name, span, false);
             let yes_reachable = condition.known.truthy() != Type::Never;
             let no_reachable = condition.known.falsey() != Type::Never;
@@ -189,7 +206,12 @@ impl Checker<'_> {
                 },
             );
             let start = self.diagnostics.len();
-            let applied = self.infer_path(&call, &yes_env, yes_reachable);
+            let applied = self.infer_path(
+                &call,
+                &yes_env,
+                yes_reachable,
+                tail && 2 * index + 4 == xs.len(),
+            );
             self.expansion_origin(start, name, span, true);
             current = applied.join(skipped);
             if yes_reachable {
@@ -203,7 +225,7 @@ impl Checker<'_> {
         current
     }
 
-    pub(super) fn named_thread(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
+    pub(super) fn named_thread(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
         if xs.len() < 3 {
             self.error(
                 "PNX2554",
@@ -234,24 +256,25 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         }
         self.with_thread_expansion(span, |checker| {
-            let mut current = checker.infer(&xs[1], env);
             if xs.len() == 3 {
-                return current;
+                return checker.infer(&xs[1], env);
             }
+            let mut current = checker.infer(&xs[1], env);
             let mut local = env.clone();
             local.insert(binding.to_owned(), Value::new(Type::Never));
-            for step in &xs[3..] {
+            for (index, step) in xs[3..].iter().enumerate() {
                 let reachable = current.known != Type::Never;
                 *local.get_mut(binding).unwrap() = current;
                 let start = checker.diagnostics.len();
-                current = checker.infer_path(step, &local, reachable);
+                current =
+                    checker.infer_path(step, &local, reachable, tail && index + 4 == xs.len());
                 checker.expansion_origin(start, "clojure.core/as->", span, false);
             }
             current
         })
     }
 
-    pub(super) fn let_form(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
+    pub(super) fn let_form(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
         let Some(bindings) = xs.get(1).and_then(Form::vector) else {
             return self.unsupported(span, "let requires a binding vector");
         };
@@ -259,44 +282,42 @@ impl Checker<'_> {
             return self.unsupported(xs[1].span, "let requires binding/value pairs");
         }
         let mut local = env.clone();
+        let mut reachable = true;
         for pair in bindings.as_chunks::<2>().0 {
-            let value = self.infer(&pair[1], &local);
+            let value = self.infer_path(&pair[1], &local, reachable, false);
+            reachable = value.known != Type::Never;
             self.bind(&pair[0], value, &mut local);
         }
-        self.body(&xs[2..], &local)
+        self.check_path(reachable, |checker| checker.body(&xs[2..], &local, tail))
     }
 
-    pub(super) fn if_form(&mut self, xs: &[Form], span: Span, env: &Env, when: bool) -> Value {
-        if xs.len() < 3 || (!when && xs.len() > 4) {
+    pub(super) fn if_form(
+        &mut self,
+        xs: &[Form],
+        span: Span,
+        env: &Env,
+        when: bool,
+        tail: bool,
+    ) -> Value {
+        if xs.len() < 2 || (!when && !(3..=4).contains(&xs.len())) {
             return self.unsupported(span, "Invalid conditional arity");
         }
         let condition = self.infer(&xs[1], env);
-        let mut yes = {
+        let yes_reachable = condition.known.truthy() != Type::Never;
+        let no_reachable = condition.known.falsey() != Type::Never;
+        let yes = {
             let mut local = env.clone();
             self.narrow(&xs[1], true, &mut local);
-            if when {
-                self.body(&xs[2..], &local)
-            } else {
-                self.infer(&xs[2], &local)
-            }
+            self.check_path(yes_reachable, |checker| {
+                checker.body(&xs[2..if when { xs.len() } else { 3 }], &local, tail)
+            })
         };
-        let mut no = {
+        let no = {
             let mut local = env.clone();
             self.narrow(&xs[1], false, &mut local);
-            if when {
-                Value::new(Type::Nil)
-            } else {
-                xs.get(3)
-                    .map_or_else(|| Value::new(Type::Nil), |x| self.infer(x, &local))
-            }
+            let body = if when { &[] } else { &xs[3..] };
+            self.check_path(no_reachable, |checker| checker.body(body, &local, tail))
         };
-        // Even unreachable forms must be resolved: Clojure compiles both branches.
-        if condition.ty.truthy() == Type::Never {
-            yes.narrow(Type::Never);
-        }
-        if condition.ty.falsey() == Type::Never {
-            no.narrow(Type::Never);
-        }
         Value::with_notes(
             Type::union([yes.known, no.known]),
             [yes.notes, no.notes].concat(),
@@ -309,6 +330,7 @@ impl Checker<'_> {
         span: Span,
         env: &Env,
         name: &str,
+        tail: bool,
     ) -> Value {
         let when = name.starts_with("clojure.core/when-");
         if xs.len() < 2 || (!when && !(3..=4).contains(&xs.len())) {
@@ -368,10 +390,10 @@ impl Checker<'_> {
         input.narrow(matched);
         let yes = self.check_path(yes_reachable, |checker| {
             checker.bind(pattern, input, &mut yes_env);
-            checker.body(if when { &xs[2..] } else { &xs[2..3] }, &yes_env)
+            checker.body(if when { &xs[2..] } else { &xs[2..3] }, &yes_env, tail)
         });
         let no = if let Some(scope) = no_env {
-            self.infer_path(&xs[3], &scope, no_reachable)
+            self.infer_path(&xs[3], &scope, no_reachable, tail)
         } else if no_reachable {
             Value::new(Type::Nil)
         } else {
@@ -383,7 +405,7 @@ impl Checker<'_> {
         )
     }
 
-    pub(super) fn short_circuit(&mut self, xs: &[Form], env: &Env, or: bool) -> Value {
+    pub(super) fn short_circuit(&mut self, xs: &[Form], env: &Env, or: bool, tail: bool) -> Value {
         if xs.len() == 1 {
             return Value::new(if or { Type::Nil } else { Type::Bool(true) });
         }
@@ -392,12 +414,13 @@ impl Checker<'_> {
         let mut notes = Vec::new();
         let mut reachable = true;
         for (index, x) in xs[1..].iter().enumerate() {
-            let value = self.infer(x, &local);
+            let last = index + 2 == xs.len();
+            let value = self.infer_path(x, &local, reachable, tail && last);
             if !reachable {
                 continue;
             }
             notes.extend(value.notes);
-            if index == xs.len() - 2 {
+            if last {
                 types.push(value.known);
                 break;
             }

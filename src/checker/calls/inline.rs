@@ -133,11 +133,13 @@ impl Checker<'_> {
         }
         let start = self.diagnostics.len();
         let result = self.check_path(invoked, |checker| {
-            let local = checker.bind_parameters(env.clone(), params, |index| {
-                args.get(index)
-                    .map_or_else(|| Value::new(Type::Never), |(value, _)| value.clone())
-            });
-            checker.body(body, &local)
+            let args = (0..params.len())
+                .map(|index| {
+                    args.get(index)
+                        .map_or_else(|| Value::new(Type::Never), |(value, _)| value.clone())
+                })
+                .collect();
+            checker.function_body(params, body, args, env, constructor)
         });
         for diagnostic in &mut self.diagnostics[start..] {
             diagnostic.notes.push(format!(

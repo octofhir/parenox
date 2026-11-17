@@ -5,10 +5,12 @@ mod env;
 mod flow;
 mod maps;
 mod model;
+mod recur;
 
 use env::Env;
 use model::Function;
 pub(crate) use model::{Globals, Model};
+use recur::RecurTarget;
 
 use std::collections::BTreeMap;
 
@@ -31,11 +33,17 @@ impl Model {
             active_helpers: Vec::new(),
             thread_depth: 0,
             specializations: BTreeMap::new(),
+            recur_target: None,
+            recur_checks: 0,
         };
-        let env = checker.bind_parameters(Env::new(), &function.params, |index| {
-            Value::new(function.args[index].clone())
-        });
-        let result = checker.body(&function.body, &env);
+        let args = function.args.iter().cloned().map(Value::new).collect();
+        let result = checker.function_body(
+            &function.params,
+            &function.body,
+            args,
+            &Env::new(),
+            function.span,
+        );
         checker.expect(
             &result,
             &function.ret,
@@ -100,6 +108,8 @@ struct Checker<'a> {
     active_helpers: Vec<String>,
     thread_depth: usize,
     specializations: BTreeMap<(String, Vec<Value>), (Value, Vec<Diagnostic>)>,
+    recur_target: Option<RecurTarget>,
+    recur_checks: usize,
 }
 
 impl Checker<'_> {
@@ -171,15 +181,20 @@ impl Checker<'_> {
         }
     }
 
-    fn body(&mut self, body: &[Form], env: &Env) -> Value {
+    fn body(&mut self, body: &[Form], env: &Env, tail: bool) -> Value {
         let mut value = Value::new(Type::Nil);
-        for form in body {
-            value = self.infer(form, env);
+        for (index, form) in body.iter().enumerate() {
+            let tail = tail && index + 1 == body.len();
+            value = self.infer_path(form, env, value.known != Type::Never, tail);
         }
         value
     }
 
     fn infer(&mut self, form: &Form, env: &Env) -> Value {
+        self.infer_position(form, env, false)
+    }
+
+    fn infer_position(&mut self, form: &Form, env: &Env, tail: bool) -> Value {
         match &form.kind {
             Kind::Nil => Value::new(Type::Nil),
             Kind::Bool(b) => Value::new(Type::Bool(*b)),
@@ -196,7 +211,7 @@ impl Checker<'_> {
             }
             Kind::String(s) => Value::new(Type::Str(s.clone())),
             Kind::Character(c) => Value::new(Type::Char(*c)),
-            Kind::Metadata(_, target) => self.infer(target, env),
+            Kind::Metadata(_, target) => self.infer_position(target, env, tail),
             Kind::Conditional { .. } => self.unsupported(form.span, "Reader conditional must be selected before type analysis"),
             Kind::Tagged(tag, _) => self.unsupported(form.span, format!(
                 "Tagged literal #{} has no declared reader semantics; its reader function was not executed",
@@ -281,7 +296,7 @@ impl Checker<'_> {
             Kind::List(xs) if xs.is_empty() => {
                 self.unsupported(form.span, "Empty list values are not supported yet")
             }
-            Kind::List(xs) => self.list(xs, form.span, env),
+            Kind::List(xs) => self.list(xs, form.span, env, tail),
             Kind::Quote(_) => self.unsupported(form.span, "Quoted data is not supported yet"),
         }
     }

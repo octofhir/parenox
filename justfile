@@ -23,8 +23,8 @@ serve: build
     @./target/release/parenox serve
 
 # Fix clinic errors in memory, then measure warm checks and edits.
-agent-loop iterations="100": build
-    cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations {{quote(iterations)}}
+agent-loop iterations="100" binary="target/release/parenox": build
+    cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations {{quote(iterations)}} --binary {{quote(binary)}}
 
 # Measure synthetic single-file sessions and fresh CLI processes.
 bench iterations="100" functions="1000": build
@@ -145,3 +145,8 @@ ordered-paths format="pretty" color="auto": build
 indices format="pretty" color="auto": build
     @./target/release/parenox check examples/indices.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/indices_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check loop accumulators and show later-iteration, arity and tail errors.
+loops format="pretty" color="auto": build
+    @./target/release/parenox check examples/loops.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/loops_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

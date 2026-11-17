@@ -389,3 +389,30 @@
            (try (demo.indices-bad/increment-explicit-nil) :unexpected-success
                 (catch NullPointerException _ :throws))))
 (println "Clojure/JVM indexed reads: 12 assertions passed")
+
+(load-file "examples/loops.clj")
+(assert (= 10 (demo.loops/triangular 5)))
+(assert (= "Ada" (demo.loops/carried-label "Ada")))
+(assert (= 15 (demo.loops/nested-total 5)))
+(assert (= 2 (demo.loops/last-value)))
+(assert (= 7 (demo.loops/local-function)))
+(assert (= 2 (let [y 1] (loop [{:keys [x] :or {x y}} {} y 2] x))))
+(assert (= "changed" (loop [again? true value 0]
+                       (if again? (recur false "changed") value))))
+(let [forms (with-open [reader (java.io.PushbackReader. (clojure.java.io/reader "examples/loops_bad.clj"))]
+              (loop [forms []]
+                (let [form (read {:eof ::eof} reader)]
+                  (if (= form ::eof) forms (recur (conj forms form))))))]
+  (binding [*ns* *ns*]
+    (eval (first forms))
+    (eval (second forms))
+    (assert (= :throws (try ((ns-resolve *ns* 'invalid-later))
+                            (catch ClassCastException _ :throws))))
+    (doseq [[form expected] (map vector (drop 2 forms)
+                                ["Mismatched argument count to recur, expected: 2"
+                                 "Can only recur from tail position"
+                                 "Mismatched argument count to recur, expected: 1"])]
+      (assert (try (eval form) false
+                   (catch clojure.lang.Compiler$CompilerException e
+                     (clojure.string/includes? (ex-message (ex-cause e)) expected)))))))
+(println "Clojure/JVM loops: 11 assertions passed")

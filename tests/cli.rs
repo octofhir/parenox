@@ -236,3 +236,43 @@ fn syntax_command_keeps_trivia_and_reports_errors_without_losing_later_code() {
     assert!(errors.contains("error[PNX9000]"), "{errors}");
     assert!(errors.contains("examples/syntax_bad.clj:4:5"), "{errors}");
 }
+
+#[test]
+fn serve_rechecks_a_later_iteration_after_an_edit() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let failing = include_str!("../examples/loops_bad.clj");
+    let fixed = failing.replace("(recur false \"bad\")", "(recur false 12345)");
+    for (id, source, expected) in [(1, failing, 4), (2, &fixed, 3), (3, &fixed, 3)] {
+        let request = serde_json::json!({"id": id, "path": "loops.clj", "source": source});
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let report = &response["result"];
+        assert_eq!(response["id"], id);
+        assert_eq!(
+            report["diagnostics"].as_array().unwrap().len(),
+            expected,
+            "{report}"
+        );
+        assert_eq!(report["complete"], true);
+        if id == 2 {
+            assert_eq!(report["stats"]["checked_functions"], 1);
+            assert_eq!(report["stats"]["reused_functions"], 3);
+        }
+        if id == 3 {
+            assert_eq!(report["stats"]["checked_functions"], 0);
+            assert_eq!(report["stats"]["reused_functions"], 4);
+        }
+    }
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
