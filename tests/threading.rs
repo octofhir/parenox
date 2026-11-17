@@ -162,3 +162,46 @@ fn private_helpers_in_pipelines_infer_and_invalidate_cached_callers() {
         Some("Nil | String")
     );
 }
+
+#[test]
+fn ordinary_threading_preserves_evaluation_order_syntax_and_tail_position() {
+    for (expected, expression) in [
+        (
+            "string?",
+            r#"(->> (throw (ex-info "unused" {})) (if true "safe"))"#,
+        ),
+        ("number?", "(-> [n 1] (let (inc n)))"),
+        (
+            "#{:done}",
+            "(loop [again false] (->> (recur true) (if again :done)))",
+        ),
+        (
+            "#{:done}",
+            "(loop [again true] (if again (-> (recur false) do) :done))",
+        ),
+        (
+            "#{:outer}",
+            r#"(try
+                  (->> (throw (ex-info "seed" {:stage :seed}))
+                       (str (throw (ex-info "outer" {:stage :outer}))))
+                  (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))"#,
+        ),
+        (
+            "#{:seed}",
+            r#"(try
+                  (some->> (throw (ex-info "seed" {:stage :seed})) (if true :body))
+                  (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))"#,
+        ),
+    ] {
+        let source = format!("(defn f {{:t/sig '[:-> {expected}]}} [] {expression})");
+        let report = check(&source);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check(
+        r#"(defn f {:t/sig '[:-> number?]} []
+             (->> (throw (ex-info "unused" {})) (if true "safe")))"#,
+    );
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX2322");
+    assert_eq!(report.diagnostics[0].actual.as_deref(), Some("String"));
+}

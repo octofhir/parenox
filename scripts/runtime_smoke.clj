@@ -640,3 +640,20 @@
   (assert (= :reader-error (try (read-string bad)
                                 (catch IllegalStateException _ :reader-error)))))
 (println "Clojure/JVM shorthand callbacks: 13 assertions passed")
+
+(assert (= "Untitled" (demo.threading/choose-label true)))
+(assert (= :input (try (demo.threading/choose-label false)
+                        (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(assert (= 2 (-> [n 1] (let (inc n)))))
+(assert (= :done (loop [again false] (->> (recur true) (if again :done)))))
+(assert (= :done (loop [again true] (if again (-> (recur false) do) :done))))
+(assert (= :outer
+           (try
+             (->> (throw (ex-info "seed" {:stage :seed}))
+                  (str (throw (ex-info "outer" {:stage :outer}))))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(assert (= :seed
+           (try
+             (some->> (throw (ex-info "seed" {:stage :seed})) (if true :body))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(println "Clojure/JVM threading order: 7 assertions passed")

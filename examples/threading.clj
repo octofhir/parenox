@@ -34,3 +34,9 @@
   {:t/sig '[:-> string?]}
   []
   (some-> false str))
+
+(defn choose-label
+  {:t/sig '[boolean? :-> string?]}
+  [use-fallback?]
+  (->> (throw (ex-info "Name required" {:stage :input}))
+       (if use-fallback? "Untitled")))

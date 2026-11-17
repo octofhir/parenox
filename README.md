@@ -364,10 +364,12 @@ the same inputs reuse inferred results within the checked entry function.
 Core threading macros `->`, `->>`, `some->` and `some->>` are supported. The checker
 resolves names before selecting a rule, so local and project functions can shadow
 these names. `some->` variants stop on nil; false continues through the chain.
-The seed is analyzed once, and flat pipelines are processed iteratively. Nested
-threading expansion is bounded to 32 active expressions and reports an analysis
-gap at the limit. Compiler-level resolution and arity checks still apply to skipped
-steps; runtime type and missing-key errors are excluded from proven skipped paths.
+Ordinary threading expands each step in place, preserving evaluation order and
+tail position when the input becomes part of a special form. Long chains of bare
+built-ins or keyword lookups are processed iteratively. Other nested expansions
+are bounded to 32 active forms and report an analysis gap at the limit.
+Compiler-level resolution and arity checks still apply to skipped steps; runtime
+type and missing-key errors are excluded from proven skipped paths.
 Run `just threading` for examples and three deliberate errors.
 
 `cond->` and `cond->>` process every condition/step pair, preserving the current

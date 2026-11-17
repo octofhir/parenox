@@ -1,9 +1,11 @@
 //! Control flow, type narrowing and core threading forms.
-use super::calls::predicate_type;
+use super::calls::{is_builtin, predicate_type};
 use super::{Checker, Env, Value, nil_part};
 use crate::expand::{self, Threading};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
+
+const MAX_THREAD_EXPANSION_DEPTH: usize = 32;
 
 impl Checker<'_> {
     pub(super) fn thread_form(
@@ -31,7 +33,33 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         }
-        self.with_thread_expansion(span, |checker| {
+        if matches!(threading, Threading::First | Threading::Last) {
+            let steps = &xs[2..];
+            if steps.len() <= MAX_THREAD_EXPANSION_DEPTH {
+                return self.with_thread_expansion(span, steps.len().max(1), |checker| {
+                    let start = checker.diagnostics.len();
+                    let expanded = steps
+                        .iter()
+                        .fold(xs[1].clone(), |input, step| threading.apply(step, input));
+                    let result = checker.infer_position(&expanded, env, tail);
+                    if !steps.is_empty() {
+                        checker.expansion_origin(start, name, span, true);
+                    }
+                    result
+                });
+            }
+            // The checker can stream a long chain of bare built-in calls whose input
+            // is their only argument. Other steps may suppress or reorder it.
+            if !steps.iter().all(|step| {
+                step.keyword().is_some()
+                    || step
+                        .symbol()
+                        .is_some_and(|name| is_builtin(&self.model.resolve(name)))
+            }) {
+                return self.thread_expansion_limit(span);
+            }
+        }
+        self.with_thread_expansion(span, 1, |checker| {
             if threading.is_conditional() {
                 checker.conditional_steps(xs, env, threading, name, span, tail)
             } else {
@@ -43,15 +71,23 @@ impl Checker<'_> {
     fn with_thread_expansion(
         &mut self,
         span: Span,
+        depth: usize,
         expand: impl FnOnce(&mut Self) -> Value,
     ) -> Value {
-        if self.thread_depth >= 32 {
-            return self.unsupported(span, "Threading expansion nesting limit (32) exceeded");
+        if self.thread_depth + depth > MAX_THREAD_EXPANSION_DEPTH {
+            return self.thread_expansion_limit(span);
         }
-        self.thread_depth += 1;
+        self.thread_depth += depth;
         let result = expand(self);
-        self.thread_depth -= 1;
+        self.thread_depth -= depth;
         result
+    }
+
+    fn thread_expansion_limit(&mut self, span: Span) -> Value {
+        self.unsupported(
+            span,
+            format!("Threading expansion nesting limit ({MAX_THREAD_EXPANSION_DEPTH}) exceeded"),
+        )
     }
 
     pub(super) fn infer_path(
@@ -258,7 +294,7 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         }
-        self.with_thread_expansion(span, |checker| {
+        self.with_thread_expansion(span, 1, |checker| {
             if xs.len() == 3 {
                 return checker.infer(&xs[1], env);
             }
