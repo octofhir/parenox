@@ -155,3 +155,8 @@ loops format="pretty" color="auto": build
 cond format="pretty" color="auto": build
     @./target/release/parenox check examples/cond.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/cond_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check a bare require and a renamed project function across files.
+libspecs format="pretty" color="auto": build
+    @./target/release/parenox check examples/libspecs/provider.clj examples/libspecs/app.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/libspecs/provider.clj examples/libspecs/bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

@@ -195,11 +195,29 @@ impl Model {
     }
 
     pub(super) fn read_function(&mut self, xs: &[Form], span: Span, globals: &Globals) {
-        let Some(name) = xs.get(1).and_then(Form::symbol) else {
+        let Some(symbol) = xs.get(1).and_then(Form::symbol) else {
             self.error("PNX9001", span, "defn requires a function name");
             return;
         };
-        let name = self.function_name(name);
+        if symbol.contains('/') && symbol != "/" {
+            self.error(
+                "PNX1001",
+                xs[1].span,
+                "A defn name must be an unqualified symbol",
+            );
+            return;
+        }
+        if let Some(referred) = self.refers.get(symbol)
+            && !referred.starts_with("clojure.core/")
+        {
+            self.error(
+                "PNX2790",
+                xs[1].span,
+                format!("{symbol} already refers to {referred}"),
+            );
+            return;
+        }
+        let name = format!("{}/{symbol}", self.ns);
         let mut index = 2;
         if xs
             .get(index)
@@ -305,6 +323,7 @@ impl Model {
             body: xs[index + 1..].to_vec(),
             span,
         };
+        self.refers.remove(symbol);
         if self.functions.insert(name.clone(), function).is_some() {
             self.error("PNX2790", span, format!("Duplicate function {name}"));
         }

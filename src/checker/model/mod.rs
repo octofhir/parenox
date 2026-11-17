@@ -1,6 +1,7 @@
 //! Namespace resolution, project interfaces and cache dependencies.
 mod contracts;
 mod externs;
+mod require;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -180,7 +181,10 @@ impl Model {
     }
 
     pub(super) fn resolve(&self, name: &str) -> String {
-        if let Some((prefix, tail)) = name.split_once('/') {
+        if let Some((prefix, tail)) = name
+            .split_once('/')
+            .filter(|(prefix, _)| !prefix.is_empty())
+        {
             format!(
                 "{}/{tail}",
                 self.aliases.get(prefix).map_or(prefix, String::as_str)
@@ -194,7 +198,7 @@ impl Model {
     }
 
     pub(super) fn function_name(&self, name: &str) -> String {
-        if name.contains('/') {
+        if name.contains('/') && name != "/" {
             self.resolve(name)
         } else {
             self.refers
@@ -243,38 +247,7 @@ impl Model {
                 continue;
             }
             for lib in items.iter().skip(1) {
-                let Some(parts) = lib.vector() else {
-                    self.error("PNX9001", lib.span, "Expected [namespace :as alias]");
-                    continue;
-                };
-                let Some(namespace) = parts.first().and_then(Form::symbol) else {
-                    self.error("PNX9001", lib.span, "Expected a required namespace");
-                    continue;
-                };
-                self.dependencies.push(namespace.into());
-                if !(parts.len() - 1).is_multiple_of(2) {
-                    self.error("PNX9001", lib.span, "Expected require option/value pairs");
-                    continue;
-                }
-                for [option, value] in parts[1..].as_chunks::<2>().0 {
-                    match option.keyword() {
-                        Some(":as" | ":as-alias") if value.symbol().is_some() => {
-                            self.aliases
-                                .insert(value.symbol().unwrap().into(), namespace.into());
-                        }
-                        Some(":refer") if value.vector().is_some() => {
-                            for name in value.vector().unwrap() {
-                                if let Some(name) = name.symbol() {
-                                    self.refers
-                                        .insert(name.into(), format!("{namespace}/{name}"));
-                                } else {
-                                    self.error("PNX9001", name.span, "Expected a referred symbol");
-                                }
-                            }
-                        }
-                        _ => self.error("PNX9001", option.span, "Unsupported require option"),
-                    }
-                }
+                self.read_libspec(lib);
             }
         }
     }

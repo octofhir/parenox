@@ -356,3 +356,73 @@ fn namespace_graph_rejects_cycles_duplicates_and_private_imports() {
     ];
     assert!(Session::default().check_project(&referred, None).ok);
 }
+
+#[test]
+fn bare_requires_and_referred_renames_follow_the_provider_signature() {
+    let provider = include_str!("../examples/libspecs/provider.clj");
+    let mut files = BTreeMap::from([
+        (
+            "app.clj",
+            include_str!("../examples/libspecs/app.clj").into(),
+        ),
+        ("provider.clj", provider.into()),
+    ]);
+    let mut session = Session::default();
+    let initial = run(&mut session, &files, None);
+    assert!(initial.ok && initial.complete, "{initial:#?}");
+    assert_eq!(run(&mut session, &files, None).stats.reused_functions, 4);
+
+    files.insert(
+        "provider.clj",
+        provider.replace(
+            "[number? :-> number?]} [count]\n  (+ count 2)",
+            "[number? :-> string?]} [count]\n  (str count)",
+        ),
+    );
+    let changed = run(&mut session, &files, None);
+    assert!(!changed.ok && changed.complete, "{changed:#?}");
+    let diagnostic = &changed.files[0].diagnostics[0];
+    assert_eq!(diagnostic.actual.as_deref(), Some("String"));
+    assert_eq!(diagnostic.expected.as_deref(), Some("Number"));
+    assert!(changed.files[1].ok);
+}
+
+#[test]
+fn referring_renames_only_selected_names_and_preserves_their_binding() {
+    let namespaces = "(ns caller (:require [vendor :refer [label skip] :exclude (skip)
+                     :rename {label render skip render-skip nonexport unused}]))";
+    let externs = Some("{vendor/label [string? :-> string?] vendor/skip [:-> string?]}");
+    for body in ["(render \"Ada\")", "(let [render \"local\"] render)"] {
+        let files = BTreeMap::from([(
+            "caller.clj",
+            format!("{namespaces} (defn f {{:t/sig '[:-> string?]}} [] {body})"),
+        )]);
+        let report = run(&mut Session::default(), &files, externs);
+        assert!(report.ok && report.complete, "{report:#?}");
+    }
+    for name in ["label", "skip", "render-skip", "unused"] {
+        let files = BTreeMap::from([(
+            "caller.clj",
+            format!("{namespaces} (defn f {{:t/sig '[:-> string?]}} [] ({name}))"),
+        )]);
+        let report = run(&mut Session::default(), &files, externs);
+        assert_eq!(
+            report.files[0].diagnostics[0].code, "PNX2304",
+            "{report:#?}"
+        );
+    }
+    let files = BTreeMap::from([(
+        "caller.clj",
+        format!("{namespaces} (defn render {{:t/sig '[:-> string?]}} [] \"conflict\")"),
+    )]);
+    let report = run(&mut Session::default(), &files, externs);
+    assert_eq!(
+        report.files[0].diagnostics[0].code, "PNX2790",
+        "{report:#?}"
+    );
+    assert!(
+        report.files[0].diagnostics[0]
+            .message
+            .contains("render already refers to vendor/label")
+    );
+}
