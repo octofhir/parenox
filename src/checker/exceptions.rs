@@ -1,4 +1,6 @@
 //! Explicit exceptional exits and Clojure's structured exception data.
+mod handlers;
+
 use std::collections::BTreeMap;
 
 use super::{Checker, Env, Value};

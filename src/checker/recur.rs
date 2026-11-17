@@ -13,6 +13,7 @@ pub(super) struct RecurTarget {
     kind: &'static str,
     arity: usize,
     pub(super) reachable: bool,
+    pub(super) blocked_by_try: bool,
     edges: Vec<RecurEdge>,
 }
 
@@ -29,6 +30,10 @@ impl Checker<'_> {
         };
         if !tail {
             self.error("PNX1001", span, "recur is only allowed in tail position");
+            return Value::new(Type::Unknown);
+        }
+        if target.blocked_by_try {
+            self.error("PNX1001", span, "Cannot recur across try");
             return Value::new(Type::Unknown);
         }
         if args.len() != target.arity {
@@ -149,6 +154,7 @@ impl Checker<'_> {
             kind,
             arity: initial.len(),
             reachable: true,
+            blocked_by_try: false,
             edges: Vec::new(),
         });
         let start = self.diagnostics.len();

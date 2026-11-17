@@ -79,6 +79,7 @@ just case             # grouped dispatch and missing-case diagnostics
 just sequences        # seq traversal, precise positions and empty inputs
 just accumulators     # growing vectors with retained element types
 just exceptions       # explicit errors and structured exception data
+just handlers         # try/catch/finally and recur boundaries
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -514,6 +515,12 @@ reports an analysis gap.
 literals preserve that exit, while still checking whether later expressions
 resolve and compile. `ex-info` retains the data map for `ex-data` and follows the
 JVM's treatment of a nil data argument as an empty map.
+
+`try` joins normal results with values from possible `catch` clauses. Catch
+analysis recognizes `ExceptionInfo` and common `java.lang` throwable classes,
+and conservatively allows calls to throw. The return value of `finally` is
+discarded. A `recur` can target a loop or function defined inside a `try`, but
+cannot cross the `try` boundary to a target outside it.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
 recursive specs, multi-arity/variadic definitions, full numeric

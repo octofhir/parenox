@@ -78,6 +78,7 @@ impl Checker<'_> {
             Some("if") => return self.if_form(xs, span, env, false, tail),
             Some("do") => return self.body(&xs[1..], env, tail),
             Some("throw") => return self.throw_form(&xs[1..], span, env),
+            Some("try") => return self.try_form(&xs[1..], env, tail),
             _ => {}
         }
         if let Some(name) = xs[0].symbol()

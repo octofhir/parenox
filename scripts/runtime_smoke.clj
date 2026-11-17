@@ -520,3 +520,23 @@
 (assert (= :throws (try (demo.exceptions-bad/bad-cause)
                         (catch ClassCastException _ :throws))))
 (println "Clojure/JVM exceptions: 10 assertions passed")
+
+(load-file "examples/handlers.clj")
+(assert (= "req-1" (demo.handlers/request-id "req-1")))
+(assert (= "unknown-1" (demo.handlers/request-id nil)))
+(assert (= 10 (demo.handlers/guarded-count 5)))
+(assert (= "Cleanup failed"
+           (try (demo.handlers/cleanup-fails)
+                (catch ExceptionInfo e (ex-message e)))))
+(assert (= 1 (try (throw nil)
+                  (catch RuntimeException e 1)
+                  (catch NullPointerException e "unreachable"))))
+(assert (nil? (try (throw nil) (catch Throwable e))))
+(assert (= :invalid
+           (try (load-file "examples/handlers_bad.clj")
+                (catch clojure.lang.Compiler$CompilerException e
+                  (when (= "Cannot recur across try" (ex-message (ex-cause e))) :invalid)))))
+(assert (= :throws
+           (try ((ns-resolve 'demo.handlers-bad 'invalid-recovery))
+                (catch ClassCastException _ :throws))))
+(println "Clojure/JVM handlers: 8 assertions passed")

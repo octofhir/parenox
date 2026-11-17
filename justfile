@@ -185,3 +185,8 @@ accumulators format="pretty" color="auto": build
 exceptions format="pretty" color="auto": build
     @./target/release/parenox check examples/exceptions.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/exceptions_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check exception recovery and show invalid recovery and recur diagnostics.
+handlers format="pretty" color="auto": build
+    @./target/release/parenox check examples/handlers.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/handlers_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
