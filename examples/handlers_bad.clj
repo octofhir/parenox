@@ -4,7 +4,7 @@
   (try
     (throw (ex-info "Missing request id" {:field :id}))
     (catch ExceptionInfo e
-      (inc (ex-data e)))))
+      (inc (:field (ex-data e))))))
 
 (defn invalid-transfer {:t/sig '[:-> number?]} []
   (loop [i 0]

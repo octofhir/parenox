@@ -159,6 +159,7 @@ impl Checker<'_> {
         env: &Env,
         invoked: bool,
     ) -> Value {
+        self.may_throw();
         if !(2..=4).contains(&parts.len()) {
             self.error(
                 "PNX2554",

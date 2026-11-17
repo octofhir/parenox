@@ -10,6 +10,7 @@ mod model;
 mod recur;
 
 use env::Env;
+use exceptions::Throws;
 use model::Function;
 pub(crate) use model::{Declarations, Globals, Model, SpecCache, SpecFingerprint, SpecSource};
 use recur::RecurTarget;
@@ -37,6 +38,7 @@ impl Model {
             specializations: BTreeMap::new(),
             recur_target: None,
             recur_checks: 0,
+            throws: None,
         };
         let args = function.args.iter().cloned().map(Value::new).collect();
         let result = checker.function_body(
@@ -112,6 +114,7 @@ struct Checker<'a> {
     specializations: BTreeMap<(String, Vec<Value>), (Value, Vec<Diagnostic>)>,
     recur_target: Option<RecurTarget>,
     recur_checks: usize,
+    throws: Option<Throws>,
 }
 
 impl Checker<'_> {
@@ -120,6 +123,7 @@ impl Checker<'_> {
     }
 
     fn unsupported(&mut self, span: Span, message: impl Into<String>) -> Value {
+        self.may_throw();
         self.error("PNX9001", span, message);
         Value::new(Type::Unknown)
     }

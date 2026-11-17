@@ -12,6 +12,9 @@ use crate::types::Type;
 
 impl Checker<'_> {
     fn inferred_call(&mut self, function: &Function, args: Vec<Value>, span: Span) -> Value {
+        if self.throws.is_some() && args.iter().all(|arg| arg.known != Type::Never) {
+            self.may_throw();
+        }
         if args.len() != function.params.len() {
             self.error(
                 "PNX2554",
@@ -104,6 +107,7 @@ impl Checker<'_> {
             if !call_returns(&args) {
                 return Value::new(Type::Never);
             }
+            self.may_throw();
             return self.lookup(
                 &args[0].0,
                 &Type::Key(self.model.key(key)),
@@ -116,6 +120,23 @@ impl Checker<'_> {
             && self.model.signature(name, self.globals).is_none()
         {
             let resolved = self.model.resolve(name);
+            if self.throws.is_some()
+                && matches!(
+                    resolved.as_str(),
+                    "clojure.core/get"
+                        | "clojure.core/req!"
+                        | "clojure.core/contains?"
+                        | "clojure.core/get-in"
+                        | "clojure.core/assoc"
+                        | "clojure.core/assoc-in"
+                        | "clojure.core/update"
+                        | "clojure.core/update-in"
+                        | "clojure.core/mapv"
+                        | "clojure.core/filterv"
+                )
+            {
+                self.may_throw();
+            }
             if let Some(threading) = Threading::from_core_symbol(&resolved) {
                 return self.thread_form(xs, span, env, threading, &resolved, tail);
             }
@@ -196,6 +217,9 @@ impl Checker<'_> {
     ) -> Value {
         if !call_returns(args) {
             return Value::new(Type::Never);
+        }
+        if function.known != Type::Never {
+            self.may_throw();
         }
         match function.known {
             Type::Function(expected, ret) => {
@@ -285,6 +309,21 @@ impl Checker<'_> {
             "clojure.core/ex-info" => (2..=3).contains(&args.len()),
             _ => args.len() == 1,
         };
+        if self.throws.is_some()
+            && (!arity_ok
+                || (!matches!(
+                    name,
+                    "clojure.core/ex-info"
+                        | "clojure.core/ex-data"
+                        | "clojure.core/identity"
+                        | "clojure.core/nil?"
+                        | "clojure.core/some?"
+                        | "clojure.core/not"
+                ) && predicate_type(name).is_none()))
+            && call_returns(args)
+        {
+            self.may_throw();
+        }
         if !arity_ok {
             self.error(
                 "PNX2554",

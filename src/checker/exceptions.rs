@@ -1,5 +1,8 @@
 //! Explicit exceptional exits and Clojure's structured exception data.
+mod effects;
 mod handlers;
+
+pub(super) use effects::Throws;
 
 use std::collections::BTreeMap;
 
@@ -15,26 +18,31 @@ impl Checker<'_> {
         };
         let value = self.infer(exception, env);
         self.expect(&value, &Type::Throwable.nilable(), exception.span, "throw");
+        if let Some(throws) = &mut self.throws {
+            throws.throw_value(&value.known);
+        }
         Value::new(Type::Never)
     }
 
     pub(super) fn ex_info(&mut self, args: &[(Value, Span)]) -> Value {
         let (message, message_span) = &args[0];
         let (data, data_span) = &args[1];
-        self.expect(
-            message,
-            &Type::String.nilable(),
-            *message_span,
-            "ex-info message",
-        );
-        self.expect(
-            data,
-            &map(ExtraFields::Open).nilable(),
-            *data_span,
-            "ex-info data",
-        );
+        let message_type = Type::String.nilable();
+        let data_type = map(ExtraFields::Open).nilable();
+        let cause_type = Type::Throwable.nilable();
+        if self.throws.is_some()
+            && (!message.known.subtype_of(&message_type)
+                || !data.known.subtype_of(&data_type)
+                || args
+                    .get(2)
+                    .is_some_and(|(cause, _)| !cause.known.subtype_of(&cause_type)))
+        {
+            self.may_throw();
+        }
+        self.expect(message, &message_type, *message_span, "ex-info message");
+        self.expect(data, &data_type, *data_span, "ex-info data");
         if let Some((cause, span)) = args.get(2) {
-            self.expect(cause, &Type::Throwable.nilable(), *span, "ex-info cause");
+            self.expect(cause, &cause_type, *span, "ex-info cause");
         }
         Value::with_notes(
             Type::ExceptionInfo(Box::new(exception_data(&data.known))),
@@ -42,7 +50,14 @@ impl Checker<'_> {
         )
     }
 
-    pub(super) fn ex_data(&self, value: &Value) -> Value {
+    pub(super) fn ex_data(&mut self, value: &Value) -> Value {
+        fn unknown_constructor(ty: &Type) -> bool {
+            match ty {
+                Type::Throwable | Type::Unknown => true,
+                Type::Union(parts) => parts.iter().any(unknown_constructor),
+                _ => false,
+            }
+        }
         fn data(ty: &Type) -> Type {
             match ty {
                 Type::ExceptionInfo(data) => data.as_ref().clone(),
@@ -51,6 +66,9 @@ impl Checker<'_> {
                 Type::Union(parts) => Type::union(parts.iter().map(data)),
                 _ => Type::Nil,
             }
+        }
+        if self.throws.is_some() && unknown_constructor(&value.known) {
+            self.may_throw();
         }
         Value::with_notes(data(&value.known), value.notes.clone())
     }

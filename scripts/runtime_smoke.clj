@@ -539,4 +539,7 @@
 (assert (= :throws
            (try ((ns-resolve 'demo.handlers-bad 'invalid-recovery))
                 (catch ClassCastException _ :throws))))
-(println "Clojure/JVM handlers: 8 assertions passed")
+(assert (= "MISSING" (demo.handlers/request-code nil)))
+(assert (= "req-1" (demo.handlers/request-code "req-1")))
+(assert (= "CLEANUP" (demo.handlers/cleanup-code)))
+(println "Clojure/JVM handlers: 11 assertions passed")

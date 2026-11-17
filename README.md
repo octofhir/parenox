@@ -516,11 +516,12 @@ literals preserve that exit, while still checking whether later expressions
 resolve and compile. `ex-info` retains the data map for `ex-data` and follows the
 JVM's treatment of a nil data argument as an empty map.
 
-`try` joins normal results with values from possible `catch` clauses. Catch
-analysis recognizes `ExceptionInfo` and common `java.lang` throwable classes,
-and conservatively allows calls to throw. The return value of `finally` is
-discarded. A `recur` can target a loop or function defined inside a `try`, but
-cannot cross the `try` boundary to a target outside it.
+`try` joins normal results with values from possible `catch` clauses. Explicit
+throws preserve `ExceptionInfo` data for a matching handler. Catch analysis
+recognizes common `java.lang` throwable classes and conservatively allows
+ordinary calls to throw. The return value of `finally` is discarded. A `recur`
+can target a loop or function defined inside a `try`, and Parenox diagnoses
+transfers to targets outside the `try`.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
 recursive specs, multi-arity/variadic definitions, full numeric

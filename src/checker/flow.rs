@@ -73,11 +73,13 @@ impl Checker<'_> {
             return check(self);
         }
         let start = self.diagnostics.len();
+        let enclosing_throws = self.throws.take();
         let old = self
             .recur_target
             .as_mut()
             .map(|target| std::mem::replace(&mut target.reachable, false));
         let mut value = check(self);
+        self.throws = enclosing_throws;
         if let Some((target, old)) = self.recur_target.as_mut().zip(old) {
             target.reachable = old;
         }

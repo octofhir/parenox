@@ -1,11 +1,11 @@
 //! Clojure try, catch and finally scopes.
-use super::{ExtraFields, map};
+use super::Throws;
 use crate::checker::{Checker, Env, Value};
 use crate::reader::{Form, Kind};
 use crate::types::Type;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ExceptionClass {
+pub(super) enum ExceptionClass {
     Throwable,
     Error,
     Exception,
@@ -48,7 +48,7 @@ impl ExceptionClass {
         }
     }
 
-    fn catches(self, class: Option<Self>) -> bool {
+    pub(super) fn catches(self, class: Option<Self>) -> bool {
         self == Self::Throwable
             || class.is_some_and(|class| self == class || self.catches(class.parent()))
     }
@@ -175,26 +175,41 @@ impl Checker<'_> {
         env: &Env,
         tail: bool,
     ) -> Value {
+        let enclosing = self.throws.replace(Throws::default());
         let mut result = self.body(body, env, tail);
-        let possible_exception = !body.iter().all(|form| inert(form, env));
+        let mut pending = self.throws.replace(Throws::default()).unwrap();
         let mut handled = Vec::<ExceptionClass>::new();
         for handler in handlers {
-            let reachable =
-                possible_exception && !handled.iter().any(|class| class.catches(handler.class));
-            let ty = if handler.class == Some(ExceptionClass::ExceptionInfo) {
-                Type::ExceptionInfo(Box::new(map(ExtraFields::Open)))
+            let ty = if handled.iter().any(|class| class.catches(handler.class)) {
+                None
             } else {
-                Type::Throwable
+                pending.take_matching(handler.class)
             };
+            let reachable = ty.is_some();
             let mut local = env.clone();
-            local.insert(handler.binding.to_owned(), Value::new(ty));
+            local.insert(
+                handler.binding.to_owned(),
+                Value::new(ty.unwrap_or(Type::Never)),
+            );
             let caught = self.check_path(reachable, |checker| {
                 checker.body(handler.body, &local, false)
             });
             result = result.join(caught);
             handled.extend(handler.class);
         }
-        let cleanup = self.body(finally, env, false);
+        let handler_throws = self.throws.replace(Throws::default()).unwrap();
+        pending.extend(handler_throws);
+        let cleanup = self.check_path(
+            result.known != Type::Never || pending.can_throw(),
+            |checker| checker.body(finally, env, false),
+        );
+        let cleanup_throws = std::mem::replace(&mut self.throws, enclosing).unwrap();
+        if let Some(enclosing) = &mut self.throws {
+            enclosing.extend(cleanup_throws);
+            if cleanup.known != Type::Never {
+                enclosing.extend(pending);
+            }
+        }
         if cleanup.known == Type::Never {
             cleanup
         } else {
@@ -208,18 +223,5 @@ fn list_head(form: &Form) -> Option<&str> {
         parts.first().and_then(Form::symbol)
     } else {
         None
-    }
-}
-
-fn inert(form: &Form, env: &Env) -> bool {
-    match &form.without_metadata().kind {
-        Kind::Nil
-        | Kind::Bool(_)
-        | Kind::Number
-        | Kind::Character(_)
-        | Kind::String(_)
-        | Kind::Keyword(_) => true,
-        Kind::Symbol(name) => env.contains_key(name),
-        _ => false,
     }
 }

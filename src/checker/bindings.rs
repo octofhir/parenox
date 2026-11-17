@@ -40,8 +40,12 @@ impl Checker<'_> {
             Kind::Symbol(name) => {
                 env.insert(name.clone(), value);
             }
-            Kind::Vector(xs) => self.bind_positions(xs, form.span, value, env),
+            Kind::Vector(xs) => {
+                self.may_throw();
+                self.bind_positions(xs, form.span, value, env);
+            }
             Kind::Map(xs) => {
+                self.may_throw();
                 // :missing changes checked lookups into collection of absent keys.
                 // Do not apply throwing semantics before this mode is implemented.
                 if xs

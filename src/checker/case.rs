@@ -72,12 +72,15 @@ impl Checker<'_> {
             let branch = self.case_branch(fallback, local, remaining, env, tail);
             types.push(branch.known);
             notes.extend(branch.notes);
-        } else if !matched && !matches!(remaining, Type::Never | Type::Unknown) {
-            self.error(
-                "PNX2802",
-                input.span,
-                format!("case has no matching clause for {remaining}"),
-            );
+        } else if remaining != Type::Never {
+            self.case_miss();
+            if !matched && remaining != Type::Unknown {
+                self.error(
+                    "PNX2802",
+                    input.span,
+                    format!("case has no matching clause for {remaining}"),
+                );
+            }
         }
         Value::with_notes(Type::union(types), notes)
     }
