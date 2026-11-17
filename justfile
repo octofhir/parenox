@@ -180,3 +180,8 @@ sequences format="pretty" color="auto": build
 accumulators format="pretty" color="auto": build
     @./target/release/parenox check examples/accumulators.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/accumulators_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check explicit throws and show invalid exception and cause arguments.
+exceptions format="pretty" color="auto": build
+    @./target/release/parenox check examples/exceptions.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/exceptions_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

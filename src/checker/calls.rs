@@ -77,13 +77,17 @@ impl Checker<'_> {
             Some("loop*") => return self.loop_form(xs, span, env, true),
             Some("if") => return self.if_form(xs, span, env, false, tail),
             Some("do") => return self.body(&xs[1..], env, tail),
+            Some("throw") => return self.throw_form(&xs[1..], span, env),
             _ => {}
         }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
             && let Some(function) = self.model.local_function(name).filter(|f| f.inferred)
         {
-            let args = xs[1..].iter().map(|x| self.infer(x, env)).collect();
+            let args = self
+                .eval_args(&xs[1..], env, true)
+                .map(|(value, _)| value)
+                .collect();
             return self.inferred_call(function, args, span);
         }
         if let Some(key) = xs[0].keyword() {
@@ -95,12 +99,14 @@ impl Checker<'_> {
                 );
                 return Value::new(Type::Unknown);
             }
-            let target = self.infer(&xs[1], env);
-            let default = xs.get(2).map(|x| self.infer(x, env));
+            let args = self.typed_args(&xs[1..], env);
+            if !call_returns(&args) {
+                return Value::new(Type::Never);
+            }
             return self.lookup(
-                &target,
+                &args[0].0,
                 &Type::Key(self.model.key(key)),
-                default.as_ref(),
+                args.get(1).map(|(value, _)| value),
                 xs[0].span,
             );
         }
@@ -166,17 +172,18 @@ impl Checker<'_> {
         }
         if let Some(parts) = self.inline_callable(&xs[0], env) {
             let args = self.typed_args(&xs[1..], env);
-            return self.call_inline(parts, args, xs[0].span, span, env, true);
+            let invoked = call_returns(&args);
+            return self.call_inline(parts, args, xs[0].span, span, env, invoked);
         }
         let function = self.infer(&xs[0], env);
-        let args = self.typed_args(&xs[1..], env);
+        let args = self
+            .eval_args(&xs[1..], env, function.known != Type::Never)
+            .collect::<Vec<_>>();
         self.call_value(function, &args, xs[0].span, span)
     }
 
     fn typed_args(&mut self, args: &[Form], env: &Env) -> Vec<(Value, Span)> {
-        args.iter()
-            .map(|arg| (self.infer(arg, env), arg.span))
-            .collect()
+        self.eval_args(args, env, true).collect()
     }
 
     fn call_value(
@@ -186,6 +193,9 @@ impl Checker<'_> {
         head: Span,
         span: Span,
     ) -> Value {
+        if !call_returns(args) {
+            return Value::new(Type::Never);
+        }
         match function.known {
             Type::Function(expected, ret) => {
                 if args.len() != expected.len() {
@@ -271,6 +281,7 @@ impl Checker<'_> {
             "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj" => true,
             "clojure.core/-" | "clojure.core/=" => !args.is_empty(),
             "clojure.core/nth" => (2..=3).contains(&args.len()),
+            "clojure.core/ex-info" => (2..=3).contains(&args.len()),
             _ => args.len() == 1,
         };
         if !arity_ok {
@@ -281,9 +292,14 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         }
+        if !call_returns(args) {
+            return Value::new(Type::Never);
+        }
         let ty = match name {
             "clojure.core/nth" => return self.nth(args),
             "clojure.core/conj" => return self.conj(args),
+            "clojure.core/ex-info" => return self.ex_info(args),
+            "clojure.core/ex-data" => return self.ex_data(&args[0].0),
             "clojure.core/seq" | "clojure.core/first" | "clojure.core/next" => {
                 return self.sequence_call(name, &args[0]);
             }
@@ -389,6 +405,10 @@ pub(super) fn predicate_type(name: &str) -> Option<Type> {
     }
 }
 
+fn call_returns(args: &[(Value, Span)]) -> bool {
+    args.iter().all(|(value, _)| value.known != Type::Never)
+}
+
 fn predicate_result(actual: &Type, expected: &Type) -> Type {
     match actual {
         Type::Unknown => Type::Boolean,
@@ -422,6 +442,8 @@ fn is_builtin(name: &str) -> bool {
             | "clojure.core/first"
             | "clojure.core/next"
             | "clojure.core/conj"
+            | "clojure.core/ex-info"
+            | "clojure.core/ex-data"
             | "clojure.string/upper-case"
             | "clojure.string/lower-case"
             | "clojure.string/trim"

@@ -78,6 +78,7 @@ just namespace-specs # alias-only imports and project-wide named specs
 just case             # grouped dispatch and missing-case diagnostics
 just sequences        # seq traversal, precise positions and empty inputs
 just accumulators     # growing vectors with retained element types
+just exceptions       # explicit errors and structured exception data
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -508,6 +509,11 @@ can still be nil. A seq made from a fixed vector retains its positions for
 vectors retain their positions. Repeated growth across loop iterations widens
 the collection length while keeping the inferred element types. Map `conj`
 reports an analysis gap.
+
+`throw` ends the current execution path. Ordinary function calls and vector
+literals preserve that exit, while still checking whether later expressions
+resolve and compile. `ex-info` retains the data map for `ex-data` and follows the
+JVM's treatment of a nil data argument as an empty map.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
 recursive specs, multi-arity/variadic definitions, full numeric

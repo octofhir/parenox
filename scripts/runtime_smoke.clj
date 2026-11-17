@@ -500,3 +500,23 @@
 (assert (= :throws (try (demo.accumulators-bad/unchecked-labels [nil])
                         (catch NullPointerException _ :throws))))
 (println "Clojure/JVM accumulators: 11 assertions passed")
+
+(load-file "examples/exceptions.clj")
+(load-file "examples/exceptions_bad.clj")
+(assert (= "req-1" (demo.exceptions/required-id "req-1")))
+(assert (= {:field :id :code "MISSING"}
+           (try (demo.exceptions/required-id nil)
+                (catch clojure.lang.ExceptionInfo e (ex-data e)))))
+(assert (= "MISSING" (demo.exceptions/error-code)))
+(assert (= "unknown" (demo.exceptions/absent-code)))
+(assert (= {} (ex-data (ex-info "No details" nil))))
+(assert (nil? (ex-data 1)))
+(assert (= "Stopped"
+           (try (demo.exceptions/stop-before-later-arguments)
+                (catch clojure.lang.ExceptionInfo e (ex-message e)))))
+(assert (= :throws (try (throw nil) (catch NullPointerException _ :throws))))
+(assert (= :throws (try (demo.exceptions-bad/bad-exception)
+                        (catch ClassCastException _ :throws))))
+(assert (= :throws (try (demo.exceptions-bad/bad-cause)
+                        (catch ClassCastException _ :throws))))
+(println "Clojure/JVM exceptions: 10 assertions passed")

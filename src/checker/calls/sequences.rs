@@ -49,9 +49,6 @@ impl Checker<'_> {
         if items.is_empty() {
             return collection.clone();
         }
-        if args.iter().any(|(value, _)| value.known == Type::Never) {
-            return Value::new(Type::Never);
-        }
         let items: Vec<_> = items.iter().map(|(value, _)| value.known.clone()).collect();
         let result = self.conj_type(&collection.known, &items, *span);
         Value::with_notes(result, collection.notes.clone())

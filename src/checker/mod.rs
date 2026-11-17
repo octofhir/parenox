@@ -3,6 +3,7 @@ mod bindings;
 mod calls;
 mod case;
 mod env;
+mod exceptions;
 mod flow;
 mod maps;
 mod model;
@@ -195,6 +196,19 @@ impl Checker<'_> {
         self.infer_position(form, env, false)
     }
 
+    fn eval_args<'a>(
+        &'a mut self,
+        forms: &'a [Form],
+        env: &'a Env,
+        mut reachable: bool,
+    ) -> impl Iterator<Item = (Value, Span)> + 'a {
+        forms.iter().map(move |form| {
+            let value = self.infer_path(form, env, reachable, false);
+            reachable = value.known != Type::Never;
+            (value, form.span)
+        })
+    }
+
     fn infer_position(&mut self, form: &Form, env: &Env, tail: bool) -> Value {
         match &form.kind {
             Kind::Nil => Value::new(Type::Nil),
@@ -250,28 +264,30 @@ impl Checker<'_> {
                     Value::new(Type::Unknown)
                 }
             }
-            Kind::Vector(xs) if xs.len() <= MAX_TUPLE_ITEMS => Value::new(Type::Tuple(
-                xs.iter().map(|x| self.infer(x, env).known).collect(),
-            )),
-            Kind::Vector(xs) | Kind::Set(xs) => {
-                let types = xs
-                    .iter()
-                    .map(|x| match self.infer(x, env).known {
-                        Type::Integer(_) => Type::Number,
-                        ty => ty,
-                    })
-                    .collect::<Vec<_>>();
-                let element = Box::new(Type::union(types));
-                Value::new(if matches!(form.kind, Kind::Set(_)) {
-                    Type::Set(element)
+            Kind::Vector(xs) => {
+                let types: Vec<_> = self.eval_args(xs, env, true).map(|(value, _)| value.known).collect();
+                if types.last() == Some(&Type::Never) {
+                    return Value::new(Type::Never);
+                }
+                Value::new(if xs.len() <= MAX_TUPLE_ITEMS {
+                    Type::Tuple(types.into_boxed_slice())
                 } else {
-                    Type::Vector(element)
+                    Type::Vector(collection_element(types))
                 })
+            }
+            Kind::Set(xs) => {
+                let types: Vec<_> = xs.iter().map(|x| self.infer(x, env).known).collect();
+                if types.contains(&Type::Never) {
+                    return Value::new(Type::Never);
+                }
+                Value::new(Type::Set(collection_element(types)))
             }
             Kind::Map(xs) => {
                 let mut fields = BTreeMap::new();
+                let mut returns = true;
                 for pair in xs.as_chunks::<2>().0 {
                     let value = self.infer(&pair[1], env);
+                    returns &= value.known != Type::Never;
                     if let Some(key) = self.literal_map_key(&pair[0]) {
                         if fields
                             .insert(
@@ -289,6 +305,9 @@ impl Checker<'_> {
                         self.unsupported(pair[0].span, "Map literals currently require keyword or string keys");
                     }
                 }
+                if !returns {
+                    return Value::new(Type::Never);
+                }
                 Value::new(Type::Map(MapType {
                     fields,
                     extra: ExtraFields::Closed,
@@ -301,6 +320,13 @@ impl Checker<'_> {
             Kind::Quote(_) => self.unsupported(form.span, "Quoted data is not supported yet"),
         }
     }
+}
+
+fn collection_element(types: Vec<Type>) -> Box<Type> {
+    Box::new(Type::union(types.into_iter().map(|ty| match ty {
+        Type::Integer(_) => Type::Number,
+        ty => ty,
+    })))
 }
 
 fn nil_part(ty: &Type) -> Type {
