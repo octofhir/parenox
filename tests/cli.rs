@@ -276,3 +276,38 @@ fn serve_rechecks_a_later_iteration_after_an_edit() {
     drop(input);
     assert!(child.wait().unwrap().success());
 }
+
+#[test]
+fn serve_streams_typed_reports_with_arbitrary_ids_and_unicode_on_one_line() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .arg("serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let id = serde_json::json!({"editor": "сессия\n1", "seq": [1, 2]});
+    let request = serde_json::json!({
+        "id": id,
+        "files": [{
+            "path": "é.clj",
+            "source": "(defn label {:t/sig '[:-> string?]} [] \"été\")"
+        }],
+        "externs": null
+    });
+    writeln!(input, "{request}").unwrap();
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], id);
+    assert_eq!(response["result"]["version"], 1);
+    assert_eq!(response["result"]["files"][0]["path"], "é.clj");
+    assert_eq!(response["result"]["files"][0]["ok"], true);
+    assert_eq!(
+        response["result"]["files"][0]["diagnostics"],
+        serde_json::json!([])
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}

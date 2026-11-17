@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use parenox::{Diagnostic, Session, Source, output, reader};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const HELP: &str = "Parenox — experimental source-only Clojure checker
@@ -348,30 +348,67 @@ enum Request {
     Project(ProjectRequest),
 }
 
+#[derive(Serialize)]
+struct CheckResponse<T> {
+    id: Value,
+    result: T,
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    id: Value,
+    error: RequestError,
+}
+
+#[derive(Serialize)]
+struct RequestError {
+    code: &'static str,
+    message: String,
+}
+
 fn serve() -> Result<u8, String> {
     let mut session = Session::default();
+    let mut input = io::stdin().lock();
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    for line in io::stdin().lock().lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(Request::File(request)) => {
-                let report = session.check(&request.path, &request.source);
-                json!({"id": request.id, "result": report})
-            }
+    let mut line = String::new();
+    while input.read_line(&mut line).map_err(|e| e.to_string())? != 0 {
+        match serde_json::from_str::<Request>(&line) {
+            Ok(Request::File(request)) => serde_json::to_writer(
+                &mut output,
+                &CheckResponse {
+                    id: request.id,
+                    result: session.check(&request.path, &request.source),
+                },
+            ),
             Ok(Request::Project(request)) => {
                 let sources: Vec<_> = request.files.iter().map(Snapshot::as_source).collect();
-                let report = session
-                    .check_project(&sources, request.externs.as_ref().map(Snapshot::as_source));
-                json!({"id": request.id, "result": report})
+                serde_json::to_writer(
+                    &mut output,
+                    &CheckResponse {
+                        id: request.id,
+                        result: session.check_project(
+                            &sources,
+                            request.externs.as_ref().map(Snapshot::as_source),
+                        ),
+                    },
+                )
             }
-            Err(error) => {
-                json!({"id": null, "error": {"code": "invalid_request", "message": error.to_string()}})
-            }
-        };
-        serde_json::to_writer(&mut output, &response).map_err(|e| e.to_string())?;
+            Err(error) => serde_json::to_writer(
+                &mut output,
+                &ErrorResponse {
+                    id: Value::Null,
+                    error: RequestError {
+                        code: "invalid_request",
+                        message: error.to_string(),
+                    },
+                },
+            ),
+        }
+        .map_err(|e| e.to_string())?;
         writeln!(output).map_err(|e| e.to_string())?;
         output.flush().map_err(|e| e.to_string())?;
+        line.clear();
     }
     Ok(0)
 }
