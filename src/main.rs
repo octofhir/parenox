@@ -1,14 +1,17 @@
+mod serve;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
 use parenox::{Diagnostic, Session, Source, output, reader};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
+
+use serve::Snapshot;
 
 const HELP: &str = "Parenox — experimental source-only Clojure checker
 
@@ -20,6 +23,7 @@ Usage:
 
 serve reads one JSON object per line: {\"id\":1,\"path\":\"demo.clj\",\"source\":\"...\"}.
 Project requests: {\"id\":1,\"files\":[{\"path\":\"a.clj\",\"source\":\"...\"}],\"externs\":{\"path\":\"externs.edn\",\"source\":\"...\"}}.
+Tracked project requests use op \"open\" and \"update\" (see README).
 Directories are checked recursively as one project; externs contain declared library contracts.
 check exits 0 on success, 1 on diagnostics, 2 on I/O or usage errors.
 Default format: pretty (stderr). plain and json use stdout; --json aliases --format json.
@@ -42,7 +46,7 @@ fn run() -> Result<u8, String> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("check") => check(&args[1..]),
-        Some("serve") if args.len() == 1 => serve(),
+        Some("serve") if args.len() == 1 => serve::run(),
         Some("syntax") => syntax(&args[1..]),
         Some("bench") => bench(&args[1..]),
         Some("--help" | "-h") | None => {
@@ -305,112 +309,6 @@ impl CheckOptions {
         }
         Ok(options)
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FileRequest {
-    #[serde(default)]
-    id: Value,
-    path: String,
-    source: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Snapshot {
-    path: String,
-    source: String,
-}
-
-impl Snapshot {
-    fn as_source(&self) -> Source<'_> {
-        Source {
-            path: &self.path,
-            source: &self.source,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProjectRequest {
-    #[serde(default)]
-    id: Value,
-    files: Vec<Snapshot>,
-    externs: Option<Snapshot>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Request {
-    File(FileRequest),
-    Project(ProjectRequest),
-}
-
-#[derive(Serialize)]
-struct CheckResponse<T> {
-    id: Value,
-    result: T,
-}
-
-#[derive(Serialize)]
-struct ErrorResponse {
-    id: Value,
-    error: RequestError,
-}
-
-#[derive(Serialize)]
-struct RequestError {
-    code: &'static str,
-    message: String,
-}
-
-fn serve() -> Result<u8, String> {
-    let mut session = Session::default();
-    let mut input = io::stdin().lock();
-    let stdout = io::stdout();
-    let mut output = stdout.lock();
-    let mut line = String::new();
-    while input.read_line(&mut line).map_err(|e| e.to_string())? != 0 {
-        match serde_json::from_str::<Request>(&line) {
-            Ok(Request::File(request)) => serde_json::to_writer(
-                &mut output,
-                &CheckResponse {
-                    id: request.id,
-                    result: session.check(&request.path, &request.source),
-                },
-            ),
-            Ok(Request::Project(request)) => {
-                let sources: Vec<_> = request.files.iter().map(Snapshot::as_source).collect();
-                serde_json::to_writer(
-                    &mut output,
-                    &CheckResponse {
-                        id: request.id,
-                        result: session.check_project(
-                            &sources,
-                            request.externs.as_ref().map(Snapshot::as_source),
-                        ),
-                    },
-                )
-            }
-            Err(error) => serde_json::to_writer(
-                &mut output,
-                &ErrorResponse {
-                    id: Value::Null,
-                    error: RequestError {
-                        code: "invalid_request",
-                        message: error.to_string(),
-                    },
-                },
-            ),
-        }
-        .map_err(|e| e.to_string())?;
-        writeln!(output).map_err(|e| e.to_string())?;
-        output.flush().map_err(|e| e.to_string())?;
-        line.clear();
-    }
-    Ok(0)
 }
 
 fn bench(args: &[String]) -> Result<u8, String> {

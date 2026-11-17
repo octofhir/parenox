@@ -274,6 +274,25 @@ and `stats`: elapsed microseconds, parsed/reused files and checked/reused functi
 Project results contain a `files` array. Invalid JSON returns an error and the
 process continues.
 
+For editor sessions, open a tracked project once and send the changed files as
+full source strings in each update. This example checks one file, edits it, and
+then removes it:
+
+```json
+{"id":3,"op":"open","files":[{"path":"a.clj","source":"(ns a)"}]}
+{"id":4,"op":"update","changes":[{"path":"a.clj","source":"(ns a) (def limit 5)"}]}
+{"id":5,"op":"update","remove":["a.clj"]}
+```
+
+`open` replaces the tracked project. `update` accepts optional `changes` to add
+or replace files and `remove` with paths to remove. An empty update checks the
+current project. Omit `externs` in an update to keep the current externs, pass
+a snapshot to replace them, or pass `null` to remove them. Each operation returns
+a full project report ordered by source path, followed by the extern report if
+present. Invalid operations leave the tracked project intact. A valid edit is
+saved even when it produces diagnostics. Single-file and complete-snapshot
+requests work independently of the tracked project.
+
 - Unchanged sources reuse their parsed forms and declaration models.
 - Unchanged externs reuse their declarations until a referenced spec changes.
 - Annotated body edits recheck that function while preserving callers' cached results.
@@ -294,6 +313,9 @@ To measure the same clinic edit sequence with a larger extern file, run
 contracts that refer to the clinic's patient spec. Run
 `just agent-loop 1000 target/release/parenox 0 128` to append 128 typed functions
 whose ranges move as the agent edits the first function in their file.
+
+Run `just agent-loop 1000 target/release/parenox 512 0 delta` to measure the
+same edit sequence through tracked updates.
 
 ## Current scope
 
