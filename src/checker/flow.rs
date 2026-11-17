@@ -83,11 +83,12 @@ impl Checker<'_> {
         }
         // Unexecuted forms must still resolve and pass compiler-level checks.
         let errors = self.diagnostics.split_off(start);
-        self.diagnostics.extend(
-            errors
-                .into_iter()
-                .filter(|d| !matches!(d.code.as_str(), "PNX2322" | "PNX2741" | "PNX2801")),
-        );
+        self.diagnostics.extend(errors.into_iter().filter(|d| {
+            !matches!(
+                d.code.as_str(),
+                "PNX2322" | "PNX2741" | "PNX2801" | "PNX2802"
+            )
+        }));
         value.narrow(Type::Never);
         value
     }

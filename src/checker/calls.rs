@@ -116,6 +116,7 @@ impl Checker<'_> {
                 "clojure.core/let" => return self.let_form(xs, span, env, tail),
                 "clojure.core/loop" => return self.loop_form(xs, span, env, false),
                 "clojure.core/cond" => return self.cond_form(&xs[1..], span, env, tail),
+                "clojure.core/case" => return self.case_form(&xs[1..], span, env, tail),
                 "clojure.core/if" | "clojure.core/when" => {
                     return self.if_form(xs, span, env, resolved.ends_with("/when"), tail);
                 }

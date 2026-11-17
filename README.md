@@ -75,6 +75,7 @@ just loops            # accumulators and recur diagnostics
 just cond             # ordered guards and fallthrough diagnostics
 just libspecs         # bare requires and renamed imports across files
 just namespace-specs # alias-only imports and project-wide named specs
+just case             # grouped dispatch and missing-case diagnostics
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -468,7 +469,7 @@ inferred helper work is included in the check of their callers.
 |---|---|
 | Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
 | Spec forms | `s/keys`, `s/map-of`, `s/tuple`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
-| Control flow | `let`, `do`, `if`, `when`, `cond`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, `loop`/`recur`, local predicate narrowing |
+| Control flow | `let`, `do`, `if`, `when`, `cond`, `case`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, `loop`/`recur`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
 | Data operations | Keyword calls, string and keyword lookups and updates, ordered vector paths, indexed reads, positional and nested map destructuring and checked keys |
 | Functions | Single arity, forward calls, bare requires, namespace aliases, `:as-alias`, explicit `:refer` with `:exclude` and `:rename`, private-var boundaries, direct private-helper inference |
@@ -490,6 +491,11 @@ iteration is checked with the types of its incoming arguments. Structural
 errors such as wrong arity and non-tail use are reported even in branches that
 will not run. Inference reports a gap if a loop keeps generating distinct or
 growing types beyond its analysis budget.
+
+`case` narrows local values in each branch, including grouped constants. An
+omitted default throws when no clause matches, and Parenox reports a definite
+miss at the input expression. Supported constants are nil, booleans, characters,
+strings, keywords and known decimal integers in the i32 range.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
 recursive specs, multi-arity/variadic definitions, full numeric

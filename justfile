@@ -165,3 +165,8 @@ libspecs format="pretty" color="auto": build
 namespace-specs format="pretty" color="auto": build
     @./target/release/parenox check examples/namespace_specs/config.clj examples/namespace_specs/app.clj examples/namespace_specs/handler.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/namespace_specs/config.clj examples/namespace_specs/bad.clj examples/namespace_specs/handler.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check literal dispatch, then show a bad branch and a definite missing match.
+case format="pretty" color="auto": build
+    @./target/release/parenox check examples/case.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/case_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

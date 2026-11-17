@@ -452,3 +452,18 @@
 (assert (clojure.spec.alpha/valid? :wire/id (demo.namespace-specs.app/sample-id)))
 (assert (not (clojure.spec.alpha/valid? :wire/id (demo.namespace-specs.bad/sample-id))))
 (println "Clojure/JVM namespace specs: 5 assertions passed")
+
+(load-file "examples/case.clj")
+(load-file "examples/case_bad.clj")
+(assert (= ["pending" "pending" "finished"]
+           (mapv demo.case/format-status [:queued :running :done])))
+(assert (= [1 0] (mapv demo.case/flag-code [true false])))
+(assert (= ["zero" "one" "other"] (mapv demo.case/digit-label [0 1 2])))
+(assert (= "Ada" (demo.case/published-label "Ada")))
+(assert (= :done (loop [x "Aa"] (case x "Aa" (recur "BB") "BB" :done))))
+(assert (= :match (case :a () missing :a :match :default)))
+(assert (= :throws (try (demo.case-bad/bad-flag-code true)
+                        (catch ClassCastException _ :throws))))
+(assert (= :throws (try (demo.case-bad/absent-status)
+                        (catch IllegalArgumentException _ :throws))))
+(println "Clojure/JVM case: 8 assertions passed")

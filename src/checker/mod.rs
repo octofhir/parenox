@@ -1,6 +1,7 @@
 //! Source analysis for the supported Clojure subset.
 mod bindings;
 mod calls;
+mod case;
 mod env;
 mod flow;
 mod maps;
