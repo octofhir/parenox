@@ -1,0 +1,3 @@
+;; A declared contract for a real library function outside the built-in rules.
+;; The checker trusts this declaration; it does not execute the library.
+{clojure.string/starts-with? [string? string? :-> boolean?]}

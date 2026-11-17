@@ -1,0 +1,218 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Type {
+    Unknown,
+    Never,
+    Nil,
+    Boolean,
+    Bool(bool),
+    Number,
+    String,
+    Str(String),
+    Keyword,
+    Key(String),
+    Map(MapType),
+    Vector(Box<Type>),
+    Set(Box<Type>),
+    Function(Vec<Type>, Box<Type>),
+    Union(Vec<Type>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MapType {
+    pub fields: BTreeMap<String, Field>,
+    pub open: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Field {
+    pub ty: Type,
+    pub required: bool,
+}
+
+impl Type {
+    /// General expression type. Exact string values remain available separately as refinements.
+    /// Keywords and booleans retain precision for Clojure lookup and truthiness semantics.
+    pub fn inferred(&self) -> Type {
+        match self {
+            Type::Str(_) => Type::String,
+            Type::Union(xs) => Type::union(xs.iter().map(Type::inferred)),
+            Type::Vector(t) => Type::Vector(Box::new(t.inferred())),
+            Type::Set(t) => Type::Set(Box::new(t.inferred())),
+            Type::Map(map) => Type::Map(MapType {
+                fields: map
+                    .fields
+                    .iter()
+                    .map(|(key, field)| {
+                        (
+                            key.clone(),
+                            Field {
+                                ty: field.ty.inferred(),
+                                required: field.required,
+                            },
+                        )
+                    })
+                    .collect(),
+                open: map.open,
+            }),
+            t => t.clone(),
+        }
+    }
+
+    pub fn constrains_string_values(&self) -> bool {
+        match self {
+            Type::Str(_) => true,
+            Type::Union(xs) => xs.iter().any(Type::constrains_string_values),
+            Type::Vector(t) | Type::Set(t) => t.constrains_string_values(),
+            Type::Map(map) => map.fields.values().any(|f| f.ty.constrains_string_values()),
+            Type::Function(args, ret) => {
+                args.iter().any(Type::constrains_string_values) || ret.constrains_string_values()
+            }
+            _ => false,
+        }
+    }
+
+    pub fn union(types: impl IntoIterator<Item = Type>) -> Type {
+        let mut set = BTreeSet::new();
+        for ty in types {
+            match ty {
+                Type::Never => {}
+                Type::Union(xs) => set.extend(xs),
+                t => {
+                    set.insert(t);
+                }
+            }
+        }
+        if set.contains(&Type::String) {
+            set.retain(|t| !matches!(t, Type::Str(_)));
+        }
+        if set.contains(&Type::Keyword) {
+            set.retain(|t| !matches!(t, Type::Key(_)));
+        }
+        if set.contains(&Type::Boolean)
+            || (set.contains(&Type::Bool(true)) && set.contains(&Type::Bool(false)))
+        {
+            set.retain(|t| !matches!(t, Type::Bool(_)));
+            set.insert(Type::Boolean);
+        }
+        match set.len() {
+            0 => Type::Never,
+            1 => set.into_iter().next().unwrap(),
+            _ => Type::Union(set.into_iter().collect()),
+        }
+    }
+
+    pub fn nilable(self) -> Type {
+        Type::union([self, Type::Nil])
+    }
+
+    pub fn without_nil(&self) -> Type {
+        match self {
+            Type::Nil => Type::Never,
+            Type::Union(xs) => Type::union(xs.iter().map(Type::without_nil)),
+            t => t.clone(),
+        }
+    }
+
+    pub fn truthy(&self) -> Type {
+        match self {
+            Type::Nil | Type::Bool(false) => Type::Never,
+            Type::Boolean => Type::Bool(true),
+            Type::Union(xs) => Type::union(xs.iter().map(Type::truthy)),
+            t => t.clone(),
+        }
+    }
+
+    pub fn falsey(&self) -> Type {
+        match self {
+            Type::Nil => Type::Nil,
+            Type::Boolean | Type::Bool(false) => Type::Bool(false),
+            Type::Union(xs) => Type::union(xs.iter().map(Type::falsey)),
+            Type::Unknown => Type::union([Type::Nil, Type::Bool(false)]),
+            _ => Type::Never,
+        }
+    }
+
+    pub fn subtype_of(&self, expected: &Type) -> bool {
+        if self == &Type::Never || self == expected {
+            return true;
+        }
+        match (self, expected) {
+            (Type::Union(xs), e) => xs.iter().all(|t| t.subtype_of(e)),
+            (a, Type::Union(xs)) => xs.iter().any(|e| a.subtype_of(e)),
+            (Type::Str(_), Type::String)
+            | (Type::Key(_), Type::Keyword)
+            | (Type::Bool(_), Type::Boolean) => true,
+            (Type::Vector(a), Type::Vector(e)) | (Type::Set(a), Type::Set(e)) => a.subtype_of(e),
+            (Type::Function(args, ret), Type::Function(e_args, e_ret)) => {
+                args.len() == e_args.len()
+                    && args.iter().zip(e_args).all(|(a, e)| e.subtype_of(a))
+                    && ret.subtype_of(e_ret)
+            }
+            (Type::Map(a), Type::Map(e)) => {
+                e.fields.iter().all(|(key, field)| match a.fields.get(key) {
+                    Some(actual) => {
+                        (!field.required || actual.required) && actual.ty.subtype_of(&field.ty)
+                    }
+                    None => !field.required && !a.open,
+                }) && (e.open || (!a.open && a.fields.keys().all(|k| e.fields.contains_key(k))))
+            }
+            _ => false,
+        }
+    }
+
+    pub fn contains_unknown(&self) -> bool {
+        match self {
+            Type::Unknown => true,
+            Type::Union(xs) => xs.iter().any(Type::contains_unknown),
+            Type::Vector(t) | Type::Set(t) => t.contains_unknown(),
+            Type::Map(m) => m.fields.values().any(|f| f.ty.contains_unknown()),
+            Type::Function(args, ret) => {
+                args.iter().any(Type::contains_unknown) || ret.contains_unknown()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Unknown => write!(f, "Unknown"),
+            Type::Never => write!(f, "Never"),
+            Type::Nil => write!(f, "Nil"),
+            Type::Boolean => write!(f, "Boolean"),
+            Type::Bool(b) => write!(f, "{b}"),
+            Type::Number => write!(f, "Number"),
+            Type::String => write!(f, "String"),
+            Type::Str(s) => write!(f, "{s:?}"),
+            Type::Keyword => write!(f, "Keyword"),
+            Type::Key(s) => write!(f, "{s}"),
+            Type::Vector(t) => write!(f, "Vector<{t}>"),
+            Type::Set(t) => write!(f, "Set<{t}>"),
+            Type::Function(args, ret) => {
+                let args = args.iter().map(ToString::to_string).collect::<Vec<_>>();
+                write!(f, "[{} -> {ret}]", args.join(", "))
+            }
+            Type::Union(xs) => {
+                let xs = xs.iter().map(ToString::to_string).collect::<Vec<_>>();
+                write!(f, "{}", xs.join(" | "))
+            }
+            Type::Map(m) => {
+                let fields = m
+                    .fields
+                    .iter()
+                    .map(|(k, v)| format!("{k}{}: {}", if v.required { "" } else { "?" }, v.ty))
+                    .collect::<Vec<_>>();
+                write!(
+                    f,
+                    "{{{}{}}}",
+                    fields.join(", "),
+                    if m.open { ", ..." } else { "" }
+                )
+            }
+        }
+    }
+}

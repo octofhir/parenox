@@ -1,0 +1,63 @@
+{
+  "scenario": "clinic: 4 namespaces + 1 declared library contract",
+  "iterations": 100,
+  "initial_errors": [
+    {
+      "file": "examples/clinic/http.clj",
+      "line": 12,
+      "code": "PNX2322",
+      "message": "Argument 1: expected String, got Number"
+    },
+    {
+      "file": "examples/clinic/http.clj",
+      "line": 14,
+      "code": "PNX2322",
+      "message": "Argument 1: expected String, got Number"
+    },
+    {
+      "file": "examples/clinic/service.clj",
+      "line": 9,
+      "code": "PNX2322",
+      "message": "clojure.string/upper-case: expected String, got Nil | String"
+    }
+  ],
+  "first_round_trip_us": 1457.5,
+  "fix_round_trip_us": 228.5,
+  "after_fix": {
+    "checked_functions": 2,
+    "elapsed_us": 145,
+    "parsed_files": 2,
+    "reused_functions": 1,
+    "reused_parses": 3
+  },
+  "warm_round_trip": {
+    "p50_us": 70.4,
+    "p95_us": 85.4,
+    "max_us": 122.1
+  },
+  "body_edit_round_trip": {
+    "p50_us": 82.9,
+    "p95_us": 101.6,
+    "max_us": 140.8
+  },
+  "body_edit": {
+    "checked_functions": 1,
+    "elapsed_us": 43,
+    "parsed_files": 1,
+    "reused_functions": 2,
+    "reused_parses": 4
+  },
+  "signature_change": {
+    "round_trip_us": 140.0,
+    "checked_functions": 2,
+    "elapsed_us": 82,
+    "parsed_files": 1,
+    "reused_functions": 1,
+    "reused_parses": 4
+  },
+  "scope": "Release process, Python JSON + pipes + full project snapshots + response decoding. Local example, not a production-scale benchmark.",
+  "platform": {
+    "os": "Darwin",
+    "arch": "arm64"
+  }
+}
