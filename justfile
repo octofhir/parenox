@@ -210,3 +210,8 @@ arities format="pretty": build
 variadic format="pretty": build
     @./target/release/parenox check examples/variadic.clj --format {{quote(format)}}
     @./target/release/parenox check examples/variadic.clj examples/variadic_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check positional argument spreading with apply.
+spread format="pretty": build
+    @./target/release/parenox check examples/arities/provider.clj examples/variadic.clj examples/apply.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/arities/provider.clj examples/variadic.clj examples/apply_bad.clj --format {{quote(format)}} || test "$?" -eq 1

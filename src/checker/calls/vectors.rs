@@ -99,12 +99,12 @@ impl Checker<'_> {
     }
 }
 
-enum CollectionError {
+pub(super) enum CollectionError {
     OpenMap,
     NotSeqable,
 }
 
-fn element_type(collection: Type) -> Result<Type, CollectionError> {
+pub(super) fn element_type(collection: Type) -> Result<Type, CollectionError> {
     match collection {
         Type::Vector(element) | Type::Set(element) | Type::Seq(element) => Ok(*element),
         Type::Nil | Type::Never => Ok(Type::Never),

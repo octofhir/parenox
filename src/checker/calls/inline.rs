@@ -7,6 +7,7 @@ use super::super::{
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
+#[derive(Clone, Copy)]
 pub(super) enum InlineCallable<'a> {
     Function(&'a [Form]),
     Fnil(&'a [Form]),

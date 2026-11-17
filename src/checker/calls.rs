@@ -1,4 +1,5 @@
 //! Function resolution, call-site inference and built-in calls.
+mod apply;
 mod indexing;
 mod inline;
 mod sequences;
@@ -9,8 +10,22 @@ use crate::Diagnostic;
 use crate::expand::Threading;
 use crate::reader::{Form, Span};
 use crate::types::{Arity, Signature, Type};
+use inline::InlineCallable;
 
-impl Checker<'_> {
+enum Callable<'form, 'model> {
+    Inline(InlineCallable<'form>),
+    Private(&'model Function),
+    Builtin(String),
+    Value(Value),
+}
+
+impl Callable<'_, '_> {
+    fn returns(&self) -> bool {
+        !matches!(self, Self::Value(value) if value.known == Type::Never)
+    }
+}
+
+impl<'model> Checker<'model> {
     fn inferred_call(&mut self, function: &Function, args: Vec<Value>, span: Span) -> Value {
         if self.throws.is_some() && args.iter().all(|arg| arg.known != Type::Never) {
             self.may_throw();
@@ -186,6 +201,7 @@ impl Checker<'_> {
                 "clojure.core/update" | "clojure.core/update-in" => {
                     return self.update(xs, span, env, &resolved);
                 }
+                "clojure.core/apply" => return self.apply_form(&xs[1..], span, env),
                 "clojure.core/mapv" | "clojure.core/filterv" => {
                     return self.vector_transform(xs, span, env, &resolved);
                 }
@@ -205,7 +221,7 @@ impl Checker<'_> {
         let args = self
             .eval_args(&xs[1..], env, function.known != Type::Never)
             .collect::<Vec<_>>();
-        self.call_value(function, &args, xs[0].span, span)
+        self.call_value(&function, &args, xs[0].span, span)
     }
 
     fn typed_args(&mut self, args: &[Form], env: &Env) -> Vec<(Value, Span)> {
@@ -214,7 +230,7 @@ impl Checker<'_> {
 
     fn call_value(
         &mut self,
-        function: Value,
+        function: &Value,
         args: &[(Value, Span)],
         head: Span,
         span: Span,
@@ -225,7 +241,7 @@ impl Checker<'_> {
         if function.known != Type::Never {
             self.may_throw();
         }
-        match function.known {
+        match &function.known {
             Type::Function(signatures) => {
                 let Some(signature) = signatures
                     .iter()
@@ -269,7 +285,7 @@ impl Checker<'_> {
                     ])
                 }
             }
-            Type::Unknown | Type::Never => Value::new(function.known),
+            Type::Unknown | Type::Never => Value::new(function.known.clone()),
             _ => self.unsupported(head, format!("Calling {} is not supported", function.ty)),
         }
     }
@@ -282,39 +298,53 @@ impl Checker<'_> {
         env: &Env,
         invoked: bool,
     ) -> Value {
+        let callable = self.prepare_callable(callee, env);
+        self.call_prepared(&callable, args, callee.span, span, env, invoked)
+    }
+
+    fn prepare_callable<'form>(
+        &mut self,
+        callee: &'form Form,
+        env: &Env,
+    ) -> Callable<'form, 'model> {
         if let Some(parts) = self.inline_callable(callee, env) {
-            return self.call_inline(parts, args, callee.span, span, env, invoked);
+            return Callable::Inline(parts);
         }
         if let Some(name) = callee.symbol()
             && !env.contains_key(name)
         {
             if let Some(function) = self.model.local_function(name).filter(|f| f.inferred) {
-                return if invoked {
-                    self.inferred_call(
-                        function,
-                        args.into_iter().map(|(value, _)| value).collect(),
-                        span,
-                    )
-                } else {
-                    Value::new(Type::Never)
-                };
+                return Callable::Private(function);
             }
             if self.model.declared_value(name, self.globals).is_none() {
                 let resolved = self.model.resolve(name);
                 if is_builtin(&resolved) {
-                    return if invoked {
-                        self.builtin(&resolved, &args, span)
-                    } else {
-                        Value::new(Type::Never)
-                    };
+                    return Callable::Builtin(resolved);
                 }
             }
         }
-        let function = self.infer(callee, env);
-        if invoked {
-            self.call_value(function, &args, callee.span, span)
-        } else {
-            Value::new(Type::Never)
+        Callable::Value(self.infer(callee, env))
+    }
+
+    fn call_prepared(
+        &mut self,
+        callable: &Callable<'_, '_>,
+        args: Vec<(Value, Span)>,
+        head: Span,
+        span: Span,
+        env: &Env,
+        invoked: bool,
+    ) -> Value {
+        match callable {
+            Callable::Inline(parts) => self.call_inline(*parts, args, head, span, env, invoked),
+            _ if !invoked => Value::new(Type::Never),
+            Callable::Private(function) => self.inferred_call(
+                function,
+                args.into_iter().map(|(value, _)| value).collect(),
+                span,
+            ),
+            Callable::Builtin(name) => self.builtin(name, &args, span),
+            Callable::Value(function) => self.call_value(function, &args, head, span),
         }
     }
 

@@ -314,6 +314,10 @@ example `:t/sig '[number? & string? :-> number?]`. Clojure supplies extra argume
 as a seq, or nil when there are none. An exact fixed clause takes precedence
 over a variadic clause at the same argument count. Inside the variadic body
 `recur` takes one argument for the rest binding. Run `just variadic` for examples.
+
+`apply` checks positional arguments from nil, vectors and seqs whose positions
+are known. It checks every possible exact shape and picks a signature for each
+shape's argument count. Run `just spread` for examples.
 Map destructuring of rest arguments reports an analysis gap.
 
 ```clojure
