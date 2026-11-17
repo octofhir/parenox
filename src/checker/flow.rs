@@ -324,6 +324,43 @@ impl Checker<'_> {
         )
     }
 
+    pub(super) fn cond_form(
+        &mut self,
+        clauses: &[Form],
+        span: Span,
+        env: &Env,
+        tail: bool,
+    ) -> Value {
+        let (pairs, remaining) = clauses.as_chunks::<2>();
+        if !remaining.is_empty() {
+            self.error("PNX2554", span, "cond requires test/result pairs");
+            return Value::new(Type::Unknown);
+        }
+        let mut fallthrough = env.clone();
+        let mut reachable = true;
+        let mut types = Vec::new();
+        let mut notes = Vec::new();
+        for [test, result] in pairs {
+            let condition = self.infer_path(test, &fallthrough, reachable, false);
+            let mut selected = fallthrough.clone();
+            self.narrow(test, true, &mut selected);
+            let branch = self.infer_path(
+                result,
+                &selected,
+                condition.known.truthy() != Type::Never,
+                tail,
+            );
+            types.push(branch.known);
+            notes.extend(branch.notes);
+            reachable = condition.known.falsey() != Type::Never;
+            self.narrow(test, false, &mut fallthrough);
+        }
+        if reachable {
+            types.push(Type::Nil);
+        }
+        Value::with_notes(Type::union(types), notes)
+    }
+
     pub(super) fn binding_conditional(
         &mut self,
         xs: &[Form],

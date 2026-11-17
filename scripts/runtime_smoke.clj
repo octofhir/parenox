@@ -416,3 +416,15 @@
                    (catch clojure.lang.Compiler$CompilerException e
                      (clojure.string/includes? (ex-message (ex-cause e)) expected)))))))
 (println "Clojure/JVM loops: 11 assertions passed")
+
+(load-file "examples/cond.clj")
+(load-file "examples/cond_bad.clj")
+(assert (= ["MISSING" "ADA" "3"] (mapv demo.cond/label [nil "Ada" 2])))
+(assert (= "Ada" (demo.cond/loop-label " Ada ")))
+(assert (nil? (demo.cond-bad/missing-label nil)))
+(assert (= 3 (demo.cond-bad/increment-wrong-branch 2)))
+(assert (= :throws (try (demo.cond-bad/increment-wrong-branch "Ada")
+                        (catch ClassCastException _ :throws))))
+(assert (= 5 (cond 0 5 :else (inc "bad"))))
+(assert (nil? (cond)))
+(println "Clojure/JVM cond: 7 assertions passed")

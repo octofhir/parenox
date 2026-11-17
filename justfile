@@ -150,3 +150,8 @@ indices format="pretty" color="auto": build
 loops format="pretty" color="auto": build
     @./target/release/parenox check examples/loops.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/loops_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check a dispatch ladder and show a missing fallback and a bad branch.
+cond format="pretty" color="auto": build
+    @./target/release/parenox check examples/cond.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/cond_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
