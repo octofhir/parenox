@@ -52,3 +52,8 @@ verify: fmt-check lint test
 # Independently check example behavior on Clojure/JVM (optional).
 runtime-smoke:
     clojure -M scripts/runtime_smoke.clj
+
+# Check private inference, then show the deliberate nil error and call chain.
+inference: build
+    @./target/release/parenox check examples/inferred.clj
+    @./target/release/parenox check examples/inferred_bad.clj || test "$?" -eq 1

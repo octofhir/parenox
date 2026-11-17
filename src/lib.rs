@@ -57,6 +57,7 @@ pub struct Stats {
     pub elapsed_us: u64,
     pub parsed_files: usize,
     pub reused_parses: usize,
+    /// Annotated definitions checked as roots; inferred private work belongs to their callers.
     pub checked_functions: usize,
     pub reused_functions: usize,
 }

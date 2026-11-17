@@ -140,7 +140,8 @@ Project results contain a `files` array. Invalid JSON returns an error and the
 process continues.
 
 - Unchanged sources reuse their parsed forms and declaration models.
-- Body edits recheck the changed function while preserving callers' cached results.
+- Annotated body edits recheck that function while preserving callers' cached results.
+- Edits to unannotated private helpers invalidate their transitive callers in the same file.
 - Public contract changes invalidate dependent namespaces.
 - Dependency invalidation is conservative at namespace granularity.
 - Removed files and externs disappear from the current environment immediately.
@@ -153,8 +154,30 @@ uses exact source, positions and interface comparisons.
 
 ## Current scope
 
-Types are read as data from `s/def` and quoted `:t/sig` metadata. Public and private
-functions currently need signatures; private-function inference is a future step.
+Types are read as data from `s/def` and quoted `:t/sig` metadata. Public functions
+need signatures. Direct calls to private helpers (`defn-` or `{:private true}`)
+can omit them: the checker uses the actual argument types to analyze the body and
+infer its result. This is inference for each call, not a generalized function signature.
+
+```clojure
+(defn- normalized [name]
+  (clojure.string/upper-case (or name "Unknown")))
+
+(defn display-name
+  {:t/sig '[(s/nilable string?) :-> string?]}
+  [name]
+  (normalized name))
+```
+
+Run `just inference` for passing and failing patient-label examples. Errors point
+to the helper body and include notes showing its call chain. Repeated calls with
+the same inputs reuse inferred results within the checked entry function.
+
+Recursive helpers, unused helpers with no typed caller, and helpers used as
+function values currently require `:t/sig`. Private inference is bounded to 32
+nested calls and 256 specializations per checked entry function; hitting a limit
+reports an explicit analysis gap. Function statistics count annotated definitions;
+inferred helper work is included in the check of their callers.
 
 | Area | Supported |
 |---|---|
@@ -162,7 +185,7 @@ functions currently need signatures; private-function inference is a future step
 | Spec forms | `s/keys`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`; local predicate narrowing |
 | Data operations | Keyword lookup, literal-key `get` and `assoc`, simple map destructuring |
-| Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries |
+| Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |
 | Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |
 

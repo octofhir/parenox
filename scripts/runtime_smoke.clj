@@ -42,3 +42,13 @@
 (assert (= 400 (:status (clinic.http/show-patient {:path-params {:id "invalid"}}))))
 (assert (= "UNKNOWN" (clinic.service/display-name {:id "p-2"})))
 (println "Clojure/JVM clinic: 4 assertions passed")
+
+(load-file "examples/inferred_bad.clj")
+(assert (= :throws
+           (try (demo.inferred/display-name {})
+                :unexpected-success
+                (catch NullPointerException _ :throws))))
+(load-file "examples/inferred.clj")
+(assert (= "UNKNOWN" (demo.inferred/display-name {})))
+(assert (= "ALICE" (demo.inferred/display-name {:name "Alice"})))
+(println "Clojure/JVM private helpers: 3 assertions passed")

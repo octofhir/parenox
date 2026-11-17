@@ -8,6 +8,8 @@ use crate::{Diagnostic, Suggestion};
 pub(crate) struct Function {
     pub name: String,
     pub private: bool,
+    // Private definitions without a signature are analyzed through direct typed callers.
+    pub inferred: bool,
     pub params: Vec<Form>,
     pub args: Vec<Type>,
     pub ret: Type,
@@ -53,6 +55,8 @@ pub(crate) struct Model {
     raw_specs: BTreeMap<String, Form>,
     specs: BTreeMap<String, Type>,
     pub functions: BTreeMap<String, Function>,
+    // Conservative references to unannotated helpers, including transitive cache dependencies.
+    helper_dependencies: BTreeMap<String, BTreeSet<String>>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -140,6 +144,7 @@ impl Model {
         for (xs, span) in definitions {
             model.read_function(xs, span, globals);
         }
+        model.collect_helpers();
         model
     }
 
@@ -424,30 +429,64 @@ impl Model {
         {
             index += 1;
         }
-        let Some(Form {
+        let attrs = if let Some(Form {
             kind: Kind::Map(attrs),
             ..
         }) = xs.get(index)
-        else {
-            self.error("PNX9002", span, format!("{name} needs a :t/sig annotation"));
-            return;
+        {
+            index += 1;
+            attrs.as_slice()
+        } else {
+            &[]
+        };
+        let default_private = xs[0]
+            .symbol()
+            .is_some_and(|s| self.resolve(s) == "clojure.core/defn-");
+        let private = if let Some(pair) = attrs
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .find(|p| p[0].keyword() == Some(":private"))
+        {
+            match pair[1].kind {
+                Kind::Bool(value) => value,
+                _ => {
+                    self.error(
+                        "PNX9001",
+                        pair[1].span,
+                        ":private currently requires a literal boolean",
+                    );
+                    default_private
+                }
+            }
+        } else {
+            default_private
         };
         let signature = attrs
             .as_chunks::<2>()
             .0
             .iter()
             .find(|p| p[0].keyword() == Some(":t/sig"));
-        let Some(signature) = signature else {
-            self.error("PNX9002", span, format!("{name} needs a :t/sig annotation"));
+        let inferred = signature.is_none();
+        if inferred && !private {
+            self.error(
+                "PNX9002",
+                span,
+                format!("Public function {name} needs a :t/sig annotation"),
+            );
             return;
-        };
-        if !matches!(signature[1].kind, Kind::Quote(_)) {
-            self.error("PNX9001", signature[1].span, ":t/sig must be quoted data");
         }
-        let Some(signature) = self.parse_signature(&signature[1], globals) else {
-            return;
+        let signature = if let Some(signature) = signature {
+            if !matches!(signature[1].kind, Kind::Quote(_)) {
+                self.error("PNX9001", signature[1].span, ":t/sig must be quoted data");
+            }
+            let Some(signature) = self.parse_signature(&signature[1], globals) else {
+                return;
+            };
+            Some(signature)
+        } else {
+            None
         };
-        index += 1;
         let Some(params) = xs.get(index).and_then(Form::vector) else {
             self.error("PNX9001", span, "Only single-arity defn is supported");
             return;
@@ -460,6 +499,10 @@ impl Model {
             );
             return;
         }
+        let signature = signature.unwrap_or_else(|| Signature {
+            args: vec![Type::Unknown; params.len()],
+            ret: Type::Unknown,
+        });
         if params.len() != signature.args.len() || xs.len() <= index + 1 {
             self.error(
                 "PNX2554",
@@ -470,9 +513,8 @@ impl Model {
         }
         let function = Function {
             name: name.clone(),
-            private: xs[0]
-                .symbol()
-                .is_some_and(|s| self.resolve(s) == "clojure.core/defn-"),
+            private,
+            inferred,
             params: params.to_vec(),
             args: signature.args,
             ret: signature.ret,
@@ -599,10 +641,103 @@ impl Model {
         )
     }
 
+    fn local_function(&self, name: &str) -> Option<&Function> {
+        self.functions.get(&self.function_name(name))
+    }
+
+    fn collect_helpers(&mut self) {
+        if !self.functions.values().any(|f| f.inferred) {
+            return;
+        }
+        fn visit(forms: &[Form], model: &Model, names: &mut BTreeSet<String>) {
+            for form in forms {
+                match &form.kind {
+                    Kind::Symbol(name) => {
+                        if let Some(function) = model.local_function(name).filter(|f| f.inferred) {
+                            names.insert(function.name.clone());
+                        }
+                    }
+                    Kind::List(xs) | Kind::Vector(xs) | Kind::Map(xs) | Kind::Set(xs) => {
+                        visit(xs, model, names)
+                    }
+                    Kind::Quote(x) => visit(std::slice::from_ref(x), model, names),
+                    _ => {}
+                }
+            }
+        }
+        for function in self.functions.values() {
+            let mut names = BTreeSet::new();
+            visit(&function.body, self, &mut names);
+            self.helper_dependencies
+                .insert(function.name.clone(), names);
+        }
+        let reachable: BTreeSet<_> = self
+            .functions
+            .values()
+            .filter(|f| !f.inferred)
+            .flat_map(|f| self.helpers(f))
+            .collect();
+        let unused: Vec<_> = self
+            .functions
+            .values()
+            .filter(|f| f.inferred && !reachable.contains(f.name.as_str()))
+            .map(|f| (f.span, f.name.clone()))
+            .collect();
+        for (span, name) in unused {
+            self.error("PNX9002", span, format!(
+                "Cannot infer unused private function {name}; add a :t/sig annotation or a direct typed caller"
+            ));
+        }
+    }
+
+    fn helpers(&self, function: &Function) -> BTreeSet<&str> {
+        let mut pending: Vec<_> = self
+            .helper_dependencies
+            .get(&function.name)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        let mut names = BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            if names.insert(name) {
+                pending.extend(
+                    self.helper_dependencies
+                        .get(name)
+                        .into_iter()
+                        .flatten()
+                        .map(String::as_str),
+                );
+            }
+        }
+        names
+    }
+
+    pub fn function_key(&self, function: &Function, source: &str) -> String {
+        let mut key = format!(
+            "{:?}|{}",
+            function.span,
+            &source[function.span.start.offset..function.span.end.offset]
+        );
+        for name in self.helpers(function) {
+            let helper = &self.functions[name];
+            key.push_str(&format!(
+                "|{name}:{:?}|{}",
+                helper.span,
+                &source[helper.span.start.offset..helper.span.end.offset]
+            ));
+        }
+        key
+    }
+
     fn signature<'a>(&'a self, name: &str, globals: &'a Globals) -> Option<(&'a [Type], &'a Type)> {
         let qualified = self.function_name(name);
         if let Some(function) = self.functions.get(&qualified) {
-            Some((&function.args, &function.ret))
+            if function.inferred {
+                None
+            } else {
+                Some((&function.args, &function.ret))
+            }
         } else {
             globals
                 .functions
@@ -623,6 +758,8 @@ impl Model {
             globals,
             source,
             diagnostics: Vec::new(),
+            active_helpers: Vec::new(),
+            specializations: BTreeMap::new(),
         };
         let mut env = BTreeMap::new();
         for (param, ty) in function.params.iter().zip(&function.args) {
@@ -639,7 +776,7 @@ impl Model {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Value {
     // Inferred language type for ordinary use and diagnostics, e.g. String or Set<String>.
     ty: Type,
@@ -677,6 +814,8 @@ struct Checker<'a> {
     globals: &'a Globals,
     source: &'a str,
     diagnostics: Vec<Diagnostic>,
+    active_helpers: Vec<String>,
+    specializations: BTreeMap<(String, Vec<Value>), (Value, Vec<Diagnostic>)>,
 }
 
 impl Checker<'_> {
@@ -810,6 +949,15 @@ impl Checker<'_> {
             Kind::Symbol(s) => {
                 if let Some(value) = env.get(s) {
                     value.clone()
+                } else if self.model.local_function(s).is_some_and(|f| f.inferred) {
+                    self.error(
+                        "PNX9002",
+                        form.span,
+                        format!(
+                            "Private function {s} needs a :t/sig annotation when used as a value"
+                        ),
+                    );
+                    Value::new(Type::Unknown)
                 } else if let Some((args, ret)) = self.model.signature(s, self.globals) {
                     Value::new(Type::Function(args.to_vec(), Box::new(ret.clone())))
                 } else {
@@ -877,7 +1025,72 @@ impl Checker<'_> {
         }
     }
 
+    fn inferred_call(&mut self, function: &Function, args: Vec<Value>, span: Span) -> Value {
+        if args.len() != function.params.len() {
+            self.error(
+                "PNX2554",
+                span,
+                format!(
+                    "{} expects {} arguments, got {}",
+                    function.name,
+                    function.params.len(),
+                    args.len()
+                ),
+            );
+            return Value::new(Type::Unknown);
+        }
+        if self.active_helpers.contains(&function.name) {
+            self.error(
+                "PNX9002",
+                span,
+                format!(
+                    "Recursive private function {} needs a :t/sig annotation",
+                    function.name
+                ),
+            );
+            return Value::new(Type::Unknown);
+        }
+        let key = (function.name.clone(), args);
+        let start = self.diagnostics.len();
+        let result = if let Some((value, diagnostics)) = self.specializations.get(&key) {
+            self.diagnostics.extend(diagnostics.iter().cloned());
+            value.clone()
+        } else {
+            if self.active_helpers.len() >= 32
+                || self.specializations.len() + self.active_helpers.len() >= 256
+            {
+                self.error("PNX9002", span,
+                    "Private inference limit reached (32 nested calls or 256 specializations); add :t/sig annotations");
+                return Value::new(Type::Unknown);
+            }
+            self.active_helpers.push(function.name.clone());
+            let mut env = Env::new();
+            for (param, value) in function.params.iter().zip(&key.1) {
+                self.bind(param, value.clone(), &mut env);
+            }
+            let result = self.body(&function.body, &env);
+            self.active_helpers.pop();
+            self.specializations
+                .insert(key, (result.clone(), self.diagnostics[start..].to_vec()));
+            result
+        };
+        for diagnostic in &mut self.diagnostics[start..] {
+            diagnostic.notes.push(format!(
+                "While checking call to {} at {}:{}",
+                function.name, span.start.line, span.start.column
+            ));
+        }
+        result
+    }
+
     fn list(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
+        if let Some(name) = xs[0].symbol()
+            && !env.contains_key(name)
+            && let Some(function) = self.model.local_function(name).filter(|f| f.inferred)
+        {
+            let args = xs[1..].iter().map(|x| self.infer(x, env)).collect();
+            return self.inferred_call(function, args, span);
+        }
         if let Some(key) = xs[0].keyword() {
             if !(2..=3).contains(&xs.len()) {
                 self.error(
@@ -1085,7 +1298,10 @@ impl Checker<'_> {
         }
         let Some(op) = xs[0].symbol() else { return };
         // Locals and project functions may shadow core predicates.
-        if env.contains_key(op) || self.model.signature(op, self.globals).is_some() {
+        if env.contains_key(op)
+            || self.model.local_function(op).is_some()
+            || self.model.signature(op, self.globals).is_some()
+        {
             return;
         }
         let op = self.model.resolve(op);

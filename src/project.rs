@@ -218,12 +218,8 @@ impl Session {
                     );
                 } else {
                     let previous = std::mem::take(&mut cache.functions);
-                    for function in model.functions.values() {
-                        let key = format!(
-                            "{:?}|{}",
-                            function.span,
-                            &source.source[function.span.start.offset..function.span.end.offset]
-                        );
+                    for function in model.functions.values().filter(|f| !f.inferred) {
+                        let key = model.function_key(function, source.source);
                         let errors = if let Some((_, errors)) = previous
                             .get(&function.name)
                             .filter(|(old, _)| cache.interface == interface && old == &key)

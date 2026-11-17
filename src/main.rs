@@ -393,7 +393,7 @@ fn bench(args: &[String]) -> Result<u8, String> {
             "warm_p95_us": times[(iterations * 95).div_ceil(100) - 1],
             "warm_max_us": times[iterations - 1],
             "reused_functions_total": reused,
-            "scope": "in-process, unchanged single-file source; includes parsing and model building; excludes file I/O, process startup and JSON transport"
+            "scope": "in-process, unchanged single-file source; warm checks reuse parsing, declaration models and function diagnostics; excludes file I/O, process startup and JSON transport"
         })
     );
     Ok(0)

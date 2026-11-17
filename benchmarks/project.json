@@ -1,7 +1,7 @@
 {
   "after_fix": {
     "checked_functions": 2,
-    "elapsed_us": 472,
+    "elapsed_us": 488,
     "parsed_files": 2,
     "reused_functions": 1,
     "reused_parses": 3
@@ -14,12 +14,12 @@
     "reused_parses": 4
   },
   "body_edit_round_trip": {
-    "max_us": 918.3,
-    "p50_us": 68.8,
-    "p95_us": 347.9
+    "max_us": 358.1,
+    "p50_us": 68.6,
+    "p95_us": 323.2
   },
-  "first_round_trip_us": 267769.541,
-  "fix_round_trip_us": 640.375,
+  "first_round_trip_us": 287881.792,
+  "fix_round_trip_us": 661.584,
   "initial_errors": [
     {
       "code": "PNX2322",
@@ -48,18 +48,18 @@
   "scenario": "clinic: 4 namespaces + 1 declared library contract",
   "scope": "Release CLI process; Rust JSON encoding, pipes, full project snapshots and response decoding. Local fixture, not a production-scale benchmark.",
   "signature_change": {
-    "round_trip_us": 140.959,
+    "round_trip_us": 138.584,
     "stats": {
       "checked_functions": 2,
-      "elapsed_us": 85,
+      "elapsed_us": 89,
       "parsed_files": 1,
       "reused_functions": 1,
       "reused_parses": 4
     }
   },
   "warm_round_trip": {
-    "max_us": 2857.5,
-    "p50_us": 55.1,
-    "p95_us": 211.0
+    "max_us": 320.0,
+    "p50_us": 54.8,
+    "p95_us": 258.2
   }
 }

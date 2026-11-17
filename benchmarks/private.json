@@ -1,0 +1,1 @@
+{"first_check_us":84,"iterations":1000,"path":"examples/inferred.clj","reused_functions_total":1000,"scope":"in-process, unchanged single-file source; warm checks reuse parsing, declaration models and function diagnostics; excludes file I/O, process startup and JSON transport","warm_max_us":10,"warm_p50_us":4,"warm_p95_us":4}
