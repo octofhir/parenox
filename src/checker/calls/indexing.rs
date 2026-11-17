@@ -68,11 +68,11 @@ impl Checker<'_> {
             }
             _ => {}
         }
-        let Some(item) = ty.indexed_item(index.0) else {
+        let Some(item) = ty.nth_item(index.0) else {
             self.diagnostics.push(Diagnostic::type_mismatch(
                 span,
                 "clojure.core/nth",
-                "Vector | String | Nil".into(),
+                "Vector | Seq | String | Nil".into(),
                 ty.inferred().to_string(),
             ));
             return Type::Unknown;

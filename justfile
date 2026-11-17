@@ -170,3 +170,8 @@ namespace-specs format="pretty" color="auto": build
 case format="pretty" color="auto": build
     @./target/release/parenox check examples/case.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/case_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check seq traversal in a loop and show an unchecked empty input.
+sequences format="pretty" color="auto": build
+    @./target/release/parenox check examples/sequences.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/sequences_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

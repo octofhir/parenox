@@ -16,11 +16,23 @@ impl Type {
                 .map(|part| part.sequential_item(index))
                 .collect::<Option<Vec<_>>>()
                 .map(Type::union),
-            _ => match self.indexed_item(i32::try_from(index).ok()?)? {
+            _ => match self.nth_item(i32::try_from(index).ok()?)? {
                 IndexedItem::Present(item) => Some(item.clone()),
                 IndexedItem::Optional(item) => Some(item.clone().nilable()),
                 IndexedItem::Absent(_) => Some(Type::Nil),
             },
+        }
+    }
+
+    pub fn nth_item(&self, index: i32) -> Option<IndexedItem<'_>> {
+        match self {
+            Type::Seq(element) => Some(match index {
+                0 => IndexedItem::Present(element),
+                1.. => IndexedItem::Optional(element),
+                _ => IndexedItem::Absent(None),
+            }),
+            Type::SeqTuple(items) => Some(fixed_item(items, usize::try_from(index).ok())),
+            _ => self.indexed_item(index),
         }
     }
 
@@ -52,9 +64,13 @@ impl Type {
             }
             _ => return None,
         };
-        Some(match position.and_then(|index| fixed.get(index)) {
-            Some(item) => IndexedItem::Present(item),
-            None => IndexedItem::Absent(Some(fixed.len())),
-        })
+        Some(fixed_item(fixed, position))
+    }
+}
+
+fn fixed_item(items: &[Type], index: Option<usize>) -> IndexedItem<'_> {
+    match index.and_then(|index| items.get(index)) {
+        Some(item) => IndexedItem::Present(item),
+        None => IndexedItem::Absent(Some(items.len())),
     }
 }

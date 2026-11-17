@@ -1,6 +1,7 @@
 //! Function resolution, call-site inference and built-in calls.
 mod indexing;
 mod inline;
+mod sequences;
 mod vectors;
 
 use super::{Checker, Env, Value, model::Function, nil_part};
@@ -282,6 +283,9 @@ impl Checker<'_> {
         }
         let ty = match name {
             "clojure.core/nth" => return self.nth(args),
+            "clojure.core/seq" | "clojure.core/first" | "clojure.core/next" => {
+                return self.sequence_call(name, &args[0]);
+            }
             "clojure.core/+" | "clojure.core/-" | "clojure.core/*" | "clojure.core/inc"
             | "clojure.core/dec" => {
                 for (value, span) in args {
@@ -317,6 +321,8 @@ impl Checker<'_> {
                         | Type::MapEntry(_)
                         | Type::Vector(_)
                         | Type::Tuple(_)
+                        | Type::Seq(_)
+                        | Type::SeqTuple(_)
                         | Type::Set(_)
                         | Type::Never
                         | Type::Unknown => true,
@@ -411,6 +417,9 @@ fn is_builtin(name: &str) -> bool {
             | "clojure.core/val"
             | "clojure.core/count"
             | "clojure.core/nth"
+            | "clojure.core/seq"
+            | "clojure.core/first"
+            | "clojure.core/next"
             | "clojure.string/upper-case"
             | "clojure.string/lower-case"
             | "clojure.string/trim"

@@ -27,6 +27,10 @@ pub enum Type {
     MapEntry(Box<[Type; 2]>),
     Vector(Box<Type>),
     Tuple(Box<[Type]>),
+    /// A nonempty seq with an unknown length.
+    Seq(Box<Type>),
+    /// A nonempty seq whose individual positions are known.
+    SeqTuple(Box<[Type]>),
     Set(Box<Type>),
     Function(Vec<Type>, Box<Type>),
     Union(Vec<Type>),
@@ -49,6 +53,10 @@ impl Type {
             Type::Tuple(items) => {
                 Type::Vector(Box::new(Type::union(items.iter().map(Type::inferred))))
             }
+            Type::Seq(t) => Type::Seq(Box::new(t.inferred())),
+            Type::SeqTuple(items) => {
+                Type::Seq(Box::new(Type::union(items.iter().map(Type::inferred))))
+            }
             Type::Set(t) => Type::Set(Box::new(t.inferred())),
             Type::Map(map) => Type::Map(map.inferred()),
             t => t.clone(),
@@ -57,10 +65,10 @@ impl Type {
 
     pub fn requires_precise_type(&self) -> bool {
         match self {
-            Type::Str(_) | Type::Char(_) | Type::Tuple(_) => true,
+            Type::Str(_) | Type::Char(_) | Type::Tuple(_) | Type::SeqTuple(_) => true,
             Type::Union(xs) => xs.iter().any(Type::requires_precise_type),
             Type::MapEntry(items) => items.iter().any(Type::requires_precise_type),
-            Type::Vector(t) | Type::Set(t) => t.requires_precise_type(),
+            Type::Vector(t) | Type::Set(t) | Type::Seq(t) => t.requires_precise_type(),
             Type::Map(map) => map.any_type(Type::requires_precise_type),
             Type::Function(args, ret) => {
                 args.iter().any(Type::requires_precise_type) || ret.requires_precise_type()
@@ -202,13 +210,16 @@ impl Type {
             }
             (Type::MapEntry(items), Type::Vector(e)) => items.iter().all(|item| item.subtype_of(e)),
             (Type::Tuple(items), Type::Vector(e)) => items.iter().all(|item| item.subtype_of(e)),
-            (Type::Tuple(a), Type::Tuple(e)) => {
+            (Type::SeqTuple(items), Type::Seq(e)) => items.iter().all(|item| item.subtype_of(e)),
+            (Type::Tuple(a), Type::Tuple(e)) | (Type::SeqTuple(a), Type::SeqTuple(e)) => {
                 a.len() == e.len() && a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
             }
             (Type::MapEntry(a), Type::Tuple(e)) => {
                 e.len() == 2 && a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
             }
-            (Type::Vector(a), Type::Vector(e)) | (Type::Set(a), Type::Set(e)) => a.subtype_of(e),
+            (Type::Vector(a), Type::Vector(e))
+            | (Type::Set(a), Type::Set(e))
+            | (Type::Seq(a), Type::Seq(e)) => a.subtype_of(e),
             (Type::Function(args, ret), Type::Function(e_args, e_ret)) => {
                 args.len() == e_args.len()
                     && args.iter().zip(e_args).all(|(a, e)| e.subtype_of(a))
@@ -224,8 +235,8 @@ impl Type {
             Type::Unknown => true,
             Type::Union(xs) => xs.iter().any(Type::contains_unknown),
             Type::MapEntry(items) => items.iter().any(Type::contains_unknown),
-            Type::Tuple(items) => items.iter().any(Type::contains_unknown),
-            Type::Vector(t) | Type::Set(t) => t.contains_unknown(),
+            Type::Tuple(items) | Type::SeqTuple(items) => items.iter().any(Type::contains_unknown),
+            Type::Vector(t) | Type::Set(t) | Type::Seq(t) => t.contains_unknown(),
             Type::Map(m) => m.any_type(Type::contains_unknown),
             Type::Function(args, ret) => {
                 args.iter().any(Type::contains_unknown) || ret.contains_unknown()
@@ -262,9 +273,15 @@ impl fmt::Display for Type {
             Type::Key(s) => write!(f, "{s}"),
             Type::MapEntry(items) => write!(f, "MapEntry<{}, {}>", items[0], items[1]),
             Type::Vector(t) => write!(f, "Vector<{t}>"),
-            Type::Tuple(items) => {
+            Type::Seq(t) => write!(f, "Seq<{t}>"),
+            Type::Tuple(items) | Type::SeqTuple(items) => {
+                let name = if matches!(self, Type::SeqTuple(_)) {
+                    "SeqTuple"
+                } else {
+                    "Tuple"
+                };
                 let items = items.iter().map(ToString::to_string).collect::<Vec<_>>();
-                write!(f, "Tuple<{}>", items.join(", "))
+                write!(f, "{name}<{}>", items.join(", "))
             }
             Type::Set(t) => write!(f, "Set<{t}>"),
             Type::Function(args, ret) => {

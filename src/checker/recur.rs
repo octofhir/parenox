@@ -230,10 +230,12 @@ fn bounded_state(state: &[Value]) -> bool {
         };
         *remaining = next;
         match ty {
-            Type::Tuple(parts) => parts.iter().all(|part| visit(part, remaining)),
+            Type::Tuple(parts) | Type::SeqTuple(parts) => {
+                parts.iter().all(|part| visit(part, remaining))
+            }
             Type::Union(parts) => parts.iter().all(|part| visit(part, remaining)),
             Type::MapEntry(parts) => parts.iter().all(|part| visit(part, remaining)),
-            Type::Vector(part) | Type::Set(part) => visit(part, remaining),
+            Type::Vector(part) | Type::Set(part) | Type::Seq(part) => visit(part, remaining),
             Type::Function(args, ret) => {
                 args.iter().all(|arg| visit(arg, remaining)) && visit(ret, remaining)
             }

@@ -76,6 +76,7 @@ just cond             # ordered guards and fallthrough diagnostics
 just libspecs         # bare requires and renamed imports across files
 just namespace-specs # alias-only imports and project-wide named specs
 just case             # grouped dispatch and missing-case diagnostics
+just sequences        # seq traversal, precise positions and empty inputs
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -496,6 +497,11 @@ growing types beyond its analysis budget.
 omitted default throws when no clause matches, and Parenox reports a definite
 miss at the input expression. Supported constants are nil, booleans, characters,
 strings, keywords and known decimal integers in the i32 range.
+
+`seq`, `first` and `next` model traversal of vectors and inferred seqs. Guarding
+the result of `seq` or `next` establishes that a first item exists. That item
+can still be nil. A seq made from a fixed vector retains its positions for
+`first`, `next`, `nth` and positional destructuring.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
 recursive specs, multi-arity/variadic definitions, full numeric
