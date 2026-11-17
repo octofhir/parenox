@@ -183,7 +183,17 @@ impl Checker<'_> {
         match &form.kind {
             Kind::Nil => Value::new(Type::Nil),
             Kind::Bool(b) => Value::new(Type::Bool(*b)),
-            Kind::Number => Value::new(Type::Number),
+            Kind::Number => {
+                let token = &self.source[form.span.start.offset..form.span.end.offset];
+                let digits = token.trim_start_matches(['+', '-']);
+                let ty = if digits.len() > 1 && digits.starts_with('0') {
+                    // A leading zero can denote octal syntax in Clojure.
+                    Type::Number
+                } else {
+                    token.parse::<i32>().map_or(Type::Number, Type::Integer)
+                };
+                Value::new(ty)
+            }
             Kind::String(s) => Value::new(Type::Str(s.clone())),
             Kind::Character(c) => Value::new(Type::Char(*c)),
             Kind::Metadata(_, target) => self.infer(target, env),
@@ -230,7 +240,10 @@ impl Checker<'_> {
             Kind::Vector(xs) | Kind::Set(xs) => {
                 let types = xs
                     .iter()
-                    .map(|x| self.infer(x, env).known)
+                    .map(|x| match self.infer(x, env).known {
+                        Type::Integer(_) => Type::Number,
+                        ty => ty,
+                    })
                     .collect::<Vec<_>>();
                 let element = Box::new(Type::union(types));
                 Value::new(if matches!(form.kind, Kind::Set(_)) {

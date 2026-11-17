@@ -70,6 +70,7 @@ just dictionaries pretty always  # map-of contracts and diagnostics
 just map-keys pretty always  # string and dynamic map keys
 just dynamic-paths pretty always  # nested maps with dynamic path segments
 just ordered-paths pretty always  # saved vector paths and positional contracts
+just indices pretty always  # indexed reads and out-of-bounds diagnostics
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -329,9 +330,20 @@ known. A conditional path is checked for each complete alternative.
 A missing path uses the `get-in` fallback and a present terminal nil or
 false is preserved. Writes create missing or nil intermediate maps, preserve
 sibling fields, and report scalar parents. Write paths support 1 to 32 keys.
-Unknown-length paths and numeric indices report an analysis gap.
+Read paths also accept known decimal integer indices in the i32 range.
+Unknown-length paths and numeric write keys report an analysis gap.
 Run `just dynamic-paths pretty always` for inline examples and
 `just ordered-paths pretty always` for saved paths and diagnostics.
+
+`nth`, `get`, `req!` and `contains?` analyze known decimal integer indices
+in the i32 range. Vectors and map entries retain known positions. String
+reads use UTF-16 positions, matching Clojure/JVM. For an out-of-range index,
+`get` yields nil or its fallback. `nth` without a fallback reports a
+provably out-of-range index; on nil it returns nil. A general vector
+contract gives `nth` the element type on successful reads. A supplied
+fallback handles absence and preserves present nil. Index expressions
+whose exact decimal integer value is unavailable report an analysis gap.
+Run `just indices pretty always` for examples and diagnostics.
 
 `contains?` checks keyword and string keys. A guard such as `(contains? patient :name)`
 refines a local map in each branch. The successful branch can read a declared
@@ -390,7 +402,7 @@ use the value type if the key can occur and preserve missing-key defaults.
 entry while retaining the types of the remaining entries.
 Run `just dictionaries pretty always` for contracts and
 `just map-keys pretty always` for dynamic key examples. Options on `s/map-of` and lookup
-keys outside keywords and strings report gaps.
+keys outside keywords, strings and known decimal integer indices report gaps.
 
 Clojure 1.13 checked lookups support keyword and string keys in `req!` and
 explicit map bindings, plus `:keys!` and its namespaced directives.
@@ -422,7 +434,7 @@ default. A default applies to the local value; `:as` retains the input collectio
 
 Map destructuring with `:missing`, `:select`, `:all` or `:excess` and
 symbol lookup keys remain unsupported. Positional destructuring covers
-vectors, map entries and nil. Vector literals of at most 32 elements retain
+vectors, map entries, strings and nil. Vector literals of at most 32 elements retain
 their positions, and `(s/tuple ...)` describes a vector with 1 to 32 position
 types. Longer literals retain an element type. Missing positions bind nil.
 A vector with unknown length contributes nil as a possible value at each
@@ -440,7 +452,7 @@ inferred helper work is included in the check of their callers.
 | Spec forms | `s/keys`, `s/map-of`, `s/tuple`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
 | Control flow | `let`, `do`, `if`, `when`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
-| Data operations | Keyword calls, string and keyword lookups and updates, ordered vector paths, positional and nested map destructuring and checked keys |
+| Data operations | Keyword calls, string and keyword lookups and updates, ordered vector paths, indexed reads, positional and nested map destructuring and checked keys |
 | Functions | Single arity, forward calls, namespace aliases, `:as-alias`, simple `:refer`, private-var boundaries, direct private-helper inference |
 | Libraries | A small built-in rule table and one optional EDN map of external signatures |
 | Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |
@@ -457,7 +469,8 @@ values remain available to check finite-value contracts.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
 recursive specs, multi-arity/variadic definitions, full numeric
-tower semantics and some reader forms. All numbers currently share `Number`.
+tower semantics and some reader forms. Numeric expressions use `Number`,
+with decimal integer literals retaining their value for indexed reads.
 Externs currently declare qualified function signatures; they do not load JARs or
 resolve Maven/Git dependencies. There is no runtime, interpreter or VM yet.
 

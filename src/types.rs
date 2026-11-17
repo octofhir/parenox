@@ -1,5 +1,7 @@
+mod indexing;
 mod maps;
 
+pub use indexing::IndexedItem;
 pub use maps::{ExtraFields, Field, MapSlot, MapType};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -14,6 +16,7 @@ pub enum Type {
     Boolean,
     Bool(bool),
     Number,
+    Integer(i32),
     String,
     Character,
     Char(char),
@@ -35,6 +38,7 @@ impl Type {
     pub fn inferred(&self) -> Type {
         match self {
             Type::Str(_) => Type::String,
+            Type::Integer(_) => Type::Number,
             Type::Char(_) => Type::Character,
             Type::Union(xs) => Type::union(xs.iter().map(Type::inferred)),
             Type::MapEntry(items) => {
@@ -75,6 +79,9 @@ impl Type {
                     set.insert(t);
                 }
             }
+        }
+        if set.contains(&Type::Number) {
+            set.retain(|t| !matches!(t, Type::Integer(_)));
         }
         if set.contains(&Type::String) {
             set.retain(|t| !matches!(t, Type::Str(_)));
@@ -178,20 +185,6 @@ impl Type {
         }
     }
 
-    pub fn sequential_item(&self, index: usize) -> Option<Type> {
-        match self {
-            Type::Tuple(items) => Some(items.get(index).cloned().unwrap_or(Type::Nil)),
-            Type::Vector(element) => Some((**element).clone().nilable()),
-            Type::Nil => Some(Type::Nil),
-            Type::Union(parts) => parts
-                .iter()
-                .map(|part| part.sequential_item(index))
-                .collect::<Option<Vec<_>>>()
-                .map(Type::union),
-            other => other.entry_item(index),
-        }
-    }
-
     pub fn subtype_of(&self, expected: &Type) -> bool {
         if self == &Type::Never || self == expected {
             return true;
@@ -199,7 +192,8 @@ impl Type {
         match (self, expected) {
             (Type::Union(xs), e) => xs.iter().all(|t| t.subtype_of(e)),
             (a, Type::Union(xs)) => xs.iter().any(|e| a.subtype_of(e)),
-            (Type::Str(_), Type::String)
+            (Type::Integer(_), Type::Number)
+            | (Type::Str(_), Type::String)
             | (Type::Char(_), Type::Character)
             | (Type::Key(_), Type::Keyword)
             | (Type::Bool(_), Type::Boolean) => true,
@@ -250,6 +244,7 @@ impl fmt::Display for Type {
             Type::Boolean => write!(f, "Boolean"),
             Type::Bool(b) => write!(f, "{b}"),
             Type::Number => write!(f, "Number"),
+            Type::Integer(index) => write!(f, "{index}"),
             Type::String => write!(f, "String"),
             Type::Character => write!(f, "Character"),
             Type::Char(c) => match c {

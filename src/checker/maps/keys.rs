@@ -13,15 +13,26 @@ impl Checker<'_> {
         }
     }
 
-    pub(super) fn read_map_key(&mut self, form: &Form, env: &Env, name: &str) -> Option<Type> {
+    pub(super) fn read_map_key(
+        &mut self,
+        form: &Form,
+        env: &Env,
+        name: &str,
+        allow_index: bool,
+    ) -> Option<Type> {
         let key = self.infer(form, env);
-        if key.known.is_lookup_key() {
+        if key.known.is_lookup_key(allow_index) {
             Some(key.known)
         } else {
             self.unsupported(
                 form.span,
                 format!(
-                    "{name} analysis supports keyword and string keys, got {}",
+                    "{name} analysis supports keyword and string keys{}, got {}",
+                    if allow_index {
+                        " and known integer indices"
+                    } else {
+                        ""
+                    },
                     key.ty
                 ),
             );
@@ -53,7 +64,7 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         }
         let target = self.infer(&xs[1], env);
-        let key = self.read_map_key(&xs[2], env, name);
+        let key = self.read_map_key(&xs[2], env, name, true);
         let default = xs.get(3).map(|form| self.infer(form, env));
         let Some(key) = key else {
             return Value::new(Type::Unknown);

@@ -369,3 +369,23 @@
            (try (demo.ordered-paths-bad/increment-quantity) :unexpected-success
                 (catch NullPointerException _ :throws))))
 (println "Clojure/JVM ordered paths: 9 assertions passed")
+
+(load-file "examples/indices.clj")
+(load-file "examples/indices_bad.clj")
+(assert (= 120 (demo.indices/row-price ["SKU-17" 120])))
+(assert (= 120 (demo.indices/first-item-price {:items [{:price 120}]} 90)))
+(assert (= 90 (demo.indices/first-item-price {:items []} 90)))
+(assert (= 0 (demo.indices/first-rate [])))
+(assert (= 120 (demo.indices/first-rate [120 90])))
+(assert (= :fallback (nth [:sku] -1 :fallback)))
+(assert (= nil (nth nil 8)))
+(assert (contains? [:sku nil] 1))
+(assert (= 1 (nth [1 2] 0.5)))
+(assert (= :fallback (get [1 2] 0.5 :fallback)))
+(assert (= :throws
+           (try (demo.indices-bad/beyond-row) :unexpected-success
+                (catch IndexOutOfBoundsException _ :throws))))
+(assert (= :throws
+           (try (demo.indices-bad/increment-explicit-nil) :unexpected-success
+                (catch NullPointerException _ :throws))))
+(println "Clojure/JVM indexed reads: 12 assertions passed")

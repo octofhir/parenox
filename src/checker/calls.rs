@@ -1,4 +1,5 @@
 //! Function resolution, call-site inference and built-in calls.
+mod indexing;
 mod inline;
 mod vectors;
 
@@ -257,6 +258,7 @@ impl Checker<'_> {
         let arity_ok = match name {
             "clojure.core/+" | "clojure.core/*" | "clojure.core/str" => true,
             "clojure.core/-" | "clojure.core/=" => !args.is_empty(),
+            "clojure.core/nth" => (2..=3).contains(&args.len()),
             _ => args.len() == 1,
         };
         if !arity_ok {
@@ -268,6 +270,7 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         }
         let ty = match name {
+            "clojure.core/nth" => return self.nth(args),
             "clojure.core/+" | "clojure.core/-" | "clojure.core/*" | "clojure.core/inc"
             | "clojure.core/dec" => {
                 for (value, span) in args {
@@ -396,6 +399,7 @@ fn is_builtin(name: &str) -> bool {
             | "clojure.core/key"
             | "clojure.core/val"
             | "clojure.core/count"
+            | "clojure.core/nth"
             | "clojure.string/upper-case"
             | "clojure.string/lower-case"
             | "clojure.string/trim"

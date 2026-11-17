@@ -140,3 +140,8 @@ dynamic-paths format="pretty" color="auto": build
 ordered-paths format="pretty" color="auto": build
     @./target/release/parenox check examples/ordered_paths.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/ordered_paths_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check indexed reads and show a bounds error and a present nil value.
+indices format="pretty" color="auto": build
+    @./target/release/parenox check examples/indices.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/indices_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use super::{Checker, Env, Value, nil_part};
 use crate::Diagnostic;
 use crate::reader::{Form, Span};
-use crate::types::{ExtraFields, Field, MapSlot, MapType, Type};
+use crate::types::{ExtraFields, Field, IndexedItem, MapSlot, MapType, Type};
 
 #[derive(Clone, Copy)]
 pub(super) enum Lookup<'a> {
@@ -77,7 +77,27 @@ impl Checker<'_> {
         };
         let mut notes = value.notes.clone();
         let ty = match &value.known {
-            Type::Nil | Type::MapEntry(_) | Type::Vector(_) | Type::Tuple(_) => default_type,
+            indexed
+                if let Type::Integer(index) = key
+                    && let Some(item) = indexed.indexed_item(*index) =>
+            {
+                match item {
+                    IndexedItem::Present(item) => item.clone(),
+                    IndexedItem::Optional(item)
+                        if matches!(mode, Lookup::Required | Lookup::Presence) =>
+                    {
+                        item.clone()
+                    }
+                    IndexedItem::Optional(item) => Type::union([item.clone(), default_type]),
+                    IndexedItem::Absent(_) => default_type,
+                }
+            }
+            Type::Nil
+            | Type::MapEntry(_)
+            | Type::Vector(_)
+            | Type::Tuple(_)
+            | Type::String
+            | Type::Str(_) => default_type,
             Type::Never => Type::Never,
             Type::Unknown => Type::Unknown,
             Type::Union(xs) => {
@@ -161,7 +181,7 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let value = self.infer(target, env);
-        let Some(key_type) = self.read_map_key(key, env, "contains?") else {
+        let Some(key_type) = self.read_map_key(key, env, "contains?", true) else {
             return Value::new(Type::Unknown);
         };
         Value::new(match env.presence(target, key) {
@@ -231,7 +251,7 @@ impl Checker<'_> {
         let target = self.infer(&xs[1], env);
         let mut updates = Vec::new();
         for pair in xs[2..].as_chunks::<2>().0 {
-            let key = self.read_map_key(&pair[0], env, "assoc");
+            let key = self.read_map_key(&pair[0], env, "assoc", false);
             let value = self.infer(&pair[1], env);
             let Some(key) = key else {
                 return Value::new(Type::Unknown);
@@ -274,7 +294,17 @@ fn key_presence(ty: &Type, key: &Type) -> Option<bool> {
             MapSlot::Absent => Some(false),
             _ => None,
         },
-        Type::Nil | Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => Some(false), // Keyword and string keys are never vector indices.
+        Type::Nil => Some(false),
+        Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => {
+            let Type::Integer(index) = key else {
+                return Some(false);
+            };
+            match ty.indexed_item(*index) {
+                Some(IndexedItem::Present(_)) => Some(true),
+                Some(IndexedItem::Absent(_)) => Some(false),
+                _ => None,
+            }
+        }
         Type::Set(element) if !key.key_overlaps(element) && !element.contains_unknown() => {
             Some(false)
         }

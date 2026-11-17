@@ -76,7 +76,7 @@ fn membership_resolves_core_calls_and_keeps_unsupported_targets_explicit() {
     for (call, code) in [
         ("(contains? 42 :name)", "PNX2322"),
         ("(contains? \"text\" :name)", "PNX2322"),
-        ("(contains? [:name] 0)", "PNX9001"),
+        ("(contains? [:name] 0.5)", "PNX9001"),
         ("(contains? {})", "PNX2554"),
     ] {
         let report = check(&format!("(defn f {{:t/sig '[:-> boolean?]}} [] {call})"));

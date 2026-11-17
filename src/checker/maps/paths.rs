@@ -35,7 +35,7 @@ impl Checker<'_> {
                 .map(|form| {
                     let key = self
                         .literal_map_key(form)
-                        .or_else(|| self.read_map_key(form, env, name));
+                        .or_else(|| self.read_map_key(form, env, name, !writing));
                     match key {
                         Some(ty) if !ty.contains_unknown() && ty != Type::Never => {
                             Ok((ty, form.span))
@@ -93,7 +93,7 @@ impl Checker<'_> {
                         Type::Unknown
                     });
                 }
-                if !key.is_lookup_key() {
+                if !key.is_lookup_key(!writing) {
                     self.unsupported(span, format!(
                     "{name} analysis supports keyword and string keys; path item {} has type {}",
                     index + 1,
@@ -228,7 +228,7 @@ impl Checker<'_> {
                 Err(ty) => return Value::new(ty),
             }
         } else {
-            let Some(key_type) = self.read_map_key(key, env, name) else {
+            let Some(key_type) = self.read_map_key(key, env, name, false) else {
                 return Value::new(Type::Unknown);
             };
             if matches!(key_type, Type::Never | Type::Unknown) {

@@ -66,9 +66,10 @@ impl Type {
         matches!(self, Self::Key(_) | Self::Str(_))
     }
 
-    pub fn is_lookup_key(&self) -> bool {
+    pub fn is_lookup_key(&self, allow_index: bool) -> bool {
         match self {
-            Self::Union(parts) => parts.iter().all(Self::is_lookup_key),
+            Self::Union(parts) => parts.iter().all(|key| key.is_lookup_key(allow_index)),
+            Self::Integer(_) => allow_index,
             Self::String | Self::Keyword | Self::Unknown | Self::Never => true,
             key => key.is_literal_map_key(),
         }
