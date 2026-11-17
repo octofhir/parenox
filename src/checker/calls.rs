@@ -1,8 +1,10 @@
 //! Function resolution, call-site inference and built-in calls.
+mod inline;
+
 use super::maps::Lookup;
 use super::{Checker, Env, Value, model::Function, nil_part};
 use crate::expand::Threading;
-use crate::reader::{Form, Kind, Span};
+use crate::reader::{Form, Span};
 use crate::types::Type;
 
 impl Checker<'_> {
@@ -45,7 +47,8 @@ impl Checker<'_> {
                 return Value::new(Type::Unknown);
             }
             self.active_helpers.push(function.name.clone());
-            let env = self.bind_parameters(&function.params, |index| key.1[index].clone());
+            let env =
+                self.bind_parameters(Env::new(), &function.params, |index| key.1[index].clone());
             let result = self.body(&function.body, &env);
             self.active_helpers.pop();
             self.specializations
@@ -145,6 +148,15 @@ impl Checker<'_> {
                 "clojure.core/get-in" => return self.get_in(xs, span, env),
                 "clojure.core/assoc" => return self.assoc(xs, span, env),
                 "clojure.core/assoc-in" => return self.assoc_in(xs, span, env),
+                "clojure.core/fn" => {
+                    return self.unsupported(
+                        span,
+                        "fn is currently supported in direct calls and inline callbacks",
+                    );
+                }
+                "clojure.core/recur" => {
+                    return self.unsupported(span, "recur is not supported yet");
+                }
                 "clojure.core/fnil" => {
                     return self.unsupported(span, "fnil is currently supported in direct calls and as an inline update callback");
                 }
@@ -158,9 +170,9 @@ impl Checker<'_> {
                 _ => {}
             }
         }
-        if let Some(parts) = self.fnil_parts(&xs[0], env) {
+        if let Some(parts) = self.inline_callable(&xs[0], env) {
             let args = self.typed_args(&xs[1..], env);
-            return self.call_fnil(parts, args, xs[0].span, span, env);
+            return self.call_inline(parts, args, xs[0].span, span, env);
         }
         let function = self.infer(&xs[0], env);
         let args = self.typed_args(&xs[1..], env);
@@ -223,8 +235,8 @@ impl Checker<'_> {
         span: Span,
         env: &Env,
     ) -> Value {
-        if let Some(parts) = self.fnil_parts(updater, env) {
-            return self.call_fnil(parts, args, updater.span, span, env);
+        if let Some(parts) = self.inline_callable(updater, env) {
+            return self.call_inline(parts, args, updater.span, span, env);
         }
         if let Some(name) = updater.symbol()
             && !env.contains_key(name)
@@ -245,66 +257,6 @@ impl Checker<'_> {
         }
         let function = self.infer(updater, env);
         self.call_value(function, &args, updater.span, span)
-    }
-
-    fn fnil_parts<'a>(&self, form: &'a Form, env: &Env) -> Option<&'a [Form]> {
-        let Kind::List(forms) = &form.without_metadata().kind else {
-            return None;
-        };
-        let (head, parts) = forms.split_first()?;
-        let name = head.symbol()?;
-        if env.contains_key(name)
-            || self.model.local_function(name).is_some()
-            || self.model.signature(name, self.globals).is_some()
-        {
-            return None;
-        }
-        (self.model.resolve(name) == "clojure.core/fnil").then_some(parts)
-    }
-
-    fn call_fnil(
-        &mut self,
-        parts: &[Form],
-        mut args: Vec<(Value, Span)>,
-        constructor: Span,
-        call: Span,
-        env: &Env,
-    ) -> Value {
-        if !(2..=4).contains(&parts.len()) {
-            self.error(
-                "PNX2554",
-                constructor,
-                "fnil requires a function and one to three defaults",
-            );
-            return Value::new(Type::Unknown);
-        }
-        let defaults = self.typed_args(&parts[1..], env);
-        // The three-default version also has a two-argument overload.
-        if args.len() < defaults.len().min(2) {
-            self.error(
-                "PNX2554",
-                call,
-                format!(
-                    "fnil wrapper expects at least {} arguments",
-                    defaults.len().min(2)
-                ),
-            );
-            return Value::new(Type::Unknown);
-        }
-        for ((arg, span), (default, default_span)) in args.iter_mut().zip(defaults) {
-            if nil_part(&arg.known) == Type::Never {
-                continue;
-            }
-            let non_nil = arg.known.without_nil();
-            if non_nil == Type::Never {
-                *arg = default;
-                *span = default_span;
-            } else {
-                arg.narrow(Type::union([non_nil, default.known]));
-                arg.notes.extend(default.notes);
-            }
-        }
-        self.call_form(&parts[0], args, call, env)
     }
 
     fn builtin(&mut self, name: &str, args: &[(Value, Span)], span: Span) -> Value {

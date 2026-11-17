@@ -11,10 +11,10 @@ type Defaults = BTreeMap<String, (Value, Span)>;
 impl Checker<'_> {
     pub(super) fn bind_parameters(
         &mut self,
+        mut env: Env,
         params: &[Form],
         value: impl Fn(usize) -> Value,
     ) -> Env {
-        let mut env = Env::new();
         // All ordinary arguments exist before fn destructuring, including later ones.
         // Destructuring then proceeds in parameter order and can shadow those names.
         for (index, param) in params

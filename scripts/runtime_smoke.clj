@@ -246,3 +246,10 @@
 (assert (= 3 ((fnil + 1 2 100) nil nil)))
 (assert (= 103 ((fnil + 1 2 100) nil nil nil)))
 (println "Clojure/JVM fnil: 5 assertions passed")
+
+(assert (= 5 (let [delta 2] (:visits (update {:visits 3} :visits (fn [old] (+ old delta)))))))
+(assert (= 9 ((fn [{:keys [x] :or {x y}} y] x) {} 9)))
+(assert (= 2 ((fn [x x] x) "first" 2)))
+(assert (nil? ((fn [x]) 42)))
+(assert (= 1 ((fnil (fn [n] (inc n)) 0) nil)))
+(println "Clojure/JVM inline fn: 5 assertions passed")

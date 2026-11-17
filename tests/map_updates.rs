@@ -26,28 +26,34 @@ fn writes_callback_result_to_the_key_and_preserves_siblings() {
 }
 
 #[test]
-fn implicit_old_arguments_get_source_diagnostics_without_edits_to_the_key() {
+fn updater_errors_distinguish_implicit_arguments_from_source_expressions() {
     let source = include_str!("../examples/updates_bad.clj");
     let report = Session::default().check("updates_bad.clj", source);
     assert!(!report.ok && report.complete, "{report:#?}");
     assert_eq!(report.diagnostics.len(), 2);
-    for (diagnostic, key, actual) in [
-        (&report.diagnostics[0], ":visits", "Nil | Number"),
-        (&report.diagnostics[1], ":name", "Nil"),
-    ] {
-        assert_eq!(diagnostic.actual.as_deref(), Some(actual));
-        assert!(diagnostic.suggestions.is_empty());
-        assert_eq!(
-            &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
-            key
-        );
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note.contains("receives the old value"))
-        );
-    }
+    let old = &report.diagnostics[0];
+    assert_eq!(old.actual.as_deref(), Some("Nil | Number"));
+    assert!(old.suggestions.is_empty());
+    assert_eq!(
+        &source[old.span.start.offset..old.span.end.offset],
+        ":visits"
+    );
+    assert!(
+        old.notes
+            .iter()
+            .any(|note| note.contains("receives the old value"))
+    );
+    let body = &report.diagnostics[1];
+    assert_eq!(body.actual.as_deref(), Some("Nil"));
+    assert_eq!(
+        &source[body.span.start.offset..body.span.end.offset],
+        "name"
+    );
+    assert!(
+        body.notes
+            .iter()
+            .any(|note| note.contains("checking inline fn"))
+    );
     let report = check(r#"(defn f {:t/sig '[:-> number?]} [] (:x (update {:x 1} :x + "2")))"#);
     assert_eq!(report.diagnostics[0].suggestions[0].replacement, "2");
 }

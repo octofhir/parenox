@@ -334,7 +334,17 @@ private helpers. Inline `fnil` replaces nil arguments and preserves false.
 For example, `(update patient :visits (fnil inc 0))` works when visits is absent.
 Parenox supports one to three defaults when the wrapper is called immediately
 or passed directly to `update` or `update-in`. Storing the wrapper for later use
-reports an analysis gap. Run `just updates` to see callback errors at the key.
+reports an analysis gap.
+
+Inline `(fn [params] ...)` works in immediate calls and as an updater.
+Its parameters take their types from the call, supported map destructuring
+works in the parameter vector, and the body can access outer locals.
+Diagnostics inside the body point at its original expressions and include
+the call location. This covers anonymous functions with one fixed arity.
+Local storage of the function itself, named functions, multiple arities,
+rest parameters and preconditions or postconditions report analysis gaps.
+Run `just updates` to see both an implicit old-value error and a body error.
+
 
 
 Clojure 1.13 checked lookups are supported for literal keyword keys: `req!`,

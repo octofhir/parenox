@@ -13,5 +13,5 @@
 (defn normalize-name
   {:t/sig '[:-> string?]}
   []
-  (get-in (update-in {:patient {:name nil}} [:patient :name] str/trim)
+  (get-in (update-in {:patient {:name nil}} [:patient :name] (fn [name] (str/trim name)))
           [:patient :name]))

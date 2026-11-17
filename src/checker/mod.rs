@@ -30,7 +30,7 @@ impl Model {
             thread_depth: 0,
             specializations: BTreeMap::new(),
         };
-        let env = checker.bind_parameters(&function.params, |index| {
+        let env = checker.bind_parameters(Env::new(), &function.params, |index| {
             Value::new(function.args[index].clone())
         });
         let result = checker.body(&function.body, &env);

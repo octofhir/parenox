@@ -13,12 +13,10 @@
   [patient delta]
   (:visits (update patient :visits (fnil + 0) delta)))
 
-(defn- normalize-or-default [name fallback]
-  (str/upper-case (or name fallback)))
-
 (defn display-name
   {:t/sig '[::request :-> string?]}
   [request]
-  (-> request
-      (update-in [:patient :name] normalize-or-default "Unknown")
-      (get-in [:patient :name])))
+  (let [fallback "Unknown"]
+    (-> request
+        (update-in [:patient :name] (fn [name] (str/upper-case (or name fallback))))
+        (get-in [:patient :name]))))
