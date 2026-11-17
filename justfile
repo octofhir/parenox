@@ -175,3 +175,8 @@ case format="pretty" color="auto": build
 sequences format="pretty" color="auto": build
     @./target/release/parenox check examples/sequences.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/sequences_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check growing vector accumulators and show a nil element diagnostic.
+accumulators format="pretty" color="auto": build
+    @./target/release/parenox check examples/accumulators.clj --format {{quote(format)}} --color {{quote(color)}}
+    @./target/release/parenox check examples/accumulators_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1

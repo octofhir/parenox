@@ -160,11 +160,16 @@ impl Checker<'_> {
             let mut seen = vec![initial];
             let mut pending = VecDeque::from(std::mem::take(&mut target.edges));
             while let Some(RecurEdge {
-                args: state,
+                args: mut state,
                 span: edge,
             }) = pending.pop_front()
             {
                 if seen.iter().any(|previous| same_types(&state, previous)) {
+                    continue;
+                }
+                if widen_growing_collections(&mut state, &seen)
+                    && seen.iter().any(|previous| same_types(&state, previous))
+                {
                     continue;
                 }
                 if seen.len() == MAX_STATES
@@ -219,6 +224,51 @@ fn same_types(left: &[Value], right: &[Value]) -> bool {
     left.iter()
         .zip(right)
         .all(|(left, right)| left.known == right.known)
+}
+
+fn widen_growing_collections(state: &mut [Value], seen: &[Vec<Value>]) -> bool {
+    // Two earlier states with the same other slots distinguish repeated growth
+    // from a single append before a loop exits.
+    let mut prior = Vec::new();
+    for previous in seen.iter().rev() {
+        let Some(slots) = growing_slots(state, previous) else {
+            continue;
+        };
+        if !prior.contains(&slots) {
+            prior.push(slots);
+            continue;
+        }
+        for index in slots {
+            let value = &mut state[index];
+            let known = match &value.known {
+                Type::Tuple(items) => Type::Vector(Box::new(Type::union(items.iter().cloned()))),
+                Type::SeqTuple(items) => Type::Seq(Box::new(Type::union(items.iter().cloned()))),
+                _ => unreachable!(),
+            };
+            value.narrow(known);
+            value
+                .notes
+                .push("The collection length can grow across iterations.".into());
+        }
+        return true;
+    }
+    false
+}
+
+fn growing_slots(current: &[Value], previous: &[Value]) -> Option<Vec<usize>> {
+    let mut growing = Vec::new();
+    for (index, (current, previous)) in current.iter().zip(previous).enumerate() {
+        if current.known == previous.known {
+            continue;
+        }
+        match (&current.known, &previous.known) {
+            (Type::Tuple(items), Type::Tuple(old)) if items.starts_with(old) => {}
+            (Type::SeqTuple(items), Type::SeqTuple(old)) if items.ends_with(old) => {}
+            _ => return None,
+        }
+        growing.push(index);
+    }
+    (!growing.is_empty()).then_some(growing)
 }
 
 // A growing shape such as (recur [state state]) can otherwise double in size

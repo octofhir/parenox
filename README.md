@@ -77,6 +77,7 @@ just libspecs         # bare requires and renamed imports across files
 just namespace-specs # alias-only imports and project-wide named specs
 just case             # grouped dispatch and missing-case diagnostics
 just sequences        # seq traversal, precise positions and empty inputs
+just accumulators     # growing vectors with retained element types
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -502,6 +503,11 @@ strings, keywords and known decimal integers in the i32 range.
 the result of `seq` or `next` establishes that a first item exists. That item
 can still be nil. A seq made from a fixed vector retains its positions for
 `first`, `next`, `nth` and positional destructuring.
+
+`conj` appends to vectors, prepends to seqs, and adds items to sets. Short fixed
+vectors retain their positions. Repeated growth across loop iterations widens
+the collection length while keeping the inferred element types. Map `conj`
+reports an analysis gap.
 
 Limitations include user macros, Java interop, generics, lazy sequence functions,
 recursive specs, multi-arity/variadic definitions, full numeric

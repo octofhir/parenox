@@ -1,8 +1,8 @@
-//! The vector and seq operations used to traverse a collection in a loop.
+//! Vector and sequence traversal and accumulation.
 use super::super::{Checker, Value};
 use crate::Diagnostic;
 use crate::reader::Span;
-use crate::types::Type;
+use crate::types::{MAX_TUPLE_ITEMS, Type};
 
 #[derive(Clone, Copy)]
 enum ReadSequence {
@@ -42,6 +42,66 @@ fn nonempty_seq(items: &[Type]) -> Type {
 }
 
 impl Checker<'_> {
+    pub(super) fn conj(&mut self, args: &[(Value, Span)]) -> Value {
+        let Some(((collection, span), items)) = args.split_first() else {
+            return Value::new(Type::Tuple(Box::new([])));
+        };
+        if items.is_empty() {
+            return collection.clone();
+        }
+        if args.iter().any(|(value, _)| value.known == Type::Never) {
+            return Value::new(Type::Never);
+        }
+        let items: Vec<_> = items.iter().map(|(value, _)| value.known.clone()).collect();
+        let result = self.conj_type(&collection.known, &items, *span);
+        Value::with_notes(result, collection.notes.clone())
+    }
+
+    fn conj_type(&mut self, collection: &Type, items: &[Type], span: Span) -> Type {
+        let joined = |element: &Type| {
+            Box::new(Type::union(
+                std::iter::once(element.clone()).chain(items.iter().cloned()),
+            ))
+        };
+        match collection {
+            Type::Unknown | Type::Never => collection.clone(),
+            Type::Nil => conj_seq(&[], items),
+            Type::SeqTuple(previous) => conj_seq(previous, items),
+            Type::Seq(element) => Type::Seq(joined(element)),
+            Type::Vector(element) => Type::Vector(joined(element)),
+            Type::Set(element) => Type::Set(joined(element)),
+            Type::Tuple(previous) => {
+                let appended = previous.iter().chain(items).cloned();
+                if previous.len() + items.len() <= MAX_TUPLE_ITEMS {
+                    Type::Tuple(appended.collect())
+                } else {
+                    Type::Vector(Box::new(Type::union(appended)))
+                }
+            }
+            Type::MapEntry(previous) => self.conj_type(
+                &Type::Tuple(previous.as_ref().as_slice().into()),
+                items,
+                span,
+            ),
+            Type::Union(parts) => {
+                Type::union(parts.iter().map(|part| self.conj_type(part, items, span)))
+            }
+            Type::Map(_) => {
+                self.unsupported(span, "conj analysis for maps is not supported yet")
+                    .known
+            }
+            other => {
+                self.diagnostics.push(Diagnostic::type_mismatch(
+                    span,
+                    "clojure.core/conj",
+                    "Collection or Nil".into(),
+                    other.inferred().to_string(),
+                ));
+                Type::Unknown
+            }
+        }
+    }
+
     pub(super) fn sequence_call(&mut self, name: &str, (value, span): &(Value, Span)) -> Value {
         let operation = match name {
             "clojure.core/seq" => ReadSequence::Start,
@@ -83,5 +143,14 @@ impl Checker<'_> {
                 Type::Unknown
             }
         }
+    }
+}
+
+fn conj_seq(previous: &[Type], items: &[Type]) -> Type {
+    let prepended = items.iter().rev().chain(previous).cloned();
+    if previous.len() + items.len() <= MAX_TUPLE_ITEMS {
+        Type::SeqTuple(prepended.collect())
+    } else {
+        Type::Seq(Box::new(Type::union(prepended)))
     }
 }

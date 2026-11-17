@@ -268,7 +268,7 @@ impl Checker<'_> {
 
     fn builtin(&mut self, name: &str, args: &[(Value, Span)], span: Span) -> Value {
         let arity_ok = match name {
-            "clojure.core/+" | "clojure.core/*" | "clojure.core/str" => true,
+            "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj" => true,
             "clojure.core/-" | "clojure.core/=" => !args.is_empty(),
             "clojure.core/nth" => (2..=3).contains(&args.len()),
             _ => args.len() == 1,
@@ -283,6 +283,7 @@ impl Checker<'_> {
         }
         let ty = match name {
             "clojure.core/nth" => return self.nth(args),
+            "clojure.core/conj" => return self.conj(args),
             "clojure.core/seq" | "clojure.core/first" | "clojure.core/next" => {
                 return self.sequence_call(name, &args[0]);
             }
@@ -420,6 +421,7 @@ fn is_builtin(name: &str) -> bool {
             | "clojure.core/seq"
             | "clojure.core/first"
             | "clojure.core/next"
+            | "clojure.core/conj"
             | "clojure.string/upper-case"
             | "clojure.string/lower-case"
             | "clojure.string/trim"
