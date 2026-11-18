@@ -45,26 +45,28 @@
                     (position root resolved line))))))
           (.getStackTrace error))))
 
-(defn- reporter [report]
+(defn- reporter [report findings]
   (let [root (.toPath (.getCanonicalFile (io/file ".")))]
-    (fn [{:keys [type actual] :as event}]
+    (fn [{:keys [type actual message] :as event}]
       (when (#{:fail :error} type)
-        (let [{:keys [ns name] :as metadata} (meta (first t/*testing-vars*))]
-          (when-let [[file line] (or (when (and (= type :error) (instance? Throwable actual))
-                                      (error-location root actual))
-                                    (test-location root event metadata))]
+        (let [{:keys [ns name] :as metadata} (meta (first t/*testing-vars*))
+              [file line] (or (when (and (= type :error) (instance? Throwable actual))
+                                (error-location root actual))
+                              (test-location root event metadata))
+              test (when ns (str (ns-name ns) "/" name))]
+          (swap! findings conj [type test (some-> file str) line (when (string? message) message)])
+          (when file
             (t/with-test-out
               (println (str file ":" line ": " (clojure.core/name type)
-                            (when ns (str " in " (ns-name ns) "/" name))))))))
+                            (when test (str " in " test))))))))
       (report event))))
 
 (let [[result & names] *command-line-args*
       namespaces (distinct (map symbol names))]
   (apply require namespaces)
-  (let [summary (binding [t/report (reporter t/report)]
-                  (apply t/run-tests namespaces))]
-    (spit result (cond
-                   (zero? (:test summary)) "empty"
-                   (t/successful? summary) "pass"
-                   :else "fail"))
+  (let [findings (atom [])
+        {:keys [test pass fail error]} (binding [t/report (reporter t/report findings)]
+                                        (apply t/run-tests namespaces))]
+    (binding [*print-length* nil *print-level* nil *print-readably* true]
+      (spit result (pr-str [test (+ pass fail error) fail error @findings])))
     (shutdown-agents)))

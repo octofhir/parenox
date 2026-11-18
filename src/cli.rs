@@ -60,9 +60,18 @@ pub(crate) struct TestOptions {
     /// Clojure CLI executable.
     #[arg(long, value_name = "EXECUTABLE", default_value = "clojure")]
     pub(crate) clojure: PathBuf,
+    /// Test report format. JSON sends the runtime log to stderr.
+    #[arg(long, value_enum, default_value_t = TestFormat::Text)]
+    pub(crate) format: TestFormat,
     /// Namespaces to require and run with clojure.test.
     #[arg(value_name = "NAMESPACE", required = true)]
     pub(crate) namespaces: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum TestFormat {
+    Text,
+    Json,
 }
 
 #[derive(Args, Clone, Default)]

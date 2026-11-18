@@ -2,6 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use serde_json::{Value, json};
+
 const MANIFEST: &str = include_str!("fixtures/jvm-project/deps.edn");
 const SOURCE: &str = include_str!("fixtures/jvm-project/src/demo/routing.cljc");
 const TEST: &str = include_str!("fixtures/jvm-project/test/demo/routing_test.cljc");
@@ -64,14 +66,22 @@ fn project_jvm_pass_failure_and_load_error() {
 
     let edited = SOURCE.replace(":found :missing", ":found :found");
     fs::write(fixture.0.join(SOURCE_PATH), edited).unwrap();
-    let output = fixture.run("demo.routing-test", &[]);
+    let output = fixture.run("demo.routing-test", &["--format", "json"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let logs = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains(&format!(
+        logs.contains(&format!(
             "{TEST_PATH}:7: fail in demo.routing-test/route-status"
         )),
-        "{stdout}"
+        "{logs}"
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result,
+        json!({
+            "version":1,"ok":false,"tests":2,"assertions":3,"failures":1,"errors":0,
+            "findings":[{"kind":"fail","test":"demo.routing-test/route-status","path":TEST_PATH,"line":7}]
+        })
     );
 
     let throwing = SOURCE.replace(
@@ -89,7 +99,8 @@ fn project_jvm_pass_failure_and_load_error() {
         "{stdout}"
     );
 
-    let output = fixture.run("demo.does-not-exist", &[]);
+    let output = fixture.run("demo.does-not-exist", &["--format", "json"]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Clojure test run did not complete"));
 }

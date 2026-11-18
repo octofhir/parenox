@@ -80,6 +80,11 @@ Use the same command in CI. Exit status **0** means the requested tests passed.
 run did not complete or no test vars ran. Run `just jvm-test-smoke` to exercise
 the command on the pinned Clojure/JVM version.
 
+With `--format json`, stdout contains one report for a completed test run,
+including test and assertion counts, failures, errors, and source locations
+where available. Runtime logs go to stderr. The exit status has the same
+meaning in both formats.
+
 ## A project-sized example
 
 The [clinic example](../examples/clinic) has four namespaces:
