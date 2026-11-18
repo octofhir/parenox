@@ -701,6 +701,12 @@ fixed arguments and an optional final `(s/* T)` for a rest parameter. Both
 `:args` and `:ret` are required. Other options such as `:fn` and more general
 argument regexes report an analysis gap. If both signature sources are present,
 they must agree. Checking does not evaluate the spec or instrument the function.
+An `s/fdef` for a var in an external namespace remains an explicit coverage gap.
+
+`s/with-gen` keeps the underlying spec's type, and `:gen-max` can accompany
+`s/map-of` and supported `s/coll-of` forms. Generator behavior is unchecked.
+Recursive specs and `s/coll-of` without a collection kind report incomplete
+coverage.
 
 An unannotated function can still receive `PNX2304` for an absent or private
 alias-qualified var, and `PNX2554` for a wrong argument count. Parenox checks
@@ -1187,8 +1193,9 @@ use the value type if the key can occur and preserve missing-key defaults.
 `contains?` narrows presence, and `assoc` and `update` track the updated
 entry while retaining the types of the remaining entries.
 Run `just dictionaries pretty always` for contracts and
-`just map-keys pretty always` for dynamic key examples. Options on `s/map-of` and lookup
-keys outside keywords, strings and known decimal integer indices report gaps.
+`just map-keys pretty always` for dynamic key examples. Dictionary validation
+options and lookup keys outside keywords, strings and known decimal integer
+indices report gaps.
 
 Clojure 1.13 checked lookups support keyword and string keys in `req!` and
 explicit map bindings, plus `:keys!` and its namespaced directives.

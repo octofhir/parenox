@@ -214,6 +214,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                     Some("clojure.spec.alpha/nilable") if xs.len() == 2 => {
                         self.parse(&xs[1]).nilable()
                     }
+                    Some("clojure.spec.alpha/with-gen") if xs.len() == 3 => self.parse(&xs[1]),
                     Some("clojure.spec.alpha/or") if xs.len() >= 3 && xs.len() % 2 == 1 => {
                         let mut types = Vec::new();
                         for pair in xs[1..].as_chunks::<2>().0 {
@@ -229,7 +230,9 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                     {
                         Type::Tuple(xs[1..].iter().map(|item| self.parse(item)).collect())
                     }
-                    Some("clojure.spec.alpha/map-of") if xs.len() == 3 => {
+                    Some("clojure.spec.alpha/map-of")
+                        if xs.len() >= 3 && generation_options(&xs[3..]) =>
+                    {
                         let key = self.parse(&xs[1]);
                         let value = self.parse(&xs[2]);
                         Type::Map(MapType::dictionary(key, value))
@@ -283,24 +286,8 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                             extra: ExtraFields::Open,
                         })
                     }
-                    Some("clojure.spec.alpha/coll-of")
-                        if xs.len() == 4 && xs[2].keyword() == Some(":kind") =>
-                    {
-                        let kind = xs[3].symbol().map(|s| self.names.resolve(s));
-                        match kind.as_deref() {
-                            Some("clojure.core/set?") => Type::Set(Box::new(self.parse(&xs[1]))),
-                            Some("clojure.core/vector?") => {
-                                Type::Vector(Box::new(self.parse(&xs[1])))
-                            }
-                            Some("clojure.core/seq?") => Type::union([
-                                Type::empty_seq(),
-                                Type::Seq(Box::new(self.parse(&xs[1]))),
-                            ]),
-                            _ => {
-                                self.error("PNX9001", xs[3].span, "Unsupported collection kind");
-                                Type::Unknown
-                            }
-                        }
+                    Some("clojure.spec.alpha/coll-of") if xs.len() >= 2 => {
+                        self.collection(form, &xs[1], &xs[2..])
                     }
                     _ => {
                         self.error("PNX9001", form.span, "Unsupported type form");
@@ -314,4 +301,51 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             }
         }
     }
+
+    fn collection(&mut self, form: &Form, element: &Form, options: &[Form]) -> Type {
+        let (pairs, extra) = options.as_chunks::<2>();
+        if !extra.is_empty()
+            || pairs
+                .iter()
+                .any(|[key, _]| !matches!(key.keyword(), Some(":kind" | ":gen-max")))
+        {
+            self.error("PNX9001", form.span, "Unsupported type form");
+            return Type::Unknown;
+        }
+        let Some([_, kind]) = pairs
+            .iter()
+            .rfind(|[key, _]| key.keyword() == Some(":kind"))
+        else {
+            self.parse(element);
+            self.diagnostics.push(Diagnostic::analysis_gap(
+                "PNX9001",
+                form.span,
+                "A collection spec without :kind has no modeled collection type",
+            ));
+            return Type::Unknown;
+        };
+        match kind
+            .symbol()
+            .map(|symbol| self.names.resolve(symbol))
+            .as_deref()
+        {
+            Some("clojure.core/set?") => Type::Set(Box::new(self.parse(element))),
+            Some("clojure.core/vector?") => Type::Vector(Box::new(self.parse(element))),
+            Some("clojure.core/seq?") => {
+                Type::union([Type::empty_seq(), Type::Seq(Box::new(self.parse(element)))])
+            }
+            _ => {
+                self.error("PNX9001", kind.span, "Unsupported collection kind");
+                Type::Unknown
+            }
+        }
+    }
+}
+
+fn generation_options(options: &[Form]) -> bool {
+    let (pairs, extra) = options.as_chunks::<2>();
+    extra.is_empty()
+        && pairs
+            .iter()
+            .all(|[key, _]| key.keyword() == Some(":gen-max"))
 }

@@ -84,6 +84,7 @@ fn recursive_and_ambiguous_project_specs_report_the_declaration() {
     assert!(recursive.files[0].diagnostics.is_empty());
     let diagnostic = &recursive.files[1].diagnostics[0];
     assert_eq!(diagnostic.code, "PNX9001");
+    assert_eq!(diagnostic.severity, "warning");
     assert!(diagnostic.message.contains("Recursive spec"));
     assert_eq!(
         &two.source[diagnostic.span.start.offset..diagnostic.span.end.offset],
@@ -112,4 +113,40 @@ fn recursive_and_ambiguous_project_specs_report_the_declaration() {
             );
         }
     }
+}
+
+#[test]
+fn generation_settings_preserve_the_checked_collection_and_element_types() {
+    let source = r#"(ns catalogs (:require [clojure.spec.alpha :as s]))
+        (s/def ::label (s/with-gen string? (fn [] (throw (Exception. "generator")))))
+        (s/def ::catalog (s/map-of keyword? ::label :gen-max 1))
+        (s/def ::labels (s/coll-of ::label :gen-max 1 :kind vector?))
+        (defn catalog {:t/sig '[:-> ::catalog]} [] {:a "Ada" :b "Grace"})
+        (defn labels {:t/sig '[:-> ::labels]} [] ["Ada" "Grace"])"#;
+    let mut session = Session::default();
+    let good = session.check("catalogs.clj", source);
+    assert!(good.ok && good.complete, "{good:#?}");
+    let bad = session.check("catalogs.clj", &source.replace(":a \"Ada\"", ":a nil"));
+    let [mismatch] = bad.diagnostics.as_slice() else {
+        panic!("{bad:#?}");
+    };
+    assert_eq!(mismatch.code, "PNX2322");
+    assert_eq!(mismatch.severity, "error");
+}
+
+#[test]
+fn external_fdefs_and_specs_without_a_collection_kind_report_incomplete_coverage() {
+    let source = r#"(ns catalogs (:require [clojure.spec.alpha :as s]))
+        (s/def ::labels (s/coll-of string? :gen-max 1))
+        (s/fdef clojure.core/str :args (s/cat :name string?) :ret string?)"#;
+    let report = Session::default().check("catalogs.clj", source);
+    assert!(!report.complete);
+    assert_eq!(report.diagnostics.len(), 2, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == "warning"),
+        "{report:#?}"
+    );
 }

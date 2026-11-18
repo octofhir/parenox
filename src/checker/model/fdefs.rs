@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 use super::{Globals, Model, Signature};
 use super::{contracts::track_spec, type_forms::read_function_spec};
+use crate::Diagnostic;
 use crate::reader::{Form, Kind};
 
 impl Model {
@@ -23,11 +24,11 @@ impl Model {
             };
             let name = self.function_name(symbol);
             if name.split_once('/').unwrap().0 != self.names.namespace {
-                self.error(
+                self.diagnostics.push(Diagnostic::analysis_gap(
                     "PNX9001",
                     parts[1].span,
-                    "s/fdef must target a function in this namespace",
-                );
+                    "Type checking for an external s/fdef is unavailable",
+                ));
                 continue;
             }
             match fdefs.entry(name) {

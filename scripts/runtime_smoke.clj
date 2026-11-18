@@ -87,6 +87,15 @@
 (assert (= "Untitled" (demo.jvm-forms/display-name {:name nil})))
 (println "Clojure/JVM declarations: 3 assertions passed")
 
+(require '[clojure.spec.alpha :as s])
+(let [label (s/with-gen string? #(throw (Exception. "generator ran")))
+      catalog (s/map-of keyword? label :gen-max 1)
+      labels (s/coll-of label :gen-max 1 :kind vector?)]
+  (assert (s/valid? catalog {:a "Ada" :b "Grace"}))
+  (assert (s/valid? labels ["Ada" "Grace"]))
+  (assert (not (s/valid? catalog {:a nil}))))
+(println "Clojure/JVM spec generator settings: 3 assertions passed")
+
 (println "Runtime reference:" (clojure-version))
 (load-file "examples/portable.cljc")
 (assert (= "ALICE" (demo.portable/label "Alice")))

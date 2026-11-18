@@ -121,11 +121,14 @@ impl Resolver<'_> {
         }
         let (&key, &owner) = self.declarations.get_key_value(key)?;
         if self.active.contains(&key) {
-            self.error(
-                path,
-                span,
-                format!("Recursive spec {key} is not supported yet"),
-            );
+            self.diagnostics
+                .entry(path.into())
+                .or_default()
+                .push(Diagnostic::analysis_gap(
+                    "PNX9001",
+                    span,
+                    format!("Recursive spec {key} is not supported yet"),
+                ));
             return Some(Type::Unknown);
         }
         if self.active.len() >= 128 {
