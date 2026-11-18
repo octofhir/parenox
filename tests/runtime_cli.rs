@@ -74,6 +74,21 @@ fn project_jvm_pass_failure_and_load_error() {
         "{stdout}"
     );
 
+    let throwing = SOURCE.replace(
+        "(if (some? (:route request)) :found :missing)",
+        "(throw (ex-info \"route unavailable\" {}))",
+    );
+    fs::write(fixture.0.join(SOURCE_PATH), throwing).unwrap();
+    let output = fixture.run("demo.routing-test", &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "{SOURCE_PATH}:4: error in demo.routing-test/route-status"
+        )),
+        "{stdout}"
+    );
+
     let output = fixture.run("demo.does-not-exist", &[]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("Clojure test run did not complete"));

@@ -71,7 +71,9 @@ Run it after saving the changes you want the JVM to load.
 Test output includes the regular `clojure.test` report. When the assertion's JVM
 location resolves to a local test file, Parenox adds a `path:line` line with the
 qualified test var. Macros can report the location of the expanded assertion's
-source expression. Unmapped locations retain the runtime's report.
+source expression. For exceptions, Parenox looks for a local Clojure source
+frame in the runtime stack, which can point to application code used by the
+test. Unmapped locations retain the runtime's report.
 
 Use the same command in CI. Exit status **0** means the requested tests passed.
 **1** means an assertion failed or a test reported an error. **2** means the
