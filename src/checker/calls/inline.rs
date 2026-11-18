@@ -6,12 +6,40 @@ use super::super::{
 };
 use super::{Callable, PreparedCallable, call_returns};
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
-use crate::types::Type;
+use crate::types::{Signature, Type};
+use crate::{ContractOrigin, Diagnostic};
+
+const MAX_CALLBACK_DEPTH: usize = 16;
 
 #[derive(Clone, Copy)]
 pub(super) enum InlineFunction<'a> {
     Function(&'a [Form]),
     Literal(&'a AnonymousFunction),
+}
+
+enum InlineSyntax<'a> {
+    Function(InlineFunction<'a>),
+    Fnil(&'a [Form]),
+}
+
+#[derive(Clone, Copy)]
+struct InlineSite<'a> {
+    constructor: Span,
+    call: Span,
+    invoked: bool,
+    callback: Option<CallbackCheck<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct CallbackCheck<'a> {
+    expected_return: Option<&'a Type>,
+    origin: Option<&'a ContractOrigin>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CallbackReturn {
+    Check,
+    Infer,
 }
 
 pub(super) struct Fnil<'form, 'model> {
@@ -26,10 +54,17 @@ impl<'model> Checker<'model> {
         form: &'form Form,
         env: &Env,
     ) -> Option<Callable<'form, 'model>> {
+        Some(match self.inline_syntax(form, env)? {
+            InlineSyntax::Function(function) => Callable::Inline(function),
+            InlineSyntax::Fnil(parts) => self.prepare_fnil(parts, form.span, env),
+        })
+    }
+
+    fn inline_syntax<'form>(&self, form: &'form Form, env: &Env) -> Option<InlineSyntax<'form>> {
         let forms = match &form.without_metadata().kind {
             Kind::List(forms) => forms,
             Kind::AnonymousFunction(function) => {
-                return Some(Callable::Inline(InlineFunction::Literal(function)));
+                return Some(InlineSyntax::Function(InlineFunction::Literal(function)));
             }
             _ => return None,
         };
@@ -42,10 +77,94 @@ impl<'model> Checker<'model> {
             return None;
         }
         match self.model.resolve(name).as_str() {
-            "clojure.core/fn" => Some(Callable::Inline(InlineFunction::Function(parts))),
-            "clojure.core/fnil" => Some(self.prepare_fnil(parts, form.span, env)),
+            "clojure.core/fn" => Some(InlineSyntax::Function(InlineFunction::Function(parts))),
+            "clojure.core/fnil" => Some(InlineSyntax::Fnil(parts)),
             _ => None,
         }
+    }
+
+    pub(super) fn inline_callback_literal(&self, form: &Form, env: &Env) -> bool {
+        matches!(
+            self.inline_syntax(form, env),
+            Some(InlineSyntax::Function(_))
+        )
+    }
+
+    pub(super) fn contextual_callback(
+        &mut self,
+        form: &Form,
+        expected: &Type,
+        call: Span,
+        origin: Option<&ContractOrigin>,
+        env: &Env,
+        mode: CallbackReturn,
+    ) -> Option<Value> {
+        let Type::Function(signatures) = expected else {
+            return None;
+        };
+        let [signature] = signatures.as_ref() else {
+            return None;
+        };
+        let InlineSyntax::Function(function) = self.inline_syntax(form, env)? else {
+            return None;
+        };
+        if signature.rest.is_some() {
+            self.error(
+                "PNX9001",
+                form.span,
+                "A contextual callback currently requires a fixed-arity s/fspec",
+            );
+            return Some(Value::new(Type::Unknown));
+        }
+        if self.callback_depth >= MAX_CALLBACK_DEPTH {
+            self.error(
+                "PNX9001",
+                form.span,
+                format!("Contextual callback nesting limit ({MAX_CALLBACK_DEPTH}) exceeded"),
+            );
+            return Some(Value::new(Type::Unknown));
+        }
+        let start = self.diagnostics.len();
+        let arguments = signature
+            .args
+            .iter()
+            .cloned()
+            .map(|ty| (Value::new(ty), form.span))
+            .collect();
+        // Constructing a closure does not execute its body. In particular a
+        // surrounding try must not catch exceptions from this speculative check.
+        let enclosing_throws = self.throws.take();
+        self.callback_depth += 1;
+        let result = self.check_inline(
+            function,
+            arguments,
+            env,
+            InlineSite {
+                constructor: form.span,
+                call,
+                invoked: true,
+                callback: Some(CallbackCheck {
+                    expected_return: matches!(mode, CallbackReturn::Check)
+                        .then_some(&signature.ret),
+                    origin,
+                }),
+            },
+        );
+        self.callback_depth -= 1;
+        self.throws = enclosing_throws;
+        let ty = match mode {
+            _ if self.diagnostics.len() != start => Type::Unknown,
+            CallbackReturn::Check if result.known.subtype_of(&signature.ret) => expected.clone(),
+            CallbackReturn::Infer => Type::Function(
+                [Signature {
+                    ret: result.known,
+                    ..signature.clone()
+                }]
+                .into(),
+            ),
+            CallbackReturn::Check => Type::Unknown,
+        };
+        Some(Value::new(ty))
     }
 
     pub(super) fn call_inline(
@@ -57,21 +176,39 @@ impl<'model> Checker<'model> {
         env: &Env,
         invoked: bool,
     ) -> Value {
+        self.check_inline(
+            callable,
+            args,
+            env,
+            InlineSite {
+                constructor,
+                call,
+                invoked,
+                callback: None,
+            },
+        )
+    }
+
+    fn check_inline(
+        &mut self,
+        callable: InlineFunction<'_>,
+        args: Vec<(Value, Span)>,
+        env: &Env,
+        site: InlineSite<'_>,
+    ) -> Value {
         match callable {
-            InlineFunction::Function(parts) => {
-                self.call_inline_fn(parts, args, constructor, call, env, invoked)
-            }
+            InlineFunction::Function(parts) => self.call_inline_fn(parts, args, env, site),
             InlineFunction::Literal(function) => {
                 if function.required > MAX_FIXED_PARAMETERS {
                     self.error(
                         "PNX2554",
-                        constructor,
+                        site.constructor,
                         "Clojure/JVM supports at most 20 fixed parameters",
                     );
                     return Value::new(Type::Unknown);
                 }
-                let clauses = literal_clause(function, constructor);
-                self.call_inline_fn(&clauses, args, constructor, call, env, invoked)
+                let clauses = literal_clause(function, site.constructor);
+                self.call_inline_fn(&clauses, args, env, site)
             }
         }
     }
@@ -80,15 +217,13 @@ impl<'model> Checker<'model> {
         &mut self,
         parts: &[Form],
         args: Vec<(Value, Span)>,
-        constructor: Span,
-        call: Span,
         env: &Env,
-        invoked: bool,
+        site: InlineSite<'_>,
     ) -> Value {
         if let Some(name) = parts.first().filter(|form| form.symbol().is_some()) {
             return self.unsupported(name.span, "Named fn forms are not supported yet");
         }
-        let clauses = match function_clauses(parts, constructor) {
+        let clauses = match function_clauses(parts, site.constructor) {
             Ok(clauses) => clauses,
             Err(diagnostic) => {
                 self.diagnostics.push(*diagnostic);
@@ -99,17 +234,23 @@ impl<'model> Checker<'model> {
             .keys()
             .copied()
             .find(|arity| arity.accepts(args.len()));
-        let missing_arity = invoked && selected_arity.is_none();
+        let missing_arity = site.invoked && selected_arity.is_none();
         if missing_arity {
-            self.error(
+            let mut diagnostic = Diagnostic::new(
                 "PNX2554",
-                call,
+                if site.callback.is_some() {
+                    site.constructor
+                } else {
+                    site.call
+                },
                 format!(
                     "fn expects {} arguments, got {}",
                     super::arity_counts(clauses.keys().copied()),
                     args.len()
                 ),
             );
+            diagnostic.contract = site.callback.and_then(|callback| callback.origin.cloned());
+            self.diagnostics.push(diagnostic);
         }
         let start = self.diagnostics.len();
         let mut result = Value::new(if missing_arity {
@@ -118,7 +259,7 @@ impl<'model> Checker<'model> {
             Type::Never
         });
         for (arity, clause) in clauses {
-            let selected = invoked && Some(arity) == selected_arity;
+            let selected = site.invoked && Some(arity) == selected_arity;
             let checked = self.check_path(selected, |checker| {
                 let parameters = if selected {
                     pack_arguments(arity, args.iter().map(|(value, _)| value.clone()).collect())
@@ -134,13 +275,31 @@ impl<'model> Checker<'model> {
                 )
             });
             if selected {
+                if let Some(CallbackCheck {
+                    expected_return: Some(expected),
+                    origin,
+                }) = site.callback
+                {
+                    self.expect_contract(
+                        &checked,
+                        expected,
+                        clause.body.last().map_or(clause.span, |form| form.span),
+                        "Return value of callback",
+                        origin,
+                    );
+                }
                 result = checked;
             }
         }
+        let context = if site.callback.is_some() {
+            "callback passed"
+        } else {
+            "fn called"
+        };
         for diagnostic in &mut self.diagnostics[start..] {
             diagnostic.notes.push(format!(
-                "While checking inline fn called at {}:{}",
-                call.start.line, call.start.column
+                "While checking inline {context} at {}:{}",
+                site.call.start.line, site.call.start.column
             ));
         }
         result

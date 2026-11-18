@@ -14,6 +14,7 @@ fn contract_note(origin: &ContractOrigin) -> String {
         ContractKind::SFdef => "s/fdef",
         ContractKind::Extern => "extern declaration",
         ContractKind::Builtin => "built-in rule",
+        ContractKind::MacroScope => "macro scope declaration",
     };
     match &origin.path {
         Some(path) => format!("Contract for {}: {kind} in {path}", origin.name),
@@ -79,6 +80,27 @@ pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: 
     output
 }
 
+pub fn file_diagnostics(report: &Report, source: &str, color: bool) -> String {
+    let mut output = diagnostics(&report.path, source, &report.diagnostics, color);
+    if !report.suppressed.is_empty() {
+        let renderer = renderer(color);
+        for finding in &report.suppressed {
+            let message = suppression_note(&report.path, finding);
+            let note = Group::with_title(Level::NOTE.secondary_title(message));
+            writeln!(output, "{}", renderer.render(&[note])).unwrap();
+        }
+    }
+    output
+}
+
+fn suppression_note(path: &str, finding: &crate::SuppressedDiagnostic) -> String {
+    let start = finding.diagnostic.span.start;
+    format!(
+        "suppressed {} at {path}:{}:{}: {}",
+        finding.diagnostic.code, start.line, start.column, finding.reason
+    )
+}
+
 fn status(label: &str, message: std::fmt::Arguments<'_>, color: bool) -> String {
     let style = if color {
         AnsiColor::BrightGreen.on_default().effects(Effects::BOLD)
@@ -92,12 +114,24 @@ pub fn checking(target: &str, color: bool) -> String {
     status("Checking", format_args!("{target}"), color)
 }
 
-fn summary(target: &str, count: usize, complete: bool, stats: &Stats, color: bool) -> String {
+fn summary(
+    target: &str,
+    count: usize,
+    suppressed: usize,
+    complete: bool,
+    stats: &Stats,
+    color: bool,
+) -> String {
     if count == 0 {
+        let result = if suppressed == 0 {
+            "no type errors".into()
+        } else {
+            format!("no unsuppressed type errors; {suppressed} suppressed")
+        };
         return status(
             "Finished",
             format_args!(
-                "checking {target} — no type errors ({} checked, {} reused, {:.3} ms)",
+                "checking {target} — {result} ({} checked, {} reused, {:.3} ms)",
                 stats.checked_functions,
                 stats.reused_functions,
                 stats.elapsed_us as f64 / 1000.0
@@ -109,10 +143,12 @@ fn summary(target: &str, count: usize, complete: bool, stats: &Stats, color: boo
     let renderer = renderer(color);
     let mut output = String::new();
     if !complete {
-        let note = Group::with_title(
-            Level::NOTE
-                .secondary_title("check is incomplete; some constructs could not be analyzed"),
-        );
+        let message = if suppressed == 0 {
+            "check is incomplete; some constructs could not be analyzed"
+        } else {
+            "check is incomplete; findings were suppressed or analysis was limited"
+        };
+        let note = Group::with_title(Level::NOTE.secondary_title(message));
         writeln!(output, "{}", renderer.render(&[note])).unwrap();
     }
     let message = format!(
@@ -129,10 +165,11 @@ fn summary(target: &str, count: usize, complete: bool, stats: &Stats, color: boo
 }
 
 pub fn pretty(report: &Report, source: &str, color: bool) -> String {
-    let mut output = diagnostics(&report.path, source, &report.diagnostics, color);
+    let mut output = file_diagnostics(report, source, color);
     output.push_str(&summary(
         &format!("`{}`", report.path),
         report.diagnostics.len(),
+        report.suppressed.len(),
         report.complete,
         &report.stats,
         color,
@@ -144,6 +181,7 @@ pub fn project_summary(report: &ProjectReport, target: &str, color: bool) -> Str
     summary(
         target,
         report.files.iter().map(|file| file.diagnostics.len()).sum(),
+        report.files.iter().map(|file| file.suppressed.len()).sum(),
         report.complete,
         &report.stats,
         color,
@@ -185,6 +223,14 @@ pub fn plain(report: &Report) -> String {
             )
             .unwrap();
         }
+    }
+    for finding in &report.suppressed {
+        writeln!(
+            output,
+            "  note: {}",
+            suppression_note(&report.path, finding)
+        )
+        .unwrap();
     }
     writeln!(
         output,

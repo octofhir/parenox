@@ -1,8 +1,10 @@
 //! Function resolution, call-site inference and built-in calls.
 mod apply;
 mod forms;
+mod generics;
 mod indexing;
 mod inline;
+mod macro_scopes;
 mod reduction;
 mod sequences;
 mod vectors;
@@ -11,14 +13,17 @@ pub(super) use sequences::narrow_emptiness;
 
 use super::flow::Conditional;
 use super::{
-    Checker, Env, Value, exceptions::Throws, function_forms::pack_arguments, model::Function,
+    Checker, Env, Value,
+    exceptions::Throws,
+    function_forms::pack_arguments,
+    model::{DeclaredValue, Function},
     nil_part,
 };
 use crate::reader::{Form, Span};
 use crate::types::{Arity, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use forms::CoreForm;
-use inline::{Fnil, InlineFunction};
+use inline::{CallbackReturn, Fnil, InlineFunction};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
@@ -173,15 +178,22 @@ impl<'model> Checker<'model> {
         }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
-            && self.model.declared_value(name, self.globals).is_none()
         {
-            let resolved = self.model.resolve(name);
-            if let Some(form) = CoreForm::resolve(&resolved) {
-                return self.core_form(form, &resolved, xs, span, env, tail);
-            }
-            if is_builtin(&resolved) {
-                let args = self.typed_args(&xs[1..], env);
-                return self.builtin(&resolved, &args, span);
+            match self.model.declared_value(name, self.globals) {
+                Some(DeclaredValue::Macro(scope)) => {
+                    return self.macro_scope(scope, &xs[1..], span, env);
+                }
+                None => {
+                    let resolved = self.model.resolve(name);
+                    if let Some(form) = CoreForm::resolve(&resolved) {
+                        return self.core_form(form, &resolved, xs, span, env, tail);
+                    }
+                    if is_builtin(&resolved) {
+                        let args = self.typed_args(&xs[1..], env);
+                        return self.builtin(&resolved, &args, span);
+                    }
+                }
+                _ => {}
             }
         }
         if let Some(kind) = self.prepare_inline(&xs[0], env) {
@@ -194,10 +206,62 @@ impl<'model> Checker<'model> {
             return self.call_prepared(&callable, args, span, env, invoked);
         }
         let function = self.infer(&xs[0], env);
-        let args = self
-            .eval_args(&xs[1..], env, function.known != Type::Never)
-            .collect::<Vec<_>>();
+        let args = self.call_args(&function, &xs[1..], span, env);
         self.call_value(&function, &args, xs[0].span, span)
+    }
+
+    fn call_args(
+        &mut self,
+        function: &Value,
+        forms: &[Form],
+        call: Span,
+        env: &Env,
+    ) -> Vec<(Value, Span)> {
+        let signature = match &function.known {
+            Type::Function(signatures) => signatures
+                .iter()
+                .find(|sig| sig.arity().accepts(forms.len())),
+            _ => None,
+        };
+        if let Some(signature) = signature.filter(|sig| sig.parameters.is_some()) {
+            return self.generic_arguments(function, signature, forms, call, env);
+        }
+        let Some(signature) = signature.filter(|sig| {
+            sig.args
+                .iter()
+                .chain(&sig.rest)
+                .any(|ty| matches!(ty, Type::Function(_)))
+        }) else {
+            return self
+                .eval_args(forms, env, function.known != Type::Never)
+                .collect();
+        };
+        let mut reachable = env.reachable();
+        forms
+            .iter()
+            .enumerate()
+            .map(|(index, form)| {
+                let expected = signature
+                    .args
+                    .get(index)
+                    .or(signature.rest.as_ref())
+                    .unwrap();
+                let value = self.check_path(reachable, |checker| {
+                    checker
+                        .contextual_callback(
+                            form,
+                            expected,
+                            call,
+                            function.contract.as_deref(),
+                            env,
+                            CallbackReturn::Check,
+                        )
+                        .unwrap_or_else(|| checker.infer(form, env))
+                });
+                reachable = value.known != Type::Never;
+                (value, form.span)
+            })
+            .collect()
     }
 
     fn typed_args(&mut self, args: &[Form], env: &Env) -> Vec<(Value, Span)> {
@@ -236,20 +300,10 @@ impl<'model> Checker<'model> {
                     self.diagnostics.push(diagnostic);
                     return Value::new(Type::Unknown);
                 };
-                for (index, (actual, span)) in args.iter().enumerate() {
-                    let expected = signature
-                        .args
-                        .get(index)
-                        .or(signature.rest.as_ref())
-                        .unwrap();
-                    self.expect_contract(
-                        actual,
-                        expected,
-                        *span,
-                        &format!("Argument {}", index + 1),
-                        function.contract.as_deref(),
-                    );
+                if signature.parameters.is_some() {
+                    return self.call_generic(signature, function, args);
                 }
+                self.check_call_arguments(signature, function, args);
                 Value::new(signature.ret.clone())
             }
             kind @ (Type::Key(_) | Type::Keyword | Type::Map(_)) => {
@@ -276,6 +330,7 @@ impl<'model> Checker<'model> {
             Type::Union(parts) => parts.iter().fold(Value::new(Type::Never), |result, part| {
                 let alternative = Value {
                     contract: function.contract.clone(),
+                    guard: function.guard.clone(),
                     ..Value::with_notes(part.clone(), function.notes.clone())
                 };
                 result.join(self.call_value(&alternative, args, head, span))
@@ -302,6 +357,28 @@ impl<'model> Checker<'model> {
             }
             Type::Unknown | Type::Never => Value::new(function.known.clone()),
             _ => self.unsupported(head, format!("Calling {} is not supported", function.ty)),
+        }
+    }
+
+    fn check_call_arguments(
+        &mut self,
+        signature: &Signature,
+        function: &Value,
+        args: &[(Value, Span)],
+    ) {
+        for (index, (actual, span)) in args.iter().enumerate() {
+            let expected = signature
+                .args
+                .get(index)
+                .or(signature.rest.as_ref())
+                .unwrap();
+            self.expect_contract(
+                actual,
+                expected,
+                *span,
+                &format!("Argument {}", index + 1),
+                function.contract.as_deref(),
+            );
         }
     }
 
@@ -477,6 +554,9 @@ impl<'model> Checker<'model> {
                         | Type::Set(_)
                         | Type::Never
                         | Type::Unknown => true,
+                        Type::Parameter(parameter) => {
+                            parameter.upper.as_ref().is_some_and(countable)
+                        }
                         Type::Union(xs) => xs.iter().all(countable),
                         _ => false,
                     }
@@ -607,6 +687,10 @@ fn literal_equality(left: &Type, right: &Type) -> Option<bool> {
 fn predicate_result(actual: &Type, expected: &Type) -> Type {
     match actual {
         Type::Unknown => Type::Boolean,
+        Type::Parameter(parameter) => parameter
+            .upper
+            .as_ref()
+            .map_or(Type::Boolean, |upper| predicate_result(upper, expected)),
         Type::Never => Type::Never,
         Type::Union(parts) => {
             Type::union(parts.iter().map(|part| predicate_result(part, expected)))

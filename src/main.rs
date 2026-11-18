@@ -24,7 +24,7 @@ Usage:
 serve reads one JSON object per line: {\"id\":1,\"path\":\"demo.clj\",\"source\":\"...\"}.
 Project requests: {\"id\":1,\"files\":[{\"path\":\"a.clj\",\"source\":\"...\"}],\"externs\":{\"path\":\"externs.edn\",\"source\":\"...\"}}.
 Tracked project requests use op \"open\" and \"update\" (see README).
-Directories are checked recursively as one project; externs contain declared library contracts.
+Directories are checked recursively as one project; externs contain function contracts and macro scopes.
 check exits 0 on success, 1 on diagnostics, 2 on I/O or usage errors.
 Default format: pretty (stderr). plain and json use stdout; --json aliases --format json.
 Color defaults to auto. NO_COLOR disables auto styling; CLICOLOR_FORCE can force it.
@@ -139,10 +139,7 @@ fn check(args: &[String]) -> Result<u8, String> {
                 })
                 .unwrap();
             match options.format {
-                Format::Pretty => eprint!(
-                    "{}",
-                    output::diagnostics(&report.path, source, &report.diagnostics, color)
-                ),
+                Format::Pretty => eprint!("{}", output::file_diagnostics(report, source, color)),
                 Format::Plain => print!("{}", output::plain(report)),
                 Format::Json => unreachable!(),
             }

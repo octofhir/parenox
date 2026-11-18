@@ -141,14 +141,41 @@ pub fn read_with(source: &str, conditionals: Conditionals<'_>) -> Result<Vec<For
     Reader::new(source, false, conditionals).read_all()
 }
 
-pub(crate) fn read_with_keyword_spans(
+pub(crate) struct CheckRead {
+    pub forms: Vec<Form>,
+    pub auto_keywords: Vec<Span>,
+    pub comments: Vec<LineComment>,
+}
+
+pub(crate) struct LineComment {
+    pub span: Span,
+    pub following_offset: usize,
+}
+
+struct CommentCapture {
+    marker: &'static str,
+    comments: Vec<LineComment>,
+}
+
+pub(crate) fn read_for_check(
     source: &str,
     conditionals: Conditionals<'_>,
-) -> Result<(Vec<Form>, Vec<Span>), ReadError> {
+    comment_marker: Option<&'static str>,
+) -> Result<CheckRead, ReadError> {
     let mut reader = Reader::new(source, false, conditionals);
     reader.auto_keywords = Some(Vec::new());
+    reader.comment_capture = comment_marker.map(|marker| CommentCapture {
+        marker,
+        comments: Vec::new(),
+    });
     let forms = reader.read_all()?;
-    Ok((forms, reader.auto_keywords.unwrap()))
+    Ok(CheckRead {
+        forms,
+        auto_keywords: reader.auto_keywords.unwrap(),
+        comments: reader
+            .comment_capture
+            .map_or_else(Vec::new, |capture| capture.comments),
+    })
 }
 
 #[derive(Debug)]
@@ -207,6 +234,7 @@ struct Reader<'a> {
     depth: usize,
     arguments: Option<AnonymousFunction>,
     auto_keywords: Option<Vec<Span>>,
+    comment_capture: Option<CommentCapture>,
     tree: Option<Builder<'a>>,
     conditionals: Conditionals<'a>,
 }
@@ -229,6 +257,7 @@ impl<'a> Reader<'a> {
             depth: 0,
             arguments: None,
             auto_keywords: None,
+            comment_capture: None,
             tree: capture.then(|| Builder::new(source)),
             conditionals,
         }
@@ -307,6 +336,10 @@ impl<'a> Reader<'a> {
 
     // Discards remain syntax in a CST and disappear from semantic forms.
     fn skip(&mut self) -> Result<(), ReadError> {
+        let first_comment = self
+            .comment_capture
+            .as_ref()
+            .map_or(0, |capture| capture.comments.len());
         loop {
             let start = self.pos;
             match self.peek() {
@@ -325,26 +358,43 @@ impl<'a> Reader<'a> {
                         self.bump();
                     }
                     self.token(SyntaxKind::Comment, start);
+                    if let Some(capture) = &mut self.comment_capture
+                        && self.source[start.offset..self.pos.offset]
+                            .trim_start_matches(';')
+                            .split_whitespace()
+                            .next()
+                            == Some(capture.marker)
+                    {
+                        capture.comments.push(LineComment {
+                            span: Span {
+                                start,
+                                end: self.pos,
+                            },
+                            following_offset: 0,
+                        });
+                    }
                 }
                 Some('#') if self.source[self.pos.offset..].starts_with("#_") => {
                     self.start_node(start);
                     self.bump();
                     self.bump();
                     self.token(SyntaxKind::DiscardMark, start);
-                    let result = (|| {
-                        if self.depth >= 128 {
-                            return Err(self.error(start, "Reader nesting limit (128) exceeded"));
+                    let result = self.without_comments(|reader| {
+                        if reader.depth >= 128 {
+                            return Err(reader.error(start, "Reader nesting limit (128) exceeded"));
                         }
-                        self.depth += 1;
-                        let skipped = self.skip();
-                        self.depth -= 1;
+                        reader.depth += 1;
+                        let skipped = reader.skip();
+                        reader.depth -= 1;
                         skipped?;
-                        if self.peek().is_none() || self.peek().is_some_and(|c| ")]}".contains(c)) {
-                            return Err(self.error(start, "Expected a form after #_"));
+                        if reader.peek().is_none()
+                            || reader.peek().is_some_and(|c| ")]}".contains(c))
+                        {
+                            return Err(reader.error(start, "Expected a form after #_"));
                         }
-                        self.form()?;
+                        reader.form()?;
                         Ok(())
-                    })();
+                    });
                     self.finish_node(if result.is_ok() {
                         SyntaxKind::Discard
                     } else {
@@ -352,9 +402,23 @@ impl<'a> Reader<'a> {
                     });
                     result?;
                 }
-                _ => return Ok(()),
+                _ => {
+                    if let Some(capture) = &mut self.comment_capture {
+                        for comment in &mut capture.comments[first_comment..] {
+                            comment.following_offset = self.pos.offset;
+                        }
+                    }
+                    return Ok(());
+                }
             }
         }
+    }
+
+    fn without_comments<T>(&mut self, read: impl FnOnce(&mut Self) -> T) -> T {
+        let capture = self.comment_capture.take();
+        let result = read(self);
+        self.comment_capture = capture;
+        result
     }
 
     fn form(&mut self) -> Result<Form, ReadError> {
@@ -449,7 +513,7 @@ impl<'a> Reader<'a> {
             }
             Some('\'') => {
                 self.token(SyntaxKind::QuoteMark, start);
-                Kind::Quote(Box::new(self.form()?))
+                Kind::Quote(Box::new(self.without_comments(Self::form)?))
             }
             Some('#') if self.peek() == Some('(') => self.anonymous_function(start)?,
             Some('#') if self.peek() == Some('{') => {
@@ -460,14 +524,14 @@ impl<'a> Reader<'a> {
             Some('#') if self.peek() == Some('?') => return self.conditional(start),
             Some('#') if self.peek().is_some_and(char::is_alphabetic) => {
                 self.token(SyntaxKind::DispatchMark, start);
-                let tag = self.form()?;
+                let tag = self.without_comments(Self::form)?;
                 let Some(name) = tag.symbol() else {
                     return Err(self.error(start, "Reader tag must be a symbol"));
                 };
                 if name.split('/').count() > 2 || name.split('/').any(str::is_empty) {
                     return Err(self.error(start, "Invalid reader tag"));
                 }
-                let value = self.form()?;
+                let value = self.without_comments(Self::form)?;
                 Kind::Tagged(Box::new(tag), Box::new(value))
             }
             Some(c @ (')' | ']' | '}')) => {
@@ -566,7 +630,7 @@ impl<'a> Reader<'a> {
     }
 
     fn metadata_form(&mut self, start: Position) -> Result<Kind, ReadError> {
-        let mut metadata = self.form()?;
+        let mut metadata = self.without_comments(Self::form)?;
         let shorthand = match &metadata.without_metadata().kind {
             Kind::Map(_) => None,
             Kind::Conditional { .. } if matches!(self.conditionals, Conditionals::Preserve) => None,
@@ -749,7 +813,7 @@ impl<'a> Reader<'a> {
         splicing: bool,
     ) -> Result<Item, ReadError> {
         loop {
-            let Some(key) = self.conditional_form(start)? else {
+            let Some(key) = self.without_comments(|reader| reader.conditional_form(start))? else {
                 return Ok(Item::Omit);
             };
             let Some(key_name) = key.keyword() else {
@@ -762,7 +826,12 @@ impl<'a> Reader<'a> {
                 return Err(self.error(key.span.start, "Reader conditional feature is reserved"));
             }
             let selected = key_name == feature || key_name == ":default";
-            let Some(mut value) = self.conditional_form(start)? else {
+            let value = if selected {
+                self.conditional_form(start)?
+            } else {
+                self.without_comments(|reader| reader.conditional_form(start))?
+            };
+            let Some(mut value) = value else {
                 return if selected {
                     Err(self.error(
                         start,
@@ -775,7 +844,10 @@ impl<'a> Reader<'a> {
             if selected {
                 // Still read the tail for syntax errors. Nested conditionals
                 // keep their selection semantics even in inactive branches.
-                while self.collection_item(')', start)?.is_some() {}
+                self.without_comments(|reader| {
+                    while reader.collection_item(')', start)?.is_some() {}
+                    Ok(())
+                })?;
                 if !splicing {
                     return Ok(Item::Form(value));
                 }

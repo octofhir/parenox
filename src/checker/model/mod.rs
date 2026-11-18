@@ -3,6 +3,7 @@ mod contracts;
 mod declarations;
 mod externs;
 mod fdefs;
+mod guards;
 mod imports;
 mod interfaces;
 mod require;
@@ -16,6 +17,8 @@ use std::sync::Arc;
 pub(crate) use declarations::Declarations;
 use declarations::Names;
 use externs::Externs;
+pub(super) use externs::MacroScope;
+pub(super) use guards::VerifiedGuard;
 pub(crate) use interfaces::InterfaceKey;
 use interfaces::{Exports, LocalInterface, visible_value};
 pub(crate) use specs::{SpecCache, SpecFingerprint, SpecSource};
@@ -45,6 +48,7 @@ impl Function {
 pub(crate) struct Contract {
     pub signatures: Arc<[Signature]>,
     pub origin: Arc<ContractOrigin>,
+    pub guard: Option<Arc<VerifiedGuard>>,
 }
 
 impl Contract {
@@ -56,7 +60,19 @@ impl Contract {
                 kind,
                 path: Some(path.into()),
             }),
+            guard: None,
         }
+    }
+
+    fn same_interface(&self, other: &Self) -> bool {
+        self.origin == other.origin
+            && self.guard == other.guard
+            && self.signatures.len() == other.signatures.len()
+            && self
+                .signatures
+                .iter()
+                .zip(other.signatures.iter())
+                .all(|(a, b)| a.same_type(b))
     }
 }
 
@@ -71,6 +87,7 @@ pub(crate) struct FunctionArity {
 pub(super) enum DeclaredValue<'a> {
     Literal(&'a Type),
     Function(&'a Contract),
+    Macro(&'a MacroScope),
 }
 
 #[derive(Default)]
@@ -118,6 +135,7 @@ pub(crate) struct Model {
     local_interface: Arc<LocalInterface>,
     external_specs: BTreeMap<String, Option<Type>>,
     external_refers: BTreeMap<String, Option<Arc<Exports>>>,
+    guard_core_in_project: Option<bool>,
     pub functions: BTreeMap<String, Function>,
     // Conservative references to unannotated helpers, including transitive cache dependencies.
     helper_dependencies: BTreeMap<String, BTreeSet<String>>,
@@ -173,12 +191,13 @@ impl Model {
             model.read_def(xs, form.span, source, globals);
         }
         let mut fdefs = model.collect_fdefs(&declarations.fdefs, forms);
+        let mut guards = BTreeMap::new();
         for &index in &declarations.functions {
             let form = &forms[index];
             let Kind::List(xs) = &form.without_metadata().kind else {
                 unreachable!()
             };
-            model.read_function(xs, form.span, globals, &mut fdefs);
+            model.read_function(xs, form.span, globals, &mut fdefs, &mut guards);
         }
         for (name, parts) in fdefs {
             model.error(
@@ -187,6 +206,7 @@ impl Model {
                 format!("s/fdef has no supported function definition for {name}"),
             );
         }
+        model.verify_guards(guards, declarations, forms, globals);
         model.collect_helpers();
         model.freeze_interfaces(specs, declarations.dependencies.clone());
         model
@@ -228,9 +248,12 @@ impl Model {
     }
 
     pub fn refresh_external_inputs(&mut self, globals: &Globals) -> bool {
-        self.external_specs
-            .iter()
-            .all(|(key, previous)| globals.specs.get(key) == previous.as_ref())
+        self.guard_core_in_project
+            .is_none_or(|present| present == globals.project_namespaces.contains("clojure.core"))
+            && self
+                .external_specs
+                .iter()
+                .all(|(key, previous)| globals.specs.get(key) == previous.as_ref())
             && self
                 .external_refers
                 .iter_mut()

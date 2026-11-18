@@ -1,0 +1,155 @@
+use parenox::{Session, Source};
+
+const EXAMPLE: &str = include_str!("../examples/checked_guards.clj");
+
+#[test]
+fn checked_guards_refine_true_and_proven_false_branches() {
+    let source = format!(
+        "{EXAMPLE}
+         (defn nilish?
+           {{:t/sig '[(s/nilable string?) :-> boolean?] :t/guard '[:both x nil?]}}
+           [x] (not (or (some? x) false)))
+         (defn missing-value {{:t/sig '[(s/nilable string?) :-> nil?]}} [x]
+           (if (nilish? x) x nil))",
+    );
+    let report = Session::default().check("guards.clj", &source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn a_one_sided_guard_does_not_refine_its_false_branch() {
+    let source = format!(
+        "{EXAMPLE}
+         (defn bad {{:t/sig '[boolean? (s/nilable string?) :-> nil?]}} [enabled value]
+           (if (enabled-text? enabled value) nil value))"
+    );
+    let report = Session::default().check("guards.clj", &source);
+    assert!(!report.ok && report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.diagnostics[0].code, "PNX2322");
+    assert_eq!(
+        report.diagnostics[0].actual.as_deref(),
+        Some("Nil | String")
+    );
+}
+
+#[test]
+fn rejecting_an_implication_never_publishes_the_guard() {
+    for (source, part) in [
+        (
+            EXAMPLE.replace("(if (string? value) true false)", "true"),
+            "true result",
+        ),
+        (
+            EXAMPLE.replace("[:then value string?]", "[:both value string?]"),
+            "false result",
+        ),
+    ] {
+        let report = Session::default().check("guards.clj", &source);
+        assert!(!report.ok && !report.complete, "{report:#?}");
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "PNX9008" && d.message.contains(part)),
+            "{report:#?}"
+        );
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "PNX2322"),
+            "the caller cannot use an unproved refinement: {report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_guard_can_refine_the_owner_of_a_map_selector() {
+    let source = format!(
+        "{}
+         (defn text-payload?
+           {{:t/sig '[(s/or :text string? :counter number?) :-> boolean?]
+             :t/guard '[:both x string?]}}
+           [x] (string? x))
+         (defn use-payload {{:t/sig '[::event :-> string?]}} [event]
+           (if (text-payload? (:value event))
+             (str/upper-case (:value event))
+             (str (inc (:value event)))))",
+        include_str!("../examples/tagged_maps.clj")
+    );
+    let report = Session::default().check("tagged.clj", &source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn shadowed_primitives_and_malformed_guard_claims_do_not_prove_facts() {
+    for source in [
+        EXAMPLE.replace(
+            ":t/guard '[:both value string?]",
+            ":t/guard [:both value string?]",
+        ),
+        EXAMPLE.replace("[:both value string?]", "[:both missing string?]"),
+        EXAMPLE.replace("(defn text?", "(defn ^:dynamic text?"),
+        format!("{EXAMPLE}\n(defn string? [x] true)"),
+        format!(
+            "{EXAMPLE}\n(defn string? {{:t/sig '[(s/nilable string?) :-> boolean?]}} [x] true)"
+        ),
+    ] {
+        let report = Session::default().check("guards.clj", &source);
+        assert!(!report.complete, "{report:#?}");
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "PNX9008"),
+            "{report:#?}"
+        );
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "PNX2322"),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn changing_only_the_proof_body_rechecks_guard_consumers() {
+    let app = Source {
+        path: "app.clj",
+        source: "(ns app (:require [lib :as lib] [clojure.spec.alpha :as s]))
+          (defn use-value {:t/sig '[(s/nilable string?) :-> string?]} [x]
+            (if (lib/text? x) (clojure.string/upper-case x) \"none\"))
+          (defn independent {:t/sig '[:-> number?]} [] 1)",
+    };
+    let library = Source {
+        path: "lib.clj",
+        source: "(ns lib (:require [clojure.spec.alpha :as s]))
+          (defn text? {:t/sig '[(s/nilable string?) :-> boolean?]
+                       :t/guard '[:both x string?]} [x] (string? x))",
+    };
+    let mut session = Session::default();
+    let first = session.check_project(&[app, library], None);
+    assert!(first.ok && first.complete, "{first:#?}");
+    let unchanged = session.check_project(&[app, library], None);
+    assert_eq!(unchanged.stats.reused_functions, 3);
+
+    let bad = library.source.replace("(string? x)", "true");
+    let bad = Source {
+        source: &bad,
+        ..library
+    };
+    let updated = session.check_project(&[app, bad], None);
+    let clean = Session::default().check_project(&[app, bad], None);
+    assert_eq!(updated.files[0].stats.checked_functions, 1);
+    assert_eq!(updated.files[0].stats.reused_functions, 1);
+    assert_eq!(updated.files[0].diagnostics[0].code, "PNX2322");
+    assert_eq!(updated.files[1].diagnostics[0].code, "PNX9008");
+    assert_eq!(
+        serde_json::to_value(&updated.files[0].diagnostics).unwrap(),
+        serde_json::to_value(&clean.files[0].diagnostics).unwrap()
+    );
+    assert!(session.check_project(&[app, library], None).ok);
+
+    let alternate_core = Source {
+        path: "core.clj",
+        source: "(ns clojure.core)",
+    };
+    let shadowed = session.check_project(&[app, library, alternate_core], None);
+    assert_eq!(shadowed.files[0].diagnostics[0].code, "PNX2322");
+    assert_eq!(shadowed.files[1].diagnostics[0].code, "PNX9008");
+    assert!(session.check_project(&[app, library], None).ok);
+}

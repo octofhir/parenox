@@ -1,5 +1,10 @@
 //! Control flow, type narrowing and core threading forms.
+mod selectors;
+
+pub(super) use selectors::{narrow_literal, refine_owner};
+
 use super::calls::{is_builtin, narrow_emptiness, predicate_type};
+use super::model::DeclaredValue;
 use super::{Checker, Env, Value, nil_part};
 use crate::expand::{self, Threading};
 use crate::reader::{Form, Kind, Span};
@@ -116,7 +121,9 @@ impl Checker<'_> {
         reachable: bool,
         tail: bool,
     ) -> Value {
-        self.check_path(reachable, |checker| checker.infer_position(form, env, tail))
+        self.check_path(reachable && env.reachable(), |checker| {
+            checker.infer_position(form, env, tail)
+        })
     }
 
     pub(super) fn check_path(
@@ -242,11 +249,11 @@ impl Checker<'_> {
             let start = self.diagnostics.len();
             let condition = self.infer_path(test, env, current.known != Type::Never, false);
             self.expansion_origin(start, name, span, false);
-            let yes_reachable = condition.known.truthy() != Type::Never;
+            let mut yes_reachable = condition.known.truthy() != Type::Never;
             let no_reachable = condition.known.falsey() != Type::Never;
-            joined_branches |= yes_reachable && no_reachable;
             let mut yes_env = env.clone();
             self.narrow(test, true, &mut yes_env);
+            yes_reachable &= yes_env.reachable();
             let mut skipped = if no_reachable {
                 current.clone()
             } else {
@@ -261,11 +268,14 @@ impl Checker<'_> {
                 if no_reachable {
                     let mut no_env = env.clone();
                     self.narrow(test, false, &mut no_env);
-                    if let Some(value) = no_env.get(seed) {
+                    if !no_env.reachable() {
+                        skipped = Value::new(Type::Never);
+                    } else if let Some(value) = no_env.get(seed) {
                         skipped = value.clone();
                     }
                 }
             }
+            joined_branches |= yes_reachable && skipped.known != Type::Never;
             yes_env.insert(temporary.clone(), current);
             let call = threading.apply(
                 step,
@@ -355,7 +365,14 @@ impl Checker<'_> {
         for pair in bindings.as_chunks::<2>().0 {
             let value = self.infer_path(&pair[1], &local, reachable, false);
             reachable = value.known != Type::Never;
+            let alias = pair[0].symbol().and_then(|name| {
+                self.selector(&pair[1], &local)
+                    .map(|selector| (name, selector))
+            });
             self.bind(&pair[0], value, &mut local);
+            if let Some((name, selector)) = alias {
+                local.set_selector(name, selector);
+            }
         }
         self.check_path(reachable, |checker| checker.body(&xs[2..], &local, tail))
     }
@@ -389,7 +406,7 @@ impl Checker<'_> {
         let yes = {
             let mut local = env.clone();
             self.narrow(&xs[1], runs_on_truth, &mut local);
-            self.check_path(yes_reachable, |checker| {
+            self.check_path(yes_reachable && local.reachable(), |checker| {
                 checker.body(&xs[2..if when { xs.len() } else { 3 }], &local, tail)
             })
         };
@@ -397,7 +414,9 @@ impl Checker<'_> {
             let mut local = env.clone();
             self.narrow(&xs[1], !runs_on_truth, &mut local);
             let body = if when { &[] } else { &xs[3..] };
-            self.check_path(no_reachable, |checker| checker.body(body, &local, tail))
+            self.check_path(no_reachable && local.reachable(), |checker| {
+                checker.body(body, &local, tail)
+            })
         };
         Value::with_notes(
             Type::union([yes.known, no.known]),
@@ -433,8 +452,8 @@ impl Checker<'_> {
             );
             types.push(branch.known);
             notes.extend(branch.notes);
-            reachable = condition.known.falsey() != Type::Never;
             self.narrow(test, false, &mut fallthrough);
+            reachable = condition.known.falsey() != Type::Never && fallthrough.reachable();
         }
         if reachable {
             types.push(Type::Nil);
@@ -492,31 +511,35 @@ impl Checker<'_> {
         };
         let yes_reachable = matched != Type::Never;
         let no_reachable = skipped != Type::Never;
-        let narrow = |truth: bool, ty, scope: &mut Env| {
+        let narrow = |truth: bool, scope: &mut Env| {
             if first {
                 if let Some(value) = init.symbol().and_then(|symbol| scope.get_mut(symbol)) {
                     value.narrow(narrow_emptiness(&value.known, !truth));
                 }
             } else if non_nil {
-                if let Some(value) = init.symbol().and_then(|symbol| scope.get_mut(symbol)) {
-                    value.narrow(ty);
-                }
+                self.narrow_subject(init, scope, |ty| {
+                    if truth {
+                        ty.without_nil()
+                    } else {
+                        nil_part(ty)
+                    }
+                });
             } else {
                 self.narrow(init, truth, scope);
             }
         };
         let mut yes_env = env.clone();
-        narrow(true, matched.clone(), &mut yes_env);
+        narrow(true, &mut yes_env);
         let no_env = if !when && xs.len() == 4 {
             let mut scope = env.clone();
-            narrow(false, skipped, &mut scope);
+            narrow(false, &mut scope);
             Some(scope)
         } else {
             None
         };
 
         input.narrow(matched);
-        let yes = self.check_path(yes_reachable, |checker| {
+        let yes = self.check_path(yes_reachable && yes_env.reachable(), |checker| {
             if first {
                 input = checker.sequence_call("clojure.core/first", &input, init.span);
             }
@@ -569,76 +592,142 @@ impl Checker<'_> {
                 reachable = false;
             }
             self.narrow(x, !or, &mut local);
+            reachable &= local.reachable();
         }
         Value::with_notes(Type::union(types), notes)
     }
 
-    fn narrow(&self, test: &Form, truth: bool, env: &mut Env) {
-        if let Some(name) = test.symbol() {
-            if let Some(value) = env.get_mut(name) {
-                value.narrow(if truth {
-                    value.known.truthy()
-                } else {
-                    value.known.falsey()
-                });
-            }
-            return;
-        }
-        let Kind::List(xs) = &test.without_metadata().kind else {
-            return;
-        };
-        if xs.len() < 2 {
-            return;
-        }
-        let Some(op) = xs[0].symbol() else { return };
+    fn unshadowed_core(&self, head: &Form, env: &Env) -> Option<String> {
+        let op = head.symbol()?;
         // Locals and project functions may shadow core predicates.
         if env.contains_key(op)
             || self.model.local_function(op).is_some()
             || self.model.declared_value(op, self.globals).is_some()
         {
-            return;
+            return None;
         }
         let op = self.model.resolve(op);
-        if op == "clojure.core/contains?" {
-            self.narrow_contains(&xs[1..], truth, env);
+        op.starts_with("clojure.core/").then_some(op)
+    }
+
+    fn narrow(&self, test: &Form, truth: bool, env: &mut Env) {
+        if !env.reachable() {
             return;
         }
-        if xs.len() != 2 {
+        let truthy = |ty: &Type| if truth { ty.truthy() } else { ty.falsey() };
+        if test.symbol().is_some() {
+            self.narrow_subject(test, env, truthy);
             return;
         }
-        if op == "clojure.core/not" {
-            self.narrow(&xs[1], !truth, env);
-            return;
-        }
-        let Some(name) = xs[1].symbol() else { return };
-        let Some(value) = env.get_mut(name) else {
+        let Kind::List(xs) = &test.without_metadata().kind else {
             return;
         };
-        let positive = match op.as_str() {
-            "clojure.core/empty?" | "clojure.core/not-empty" => {
-                let empty = truth == (op == "clojure.core/empty?");
-                value.narrow(narrow_emptiness(&value.known, empty));
-                return;
-            }
-            "clojure.core/nil?" => Some(Type::Nil),
-            "clojure.core/some?" => {
-                value.narrow(if truth {
-                    value.known.without_nil()
+        let Some((head, args)) = xs.split_first() else {
+            return;
+        };
+        let Some(op) = self.unshadowed_core(head, env) else {
+            if head.keyword().is_some() {
+                self.narrow_subject(test, env, truthy);
+            } else if let Some(name) = head.symbol() {
+                let guard = if let Some(value) = env.get(name) {
+                    value.guard.clone()
+                } else if let Some(DeclaredValue::Function(contract)) =
+                    self.model.declared_value(name, self.globals)
+                {
+                    contract.guard.clone()
                 } else {
-                    nil_part(&value.known)
-                });
-                return;
+                    None
+                };
+                if let Some(guard) = guard
+                    && args.len() == guard.arity
+                    && (truth || guard.both)
+                {
+                    self.narrow_subject(&args[guard.argument], env, |ty| {
+                        narrow_by_type(ty, &guard.ty, truth)
+                    });
+                }
             }
-            _ => predicate_type(&op),
+            return;
         };
-        if let Some(wanted) = positive {
-            value.narrow(narrow_by_type(&value.known, &wanted, truth));
+        match (op.as_str(), args) {
+            ("clojure.core/contains?", _) => self.narrow_contains(args, truth, env),
+            ("clojure.core/get" | "clojure.core/get-in", [_, _]) => {
+                self.narrow_subject(test, env, truthy);
+            }
+            ("clojure.core/=", [left, right]) => {
+                let pair = self
+                    .guard_literal(left)
+                    .map(|ty| (right, ty))
+                    .or_else(|| self.guard_literal(right).map(|ty| (left, ty)));
+                if let Some((subject, literal)) = pair {
+                    self.narrow_subject(subject, env, |ty| narrow_literal(ty, &literal, truth));
+                }
+            }
+            ("clojure.core/and" | "clojure.core/or", [operand]) => self.narrow(operand, truth, env),
+            ("clojure.core/and", _) if truth => {
+                for operand in args {
+                    self.narrow(operand, true, env);
+                }
+            }
+            ("clojure.core/or", _) if !truth => {
+                for operand in args {
+                    self.narrow(operand, false, env);
+                }
+            }
+            ("clojure.core/not", [operand]) => self.narrow(operand, !truth, env),
+            ("clojure.core/empty?" | "clojure.core/not-empty", [operand]) => {
+                let empty = truth == (op == "clojure.core/empty?");
+                self.narrow_subject(operand, env, |ty| narrow_emptiness(ty, empty));
+            }
+            ("clojure.core/nil?", [operand]) => {
+                self.narrow_subject(operand, env, |ty| narrow_by_type(ty, &Type::Nil, truth));
+            }
+            ("clojure.core/some?", [operand]) => {
+                self.narrow_subject(operand, env, |ty| {
+                    if truth {
+                        ty.without_nil()
+                    } else {
+                        nil_part(ty)
+                    }
+                });
+            }
+            (_, [operand]) => {
+                if let Some(wanted) = predicate_type(&op) {
+                    self.narrow_subject(operand, env, |ty| narrow_by_type(ty, &wanted, truth));
+                }
+            }
+            _ => {}
         }
     }
 }
 
 pub(super) fn narrow_by_type(actual: &Type, wanted: &Type, truth: bool) -> Type {
     match actual {
+        Type::Parameter(parameter) => {
+            let impossible = parameter.upper.as_ref().is_some_and(|upper| {
+                if truth {
+                    // The supported bounds and core predicate types are
+                    // pairwise disjoint. A general wanted type can overlap.
+                    matches!(
+                        wanted,
+                        Type::Nil
+                            | Type::Number
+                            | Type::String
+                            | Type::Character
+                            | Type::Boolean
+                            | Type::Keyword
+                            | Type::Symbol
+                    ) && !upper.subtype_of(wanted)
+                } else {
+                    upper.subtype_of(wanted)
+                }
+            });
+            if impossible {
+                Type::Never
+            } else {
+                actual.clone()
+            }
+        }
         Type::Union(parts) => {
             Type::union(parts.iter().map(|part| narrow_by_type(part, wanted, truth)))
         }

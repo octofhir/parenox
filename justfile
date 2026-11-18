@@ -96,6 +96,30 @@ guards format="pretty": build
     @./target/release/parenox check examples/guards.clj --format {{quote(format)}}
     @./target/release/parenox check examples/guards_bad.clj --format {{quote(format)}} || test "$?" -eq 1
 
+# Check one-sided and two-sided predicates with verified bodies.
+checked-guards format="pretty": build
+    @./target/release/parenox check examples/checked_guards.clj --format {{quote(format)}}
+
+# Check inline callbacks against an expected s/fspec contract.
+contextual-callbacks format="pretty": build
+    @./target/release/parenox check examples/contextual_callbacks.clj --format {{quote(format)}}
+
+# Infer callback input and result types from a generic contract.
+generic-callbacks format="pretty": build
+    @./target/release/parenox check examples/generic_callbacks.clj --format {{quote(format)}}
+
+# Infer independent inputs for a callback that combines two vectors.
+generic-zip format="pretty": build
+    @./target/release/parenox check examples/generic_zip.clj --format {{quote(format)}}
+
+# Check a storage extern, generic map contracts and an HTTP response.
+map-boundary format="pretty": build
+    @./target/release/parenox check examples/map_boundary/src --externs examples/map_boundary/externs.edn --format {{quote(format)}}
+
+# Compare an ordinary let with a macro whose scope is known but effects are not.
+macro-scopes format="pretty": build
+    @./target/release/parenox check examples/macro_scopes/use.clj --externs examples/macro_scopes/externs.edn --format {{quote(format)}} || test "$?" -eq 1
+
 # Check nested map paths and show the errors for an explicit Nil and a scalar parent.
 paths format="pretty": build
     @./target/release/parenox check examples/paths.clj --format {{quote(format)}}
@@ -170,6 +194,10 @@ namespace-specs format="pretty" color="auto": build
 case format="pretty" color="auto": build
     @./target/release/parenox check examples/case.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/case_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+
+# Check that tag tests narrow each map variant and its payload.
+tagged-maps format="pretty" color="auto": build
+    @./target/release/parenox check examples/tagged_maps.clj --format {{quote(format)}} --color {{quote(color)}}
 
 # Check seq traversal in a loop and show an unchecked empty input.
 sequences format="pretty" color="auto": build

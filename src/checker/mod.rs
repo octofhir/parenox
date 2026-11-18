@@ -13,10 +13,10 @@ mod recur;
 
 use env::Env;
 use exceptions::Throws;
+use model::{Contract, DeclaredValue, Function, VerifiedGuard};
 pub(crate) use model::{
     Declarations, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
 };
-use model::{DeclaredValue, Function};
 use recur::RecurTarget;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -76,6 +76,7 @@ struct Value {
     known: Type,
     notes: Vec<String>,
     contract: Option<Arc<ContractOrigin>>,
+    guard: Option<Arc<VerifiedGuard>>,
 }
 
 impl Value {
@@ -85,6 +86,7 @@ impl Value {
             known,
             notes: Vec::new(),
             contract: None,
+            guard: None,
         }
     }
 
@@ -112,8 +114,14 @@ impl Value {
         } else {
             None
         };
+        let guard = if self.guard == other.guard {
+            self.guard
+        } else {
+            None
+        };
         Self {
             contract,
+            guard,
             ..Self::with_notes(self.known.join_values(other.known), self.notes)
         }
     }
@@ -124,14 +132,12 @@ impl Value {
     }
 }
 
-impl From<DeclaredValue<'_>> for Value {
-    fn from(value: DeclaredValue<'_>) -> Self {
-        match value {
-            DeclaredValue::Literal(ty) => Self::new(ty.clone()),
-            DeclaredValue::Function(contract) => Self {
-                contract: Some(contract.origin.clone()),
-                ..Self::new(Type::Function(contract.signatures.clone()))
-            },
+impl Value {
+    fn from_contract(contract: &Contract) -> Self {
+        Self {
+            contract: Some(contract.origin.clone()),
+            guard: contract.guard.clone(),
+            ..Self::new(Type::Function(contract.signatures.clone()))
         }
     }
 }
@@ -147,6 +153,8 @@ struct Checker<'a> {
     recur_target: Option<RecurTarget>,
     recur_checks: usize,
     reduction_steps: usize,
+    callback_depth: usize,
+    macro_scope_depth: usize,
     throws: Option<Throws>,
 }
 
@@ -163,6 +171,8 @@ impl<'a> Checker<'a> {
             recur_target: None,
             recur_checks: 0,
             reduction_steps: 0,
+            callback_depth: 0,
+            macro_scope_depth: 0,
             throws: None,
         }
     }
@@ -345,7 +355,13 @@ impl Checker<'_> {
                     );
                     Value::new(Type::Unknown)
                 } else if let Some(value) = self.model.declared_value(s, self.globals) {
-                    value.into()
+                    match value {
+                        DeclaredValue::Literal(ty) => Value::new(ty.clone()),
+                        DeclaredValue::Function(contract) => Value::from_contract(contract),
+                        DeclaredValue::Macro(scope) => self.macro_gap(
+                            scope, form.span, format!("Macro {} is not a function value", scope.origin().name)
+                        ),
+                    }
                 } else {
                     let qualified = self.model.function_name(s);
                     let external = qualified.split_once('/').is_some_and(|(namespace, _)| {
@@ -408,6 +424,7 @@ fn collection_element(types: Vec<Type>) -> Box<Type> {
 fn nil_part(ty: &Type) -> Type {
     match ty {
         Type::Nil | Type::Unknown => Type::Nil,
+        Type::Parameter(parameter) => parameter.upper.as_ref().map_or(Type::Nil, nil_part),
         Type::Union(xs) if xs.iter().any(|t| nil_part(t) == Type::Nil) => Type::Nil,
         _ => Type::Never,
     }

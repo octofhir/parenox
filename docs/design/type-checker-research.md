@@ -8,8 +8,19 @@ Parenox checks Clojure source without loading namespaces or running project code
 |---|---|
 | Contracts and externs | Parenox reads `s/def`, `:t/sig`, single-arity `s/fdef` and one EDN file with trusted library signatures. Externs cannot replace a modeled built-in. Versioned sidecars are not yet supported. |
 | Nil, maps and guards | `get` distinguishes explicit nil from absence. Truthiness and `some?` disagree on false. Right-biased `merge` preserves required keys when an optional field can overwrite their value. |
+| Tagged unions | Literal tests on a map selector narrow its owner. Local aliases keep that relation until rebinding, and finite map tags support exhaustiveness checks in `case`. |
+| Checked predicates | `:t/guard` verifies true and false implications independently for a restricted Boolean expression. A body edit that changes the proven contract invalidates that predicate's callers. |
+| Contextual callbacks | Fixed-arity `s/fspec` supplies parameter and result types to inline callbacks passed in direct calls. Checking the body does not execute it or add its throws to argument evaluation. |
+| Generic callbacks | In `t/all`, a direct argument or a vector's element type determines the input parameter. A callback's body or named contract can supply the result parameter, including for a vector of results. The generic body is checked with both parameters abstract. |
+| Generic contract equivalence | Renaming binders leaves a contract equivalent. Incremental checks reuse passing callers, but rerun checks that emitted diagnostics so their messages use the current names. |
+| Primitive bounds | A bound such as `(a :< number?)` is checked against call evidence. The generic body may use `a` as a number, but cannot return an arbitrary number as `a`. Changing the bound invalidates affected callers. |
+| Named generic callbacks | Specialize from the expected fixed-arity inputs, including a known callback argument's result if needed. Check the final signature for compatibility without using the expected return as evidence. |
+| Typed map boundaries | Closed literal map contracts distinguish required fields from optional or missing keys. `t/all` can infer from a required field or dictionary values, including in a callback result. The storage example uses a trusted extern, not inferred SQL or a live database. |
+| Independent input parameters | A fixed-arity `t/all` can infer up to two independent inputs and one optional callback result. Roles come from the signature positions, and an unknown input does not suppress definite errors on another. |
+| Nullable generic results | `(s/nilable a)` preserves a known parameter type alongside `nil`, for example in a dictionary lookup. A nullable callback result alone cannot witness a parameter. |
+| Macro scopes | An EDN `:let-like` description supplies sequential lexical bindings for an external macro. Result, effects and tail positions remain explicitly unchecked. |
 | Compatibility | Structural checks distinguish a proven match, a mismatch and an unproven comparison. An unknown field cannot hide a known mismatch elsewhere. Recursive specs still report a gap. Function compatibility checks variance for matching arities. |
-| Diagnostics | Parenox exposes spans, stable rule codes, occurrence IDs, the contract source and a `complete` flag. Occurrence IDs are stable for repeated checks of the same snapshot, not across source moves. Targeted suppression, trust baselines and coverage are not yet supported. |
+| Diagnostics | Parenox exposes spans, stable rule codes, occurrence IDs, the contract source and a `complete` flag. Occurrence IDs are stable for repeated checks of the same snapshot, not across source moves. Source comments can suppress one rule for one form without changing the inferred type. Trust baselines and coverage are not yet supported. |
 
 ## What to borrow from other languages
 
@@ -35,9 +46,6 @@ Do not compare Crabjure's cold lint benchmarks against Parenox's warm type-check
 
 ## What to implement next
 
-1. **Rule-specific suppression.** Apply it to one source form and rule code, without hiding unrelated diagnostics. Require a reason and distinguish a suppressed diagnostic from proven coverage.
-2. **Stable paths and checked guards.** Add a tagged-map fixture that narrows the owner when a field is tested. A one-sided guard must not narrow the false branch; rebinding must invalidate facts attached to the old value.
-3. **Contextual callbacks.** Check an inline callback against an expected contract and cover a wrong return type. Measure the edit/check cost before expanding this to generic constraints and user-defined higher-order functions.
-4. **Macro scope descriptions.** Compare a known binding macro with its hand-written equivalent, including shadowing. Without a reviewed body rule, resolve its locals but report that its result and effects were not checked.
+1. **External contract files.** Accept multiple explicitly selected EDN files. Preserve the origin of each declaration, reject duplicate qualified names, and only recheck callers that depend on a changed declaration.
 
 Keep JVM contracts, recursive types, general rows, and latent effect summaries as separate slices. Do not add runtime instrumentation or project macro execution to make a static check pass.

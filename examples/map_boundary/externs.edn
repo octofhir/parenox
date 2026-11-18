@@ -1,0 +1,2 @@
+{vendor.patient-store/fetch
+ [string? :-> (clojure.spec.alpha/nilable {:row :map-boundary.model/row})]}

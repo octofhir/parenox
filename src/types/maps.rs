@@ -85,7 +85,9 @@ impl Type {
     pub fn key_overlaps(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Never, _) | (_, Self::Never) => false,
-            (Self::Unknown, _) | (_, Self::Unknown) => true,
+            (Self::Unknown | Self::Parameter(_), _) | (_, Self::Unknown | Self::Parameter(_)) => {
+                true
+            }
             (Self::Union(parts), other) => parts.iter().any(|key| key.key_overlaps(other)),
             (key, Self::Union(parts)) => parts.iter().any(|other| key.key_overlaps(other)),
             (key, other) => key.subtype_of(other) || other.subtype_of(key),
@@ -277,9 +279,9 @@ impl MapType {
         }
     }
 
-    pub(super) fn any_type(&self, predicate: fn(&Type) -> bool) -> bool {
+    pub(super) fn any_type(&self, predicate: impl Fn(&Type) -> bool) -> bool {
         self.fields.values().any(|field| predicate(&field.ty))
-            || matches!(&self.extra, ExtraFields::Typed(types) if types.iter().any(predicate))
+            || matches!(&self.extra, ExtraFields::Typed(types) if types.iter().any(&predicate))
     }
 
     pub(super) fn compatibility(&self, expected: &Self) -> Compatibility {

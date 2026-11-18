@@ -112,6 +112,14 @@ impl Checker<'_> {
         let start = self.diagnostics.len();
         let result = match &callable.kind {
             Callable::Value(function) => match &function.known {
+                Type::Function(signatures)
+                    if signatures.iter().any(|sig| sig.parameters.is_some()) =>
+                {
+                    self.unsupported(
+                        spread.span,
+                        "apply cannot infer a type parameter from an open spread",
+                    )
+                }
                 Type::Function(signatures) => {
                     let arities: Vec<_> = signatures.iter().map(Signature::arity).collect();
                     self.check_spread_arities(&arities, minimum, spread.span);

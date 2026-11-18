@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 use std::slice;
 
-use super::flow::narrow_by_type;
+use super::flow::{narrow_literal, refine_owner};
 use super::{Checker, Env, Value};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
@@ -53,28 +53,50 @@ impl Checker<'_> {
         }
 
         let local = input.symbol();
+        let selector = self.selector(input, env);
         let mut remaining = subject.known;
         let mut types = Vec::new();
         let mut notes = Vec::new();
         let mut matched = false;
         for (keys, result) in branches {
-            let selected =
-                Type::union(keys.iter().map(|key| narrow_by_type(&remaining, key, true)));
+            let select =
+                |ty: &Type| Type::union(keys.iter().map(|key| narrow_literal(ty, key, true)));
+            let selected = select(&remaining);
             for key in &keys {
-                remaining = unmatched(&remaining, key);
+                remaining = narrow_literal(&remaining, key, false);
             }
             matched |= selected != Type::Never;
-            let branch = self.case_branch(result, local, selected, env, tail);
+            let mut branch_env = env.clone();
+            if selected != Type::Never
+                && let Some(selector) = &selector
+            {
+                refine_owner(selector, &mut branch_env, select);
+            }
+            let branch = self.case_branch(result, local, selected, branch_env, tail);
             types.push(branch.known);
             notes.extend(branch.notes);
         }
         if let Some(fallback) = fallback.first() {
-            let branch = self.case_branch(fallback, local, remaining, env, tail);
+            let mut branch_env = env.clone();
+            if remaining != Type::Never
+                && let Some(selector) = &selector
+            {
+                refine_owner(selector, &mut branch_env, |ty| {
+                    let mut rest = ty.clone();
+                    for key in &tests {
+                        rest = narrow_literal(&rest, key, false);
+                    }
+                    rest
+                });
+            }
+            let branch = self.case_branch(fallback, local, remaining, branch_env, tail);
             types.push(branch.known);
             notes.extend(branch.notes);
         } else if remaining != Type::Never {
             self.illegal_argument();
-            if !matched && remaining != Type::Unknown {
+            if (!matched && remaining != Type::Unknown)
+                || (selector.is_some() && finite_tag(&remaining))
+            {
                 self.error(
                     "PNX2802",
                     input.span,
@@ -103,11 +125,10 @@ impl Checker<'_> {
         form: &Form,
         local: Option<&str>,
         ty: Type,
-        env: &Env,
+        mut env: Env,
         tail: bool,
     ) -> Value {
         let reachable = ty != Type::Never;
-        let mut env = env.clone();
         if let Some(value) = local.and_then(|name| env.get_mut(name)) {
             value.narrow(ty);
         }
@@ -115,10 +136,16 @@ impl Checker<'_> {
     }
 }
 
-fn unmatched(actual: &Type, key: &Type) -> Type {
-    match (actual, key) {
-        (Type::Boolean, Type::Bool(test)) => Type::Bool(!test),
-        (Type::Union(parts), _) => Type::union(parts.iter().map(|part| unmatched(part, key))),
-        _ => narrow_by_type(actual, key, false),
+fn finite_tag(ty: &Type) -> bool {
+    match ty {
+        Type::Union(parts) => parts.iter().all(finite_tag),
+        Type::Nil
+        | Type::Boolean
+        | Type::Bool(_)
+        | Type::Key(_)
+        | Type::Str(_)
+        | Type::Char(_)
+        | Type::Integer(_) => true,
+        _ => false,
     }
 }

@@ -61,6 +61,12 @@ just defaults        # destructuring defaults and three deliberate errors
 just threading       # ->, ->>, some->, some->> and three deliberate errors
 just conditional     # cond->, cond->>, as-> and three deliberate errors
 just guards          # if-let, when-let, if-some and when-some
+just checked-guards  # predicates that prove what their results imply
+just contextual-callbacks # check fn and #() against a callback contract
+just generic-callbacks    # infer callback input and result types
+just generic-zip          # infer two independent inputs and a callback result
+just map-boundary         # check a storage extern through to an HTTP response
+just macro-scopes    # resolve macro bindings and show the analysis limit
 just paths           # nested map lookup and update with source diagnostics
 just presence        # presence guards for optional fields
 just updates         # update and update-in with callback diagnostics
@@ -76,6 +82,7 @@ just cond             # ordered guards and fallthrough diagnostics
 just libspecs         # bare requires and renamed imports across files
 just namespace-specs # alias-only imports and project-wide named specs
 just case             # grouped dispatch and missing-case diagnostics
+just tagged-maps      # narrow a map union by its tag
 just sequences        # seq traversal, precise positions and empty inputs
 just accumulators     # growing vectors with retained element types
 just exceptions       # explicit errors and structured exception data
@@ -115,8 +122,33 @@ unless `NO_COLOR` is set. `TERM=dumb` disables terminal auto-detection.
 `--color always|never` takes precedence, including in `just errors pretty always`.
 `--json` remains an alias for `--format json`.
 
-Exit codes: **0** successful check, **1** diagnostics, **2** usage or I/O failure.
+Exit codes: **0** no unsuppressed diagnostics, **1** diagnostics, **2** usage or I/O failure.
 Suggested edits require review and are never applied automatically.
+
+## Targeted suppressions
+
+Put a comment before the form whose finding you want to suppress:
+
+```clojure
+(defn label {:t/sig '[:-> string?]} []
+  ;; parenox-ignore PNX2322: the legacy caller handles a numeric label
+  42)
+```
+
+The comment requires one rule code and a nonempty reason. It matches only
+findings of that rule inside the next form, not its siblings. Supported codes
+are `PNX2322` (type mismatch), `PNX2741` (missing checked key), `PNX2801`
+(out-of-bounds index), and `PNX2802` (unhandled `case` value). Place the
+comment inside the selected branch of a reader conditional. Comments in
+inactive branches, discarded forms, and quoted data do not apply.
+
+JSON reports keep each suppressed finding, its original `id`, the reason and
+the comment span in `suppressed`. Text output lists suppressed findings as
+notes. Suppressing a finding does not change the inferred type. A report with
+only suppressed findings is `ok: true` but `complete: false`.
+Invalid directives report `PNX9006`. A directive that matches no finding
+reports `PNX9007` when no other reader, resolution, or analysis error prevented
+checking.
 
 ## A project-sized example
 
@@ -135,6 +167,26 @@ Externs are trusted declarations for library functions. A matching project
 source declaration takes precedence, and source privacy applies to every caller.
 An extern for a name that Parenox already models reports `PNX2790`; it does not
 replace the built-in rule. An unmodeled name in the same namespace is allowed.
+
+### External macro scopes
+
+An extern can describe where a macro introduces local names:
+
+```edn
+{vendor.bindings/with-bindings {:macro :let-like}}
+```
+
+`(vendor/with-bindings [label input decorated (str label "!")] decorated)`
+has sequential bindings. Each initializer sees the preceding bindings but
+not its own new binding. The body sees all of them. They do not escape
+the macro call. Use simple unqualified symbols in the binding vector.
+
+This is a scope description, not an expansion or a function signature.
+Parenox checks name resolution in the forms it understands without loading
+or running the macro. `PNX9009` marks the call incomplete: its result, effects
+and tail positions are not inferred. Lexical bindings and project functions
+still take precedence over the extern. Run `just macro-scopes` for the
+comparison with an ordinary `let`.
 
 ```sh
 ./target/release/parenox check examples/clinic \
@@ -311,8 +363,9 @@ change when a file is renamed or a diagnostic moves. Use `code` to identify
 the rule. The top-level response `id` still identifies the request.
 
 When a diagnostic checks a known function contract, text output names its
-source and JSON includes a `contract` object. It contains the qualified
-`name`, the `kind` (`t_sig`, `s_fdef`, `extern` or `builtin`) and, for
+source and JSON includes a `contract` object. Scope diagnostics can also carry
+their declaration. The object contains the qualified `name`, the `kind`
+(`t_sig`, `s_fdef`, `extern`, `builtin` or `macro_scope`) and, for
 file-backed contracts, the `path`. The primary diagnostic span still points
 to the call or return being checked.
 
@@ -341,6 +394,8 @@ requests work independently of the tracked project.
 - Edits to unannotated private helpers invalidate their transitive callers in the same file.
 - Public contract changes recheck functions that reference the changed var,
   including references reached through inferred private helpers.
+- A guard body edit also rechecks its callers if the verified refinement
+  changes, even when its signature stays the same.
 - Local var changes recheck their consumers in the same file. Changes to
   namespace resolution or local spec declarations can still recheck that file.
 - Removed files and externs disappear from the current environment immediately.
@@ -396,6 +451,199 @@ At calls and returns, an unknown type does not hide a mismatch in a different
 part of the value. If missing type information prevents checking the contract
 and there is no local diagnostic yet, Parenox reports `PNX9004` and marks the
 check incomplete.
+
+### Checked predicates
+
+```clojure
+(defn enabled-text?
+  {:t/sig '[boolean? (s/nilable string?) :-> boolean?]
+   :t/guard '[:then value string?]}
+  [enabled value]
+  (and enabled (string? value)))
+```
+
+`:then` narrows the named argument only when the call returns true. False could
+mean `enabled` was false even when `value` was a string. Use `:both` only when
+the body also proves that a false result excludes the declared type.
+
+The checker verifies both claims without running the function. The subset
+requires one fixed arity with plain symbol parameters, a Boolean result, and
+one expression built from Boolean parameters or literals, `and`, `or`, `not`,
+`if`, and the supported core predicates: `string?`, `char?`, `number?`,
+`boolean?`, `keyword?`, `symbol?` and `nil?`. The body may also use `some?`.
+A shadowed primitive or other unsupported form cannot prove a claim. An
+unproved claim reports `PNX9008` and does not narrow callers. Run
+`just checked-guards` for both directions.
+
+### Contextual callbacks
+
+```clojure
+(s/def ::text-transform
+  (s/fspec :args (s/cat :text string?) :ret string?))
+
+(defn transform {:t/sig '[::text-transform string? :-> string?]} [f text]
+  (f text))
+
+(defn clean-label {:t/sig '[string? :-> string?]} [label]
+  (transform #(clojure.string/trim %) label))
+```
+
+`s/fspec` describes a callable value. Parenox checks calls to the callback in
+the receiving function. At a direct call with a fixed-arity callback contract,
+it uses that contract to check the parameters and result of a passed `fn` or
+`#()`. Errors point inside the callback and its body is not run during
+argument evaluation. Named functions are checked against the contract too:
+they must accept every declared input and return a compatible result.
+
+The spec uses the same `:args (s/cat ...)` and `:ret` subset as `s/fdef`.
+Named specs and externs can supply it. No generative tests are run.
+Typing a standalone `fn` without context, inferring a callback's type through
+`apply`, and contextual checking against a variadic callback contract are
+not supported yet. Run `just contextual-callbacks`.
+
+### Generic callbacks
+
+```clojure
+(defn transform
+  {:t/sig '(t/all [a] [(s/fspec :args (s/cat :value a) :ret a) a :-> a])}
+  [f value]
+  (f value))
+
+(defn next-id {:t/sig '[number? :-> number?]} [id]
+  (transform #(inc %) id))
+```
+
+Parenox infers `a` from the first argument declared directly as `a` (`value`
+here). It uses that type for the callback and the result, then checks any other
+occurrences against it. The body of `transform` is checked without assuming
+that `a` is a number, a string, or any other concrete type.
+
+Use a second parameter when the callback changes the type:
+
+```clojure
+(defn convert
+  {:t/sig '(t/all [a b] [(s/fspec :args (s/cat :value a) :ret b) a :-> b])}
+  [f value]
+  (f value))
+
+(defn label-length {:t/sig '[string? :-> number?]} [label]
+  (convert #(count %) label))
+```
+
+Here `label` gives the callback its input type (`String`), and the callback
+gives the call its result type (`Number`). A named callback supplies that type
+from its matching fixed-arity signature. A callback can produce a concrete
+map or collection; the type it produces is inferred without running it.
+
+A contract can also infer `a` from vector elements and return a vector of
+callback results:
+
+```clojure
+(defn map-values
+  {:t/sig '(t/all [a b] [(s/fspec :args (s/cat :element a) :ret b)
+                        (s/coll-of a :kind vector?) :-> (s/coll-of b :kind vector?)])}
+  [f values]
+  (mapv f values))
+```
+
+If no argument is declared directly as `a`, the first declared argument that
+uses it as a vector element, dictionary value, or required map field supplies
+it. For vectors and dictionaries, Parenox considers all possible element or
+value types. An empty literal `[]` or `{}` alone cannot supply that type.
+Parenox reports `PNX9010` instead of guessing.
+
+Source contracts and EDN externs support one fixed generic arity, with one
+or two parameters inferred from ordinary arguments. A parameter without such
+an argument can be inferred from one immediate fixed-arity callback's result,
+if it also appears in the call's result. Parameters in map keys, sets, general
+unions, nested collections, or deeper callbacks are not supported. Generic calls
+through `apply` require a spread with known positions and do not infer inline
+callback bodies. Run `just generic-callbacks`.
+
+### Two independent inputs
+
+```clojure
+(defn zip-with
+  {:t/sig '(t/all [a b c]
+             [(s/fspec :args (s/cat :left a :right b) :ret c)
+              (s/coll-of a :kind vector?) (s/coll-of b :kind vector?)
+              :-> (s/coll-of c :kind vector?)])}
+  [combine left right]
+  (mapv combine left right))
+```
+
+Each vector supplies its own element type. The callback supplies `c`. The
+order of the names in `t/all` doesn't decide their roles: a parameter that
+appears in an ordinary argument gets its type from that argument, even if it
+also appears in the callback result. If one input lacks evidence, Parenox
+reports an analysis gap without hiding a definite mismatch on the other
+input. Run `just generic-zip`.
+
+A result can be `(s/nilable a)` when `a` has a separate source of evidence.
+For example, `[(s/map-of keyword? a) keyword? :-> (s/nilable a)]` describes
+a dictionary lookup. Its result must be checked for `nil` before it is used
+as an `a`. A nullable callback result alone does not supply evidence for a
+parameter: `nil` might mean there was no result.
+
+Renaming the parameters of a `t/all` declaration without changing how they're
+used leaves the contract equivalent. An incremental check can reuse passing
+callers after that edit. Callers with diagnostics are checked again so their
+messages use the current names. Changing a bound changes the contract.
+
+### Type parameter bounds
+
+Write `(a :< number?)` to require that the type inferred for `a` is numeric.
+Any input parameter or the optional callback result parameter can have a
+bound. Supported bounds are `number?`, `string?`, `boolean?`, `char?`,
+`keyword?`, and `symbol?`.
+
+```clojure
+(defn number-label
+  {:t/sig '(t/all [(a :< number?)] [a :-> string?])}
+  [value]
+  (str (inc value)))
+
+(defn labels {:t/sig '[:-> (s/coll-of string? :kind vector?)]} []
+  (map-values number-label [1 2]))
+```
+
+Inside `number-label`, `value` can be used as a number. A declaration returning
+`a` would still need to return a value of that same abstract type, not just any
+number. At a call, a bound is checked against the inferred type; it is not a
+default when evidence is missing.
+
+A named generic function can be specialized to a fixed-arity callback. Its
+input parameters come from the expected callback inputs; a result parameter
+can come from a known non-generic callback argument of that signature. The
+expected return is checked after specialization, not used to infer either
+parameter. Parenox reports an analysis gap when the context cannot supply
+that evidence. It does not recursively specialize generic callback arguments.
+
+### Generic map contracts
+
+A literal map type in `:t/sig` or an EDN extern is closed: every declared key
+is required and additional keys are rejected. Use `s/keys` for an open shape
+with named specs and optional fields. A parameter can describe a direct value
+in a literal map type or the value type in `(s/map-of key-spec a)`. When a
+literal map type has several fields with the same parameter, Parenox infers
+from the first such field in key order and checks the other fields against it.
+
+```clojure
+(defn ok
+  {:t/sig '(t/all [a b] [(s/fspec :args (s/cat :row a) :ret {:body b})
+                        {:row a} :-> {:status number? :body b}])}
+  [render result]
+  (assoc (render (:row result)) :status 200))
+```
+
+Here the required `:row` field supplies `a`, and the renderer's required
+`:body` field supplies `b`. A present field with value `nil` is evidence of
+type `Nil`; a missing or optional field does not satisfy a required field.
+Run `just map-boundary` for a storage declaration and a response handler that
+keep these cases distinct. This checks the declared boundary, not a database
+schema.
+
+### Arity and argument spreading
 
 For a multi-arity definition, write one signature per clause in a
 quoted vector or list, for example `:t/sig '[[:-> string?] [string? :-> number?]]`.
@@ -684,6 +932,18 @@ growing types beyond its analysis budget.
 omitted default throws when no clause matches, and Parenox reports a definite
 miss at the input expression. Supported constants are nil, booleans, characters,
 strings, keywords and known decimal integers in the i32 range.
+
+For a union of map shapes, testing a literal tag can narrow the whole map.
+For example, in `(if (= :note (:kind event)) ...)`, each branch sees the
+remaining variants of `event` and their own `:value` types. `cond` narrows
+later clauses using earlier tests. `case` on a map tag also reports unhandled
+values from a known finite set when there is no default.
+
+Supported selectors are keyword calls, `get` with a literal key, and
+`get-in` with a literal vector of keys. A `let` alias retains the relation to
+the original binding until either name is rebound. Missing keys still read as
+nil; `some?` also accepts false. A lookup with a default, a computed key, or a
+user-defined predicate is not evidence for a tag. Run `just tagged-maps`.
 
 `seq`, `first`, `next` and `rest` model traversal of vectors, sequences,
 sets, strings and maps with declared entry types. Strings use JVM UTF-16

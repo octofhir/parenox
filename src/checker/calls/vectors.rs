@@ -129,6 +129,9 @@ pub(super) enum CollectionError {
 pub(super) fn element_type(collection: Type) -> Result<Type, CollectionError> {
     match collection {
         Type::Vector(element) | Type::Set(element) | Type::Seq(element) => Ok(*element),
+        Type::Parameter(parameter) if parameter.upper.as_ref() == Some(&Type::String) => {
+            Ok(Type::Character)
+        }
         Type::Nil | Type::Never => Ok(Type::Never),
         Type::Str(string) if string.is_empty() => Ok(Type::Never),
         Type::String | Type::Str(_) => Ok(Type::Character),

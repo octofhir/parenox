@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::{
     Contract, DeclaredValue, Function, Globals, LiteralVar, Model, Names,
     declarations::symbols_match,
+    externs::{ExternalDeclaration, ExternalDeclarations},
 };
 use crate::types::Type;
 
@@ -28,7 +29,7 @@ impl Exports {
 
 pub(super) fn visible_value<'a>(
     source: Option<&'a Exports>,
-    externs: impl FnOnce() -> Option<&'a Contracts>,
+    externs: impl FnOnce() -> Option<&'a ExternalDeclarations>,
     name: &str,
 ) -> Option<DeclaredValue<'a>> {
     if let Some(source) = source {
@@ -42,7 +43,10 @@ pub(super) fn visible_value<'a>(
             return None;
         }
     }
-    externs()?.get(name).map(DeclaredValue::Function)
+    Some(match externs()?.get(name)? {
+        ExternalDeclaration::Function(contract) => DeclaredValue::Function(contract),
+        ExternalDeclaration::Macro(scope) => DeclaredValue::Macro(scope),
+    })
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -67,7 +71,7 @@ pub(crate) struct InterfaceKey {
 
 struct Dependency {
     source: Option<Arc<Exports>>,
-    externs: Option<Arc<Contracts>>,
+    externs: Option<Arc<ExternalDeclarations>>,
     in_project: bool,
 }
 
@@ -125,7 +129,12 @@ impl InterfaceChanges<'_> {
         self.compatible_scope && self.local.is_none() && self.namespaces.is_empty()
     }
 
-    pub fn allows_reuse(&self, model: &Model, function: &Function) -> bool {
+    pub fn allows_reuse(
+        &self,
+        model: &Model,
+        function: &Function,
+        allow_binder_renames: bool,
+    ) -> bool {
         if !self.compatible_scope
             || self.local.is_some_and(|(current, old)| {
                 current.functions.get(&function.name) != old.functions.get(&function.name)
@@ -139,11 +148,11 @@ impl InterfaceChanges<'_> {
         let names = &model.names;
         let mut unchanged = |name: &str| {
             let (namespace, local) = names.resolve_parts(name);
-            self.identical_var(namespace, local)
+            self.identical_var(namespace, local, allow_binder_renames)
                 && ((name.contains('/') && name != "/")
                     || names.refers.contains_key(name)
                     || namespace == names.namespace
-                    || self.identical_var(&names.namespace, name))
+                    || self.identical_var(&names.namespace, name, allow_binder_renames))
         };
         std::iter::once(function)
             .chain(
@@ -163,7 +172,7 @@ impl InterfaceChanges<'_> {
             })
     }
 
-    fn identical_var(&self, namespace: &str, local: &str) -> bool {
+    fn identical_var(&self, namespace: &str, local: &str, allow_binder_renames: bool) -> bool {
         let external = self.namespaces.get(namespace);
         let local_vars = self
             .local
@@ -173,13 +182,46 @@ impl InterfaceChanges<'_> {
         }
         let qualified = format!("{namespace}/{local}");
         local_vars.is_none_or(|(current, old)| {
-            current.functions.get(&qualified) == old.functions.get(&qualified)
-                && current.literals.get(&qualified) == old.literals.get(&qualified)
+            same_local_function(
+                current.functions.get(&qualified),
+                old.functions.get(&qualified),
+                allow_binder_renames,
+            ) && current.literals.get(&qualified) == old.literals.get(&qualified)
         }) && external.is_none_or(|(current, old)| {
             current.in_project == old.in_project
-                && current.value(&qualified) == old.value(&qualified)
+                && same_visible_value(
+                    current.value(&qualified),
+                    old.value(&qualified),
+                    allow_binder_renames,
+                )
         })
     }
+}
+
+fn same_local_function(
+    a: Option<&LocalFunction>,
+    b: Option<&LocalFunction>,
+    allow_binder_renames: bool,
+) -> bool {
+    a == b
+        || allow_binder_renames
+            && a.zip(b).is_some_and(|(a, b)| {
+                a.private == b.private
+                    && a.contract
+                        .as_ref()
+                        .zip(b.contract.as_ref())
+                        .is_some_and(|(a, b)| a.same_interface(b))
+            })
+}
+
+fn same_visible_value(
+    a: Option<DeclaredValue<'_>>,
+    b: Option<DeclaredValue<'_>>,
+    allow_binder_renames: bool,
+) -> bool {
+    a == b
+        || allow_binder_renames
+            && matches!((a, b), (Some(DeclaredValue::Function(a)), Some(DeclaredValue::Function(b))) if a.same_interface(b))
 }
 
 impl Model {

@@ -1,10 +1,13 @@
 //! The supported type syntax shared by source contracts and spec declarations.
+mod function_specs;
+pub(super) use function_specs::read_function_spec;
+
 use std::collections::BTreeMap;
 
 use super::Names;
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
-use crate::types::{ExtraFields, Field, MAX_TUPLE_ITEMS, MapType, Type};
+use crate::types::{ExtraFields, Field, MAX_TUPLE_ITEMS, MapType, Parameters, Type};
 
 pub(super) fn read_type(
     names: &Names,
@@ -14,6 +17,25 @@ pub(super) fn read_type(
 ) -> Type {
     TypeReader {
         names,
+        parameters: None,
+        literal_shapes: false,
+        diagnostics,
+        lookup,
+    }
+    .parse(form)
+}
+
+pub(super) fn read_type_with_parameters(
+    names: &Names,
+    form: &Form,
+    parameters: Option<&Parameters>,
+    diagnostics: &mut Vec<Diagnostic>,
+    lookup: impl FnMut(&str, Span) -> Option<Type>,
+) -> Type {
+    TypeReader {
+        names,
+        parameters,
+        literal_shapes: true,
         diagnostics,
         lookup,
     }
@@ -22,6 +44,8 @@ pub(super) fn read_type(
 
 struct TypeReader<'a, F> {
     names: &'a Names,
+    parameters: Option<&'a Parameters>,
+    literal_shapes: bool,
     diagnostics: &'a mut Vec<Diagnostic>,
     lookup: F,
 }
@@ -38,7 +62,49 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
         })
     }
 
+    fn map_shape(&mut self, forms: &[Form]) -> Type {
+        let mut fields = BTreeMap::new();
+        for [key, ty] in forms.as_chunks::<2>().0 {
+            let name = match &key.without_metadata().kind {
+                Kind::Keyword(key) => Type::Key(self.names.key(key)),
+                Kind::String(key) => Type::Str(key.clone()),
+                _ => {
+                    self.error(
+                        "PNX9001",
+                        key.span,
+                        "A literal map type requires literal keyword or string keys",
+                    );
+                    return Type::Unknown;
+                }
+            };
+            if fields
+                .insert(
+                    name,
+                    Field {
+                        ty: self.parse(ty),
+                        required: true,
+                    },
+                )
+                .is_some()
+            {
+                self.error("PNX9001", key.span, "Duplicate key in a literal map type");
+                return Type::Unknown;
+            }
+        }
+        Type::Map(MapType {
+            fields,
+            extra: ExtraFields::Closed,
+        })
+    }
+
     fn parse(&mut self, form: &Form) -> Type {
+        if let Some(symbol) = form.symbol()
+            && let Some(parameter) = self
+                .parameters
+                .and_then(|binders| binders.iter().find(|parameter| parameter.name == symbol))
+        {
+            return Type::Parameter(parameter.clone());
+        }
         match &form.without_metadata().kind {
             Kind::Symbol(s) => match self.names.resolve(s).as_str() {
                 "clojure.core/string?" => Type::String,
@@ -58,6 +124,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                 }
             },
             Kind::Keyword(key) => self.spec(&self.names.key(key), form.span),
+            Kind::Map(forms) if self.literal_shapes => self.map_shape(forms),
             Kind::Set(xs) => {
                 let mut types = Vec::new();
                 for x in xs {
@@ -81,6 +148,11 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                     .and_then(Form::symbol)
                     .map(|s| self.names.resolve(s));
                 match op.as_deref() {
+                    Some("clojure.spec.alpha/fspec") => self
+                        .function_spec(&xs[1..], form.span, "s/fspec")
+                        .map_or(Type::Unknown, |signature| {
+                            Type::Function([signature].into())
+                        }),
                     Some("clojure.spec.alpha/nilable") if xs.len() == 2 => {
                         self.parse(&xs[1]).nilable()
                     }

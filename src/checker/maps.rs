@@ -149,7 +149,7 @@ impl Checker<'_> {
             | Type::String
             | Type::Str(_) => default_type,
             Type::Never => Type::Never,
-            Type::Unknown => Type::Unknown,
+            Type::Unknown | Type::Parameter(_) => Type::Unknown,
             Type::Union(xs) => {
                 let values = xs
                     .iter()

@@ -1,10 +1,14 @@
 mod compatibility;
 mod indexing;
 mod maps;
+mod parameters;
 
 pub(crate) use compatibility::Compatibility;
 pub use indexing::IndexedItem;
 pub use maps::{ExtraFields, Field, MapSlot, MapType};
+pub(crate) use parameters::{
+    CallbackWitness, MAX_TYPE_PARAMETERS, Parameter, Parameters, TypeArguments,
+};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -71,6 +75,7 @@ pub(crate) struct Signature {
     pub args: Vec<Type>,
     pub rest: Option<Type>,
     pub ret: Type,
+    pub parameters: Option<Arc<Parameters>>,
 }
 
 impl Signature {
@@ -96,6 +101,20 @@ impl fmt::Display for Signature {
         if let Some(rest) = &self.rest {
             args.push(format!("& {rest}"));
         }
+        if let Some(parameters) = &self.parameters {
+            write!(f, "all [")?;
+            for (index, parameter) in parameters.iter().enumerate() {
+                if index > 0 {
+                    write!(f, " ")?;
+                }
+                if let Some(upper) = &parameter.upper {
+                    write!(f, "({} :< {upper})", parameter.name)?;
+                } else {
+                    write!(f, "{}", parameter.name)?;
+                }
+            }
+            write!(f, "] ")?;
+        }
         write!(f, "[{} -> {}]", args.join(", "), self.ret)
     }
 }
@@ -103,6 +122,7 @@ impl fmt::Display for Signature {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type {
     Unknown,
+    Parameter(Arc<Parameter>),
     Never,
     Nil,
     Boolean,
@@ -282,6 +302,16 @@ impl Type {
             Type::Boolean | Type::Bool(false) => Type::Bool(false),
             Type::Union(xs) => Type::union(xs.iter().map(Type::falsey)),
             Type::Unknown => Type::union([Type::Nil, Type::Bool(false)]),
+            // Without a bound we cannot exclude either branch. Keep the
+            // identity of the value when checking a polymorphic body.
+            Type::Parameter(parameter)
+                if parameter
+                    .upper
+                    .as_ref()
+                    .is_none_or(|bound| bound.falsey() != Type::Never) =>
+            {
+                self.clone()
+            }
             _ => Type::Never,
         }
     }
@@ -300,20 +330,28 @@ impl Type {
     }
 
     pub fn contains_unknown(&self) -> bool {
+        self.any_component(|ty| matches!(ty, Type::Unknown))
+    }
+
+    fn any_component(&self, predicate: impl Fn(&Type) -> bool + Copy) -> bool {
+        if predicate(self) {
+            return true;
+        }
         match self {
-            Type::Unknown => true,
-            Type::Union(xs) => xs.iter().any(Type::contains_unknown),
-            Type::MapEntry(items) => items.iter().any(Type::contains_unknown),
-            Type::Tuple(items) | Type::SeqTuple(items) => items.iter().any(Type::contains_unknown),
+            Type::Union(xs) => xs.iter().any(|ty| ty.any_component(predicate)),
+            Type::MapEntry(items) => items.iter().any(|ty| ty.any_component(predicate)),
+            Type::Tuple(items) | Type::SeqTuple(items) => {
+                items.iter().any(|ty| ty.any_component(predicate))
+            }
             Type::Vector(t)
             | Type::Set(t)
             | Type::Seq(t)
             | Type::Reduced(t)
-            | Type::ExceptionInfo(t) => t.contains_unknown(),
-            Type::Map(m) => m.any_type(Type::contains_unknown),
+            | Type::ExceptionInfo(t) => t.any_component(predicate),
+            Type::Map(m) => m.any_type(|ty| ty.any_component(predicate)),
             Type::Function(signatures) => signatures
                 .iter()
-                .any(|sig| sig.types().any(Type::contains_unknown)),
+                .any(|sig| sig.types().any(|ty| ty.any_component(predicate))),
             _ => false,
         }
     }
@@ -323,6 +361,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Unknown => write!(f, "Unknown"),
+            Type::Parameter(parameter) => write!(f, "{}", parameter.name),
             Type::Never => write!(f, "Never"),
             Type::Nil => write!(f, "Nil"),
             Type::Boolean => write!(f, "Boolean"),

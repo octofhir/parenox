@@ -3,6 +3,7 @@ pub mod expand;
 pub mod output;
 mod project;
 pub mod reader;
+mod suppressions;
 pub mod syntax;
 mod types;
 
@@ -52,6 +53,7 @@ pub enum ContractKind {
     SFdef,
     Extern,
     Builtin,
+    MacroScope,
 }
 
 impl ContractOrigin {
@@ -129,5 +131,15 @@ pub struct Report {
     pub ok: bool,
     pub complete: bool,
     pub diagnostics: Vec<Diagnostic>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suppressed: Vec<SuppressedDiagnostic>,
     pub stats: Stats,
+}
+
+/// A finding explicitly suppressed at a source form; the original occurrence ID is retained.
+#[derive(Debug, Serialize)]
+pub struct SuppressedDiagnostic {
+    pub diagnostic: Diagnostic,
+    pub reason: String,
+    pub directive: Span,
 }

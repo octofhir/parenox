@@ -173,6 +173,9 @@ impl Checker<'_> {
     fn read_sequence(&mut self, op: ReadSequence, ty: &Type, name: &str, span: Span) -> Type {
         match ty {
             Type::Never | Type::Unknown => ty.clone(),
+            Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
+                self.read_sequence(op, upper, name, span)
+            }
             Type::Nil => op.fixed(&[]),
             Type::Tuple(items) | Type::SeqTuple(items) => op.fixed(items),
             Type::MapEntry(items) => op.fixed(items.as_ref()),
@@ -270,6 +273,7 @@ pub(super) fn collection_emptiness(ty: &Type) -> Option<Type> {
         Type::Nil => Type::Bool(true),
         Type::Never => Type::Never,
         Type::Unknown => Type::Boolean,
+        Type::Parameter(parameter) => return collection_emptiness(parameter.upper.as_ref()?),
         Type::Tuple(items) | Type::SeqTuple(items) => Type::Bool(items.is_empty()),
         Type::Seq(_) | Type::MapEntry(_) => Type::Bool(false),
         Type::Vector(element) | Type::Set(element) if **element == Type::Never => Type::Bool(true),

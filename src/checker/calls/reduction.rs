@@ -312,6 +312,10 @@ fn partition_reduced(value: Value) -> (Value, Value) {
     for ty in types {
         match ty {
             Type::Reduced(value) => finished.push(*value),
+            Type::Parameter(_) => {
+                continuing.push(ty);
+                finished.push(Type::Unknown);
+            }
             ty => continuing.push(ty),
         }
     }
@@ -334,15 +338,17 @@ pub(super) fn reduced_operation(name: &str, input: &Value) -> Value {
     };
     let ty = Type::union(parts.iter().map(|ty| match name {
         "clojure.core/reduced?" => match ty {
-            Type::Unknown => Type::Boolean,
+            Type::Unknown | Type::Parameter(_) => Type::Boolean,
             ty => Type::Bool(matches!(ty, Type::Reduced(_))),
         },
         "clojure.core/unreduced" => match ty {
             Type::Reduced(value) => value.as_ref().clone(),
+            Type::Parameter(_) => Type::Unknown,
             ty => ty.clone(),
         },
         "clojure.core/ensure-reduced" => match ty {
             Type::Reduced(_) => ty.clone(),
+            Type::Parameter(_) => Type::Reduced(Box::new(Type::Unknown)),
             ty => Type::Reduced(Box::new(ty.clone())),
         },
         _ => unreachable!(),

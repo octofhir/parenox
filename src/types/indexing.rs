@@ -37,6 +37,9 @@ impl Type {
     }
 
     pub fn indexed_item(&self, index: i32) -> Option<IndexedItem<'_>> {
+        if let Type::Parameter(parameter) = self {
+            return parameter.upper.as_ref()?.indexed_item(index);
+        }
         let position = usize::try_from(index).ok();
         let fixed = match self {
             Type::Tuple(items) => items.as_ref(),

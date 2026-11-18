@@ -62,6 +62,11 @@ impl Type {
             (actual, Type::Union(parts)) => {
                 Compatibility::any(parts.iter().map(|expected| actual.compatibility(expected)))
             }
+            (Type::Parameter(actual), Type::Parameter(expected)) => (actual == expected).into(),
+            (Type::Parameter(actual), expected) => actual
+                .upper
+                .as_ref()
+                .map_or(Mismatch, |upper| upper.compatibility(expected)),
             (Type::Integer(_), Type::Number)
             | (Type::Str(_), Type::String)
             | (Type::Char(_), Type::Character)
@@ -105,6 +110,19 @@ fn positions(actual: &[Type], expected: &[Type]) -> Compatibility {
 }
 
 fn signature(actual: &Signature, expected: &Signature) -> Compatibility {
+    if actual.parameters.is_some() && expected.parameters.is_none() {
+        return match actual.specialize_callback(expected) {
+            Ok(specialized) => signature(&specialized, expected),
+            Err(result) => result,
+        };
+    }
+    if actual.parameters.is_some() || expected.parameters.is_some() {
+        return if actual.same_type(expected) && !actual.types().any(Type::contains_unknown) {
+            Compatibility::Proven
+        } else {
+            Compatibility::Unproven
+        };
+    }
     Compatibility::from(actual.arity() == expected.arity())
         .and(|| positions(&expected.args, &actual.args))
         .and(|| {

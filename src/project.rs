@@ -9,6 +9,7 @@ use crate::checker::{
     Declarations, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
 };
 use crate::reader::{self, Form, Position, Span};
+use crate::suppressions::{MARKER, Suppressions};
 use crate::{Diagnostic, Report, Stats};
 
 #[derive(Clone, Copy)]
@@ -34,6 +35,7 @@ struct FileCache {
     kind: FileKind,
     forms: Vec<Form>,
     parse_error: Option<Diagnostic>,
+    suppressions: Suppressions,
     declarations: Option<Declarations>,
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
@@ -81,31 +83,36 @@ impl FileCache {
         self.kind = kind;
         self.model = None;
         self.parse_error = None;
+        self.suppressions = Suppressions::default();
         self.declarations = None;
         let conditionals = if kind == FileKind::Source && path.ends_with(".cljc") {
             reader::Conditionals::Select(":clj")
         } else {
             reader::Conditionals::Reject
         };
-        let parsed =
-            reader::read_with_keyword_spans(source, conditionals).and_then(|(forms, keywords)| {
-                let declarations = if kind == FileKind::Source {
-                    let declarations = Declarations::read(&forms);
-                    declarations.validate_keyword_aliases(source, &keywords)?;
-                    Some(declarations)
-                } else {
-                    if let Some(&span) = keywords.first() {
-                        return Err(reader::ReadError {
-                            span,
-                            message: "Auto-resolved keywords are invalid in EDN externs".into(),
-                        });
-                    }
-                    None
-                };
-                Ok((forms, declarations))
-            });
+        let parsed = reader::read_for_check(
+            source,
+            conditionals,
+            (kind == FileKind::Source && source.contains(MARKER)).then_some(MARKER),
+        )
+        .and_then(|read| {
+            let declarations = if kind == FileKind::Source {
+                let declarations = Declarations::read(&read.forms);
+                declarations.validate_keyword_aliases(source, &read.auto_keywords)?;
+                Some(declarations)
+            } else {
+                if let Some(&span) = read.auto_keywords.first() {
+                    return Err(reader::ReadError {
+                        span,
+                        message: "Auto-resolved keywords are invalid in EDN externs".into(),
+                    });
+                }
+                None
+            };
+            Ok((read, declarations))
+        });
         match parsed {
-            Ok((forms, declarations)) => {
+            Ok((read, declarations)) => {
                 let fingerprint = declarations
                     .as_ref()
                     .and_then(|declarations| declarations.spec_fingerprint(source));
@@ -113,7 +120,8 @@ impl FileCache {
                     self.spec_fingerprint = fingerprint.map(Arc::new);
                 }
                 self.declarations = declarations;
-                self.forms = forms;
+                self.suppressions = Suppressions::read(source, &read.forms, read.comments);
+                self.forms = read.forms;
             }
             Err(error) => {
                 self.forms.clear();
@@ -198,6 +206,7 @@ impl Session {
                 ok: false,
                 complete: false,
                 diagnostics,
+                suppressed: Vec::new(),
                 stats: Stats {
                     parsed_files: usize::from(parsed),
                     reused_parses: usize::from(!parsed),
@@ -339,7 +348,12 @@ impl Session {
                             cache.functions.get_mut(&function.name).filter(|cached| {
                                 cached.reusable(&cache.checked_source, source.source, &ranges)
                                     && changes.as_ref().is_some_and(|changes| {
-                                        changes.allows_reuse(model, function)
+                                        // Cached messages can contain the original binder names.
+                                        changes.allows_reuse(
+                                            model,
+                                            function,
+                                            cached.diagnostics.is_empty(),
+                                        )
                                     })
                             })
                         {
@@ -375,18 +389,30 @@ impl Session {
                 }
                 cache.interface = Some(interface);
             }
-            if !report.diagnostics.is_empty() {
+            report
+                .diagnostics
+                .extend(cache.suppressions.invalid.iter().cloned());
+            if !report.diagnostics.is_empty() || cache.suppressions.has_rules() {
                 // A caller can supply duplicate paths in an invalid snapshot. Their
                 // reports must not share IDs even when the diagnostics are identical.
                 let ordinal = report_ordinals.entry(source.path).or_default();
                 identify_diagnostics(source.path, *ordinal, &mut report.diagnostics);
+                let mut unused = cache.suppressions.apply(report);
+                if !unused.is_empty() {
+                    // Only this step emits PNX9007; these IDs cannot collide
+                    // with IDs assigned before filtering.
+                    identify_diagnostics(source.path, *ordinal, &mut unused);
+                    report.diagnostics.append(&mut unused);
+                    report.diagnostics.sort_by(diagnostic_order);
+                }
                 *ordinal += 1;
             }
             report.ok = report.diagnostics.is_empty();
-            report.complete = !report
-                .diagnostics
-                .iter()
-                .any(|d| d.code.starts_with("PNX9"));
+            report.complete = report.suppressed.is_empty()
+                && !report
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code.starts_with("PNX9"));
             report.stats.elapsed_us = file_started.elapsed().as_micros() as u64;
             totals.checked_functions += report.stats.checked_functions;
             totals.reused_functions += report.stats.reused_functions;
@@ -406,19 +432,14 @@ impl Session {
 }
 
 fn identify_diagnostics(path: &str, report: usize, diagnostics: &mut [Diagnostic]) {
-    let key = |diagnostic: &Diagnostic| (diagnostic.span.start.offset, diagnostic.span.end.offset);
-    diagnostics.sort_by(|a, b| {
-        let (start_a, end_a) = key(a);
-        let (start_b, end_b) = key(b);
-        (start_a, &a.code, end_a).cmp(&(start_b, &b.code, end_b))
-    });
+    diagnostics.sort_by(diagnostic_order);
 
     // Assign IDs after merging cached and fresh diagnostics. Stable sorting keeps
     // the original analysis order among diagnostics with identical spans and rules.
     let mut previous = None;
     let mut ordinal = 0;
     for diagnostic in diagnostics {
-        let (start, end) = key(diagnostic);
+        let (start, end) = (diagnostic.span.start.offset, diagnostic.span.end.offset);
         let code = diagnostic.code.as_str();
         let current = (start, end, code);
         if previous != Some(current) {
@@ -428,4 +449,12 @@ fn identify_diagnostics(path: &str, report: usize, diagnostics: &mut [Diagnostic
         diagnostic.id = Some(format!("{path}:{start}-{end}:{code}:{report}:{ordinal}"));
         ordinal += 1;
     }
+}
+
+fn diagnostic_order(a: &Diagnostic, b: &Diagnostic) -> std::cmp::Ordering {
+    (a.span.start.offset, &a.code, a.span.end.offset).cmp(&(
+        b.span.start.offset,
+        &b.code,
+        b.span.end.offset,
+    ))
 }

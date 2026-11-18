@@ -53,7 +53,7 @@ impl Checker<'_> {
     pub(super) fn ex_data(&mut self, value: &Value) -> Value {
         fn unknown_constructor(ty: &Type) -> bool {
             match ty {
-                Type::Throwable | Type::Unknown => true,
+                Type::Throwable | Type::Unknown | Type::Parameter(_) => true,
                 Type::Union(parts) => parts.iter().any(unknown_constructor),
                 _ => false,
             }
@@ -61,7 +61,7 @@ impl Checker<'_> {
         fn data(ty: &Type) -> Type {
             match ty {
                 Type::ExceptionInfo(data) => data.as_ref().clone(),
-                Type::Throwable => map(ExtraFields::Open).nilable(),
+                Type::Throwable | Type::Parameter(_) => map(ExtraFields::Open).nilable(),
                 Type::Unknown | Type::Never => ty.clone(),
                 Type::Union(parts) => Type::union(parts.iter().map(data)),
                 _ => Type::Nil,
