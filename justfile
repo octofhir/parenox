@@ -260,3 +260,8 @@ lookup-order format="pretty": build
 helper-effects format="pretty": build
     @./target/release/parenox check examples/helper_effects.clj --format {{quote(format)}}
     @./target/release/parenox check examples/helper_effects_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check loop accumulation in a list and a non-seqable tail diagnostic.
+list-accumulators format="pretty": build
+    @./target/release/parenox check examples/list_accumulators.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/list_accumulators_bad.clj --format {{quote(format)}} || test "$?" -eq 1

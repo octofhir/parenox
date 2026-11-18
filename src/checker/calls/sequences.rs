@@ -46,7 +46,28 @@ fn nonempty_seq(items: &[Type]) -> Type {
     }
 }
 
+pub(super) fn list_value(args: &[(Value, Span)]) -> Value {
+    let items = args.iter().map(|(value, _)| value.known.clone());
+    Value::new(if args.len() <= MAX_TUPLE_ITEMS {
+        Type::SeqTuple(items.collect())
+    } else {
+        Type::Seq(Box::new(Type::union(items)))
+    })
+}
+
 impl Checker<'_> {
+    pub(super) fn cons(&mut self, args: &[(Value, Span)]) -> Value {
+        let (item, _) = &args[0];
+        let (tail, span) = &args[1];
+        let sequence =
+            self.read_sequence(ReadSequence::Start, &tail.known, "clojure.core/cons", *span);
+        if sequence.contains_unknown() {
+            self.may_throw();
+        }
+        let result = self.conj_type(&sequence, std::slice::from_ref(&item.known), *span);
+        Value::with_notes(result, tail.notes.clone())
+    }
+
     pub(super) fn conj(&mut self, args: &[(Value, Span)]) -> Value {
         let Some(((collection, span), items)) = args.split_first() else {
             return Value::new(Type::Tuple(Box::new([])));

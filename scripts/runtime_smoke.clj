@@ -935,3 +935,17 @@
 (load-file "examples/helper_effects_bad.clj")
 (assert (= :missing (demo.helper-effects-bad/request-stage)))
 (println "Clojure/JVM private helper effects: 4 assertions passed")
+
+(load-file "examples/list_accumulators.clj")
+(load-file "examples/list_accumulators_bad.clj")
+(assert (= '("Ada" "Eve") (demo.list-accumulators/reverse-names ["Eve" "Ada"])))
+(assert (seq? (demo.list-accumulators/reverse-names [])))
+(assert (= :paused (demo.list-accumulators/second-status)))
+(assert (= :requested (demo.list-accumulators/head-status)))
+(assert (= '(nil :next) (cons nil '(:next))))
+(assert (= :invalid-tail
+           (try (demo.list-accumulators-bad/invalid-tail)
+                (catch IllegalArgumentException _ :invalid-tail))))
+(assert (= '("Eve" "Ada") (demo.list-accumulators/copy-names ["Eve" "Ada"])))
+(assert (empty? (demo.list-accumulators/copy-names [])))
+(println "Clojure/JVM list accumulators: 8 assertions passed")

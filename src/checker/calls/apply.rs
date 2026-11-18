@@ -137,6 +137,17 @@ impl Checker<'_> {
                     format!("Calling {} is not supported", function.ty),
                 ),
             },
+            Callable::Builtin(name) if name == "clojure.core/list" => {
+                let items = prefix.iter().map(|(value, _)| value.known.clone());
+                let sequence = Type::Seq(Box::new(Type::union(
+                    items.chain(std::iter::once(element.known.clone())),
+                )));
+                Value::new(if minimum == 0 {
+                    Type::union([Type::empty_seq(), sequence])
+                } else {
+                    sequence
+                })
+            }
             Callable::Builtin(name) if name != "clojure.core/conj" => {
                 let arities = builtin_arities(name);
                 self.check_spread_arities(arities, minimum, spread.span);

@@ -154,20 +154,22 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                         })
                     }
                     Some("clojure.spec.alpha/coll-of")
-                        if xs.len() == 4
-                            && xs[2].keyword() == Some(":kind")
-                            && matches!(
-                                xs[3].symbol().map(|s| self.names.resolve(s)).as_deref(),
-                                Some("clojure.core/vector?" | "clojure.core/set?")
-                            ) =>
+                        if xs.len() == 4 && xs[2].keyword() == Some(":kind") =>
                     {
-                        let element = Box::new(self.parse(&xs[1]));
-                        if xs[3].symbol().map(|s| self.names.resolve(s)).as_deref()
-                            == Some("clojure.core/set?")
-                        {
-                            Type::Set(element)
-                        } else {
-                            Type::Vector(element)
+                        let kind = xs[3].symbol().map(|s| self.names.resolve(s));
+                        match kind.as_deref() {
+                            Some("clojure.core/set?") => Type::Set(Box::new(self.parse(&xs[1]))),
+                            Some("clojure.core/vector?") => {
+                                Type::Vector(Box::new(self.parse(&xs[1])))
+                            }
+                            Some("clojure.core/seq?") => Type::union([
+                                Type::empty_seq(),
+                                Type::Seq(Box::new(self.parse(&xs[1]))),
+                            ]),
+                            _ => {
+                                self.error("PNX9001", xs[3].span, "Unsupported collection kind");
+                                Type::Unknown
+                            }
                         }
                     }
                     _ => {

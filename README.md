@@ -82,6 +82,7 @@ just exceptions       # explicit errors and structured exception data
 just handlers         # try/catch/finally and recur boundaries
 just literal-vars     # literal config values across namespaces
 just core-imports     # core referrals and local replacements
+just list-accumulators # list and cons with a loop accumulator
 just agent-loop      # fix/recheck and cache measurements
 just verify          # format, Clippy and tests
 ```
@@ -519,6 +520,11 @@ Maps and keywords work in function position and as inline callbacks, for
 example `(mapv :active patients)`. Lookup defaults apply to missing entries
 and preserve explicit nil and false. Vectors and map entries accept one integer
 index and report known out-of-bounds calls. Run `just callables` for examples.
+
+`list` preserves argument order and `cons` prepends to any modeled sequence.
+Use `(s/coll-of element-spec :kind seq?)` for an ordered sequence that may be
+empty. An empty list is truthy, while `(seq (list))` yields nil. Run
+`just list-accumulators` for reversal with `loop` and a non-seqable tail diagnostic.
 
 `reduce` checks vectors and sequences with known positions in order. Without
 an initial value it invokes the reducer with zero arguments on empty input and
