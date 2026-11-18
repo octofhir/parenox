@@ -15,7 +15,7 @@ use clap::{CommandFactory, Parser};
 use parenox::{Diagnostic, Session, Source, output, reader};
 use serde_json::json;
 
-use cli::{CheckOptions, Cli, Color, Command, Format};
+use cli::{CheckOptions, Cli, Color, Command, Format, ProjectOptions};
 use config::ProjectConfig;
 use serve::Snapshot;
 
@@ -60,13 +60,10 @@ fn syntax(path: &str) -> Result<u8, String> {
 
 fn check(mut options: CheckOptions, validate_externs: bool) -> Result<u8, String> {
     options.load_config()?;
-    if options.paths.is_empty() {
-        return Err("Specify a source path or configure :paths in parenox.edn".into());
-    }
     if validate_externs && options.externs.is_empty() {
         return Err("validate-externs requires at least one --externs file".into());
     }
-    let files = read_sources(&options.paths)?;
+    let files = read_sources(&options.project.paths)?;
     let format = options.format();
     let color = format == Format::Pretty && options.color.enabled();
     let externs = read_externs(&options.externs)?;
@@ -154,10 +151,7 @@ fn check(mut options: CheckOptions, validate_externs: bool) -> Result<u8, String
 
 fn export_externs(mut options: CheckOptions) -> Result<u8, String> {
     options.load_config()?;
-    if options.paths.is_empty() {
-        return Err("Specify a source path or configure :paths in parenox.edn".into());
-    }
-    let files = read_sources(&options.paths)?;
+    let files = read_sources(&options.project.paths)?;
     let sources: Vec<_> = files
         .iter()
         .map(|(path, source)| Source { path, source })
@@ -266,24 +260,8 @@ impl Color {
 
 impl CheckOptions {
     fn load_config(&mut self) -> Result<(), String> {
-        let path = if let Some(path) = &self.config {
-            Path::new(path)
-        } else if self.paths.is_empty() {
-            let path = Path::new(config::DEFAULT_PATH);
-            if !path
-                .try_exists()
-                .map_err(|err| format!("{}: {err}", path.display()))?
-            {
-                return Ok(());
-            }
-            path
-        } else {
-            return Ok(());
-        };
-        let config = ProjectConfig::read(path)?;
-        if self.paths.is_empty() {
-            self.paths = config.paths;
-        }
+        let config = self.project.load()?;
+        self.project.paths = config.paths;
         if self.externs.is_empty() {
             self.externs = config.externs;
         }
@@ -292,6 +270,48 @@ impl CheckOptions {
         }
         Ok(())
     }
+}
+
+impl ProjectOptions {
+    fn load(&self) -> Result<ProjectConfig, String> {
+        let default = Path::new(config::DEFAULT_PATH);
+        let mut settings = if let Some(path) = &self.config {
+            ProjectConfig::read(Path::new(path))?
+        } else if self.paths.is_empty() && file_exists(default)? {
+            ProjectConfig::read(default)?
+        } else {
+            ProjectConfig::default()
+        };
+        if !self.paths.is_empty() {
+            settings.paths.clone_from(&self.paths);
+        } else {
+            let manifest = self.deps.as_deref().map(PathBuf::from).unwrap_or_else(|| {
+                self.config
+                    .as_deref()
+                    .and_then(|path| Path::new(path).parent())
+                    .unwrap_or_else(|| Path::new(""))
+                    .join("deps.edn")
+            });
+            if self.deps.is_some()
+                || !self.aliases.is_empty()
+                || (settings.paths.is_empty() && file_exists(&manifest)?)
+            {
+                settings.paths = config::deps_paths(&manifest, &self.aliases)?;
+            }
+        }
+        if settings.paths.is_empty() {
+            return Err(
+                "No source paths. Specify paths or configure :paths in parenox.edn or deps.edn"
+                    .into(),
+            );
+        }
+        Ok(settings)
+    }
+}
+
+fn file_exists(path: &Path) -> Result<bool, String> {
+    path.try_exists()
+        .map_err(|err| format!("{}: {err}", path.display()))
 }
 
 fn bench(path: &str, iterations: usize) -> Result<u8, String> {

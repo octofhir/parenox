@@ -36,13 +36,25 @@ pub(crate) enum Command {
 }
 
 #[derive(Args)]
-pub(crate) struct CheckOptions {
-    /// Clojure files or directories; defaults to paths from parenox.edn.
+pub(crate) struct ProjectOptions {
+    /// Source files or directories; defaults to parenox.edn or deps.edn paths.
     #[arg(value_name = "PATH")]
     pub(crate) paths: Vec<String>,
     /// Read project paths and externs from this EDN configuration.
     #[arg(long, value_name = "FILE")]
     pub(crate) config: Option<String>,
+    /// Read source roots from this deps.edn file.
+    #[arg(long, value_name = "FILE", conflicts_with = "paths")]
+    pub(crate) deps: Option<String>,
+    /// Select a local deps.edn alias. Repeat to combine aliases in order.
+    #[arg(long = "alias", value_name = "NAME", conflicts_with = "paths")]
+    pub(crate) aliases: Vec<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct CheckOptions {
+    #[command(flatten)]
+    pub(crate) project: ProjectOptions,
     /// Diagnostic format (stderr for pretty and for all export diagnostics).
     #[arg(long, value_enum, default_value_t = Format::Pretty)]
     format: Format,

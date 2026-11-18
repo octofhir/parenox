@@ -348,6 +348,15 @@ namespace cycles and duplicate namespaces are reported. JSON output for a projec
 is one object with per-file reports and aggregate statistics. Single-file JSON
 keeps the simpler file-report shape.
 
+From a Clojure CLI project, `parenox check` can read source roots from the local
+`deps.edn`. Use `parenox check --alias test` to include the paths of the `:test`
+alias. Repeat `--alias` in composition order and use `--deps FILE` for a different
+project manifest. Explicit `parenox.edn` source paths are used by default when
+available. A selected manifest or alias supplies the source paths instead.
+Parenox reads project paths, including path aliases, `:extra-paths`, and path
+replacements, as EDN. Supply dependency sources as paths or configure their
+contracts as externs. [Clojure CLI project configuration](https://clojure.org/reference/deps_edn)
+
 Named specs resolve against the supplied project declarations, including keys
 whose namespace differs from the file that declares them. Input file order does
 not affect resolution. An alias created with `:as-alias` can qualify keywords

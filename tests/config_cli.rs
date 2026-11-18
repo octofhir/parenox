@@ -49,6 +49,79 @@ fn conventional_config_is_loaded_without_positional_paths() {
 }
 
 #[test]
+fn deps_edn_aliases_compose_project_source_roots() {
+    let dir = TestDir::new("deps-paths");
+    fs::write(
+        dir.0.join("deps.edn"),
+        r#"
+      {:paths [:shared "resources"]
+       :aliases {:shared ["lib"]
+                 :test {:extra-paths [:tests]}
+                 :tests ["test"]
+                 :other {:replace-paths ["other"]}}}
+    "#,
+    )
+    .unwrap();
+    for (path, namespace) in [("lib", "lib"), ("test", "checks"), ("other", "other")] {
+        fs::create_dir(dir.0.join(path)).unwrap();
+        fs::write(
+            dir.0.join(path).join("main.clj"),
+            format!("(ns {namespace})"),
+        )
+        .unwrap();
+    }
+    let run = |aliases: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+            .current_dir(&dir.0)
+            .args(["check", "--json"])
+            .args(aliases)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    assert_eq!(run(&[])["path"], "lib/main.clj");
+    assert_eq!(
+        run(&["--alias", "test"])["files"][1]["path"],
+        "test/main.clj"
+    );
+    let replaced = run(&["--alias", ":test", "--alias", "other"]);
+    let paths: Vec<_> = replaced["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["other/main.clj", "test/main.clj"]);
+}
+
+#[test]
+fn cyclic_deps_path_alias_is_reported() {
+    let dir = TestDir::new("deps-cycle");
+    fs::write(
+        dir.0.join("deps.edn"),
+        "{:paths [:a] :aliases {:a [:b] :b [:a]}}",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .current_dir(&dir.0)
+        .arg("check")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("deps.edn:1:"), "{error}");
+    assert!(
+        error.contains("cyclic or too deeply nested path alias :a"),
+        "{error}"
+    );
+}
+
+#[test]
 fn explicit_extern_flags_replace_the_configured_list() {
     let target = "examples/split_externs/drift.edn";
     let output = Command::new(env!("CARGO_BIN_EXE_parenox"))

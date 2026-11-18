@@ -1,4 +1,6 @@
 //! Inert EDN project settings for command-line checks.
+mod deps;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
@@ -6,6 +8,7 @@ use std::path::Path;
 use parenox::reader::{self, Form, Kind, Span};
 
 pub(super) const DEFAULT_PATH: &str = "parenox.edn";
+pub(super) use deps::deps_paths;
 
 #[derive(Default)]
 pub(super) struct ProjectConfig {
@@ -16,21 +19,7 @@ pub(super) struct ProjectConfig {
 
 impl ProjectConfig {
     pub fn read(path: &Path) -> Result<Self, String> {
-        let source =
-            fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
-        let forms = reader::read(&source).map_err(|err| invalid(path, err.span, &err.message))?;
-        let [
-            Form {
-                kind: Kind::Map(entries),
-                ..
-            },
-        ] = forms.as_slice()
-        else {
-            return Err(format!(
-                "{}: expected one EDN configuration map",
-                path.display()
-            ));
-        };
+        let entries = read_map(path)?;
         let parent = path.parent().unwrap_or_else(|| Path::new(""));
         let mut config = Self::default();
         let mut seen = BTreeSet::new();
@@ -84,6 +73,20 @@ impl ProjectConfig {
         }
         Ok(config)
     }
+}
+
+fn read_map(path: &Path) -> Result<Vec<Form>, String> {
+    let source = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut forms = reader::read(&source).map_err(|err| invalid(path, err.span, &err.message))?;
+    if forms.len() == 1
+        && let Kind::Map(entries) = forms.remove(0).kind
+    {
+        return Ok(entries);
+    }
+    Err(format!(
+        "{}: expected one EDN configuration map",
+        path.display()
+    ))
 }
 
 fn invalid(path: &Path, span: Span, message: &str) -> String {
