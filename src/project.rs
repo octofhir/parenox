@@ -87,18 +87,32 @@ impl FileCache {
         } else {
             reader::Conditionals::Reject
         };
-        match reader::read_with(source, conditionals) {
-            Ok(forms) => {
-                if kind == FileKind::Source {
+        let parsed =
+            reader::read_with_keyword_spans(source, conditionals).and_then(|(forms, keywords)| {
+                let declarations = if kind == FileKind::Source {
                     let declarations = Declarations::read(&forms);
-                    let fingerprint = declarations.spec_fingerprint(source);
-                    if self.spec_fingerprint.as_deref() != fingerprint.as_ref() {
-                        self.spec_fingerprint = fingerprint.map(Arc::new);
-                    }
-                    self.declarations = Some(declarations);
+                    declarations.validate_keyword_aliases(source, &keywords)?;
+                    Some(declarations)
                 } else {
-                    self.spec_fingerprint = None;
+                    if let Some(&span) = keywords.first() {
+                        return Err(reader::ReadError {
+                            span,
+                            message: "Auto-resolved keywords are invalid in EDN externs".into(),
+                        });
+                    }
+                    None
+                };
+                Ok((forms, declarations))
+            });
+        match parsed {
+            Ok((forms, declarations)) => {
+                let fingerprint = declarations
+                    .as_ref()
+                    .and_then(|declarations| declarations.spec_fingerprint(source));
+                if self.spec_fingerprint.as_deref() != fingerprint.as_ref() {
+                    self.spec_fingerprint = fingerprint.map(Arc::new);
                 }
+                self.declarations = declarations;
                 self.forms = forms;
             }
             Err(error) => {

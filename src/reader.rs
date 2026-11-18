@@ -136,12 +136,17 @@ pub fn read(source: &str) -> Result<Vec<Form>, ReadError> {
 
 /// The same reader with an explicit conditional policy; no project code is executed.
 pub fn read_with(source: &str, conditionals: Conditionals<'_>) -> Result<Vec<Form>, ReadError> {
+    Reader::new(source, false, conditionals).read_all()
+}
+
+pub(crate) fn read_with_keyword_spans(
+    source: &str,
+    conditionals: Conditionals<'_>,
+) -> Result<(Vec<Form>, Vec<Span>), ReadError> {
     let mut reader = Reader::new(source, false, conditionals);
-    let mut forms = Vec::new();
-    while let Some(form) = reader.next_form()? {
-        forms.push(form);
-    }
-    Ok(forms)
+    reader.auto_keywords = Some(Vec::new());
+    let forms = reader.read_all()?;
+    Ok((forms, reader.auto_keywords.unwrap()))
 }
 
 #[derive(Debug)]
@@ -199,6 +204,7 @@ struct Reader<'a> {
     pos: Position,
     depth: usize,
     arguments: Option<AnonymousFunction>,
+    auto_keywords: Option<Vec<Span>>,
     tree: Option<Builder<'a>>,
     conditionals: Conditionals<'a>,
 }
@@ -220,9 +226,18 @@ impl<'a> Reader<'a> {
             },
             depth: 0,
             arguments: None,
+            auto_keywords: None,
             tree: capture.then(|| Builder::new(source)),
             conditionals,
         }
+    }
+
+    fn read_all(&mut self) -> Result<Vec<Form>, ReadError> {
+        let mut forms = Vec::new();
+        while let Some(form) = self.next_form()? {
+            forms.push(form);
+        }
+        Ok(forms)
     }
 
     fn next_form(&mut self) -> Result<Option<Form>, ReadError> {
@@ -471,7 +486,18 @@ impl<'a> Reader<'a> {
                     "nil" => Kind::Nil,
                     "true" => Kind::Bool(true),
                     "false" => Kind::Bool(false),
-                    s if s.starts_with(':') => Kind::Keyword(s.to_string()),
+                    s if s.starts_with(':') => {
+                        if s.starts_with("::")
+                            && let Some(spans) = &mut self.auto_keywords
+                        {
+                            spans.push(Span {
+                                start,
+                                end: self.pos,
+                            });
+                        }
+                        Kind::Keyword(s.to_string())
+                    }
+
                     s if s.chars().next().is_some_and(|c| c.is_ascii_digit())
                         || s.strip_prefix(['+', '-']).is_some_and(|s| {
                             s.chars().next().is_some_and(|c| c.is_ascii_digit())

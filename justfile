@@ -235,3 +235,8 @@ callables format="pretty": build
 reductions format="pretty": build
     @./target/release/parenox check examples/reductions.clj --format {{quote(format)}}
     @./target/release/parenox check examples/reductions_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check explicit namespace aliases in auto-resolved keywords.
+keyword-aliases format="pretty": build
+    @./target/release/parenox check examples/keyword_aliases.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/keyword_aliases_bad.clj --format {{quote(format)}} || test "$?" -eq 1

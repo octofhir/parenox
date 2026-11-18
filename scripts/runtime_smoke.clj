@@ -853,3 +853,26 @@
 (assert (= 2 (count (seq "🚀"))))
 (assert (char? (nth (seq "🚀") 1)))
 (println "Clojure/JVM maps, sets and string sequence views: 8 assertions passed")
+
+(load-file "examples/keyword_aliases.clj")
+(assert (= :demo.schema/status (demo.keyword-aliases/status-key)))
+(assert (= :demo.keyword-aliases/ready (demo.keyword-aliases/local-key)))
+(assert (= :invalid-token
+           (try
+             (load-file "examples/keyword_aliases_bad.clj")
+             (catch clojure.lang.Compiler$CompilerException e
+               (when (clojure.string/includes? (ex-message (ex-cause e))
+                                               "Invalid token: ::missing/status")
+                 :invalid-token)))))
+(doseq [source ["#?(:clj :ok :cljs ::missing/status)" "::clojure.core/status"]]
+  (assert (= :invalid-token
+             (try
+               (read-string {:read-cond :allow} source)
+               (catch RuntimeException e
+                 (when (clojure.string/includes? (ex-message e) "Invalid token")
+                   :invalid-token))))))
+(assert (= :invalid-edn
+           (try
+             (clojure.edn/read-string "::status")
+             (catch RuntimeException _ :invalid-edn))))
+(println "Clojure/JVM keyword aliases: 6 assertions passed")

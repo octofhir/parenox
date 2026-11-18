@@ -158,6 +158,11 @@ not affect resolution. An alias created with `:as-alias` can qualify keywords
 without creating a namespace load dependency. Competing declarations of the
 same spec key in separate files report an analysis gap.
 
+Auto-resolved keywords such as `::schema/name` require a declared alias.
+The checker validates these tokens in discarded forms and inactive reader
+branches. Externs use ordinary EDN keywords, such as `:schema/name`.
+Run `just keyword-aliases` for examples.
+
 `:refer-clojure` supports `:exclude`, `:only` and nonoverlapping `:rename`
 mappings. Qualified calls to `clojure.core` continue to resolve when an
 unqualified name is excluded.

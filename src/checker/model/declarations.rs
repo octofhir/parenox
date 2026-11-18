@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Globals;
 use crate::Diagnostic;
-use crate::reader::{Form, Kind, Span};
+use crate::reader::{Form, Kind, ReadError, Span};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Names {
@@ -69,6 +69,7 @@ pub(super) struct SpecDeclaration {
 #[derive(Default)]
 pub(crate) struct Declarations {
     pub(super) names: Names,
+    namespace_end: Option<usize>,
     pub dependencies: Vec<String>,
     pub(super) all_refers: BTreeSet<String>,
     pub(super) specs: BTreeMap<String, SpecDeclaration>,
@@ -110,6 +111,7 @@ impl Declarations {
                     model.error("PNX9001", form.span, "Only one ns declaration is supported");
                 }
                 seen_ns = true;
+                model.namespace_end = Some(form.span.end.offset);
                 model.read_ns(xs, form.span, globals);
             }
         }
@@ -164,6 +166,24 @@ impl Declarations {
             }
         }
         model
+    }
+
+    pub fn validate_keyword_aliases(&self, source: &str, spans: &[Span]) -> Result<(), ReadError> {
+        for &span in spans {
+            let token = &source[span.start.offset..span.end.offset];
+            if let Some((alias, _)) = token[2..].split_once('/')
+                && (self.namespace_end.is_none_or(|end| span.start.offset < end)
+                    || !self.names.aliases.contains_key(alias))
+            {
+                return Err(ReadError {
+                    span,
+                    message: format!(
+                        "No namespace alias {alias} for auto-resolved keyword {token}"
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn read_ns(&mut self, xs: &[Form], span: Span, globals: Option<&Globals>) {
