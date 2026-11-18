@@ -117,6 +117,47 @@ fn regex_literals_preserve_pattern_escapes_instead_of_decoding_strings() {
 }
 
 #[test]
+fn string_escapes_preserve_jvm_utf16_values_and_original_text() {
+    let source = r#"["\uD83D\uDE03!" "a\uD800😃\n"]"#;
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_lossless(source, &parsed);
+    let Some([paired, unpaired]) = parsed.forms[0].vector() else {
+        panic!("{:?}", parsed.forms);
+    };
+    assert!(matches!(&paired.kind, Kind::String(text) if text == "😃!"));
+    assert!(matches!(&unpaired.kind, Kind::Utf16String(units)
+        if units == &[0x0061, 0xd800, 0xd83d, 0xde03, 0x000a]));
+    assert!(reader::validate_edn(source).is_ok());
+    assert!(reader::validate_edn(r#""\u12x4""#).is_err());
+    assert!(reader::read(r#"#{"\uD800" "\ud800"}"#).is_err());
+    assert!(reader::read(r#"#{"\uD83D\uDE03" "😃"}"#).is_err());
+}
+
+#[test]
+fn symbolic_numbers_use_the_same_reader_in_code_and_edn() {
+    let source = "[##Inf ##-Inf ## ; comment\n #_discard NaN]";
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_lossless(source, &parsed);
+    assert!(reader::validate_edn(source).is_ok());
+    let numbers = parsed.forms[0]
+        .vector()
+        .unwrap()
+        .iter()
+        .map(|form| match form.kind {
+            Kind::SymbolicNumber(number) => number.spelling(),
+            _ => panic!("{form:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(numbers, ["##Inf", "##-Inf", "##NaN"]);
+    for invalid in ["##+Inf", "##NaN#extra", "##[NaN]", "#{##NaN ## NaN}"] {
+        assert!(reader::read(invalid).is_err(), "{invalid}");
+        assert!(reader::validate_edn(invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
 fn deref_and_var_quote_keep_source_and_expand_to_jvm_reader_forms() {
     let source = "@ #_ignored app/state\n#' ; reference\n app/read-state";
     let parsed = reader::parse(source);

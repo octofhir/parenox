@@ -326,7 +326,7 @@ impl Declarations {
         let mut has_core_clause = false;
         for clause in xs.iter().skip(2) {
             // ns docstrings and attr-maps are declarations, not executable forms.
-            if matches!(clause.kind, Kind::String(_) | Kind::Map(_)) {
+            if clause.is_string() || matches!(clause.kind, Kind::Map(_)) {
                 continue;
             }
             let Kind::List(items) = &clause.without_metadata().kind else {

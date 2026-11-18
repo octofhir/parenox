@@ -1,5 +1,6 @@
 //! Canonical inert EDN for literal vars, independent of their inferred type.
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::sync::Arc;
 
 use super::{ExternalDeclaration, Globals, Model, Names};
@@ -68,7 +69,7 @@ impl Model {
             let (name, _) = self.exports.literals.get_key_value(&qualified)?;
             let initializer = match &parts[2..] {
                 [value] => value,
-                [doc, value] if matches!(doc.kind, Kind::String(_)) => value,
+                [doc, value] if doc.is_string() => value,
                 _ => return None,
             };
             let encoded = if super::is_modeled_call(name) {
@@ -100,8 +101,17 @@ fn encode(form: &Form, source: &str, names: &Names, context: Context) -> Encoded
         Kind::Nil => "nil".into(),
         Kind::Bool(value) => value.to_string(),
         Kind::Number => source[form.span.start.offset..form.span.end.offset].to_owned(),
+        Kind::SymbolicNumber(number) => number.spelling().into(),
         Kind::String(value) => {
             serde_json::to_string(value).expect("string serialization is infallible")
+        }
+        Kind::Utf16String(units) => {
+            let mut edn = String::from("\"");
+            for unit in units {
+                write!(edn, "\\u{unit:04x}").expect("writing to String is infallible");
+            }
+            edn.push('"');
+            edn
         }
         Kind::Character(value) => format!("\\u{:04x}", u32::from(*value)),
         Kind::Keyword(value) => names.key(value),

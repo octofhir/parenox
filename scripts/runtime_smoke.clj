@@ -64,6 +64,17 @@
 (assert (= 42 ((eval '(fn [^String x] x)) 42)))
 (println "Clojure/JVM metadata and characters: 8 assertions passed")
 
+(require '[clojure.edn :as edn])
+(doseq [read [read-string edn/read-string]]
+  (assert (= [0xd83d 0xde03 33]
+             (mapv int (read "\"\\uD83D\\uDE03!\""))))
+  (assert (= [97 0xd800 0xd83d 0xde03 10]
+             (mapv int (read "\"a\\uD800😃\\n\""))))
+  (assert (= [Double/POSITIVE_INFINITY Double/NEGATIVE_INFINITY]
+             (read "[##Inf ##-Inf]")))
+  (assert (Double/isNaN (read "## ; comment\n #_discard NaN"))))
+(println "Clojure/JVM and EDN strings and symbolic numbers: 8 assertions passed")
+
 (println "Runtime reference:" (clojure-version))
 (load-file "examples/portable.cljc")
 (assert (= "ALICE" (demo.portable/label "Alice")))

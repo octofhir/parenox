@@ -16,7 +16,7 @@ impl Reader<'_> {
             self.source
                 .as_bytes()
                 .get(self.pos.offset..self.pos.offset.saturating_add(2)),
-            Some([b'#', b'(' | b'"' | b':' | b'#' | b'^' | b'\''])
+            Some([b'#', b'(' | b'"' | b':' | b'^' | b'\''])
         )
     }
 
@@ -24,7 +24,6 @@ impl Reader<'_> {
         self.bump(); // #
         let kind = match self.peek() {
             Some(':') => self.edn_map(start)?,
-            Some('#') => self.edn_symbolic_value(start)?,
             Some('^') => {
                 self.bump();
                 self.metadata_form(start)?
@@ -60,17 +59,5 @@ impl Reader<'_> {
         }
         // Validation needs the map's syntax. Its keys are never resolved or evaluated.
         Ok(self.form()?.kind)
-    }
-
-    fn edn_symbolic_value(&mut self, start: Position) -> Result<Kind, ReadError> {
-        self.bump(); // #
-        let value_start = self.pos.offset;
-        while self.peek().is_some_and(|ch| !Self::token_boundary(ch)) {
-            self.bump();
-        }
-        match &self.source[value_start..self.pos.offset] {
-            "Inf" | "-Inf" | "NaN" => Ok(Kind::Number),
-            _ => Err(self.error(start, "Unknown EDN symbolic value")),
-        }
     }
 }

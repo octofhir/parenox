@@ -1,7 +1,7 @@
 //! Detect reader-level duplicates whose equality is known from inert syntax.
 use std::collections::BTreeSet;
 
-use super::{Form, Kind, ReadError};
+use super::{Form, Kind, ReadError, SymbolicNumber};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Atom<'a> {
@@ -9,7 +9,9 @@ enum Atom<'a> {
     Bool(bool),
     Character(char),
     Number(&'a str),
+    SymbolicNumber(SymbolicNumber),
     String(&'a str),
+    Utf16String(&'a [u16]),
     Symbol(&'a str),
     Keyword(&'a str),
 }
@@ -26,7 +28,9 @@ pub(super) fn check_set(values: &[Form], source: &str) -> Result<(), ReadError> 
             Kind::Bool(value) => Atom::Bool(*value),
             Kind::Character(value) => Atom::Character(*value),
             Kind::Number => Atom::Number(&source[value.span.start.offset..value.span.end.offset]),
+            Kind::SymbolicNumber(value) => Atom::SymbolicNumber(*value),
             Kind::String(value) => Atom::String(value),
+            Kind::Utf16String(value) => Atom::Utf16String(value),
             Kind::Symbol(value) | Kind::AnonymousArgument(value) => Atom::Symbol(value),
             Kind::Keyword(value) => Atom::Keyword(value),
             _ => continue,

@@ -337,7 +337,9 @@ impl Checker<'_> {
                 };
                 Value::new(ty)
             }
+            Kind::SymbolicNumber(_) => Value::new(Type::Number),
             Kind::String(s) => Value::new(Type::Str(s.clone())),
+            Kind::Utf16String(_) => Value::new(Type::String),
             Kind::Regex => Value::new(Type::Pattern),
             Kind::Character(c) => Value::new(Type::Char(*c)),
             Kind::Metadata(_, target) => self.infer_position(target, env, tail),

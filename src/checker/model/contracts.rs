@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 
 pub(super) fn function_parts(tail: &[Form]) -> (&[Form], impl Iterator<Item = &[Form; 2]> + Clone) {
-    let tail = if matches!(tail.first().map(|form| &form.kind), Some(Kind::String(_))) {
+    let tail = if tail.first().is_some_and(Form::is_string) {
         &tail[1..]
     } else {
         tail

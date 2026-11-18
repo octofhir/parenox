@@ -130,6 +130,31 @@ fn exported_data_keeps_lists_symbols_and_exact_numbers_without_executing_them() 
 }
 
 #[test]
+fn exported_literals_round_trip_nonfinite_numbers_and_jvm_strings() {
+    let library = Source {
+        path: "data.clj",
+        source: r#"(ns literal)
+            (def inf ## ; fmt
+                  Inf)
+            (def marker "\uD800")
+            (defn ready {:t/sig '[:-> string?]} [] "\uDFFF")
+            (defn amount {:t/sig '[:-> number?]} [] ##NaN)"#,
+    };
+    let snapshot = export(library);
+    assert!(
+        snapshot.contains("literal/inf {:value ##Inf}"),
+        "{snapshot}"
+    );
+    assert!(
+        snapshot.contains(r#"literal/marker {:value "\ud800"}"#),
+        "{snapshot}"
+    );
+    assert!(parenox::reader::validate_edn(&snapshot).is_ok());
+    let result = Session::default().validate_externs(&[library], &[externs(&snapshot)]);
+    assert!(result.ok && result.complete, "{result:#?}");
+}
+
+#[test]
 fn changing_or_removing_an_extern_literal_invalidates_only_affected_callers() {
     let app = Source {
         path: "callers.clj",

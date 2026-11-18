@@ -63,7 +63,7 @@ impl Model {
                 None
             }
             [value] => Some(value),
-            [doc, value] if matches!(doc.kind, Kind::String(_)) => Some(value),
+            [doc, value] if doc.is_string() => Some(value),
             _ => {
                 self.error(
                     "PNX1001",
@@ -119,7 +119,9 @@ fn literal(form: &Form) -> bool {
         Kind::Nil
         | Kind::Bool(_)
         | Kind::Number
+        | Kind::SymbolicNumber(_)
         | Kind::String(_)
+        | Kind::Utf16String(_)
         | Kind::Character(_)
         | Kind::Keyword(_)
         | Kind::Quote(_) => true,

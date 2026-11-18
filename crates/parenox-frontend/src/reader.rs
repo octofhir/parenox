@@ -36,9 +36,12 @@ pub enum Kind {
     AnonymousArgument(String),
     Keyword(String),
     String(String),
+    /// A JVM string with at least one unpaired UTF-16 surrogate.
+    Utf16String(Vec<u16>),
     Regex,
     Character(char),
     Number,
+    SymbolicNumber(SymbolicNumber),
     Bool(bool),
     Nil,
     List(Vec<Form>),
@@ -49,7 +52,27 @@ pub enum Kind {
     Quote(Box<Form>),
     Metadata(Box<Form>, Box<Form>),
     Tagged(Box<Form>, Box<Form>),
-    Conditional { splicing: bool, form: Box<Form> },
+    Conditional {
+        splicing: bool,
+        form: Box<Form>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SymbolicNumber {
+    PositiveInfinity,
+    NegativeInfinity,
+    NaN,
+}
+
+impl SymbolicNumber {
+    pub fn spelling(self) -> &'static str {
+        match self {
+            Self::PositiveInfinity => "##Inf",
+            Self::NegativeInfinity => "##-Inf",
+            Self::NaN => "##NaN",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -99,6 +122,10 @@ impl Form {
             Kind::Keyword(s) => Some(s),
             _ => None,
         }
+    }
+
+    pub fn is_string(&self) -> bool {
+        matches!(self.kind, Kind::String(_) | Kind::Utf16String(_))
     }
 
     pub fn vector(&self) -> Option<&[Form]> {
@@ -499,13 +526,14 @@ impl<'a> Reader<'a> {
                                 Kind::Quote(_) => SyntaxKind::Quote,
                                 Kind::Symbol(_) | Kind::AnonymousArgument(_) => SyntaxKind::Symbol,
                                 Kind::Keyword(_) => SyntaxKind::Keyword,
-                                Kind::String(_) => SyntaxKind::String,
+                                Kind::String(_) | Kind::Utf16String(_) => SyntaxKind::String,
                                 Kind::Regex => SyntaxKind::Regex,
                                 Kind::Character(_) => SyntaxKind::Character,
                                 Kind::Metadata(_, _) => SyntaxKind::Metadata,
                                 Kind::Tagged(_, _) => SyntaxKind::Tagged,
                                 Kind::Conditional { .. } => SyntaxKind::Conditional,
                                 Kind::Number => SyntaxKind::Number,
+                                Kind::SymbolicNumber(_) => SyntaxKind::SymbolicNumber,
                                 Kind::Bool(_) => SyntaxKind::Boolean,
                                 Kind::Nil => SyntaxKind::Nil,
                             },
@@ -544,7 +572,7 @@ impl<'a> Reader<'a> {
                 }
                 Kind::Map(xs)
             }
-            Some('"') => Kind::String(self.string(start)?),
+            Some('"') => self.string(start)?,
             Some('\\') => Kind::Character(self.character(start)?),
             Some('^') => {
                 self.token(SyntaxKind::MetadataMark, start);
@@ -561,6 +589,7 @@ impl<'a> Reader<'a> {
                 self.bump();
                 return self.prefix_call(start, SyntaxKind::VarQuoteMark, "var");
             }
+            Some('#') if self.peek() == Some('#') => self.symbolic_number(start)?,
             Some('#') if self.peek() == Some('(') => self.anonymous_function(start)?,
             Some('#') if self.peek() == Some('"') => {
                 self.bump();
@@ -620,6 +649,19 @@ impl<'a> Reader<'a> {
         let values = self.collection('}', start)?;
         uniqueness::check_set(&values, self.source)?;
         Ok(self.form_item(start, Kind::Set(values)))
+    }
+
+    fn symbolic_number(&mut self, start: Position) -> Result<Kind, ReadError> {
+        self.bump(); // #
+        self.token(SyntaxKind::DispatchMark, start);
+        let value = self.without_comments(Self::form)?;
+        let number = match value.symbol() {
+            Some("Inf") => SymbolicNumber::PositiveInfinity,
+            Some("-Inf") => SymbolicNumber::NegativeInfinity,
+            Some("NaN") => SymbolicNumber::NaN,
+            _ => return Err(self.error(start, "Unknown symbolic value")),
+        };
+        Ok(Kind::SymbolicNumber(number))
     }
 
     fn atom(&mut self, start: Position) -> Result<Item, ReadError> {
@@ -729,9 +771,10 @@ impl<'a> Reader<'a> {
             Kind::Map(_) => None,
             Kind::Conditional { .. } if matches!(self.conditionals, Conditionals::Preserve) => None,
             Kind::Keyword(key) => Some((key.clone(), true)),
-            Kind::Symbol(_) | Kind::AnonymousArgument(_) | Kind::String(_) => {
-                Some((":tag".into(), false))
-            }
+            Kind::Symbol(_)
+            | Kind::AnonymousArgument(_)
+            | Kind::String(_)
+            | Kind::Utf16String(_) => Some((":tag".into(), false)),
             Kind::Vector(_) if !self.edn => Some((":param-tags".into(), false)),
             _ => {
                 return Err(self.error(
@@ -985,39 +1028,60 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn string(&mut self, start: Position) -> Result<String, ReadError> {
-        let mut value = String::new();
+    fn string(&mut self, start: Position) -> Result<Kind, ReadError> {
+        let mut text = String::new();
+        let mut utf16 = Vec::new();
         loop {
-            match self.bump() {
-                Some('"') => return Ok(value),
-                Some('\\') => {
-                    match self.bump() {
-                        Some('n') => value.push('\n'),
-                        Some('r') => value.push('\r'),
-                        Some('t') => value.push('\t'),
-                        Some('b') => value.push('\u{0008}'),
-                        Some('f') => value.push('\u{000c}'),
-                        Some('"') => value.push('"'),
-                        Some('\\') => value.push('\\'),
-                        Some('u') => {
-                            let mut digits = String::new();
-                            for _ in 0..4 {
-                                digits.push(self.bump().ok_or_else(|| {
-                                    self.error(start, "Incomplete Unicode escape")
-                                })?);
-                            }
-                            let ch = u32::from_str_radix(&digits, 16)
-                                .ok()
-                                .and_then(char::from_u32)
-                                .ok_or_else(|| self.error(start, "Invalid Unicode escape"))?;
-                            value.push(ch);
-                        }
-                        _ => return Err(self.error(start, "Invalid string escape")),
-                    }
+            let ch = match self.bump() {
+                Some('"') if utf16.is_empty() => return Ok(Kind::String(text)),
+                Some('"') => {
+                    return Ok(String::from_utf16(&utf16)
+                        .map(Kind::String)
+                        .unwrap_or_else(|_| Kind::Utf16String(utf16)));
                 }
-                Some(c) => value.push(c),
+                Some('\\') => match self.bump() {
+                    Some('n') => '\n',
+                    Some('r') => '\r',
+                    Some('t') => '\t',
+                    Some('b') => '\u{0008}',
+                    Some('f') => '\u{000c}',
+                    Some('"') => '"',
+                    Some('\\') => '\\',
+                    Some('u') => {
+                        let unit = self.unicode_escape(start)?;
+                        let Some(ch) = char::from_u32(unit.into()) else {
+                            if utf16.is_empty() {
+                                utf16.extend(text.encode_utf16());
+                            }
+                            utf16.push(unit);
+                            continue;
+                        };
+                        ch
+                    }
+                    _ => return Err(self.error(start, "Invalid string escape")),
+                },
+                Some(ch) => ch,
                 None => return Err(self.error(start, "Unterminated string")),
+            };
+            if utf16.is_empty() {
+                text.push(ch);
+            } else {
+                utf16.extend_from_slice(ch.encode_utf16(&mut [0; 2]));
             }
         }
+    }
+
+    fn unicode_escape(&mut self, start: Position) -> Result<u16, ReadError> {
+        let mut unit = 0;
+        for _ in 0..4 {
+            let ch = self
+                .bump()
+                .ok_or_else(|| self.error(start, "Incomplete Unicode escape"))?;
+            let digit = ch
+                .to_digit(16)
+                .ok_or_else(|| self.error(start, "Invalid Unicode escape"))?;
+            unit = unit * 16 + digit as u16;
+        }
+        Ok(unit)
     }
 }

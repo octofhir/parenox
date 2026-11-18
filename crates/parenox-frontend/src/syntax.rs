@@ -46,6 +46,7 @@ pub enum SyntaxKind {
     VarQuote,
     DerefMark,
     VarQuoteMark,
+    SymbolicNumber,
     ErrorToken,
 }
 
@@ -66,6 +67,7 @@ impl SyntaxKind {
                 | Self::Metadata
                 | Self::Tagged
                 | Self::Conditional
+                | Self::SymbolicNumber
                 | Self::Error
         )
     }

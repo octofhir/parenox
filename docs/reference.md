@@ -440,7 +440,10 @@ when encountered in a checked function.
 
 Repeated simple values in set literals report a reader error at the repeated
 element. This check compares decoded strings and characters, symbols, keywords,
-booleans, nil, and identical numeric spellings.
+booleans, nil, symbolic numbers and identical ordinary numeric spellings.
+Clojure and EDN support `##Inf`, `##-Inf` and `##NaN`. String escapes preserve
+JVM UTF-16. Unpaired surrogates retain their code units for literal export,
+and the checker gives such values the general string type.
 
 Regex literals and `re-pattern` produce a JVM `java.util.regex.Pattern`,
 which can appear in a contract. `clojure.string/split` returns a vector
