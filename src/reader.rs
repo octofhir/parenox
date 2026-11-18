@@ -164,21 +164,24 @@ pub(crate) fn read_for_check(
     source: &str,
     conditionals: Conditionals<'_>,
     comment_marker: Option<&'static str>,
-) -> Result<CheckRead, ReadError> {
+) -> (CheckRead, Option<ReadError>) {
     let mut reader = Reader::new(source, false, conditionals);
     reader.auto_keywords = Some(Vec::new());
     reader.comment_capture = comment_marker.map(|marker| CommentCapture {
         marker,
         comments: Vec::new(),
     });
-    let forms = reader.read_all()?;
-    Ok(CheckRead {
-        forms,
-        auto_keywords: reader.auto_keywords.unwrap(),
-        comments: reader
-            .comment_capture
-            .map_or_else(Vec::new, |capture| capture.comments),
-    })
+    let (forms, error) = reader.read_prefix();
+    (
+        CheckRead {
+            forms,
+            auto_keywords: reader.auto_keywords.unwrap(),
+            comments: reader
+                .comment_capture
+                .map_or_else(Vec::new, |capture| capture.comments),
+        },
+        error,
+    )
 }
 
 #[derive(Debug)]
@@ -267,11 +270,19 @@ impl<'a> Reader<'a> {
     }
 
     fn read_all(&mut self) -> Result<Vec<Form>, ReadError> {
+        let (forms, error) = self.read_prefix();
+        error.map_or(Ok(forms), Err)
+    }
+
+    fn read_prefix(&mut self) -> (Vec<Form>, Option<ReadError>) {
         let mut forms = Vec::new();
-        while let Some(form) = self.next_form()? {
-            forms.push(form);
+        loop {
+            match self.next_form() {
+                Ok(Some(form)) => forms.push(form),
+                Ok(None) => return (forms, None),
+                Err(error) => return (forms, Some(error)),
+            }
         }
-        Ok(forms)
     }
 
     fn next_form(&mut self) -> Result<Option<Form>, ReadError> {

@@ -98,6 +98,8 @@ Use [lambdaisland/uri at `e439c2ca`](https://github.com/lambdaisland/uri/tree/e4
 2. Misspell that var in an unsaved editor buffer, verify the diagnostic and its disappearance after a correction, and compare the result with a clean CLI check of the same text.
 3. Run the upstream JVM test suite. Change one expectation in a temporary copy and verify that the failure points to the correct test and source line.
 
+The first editor trial used Neovim 0.12.5 with its built-in LSP client. The call in `src/lambdaisland/uri.cljc` at line 134 resolves to `src/lambdaisland/uri/normalize.cljc` at line 82. Hover identifies the qualified var, and an unfinished form appended in the editor produces a reader diagnostic while the earlier reference still resolves. The project has no checked contract for this var, so the hover reports unavailable type information.
+
 ### Performance and correctness
 
 - Run `just agent-loop` for regressions in the existing incremental path. Verify that warm diagnostics and definition targets match a clean session after source, alias and dependency changes. Check that CLI and editor diagnostics agree on the same revision and that stale editor results are discarded.

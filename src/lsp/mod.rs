@@ -132,7 +132,7 @@ fn request(
             id,
             json!({"capabilities": {
             "positionEncoding":"utf-16", "textDocumentSync":{"openClose":true,"change":1},
-            "definitionProvider":true
+            "definitionProvider":true, "hoverProvider":true
         }, "serverInfo":{"name":"parenox", "version":env!("CARGO_PKG_VERSION")}}),
         );
     }
@@ -146,6 +146,10 @@ fn request(
         }
         "textDocument/definition" => match serde_json::from_value(params) {
             Ok(params) => workspace.definition(params).unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/hover" => match serde_json::from_value(params) {
+            Ok(params) => workspace.hover(params).unwrap_or(Value::Null),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         _ => return send_error(output, id, -32601, "Method not found"),

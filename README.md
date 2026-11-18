@@ -493,8 +493,10 @@ loads one workspace using the same `parenox.edn` and `deps.edn` settings as
 
 The server publishes Parenox diagnostics for open `.clj` and `.cljc` files and
 supports go-to-definition for qualified source vars, including namespace aliases.
-Unsaved buffers participate in checks and navigation. Positions use UTF-16 and
-the server requests full document synchronization from the editor.
+Hover on those references shows the checked function signature when available
+and its contract source. Unsaved buffers participate in checks and navigation.
+Completed top-level forms before a reader error remain available for navigation.
+Positions use UTF-16 and the server requests full document synchronization.
 
 ## Agent sessions
 

@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use parenox::{Session, Source};
+use parenox::{Session, Source, output::contract_note};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -179,9 +179,7 @@ impl Workspace {
     }
 
     pub fn definition(&self, params: TextQuery) -> Option<Value> {
-        let path = source_path(&params.text_document.uri)?;
-        let document = self.documents.get(&path)?;
-        let offset = Lines::new(&document.source).offset(params.position)?;
+        let (path, offset) = self.query_offset(params)?;
         let target = self.session.definition(&path, offset)?;
         let document = self.documents.get(&target.path)?;
         let range = Lines::new(&document.source).range(target.span)?;
@@ -190,6 +188,26 @@ impl Workspace {
             .as_ref()
             .map_or_else(|| file_uri(&target.path), |editor| editor.uri.clone());
         Some(json!({"uri": uri, "range": range}))
+    }
+
+    pub fn hover(&self, params: TextQuery) -> Option<Value> {
+        let (path, offset) = self.query_offset(params)?;
+        let info = self.session.var_at(&path, offset)?;
+        let mut lines = vec![info.name];
+        lines.extend(info.signatures);
+        if let Some(contract) = &info.contract {
+            lines.push(contract_note(contract));
+        } else {
+            lines.push("Checked type information unavailable".into());
+        }
+        Some(json!({"contents":{"kind":"plaintext","value":lines.join("\n")}}))
+    }
+
+    fn query_offset(&self, params: TextQuery) -> Option<(String, usize)> {
+        let path = source_path(&params.text_document.uri)?;
+        let document = self.documents.get(&path)?;
+        let offset = Lines::new(&document.source).offset(params.position)?;
+        Some((path, offset))
     }
 
     fn check(&mut self, output: &mut impl Write) -> io::Result<()> {

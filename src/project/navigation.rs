@@ -1,9 +1,10 @@
 //! Source queries over the current project snapshot.
 use serde::Serialize;
 
+use crate::ContractOrigin;
 use crate::reader::{Form, Kind, Span};
 
-use super::Session;
+use super::{FileCache, Session};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Definition {
@@ -11,10 +12,55 @@ pub struct Definition {
     pub span: Span,
 }
 
+pub struct VarInfo {
+    pub name: String,
+    pub signatures: Vec<String>,
+    pub contract: Option<ContractOrigin>,
+}
+
+struct ResolvedVar<'a> {
+    namespace: &'a str,
+    name: &'a str,
+    path: &'a str,
+    source: &'a FileCache,
+    span: Span,
+}
+
 impl Session {
     /// Resolves a qualified source var at a UTF-8 byte offset in the latest snapshot.
     /// Ambiguous namespaces and references outside successfully read forms have no target.
     pub fn definition(&self, path: &str, offset: usize) -> Option<Definition> {
+        let target = self.resolve_var(path, offset)?;
+        Some(Definition {
+            path: target.path.into(),
+            span: target.span,
+        })
+    }
+
+    /// Describes a qualified source var and any signature from the checked declaration model.
+    pub fn var_at(&self, path: &str, offset: usize) -> Option<VarInfo> {
+        let target = self.resolve_var(path, offset)?;
+        let name = format!("{}/{}", target.namespace, target.name);
+        let contract = target
+            .source
+            .model
+            .as_ref()
+            .and_then(|model| model.functions.get(&name))
+            .and_then(|function| function.contract.as_ref());
+        Some(VarInfo {
+            name,
+            signatures: contract.map_or_else(Vec::new, |contract| {
+                contract
+                    .signatures
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            }),
+            contract: contract.map(|contract| contract.origin.as_ref().clone()),
+        })
+    }
+
+    fn resolve_var(&self, path: &str, offset: usize) -> Option<ResolvedVar<'_>> {
         let file = self
             .files
             .get(path)
@@ -22,23 +68,26 @@ impl Session {
         if !file.source.is_char_boundary(offset) {
             return None;
         }
-        let declarations = file.declarations.as_ref()?;
-        let name = symbol_at(&file.forms, offset)?;
+        let (declarations, forms) = file.navigation_source()?;
+        let name = symbol_at(forms, offset)?;
         let (namespace, local) = declarations.qualified_reference(name)?;
         let mut providers = self.files.iter().filter_map(|(path, candidate)| {
             if candidate.snapshot != self.snapshot {
                 return None;
             }
-            let provider = candidate.declarations.as_ref()?;
-            (provider.namespace() == namespace).then_some((path, candidate, provider))
+            let (provider, forms) = candidate.navigation_source()?;
+            (provider.namespace() == namespace).then_some((path, candidate, provider, forms))
         });
-        let (target_path, candidate, provider) = providers.next()?;
+        let (target_path, candidate, provider, forms) = providers.next()?;
         if providers.next().is_some() {
             return None;
         }
-        let span = provider.source_var(&candidate.forms, local, target_path != path)?;
-        Some(Definition {
-            path: target_path.clone(),
+        let span = provider.source_var(forms, local, target_path != path)?;
+        Some(ResolvedVar {
+            namespace,
+            name: local,
+            path: target_path,
+            source: candidate,
             span,
         })
     }

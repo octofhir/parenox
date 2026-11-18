@@ -1,7 +1,7 @@
 mod extern_export;
 mod navigation;
 
-pub use navigation::Definition;
+pub use navigation::{Definition, VarInfo};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -96,6 +96,7 @@ struct FileCache {
     parse_error: Option<Diagnostic>,
     suppressions: Suppressions,
     declarations: Option<Declarations>,
+    navigation_prefix: Option<Box<NavigationPrefix>>,
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
     interface: Option<InterfaceKey>,
@@ -106,6 +107,11 @@ struct FileCache {
 struct CheckedFunction {
     ranges: Vec<Span>,
     diagnostics: Vec<Diagnostic>,
+}
+
+struct NavigationPrefix {
+    forms: Vec<Form>,
+    declarations: Declarations,
 }
 
 impl CheckedFunction {
@@ -151,34 +157,34 @@ impl FileCache {
         self.parse_error = None;
         self.suppressions = Suppressions::default();
         self.declarations = None;
+        self.navigation_prefix = None;
         let conditionals = if kind == FileKind::Source && path.ends_with(".cljc") {
             reader::Conditionals::Select(":clj")
         } else {
             reader::Conditionals::Reject
         };
-        let parsed = reader::read_for_check(
+        let (mut read, read_error) = reader::read_for_check(
             source,
             conditionals,
             (kind == FileKind::Source && source.contains(MARKER)).then_some(MARKER),
-        )
-        .and_then(|read| {
-            let declarations = if kind == FileKind::Source {
+        );
+        let parsed = match read_error {
+            Some(error) => Err(error),
+            None if kind == FileKind::Source => {
                 let declarations = Declarations::read(&read.forms);
-                declarations.validate_keyword_aliases(source, &read.auto_keywords)?;
-                Some(declarations)
-            } else {
-                if let Some(&span) = read.auto_keywords.first() {
-                    return Err(reader::ReadError {
-                        span,
-                        message: "Auto-resolved keywords are invalid in EDN externs".into(),
-                    });
-                }
-                None
-            };
-            Ok((read, declarations))
-        });
+                declarations
+                    .validate_keyword_aliases(source, &read.auto_keywords)
+                    .map(|()| Some(declarations))
+            }
+            None => read.auto_keywords.first().map_or(Ok(None), |&span| {
+                Err(reader::ReadError {
+                    span,
+                    message: "Auto-resolved keywords are invalid in EDN externs".into(),
+                })
+            }),
+        };
         match parsed {
-            Ok((read, declarations)) => {
+            Ok(declarations) => {
                 let fingerprint = declarations
                     .as_ref()
                     .and_then(|declarations| declarations.spec_fingerprint(source));
@@ -191,11 +197,30 @@ impl FileCache {
             }
             Err(error) => {
                 self.forms.clear();
+                if kind == FileKind::Source {
+                    read.forms
+                        .retain(|form| form.span.end.offset <= error.span.start.offset);
+                    if !read.forms.is_empty() {
+                        self.navigation_prefix = Some(Box::new(NavigationPrefix {
+                            declarations: Declarations::read(&read.forms),
+                            forms: read.forms,
+                        }));
+                    }
+                }
                 self.spec_fingerprint = None;
                 self.parse_error = Some(error.into());
             }
         }
         true
+    }
+
+    fn navigation_source(&self) -> Option<(&Declarations, &[Form])> {
+        if let Some(declarations) = &self.declarations {
+            Some((declarations, &self.forms))
+        } else {
+            let prefix = self.navigation_prefix.as_deref()?;
+            Some((&prefix.declarations, &prefix.forms))
+        }
     }
 
     fn start_span(&self) -> Span {

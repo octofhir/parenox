@@ -97,6 +97,7 @@ fn editor_uses_aliases_overlays_and_utf16_ranges() {
     .unwrap();
     let app = "(ns shop.test (:require [shop.store :as store]))\r\n(defn label {:t/sig '[:-> string?]} [] (do \"🦀\" (store/title 42)))\r\n";
     let fixed = app.replace("42", "\"id\"");
+    let unfinished = format!("{fixed}(defn unfinished [");
     fs::write(&caller, &fixed).unwrap();
     let line = app.lines().nth(1).unwrap();
     let column = |word| line[..line.find(word).unwrap()].encode_utf16().count();
@@ -105,6 +106,8 @@ fn editor_uses_aliases_overlays_and_utf16_ranges() {
             "textDocument":{"uri":uri(&caller)}, "position":{"line":1,"character":column("store/title")}
         }})
     };
+    let mut hover = query(6);
+    hover["method"] = "textDocument/hover".into();
     let change = |version, text| {
         json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
             "textDocument":{"uri":uri(&caller),"version":version}, "contentChanges":[{"text":text}]
@@ -118,9 +121,12 @@ fn editor_uses_aliases_overlays_and_utf16_ranges() {
             "uri":uri(&caller),"languageId":"clojure","version":1,"text":app
         }}}),
         query(2),
+        hover,
         change(3, &fixed),
-        change(2, &"(ns stale)".into()),
+        change(2, &"(ns stale)".to_owned()),
         query(3),
+        change(4, &unfinished),
+        query(7),
         json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
             "uri":uri(&external),"languageId":"clojure","version":1,"text":"(ns broken"
         }}}),
@@ -130,10 +136,11 @@ fn editor_uses_aliases_overlays_and_utf16_ranges() {
         json!({"jsonrpc":"2.0","id":5,"method":"shutdown"}),
         json!({"jsonrpc":"2.0","method":"exit"}),
     ]);
-    assert_eq!(messages.len(), 11, "{messages:?}");
+    assert_eq!(messages.len(), 14, "{messages:?}");
     assert_eq!(messages[0]["error"]["code"], -32002);
     let capabilities = &messages[1]["result"]["capabilities"];
     assert_eq!(capabilities["definitionProvider"], true);
+    assert_eq!(capabilities["hoverProvider"], true);
     assert_eq!(capabilities["positionEncoding"], "utf-16");
     assert_eq!(capabilities["textDocumentSync"]["change"], 1);
     let reported = &messages[2]["params"];
@@ -144,15 +151,26 @@ fn editor_uses_aliases_overlays_and_utf16_ranges() {
         json!({"line":1,"character":column("42")})
     );
     let target = json!({"uri":uri(&provider),"range":{"start":{"line":1,"character":14},"end":{"line":1,"character":19}}});
-    for index in [3, 5, 7] {
+    for index in [3, 6, 8, 10] {
         assert_eq!(messages[index]["result"], target);
     }
-    assert_eq!(messages[4]["params"]["version"], 3);
-    assert_eq!(messages[4]["params"]["diagnostics"], json!([]));
-    assert_eq!(messages[6]["params"]["diagnostics"][0]["code"], "PNX9000");
-    for index in [8, 9] {
+    let hover = messages[4]["result"]["contents"]["value"].as_str().unwrap();
+    assert!(
+        hover.contains("shop.store/title\n[String -> String]"),
+        "{hover}"
+    );
+    assert!(hover.contains(":t/sig"), "{hover}");
+    assert_eq!(messages[5]["params"]["version"], 3);
+    assert_eq!(messages[5]["params"]["diagnostics"], json!([]));
+    for index in [7, 9] {
+        assert_eq!(
+            messages[index]["params"]["diagnostics"][0]["code"],
+            "PNX9000"
+        );
+    }
+    for index in [11, 12] {
         assert_eq!(messages[index]["params"]["diagnostics"], json!([]));
     }
-    assert_eq!(messages[10]["id"], 5);
-    assert!(messages[10]["result"].is_null());
+    assert_eq!(messages[13]["id"], 5);
+    assert!(messages[13]["result"].is_null());
 }

@@ -8,7 +8,7 @@ use annotate_snippets::renderer::{AnsiColor, Effects, Style};
 
 use crate::{ContractKind, ContractOrigin, Diagnostic, ProjectReport, Report, Stats};
 
-fn contract_note(origin: &ContractOrigin) -> String {
+pub fn contract_note(origin: &ContractOrigin) -> String {
     let kind = match origin.kind {
         ContractKind::TSig => ":t/sig",
         ContractKind::SFdef => "s/fdef",
