@@ -1,6 +1,6 @@
 //! Lookup and presence for keys supplied as expressions.
-use super::super::{Checker, Env, Value};
-use super::{Lookup, narrow_key_presence};
+use super::super::{Checker, Env, Value, calls::call_returns};
+use super::{Lookup, key_presence, narrow_key_presence};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
@@ -21,11 +21,21 @@ impl Checker<'_> {
         allow_index: bool,
     ) -> Option<Type> {
         let key = self.infer(form, env);
+        self.validate_map_key(key, form.span, name, allow_index)
+    }
+
+    pub(super) fn validate_map_key(
+        &mut self,
+        key: Value,
+        span: Span,
+        name: &str,
+        allow_index: bool,
+    ) -> Option<Type> {
         if key.known.is_lookup_key(allow_index) {
             Some(key.known)
         } else {
             self.unsupported(
-                form.span,
+                span,
                 format!(
                     "{name} analysis supports keyword and string keys{}, got {}",
                     if allow_index {
@@ -63,21 +73,34 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         }
-        let target = self.infer(&xs[1], env);
-        let key = self.read_map_key(&xs[2], env, name, true);
-        let default = xs.get(3).map(|form| self.infer(form, env));
-        let Some(key) = key else {
+        let args: Vec<_> = self.eval_args(&xs[1..], env, true).collect();
+        if !call_returns(&args) {
+            return Value::new(Type::Never);
+        }
+        let mut args = args.into_iter();
+        let (target, _) = args.next().unwrap();
+        let (key, key_span) = args.next().unwrap();
+        let default = args.next().map(|(value, _)| value);
+        let Some(key) = self.validate_map_key(key, key_span, name, true) else {
+            self.may_throw();
             return Value::new(Type::Unknown);
         };
+        if target.known.contains_unknown() || key.contains_unknown() {
+            self.may_throw();
+        }
         let presence = env.presence(&xs[1], &xs[2]);
         if required {
-            if presence == Some(false) {
-                self.checked_lookup(&Value::new(Type::Nil), &key, Lookup::Required, xs[2].span)
-            } else {
-                self.checked_lookup(&target, &key, Lookup::Required, xs[2].span)
+            if presence.or_else(|| key_presence(&target.known, &key)) != Some(true) {
+                self.illegal_argument();
             }
+            let target = if presence == Some(false) {
+                Value::new(Type::Nil)
+            } else {
+                target
+            };
+            self.checked_lookup(&target, &key, Lookup::Required, key_span)
         } else {
-            self.lookup_with_presence(&target, &key, default.as_ref(), xs[2].span, presence)
+            self.lookup_with_presence(&target, &key, default.as_ref(), key_span, presence)
         }
     }
 
@@ -92,7 +115,7 @@ impl Checker<'_> {
         match presence {
             Some(true) => self.lookup_value(target, key, Lookup::Required, span),
             Some(false) => default.cloned().unwrap_or_else(|| Value::new(Type::Nil)),
-            None => self.lookup(target, key, default, span),
+            None => self.lookup_default(target, key, default, span),
         }
     }
 

@@ -250,3 +250,8 @@ quoted format="pretty": build
 imports format="pretty": build
     @./target/release/parenox check examples/imports.clj --format {{quote(format)}}
     @./target/release/parenox check examples/imports_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check lookup evaluation order and show a mismatched recovery result.
+lookup-order format="pretty": build
+    @./target/release/parenox check examples/lookup_order.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/lookup_order_bad.clj --format {{quote(format)}} || test "$?" -eq 1

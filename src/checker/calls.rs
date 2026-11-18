@@ -142,12 +142,7 @@ impl<'model> Checker<'model> {
             if self.throws.is_some()
                 && matches!(
                     resolved.as_str(),
-                    "clojure.core/get"
-                        | "clojure.core/req!"
-                        | "clojure.core/contains?"
-                        | "clojure.core/get-in"
-                        | "clojure.core/assoc"
-                        | "clojure.core/assoc-in"
+                    "clojure.core/assoc" | "clojure.core/assoc-in"
                 )
             {
                 self.may_throw();
@@ -290,9 +285,9 @@ impl<'model> Checker<'model> {
                 }
                 let default = args.get(1).map(|(value, _)| value);
                 if is_map {
-                    self.lookup_invocation(function, &args[0].0.known, default, args[0].1)
+                    self.lookup_default(function, &args[0].0.known, default, args[0].1)
                 } else {
-                    self.lookup_invocation(&args[0].0, kind, default, head)
+                    self.lookup_default(&args[0].0, kind, default, head)
                 }
             }
             Type::Union(parts) => parts.iter().fold(Value::new(Type::Never), |result, part| {

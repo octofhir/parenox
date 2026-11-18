@@ -901,3 +901,19 @@
                (when (clojure.string/includes? (ex-message (ex-cause e)) "Date already refers")
                  :collision)))))
 (println "Clojure/JVM class imports: 4 assertions passed")
+
+(load-file "examples/lookup_order.clj")
+(load-file "examples/lookup_order_bad.clj")
+(assert (= :default (demo.lookup-order/eager-default)))
+(assert (= :key (demo.lookup-order/first-path-error)))
+(assert (= :missing (demo.lookup-order/scalar-fallback)))
+(assert (true? (demo.lookup-order/string-index-present?)))
+(assert (= :default (demo.lookup-order-bad/wrong-recovery)))
+(assert (= :target
+           (try (contains? (throw (ex-info "target" {:stage :target}))
+                           (throw (ex-info "key" {:stage :key})))
+                (catch ExceptionInfo e (:stage (ex-data e))))))
+(assert (= "Missing required key: :missing"
+           (try (req! 42 :missing)
+                (catch IllegalArgumentException e (ex-message e)))))
+(println "Clojure/JVM lookup evaluation order: 7 assertions passed")

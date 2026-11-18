@@ -3,7 +3,7 @@ mod keys;
 mod paths;
 use std::collections::BTreeMap;
 
-use super::{Checker, Env, Value, nil_part};
+use super::{Checker, Env, Value, calls::call_returns, nil_part};
 use crate::Diagnostic;
 use crate::reader::{Form, Span};
 use crate::types::{ExtraFields, Field, IndexedItem, MapSlot, MapType, Type};
@@ -66,15 +66,13 @@ impl Checker<'_> {
         self.lookup_value(value, key, Lookup::Optional(default), span)
     }
 
-    pub(super) fn lookup_invocation(
+    pub(super) fn lookup_default(
         &mut self,
         value: &Value,
         key: &Type,
         default: Option<&Value>,
         span: Span,
     ) -> Value {
-        // Keyword invocation delegates to Clojure's default-aware lookup, which
-        // also allows targets without any supported lookup keys.
         self.lookup_value(value, key, Lookup::Path(default), span)
     }
 
@@ -201,7 +199,7 @@ impl Checker<'_> {
                 MapSlot::Undeclared if matches!(mode, Lookup::Presence) => Type::Unknown,
                 MapSlot::Undeclared => self.undeclared_key(key, span),
             },
-            _ if matches!(mode, Lookup::Path(_)) => default_type,
+            _ if matches!(mode, Lookup::Path(_) | Lookup::Required) => default_type,
             _ => {
                 self.error(
                     "PNX2322",
@@ -231,8 +229,15 @@ impl Checker<'_> {
             self.error("PNX2554", span, "contains? requires a target and key");
             return Value::new(Type::Unknown);
         };
-        let value = self.infer(target, env);
-        let Some(key_type) = self.read_map_key(key, env, "contains?", true) else {
+        let args: Vec<_> = self.eval_args(&xs[1..], env, true).collect();
+        if !call_returns(&args) {
+            return Value::new(Type::Never);
+        }
+        let mut args = args.into_iter();
+        let (value, _) = args.next().unwrap();
+        let (key_value, key_span) = args.next().unwrap();
+        let Some(key_type) = self.validate_map_key(key_value, key_span, "contains?", true) else {
+            self.may_throw();
             return Value::new(Type::Unknown);
         };
         Value::new(match env.presence(target, key) {
@@ -243,14 +248,22 @@ impl Checker<'_> {
 
     fn contains_type(&mut self, ty: &Type, key: &Type, span: Span) -> Type {
         match key {
-            Type::Never | Type::Unknown => return key.clone(),
+            Type::Unknown => {
+                self.may_throw();
+                return Type::Unknown;
+            }
+            Type::Never => return Type::Never,
             Type::Union(parts) => {
                 return Type::union(parts.iter().map(|key| self.contains_type(ty, key, span)));
             }
             _ => {}
         }
         match ty {
-            Type::Never | Type::Unknown => ty.clone(),
+            Type::Unknown => {
+                self.may_throw();
+                Type::Unknown
+            }
+            Type::Never => Type::Never,
             Type::Union(parts) => {
                 Type::union(parts.iter().map(|part| self.contains_type(part, key, span)))
             }
@@ -260,16 +273,20 @@ impl Checker<'_> {
             | Type::Set(_)
             | Type::Vector(_)
             | Type::Tuple(_) => key_presence(ty, key).map_or(Type::Boolean, Type::Bool),
+            Type::String | Type::Str(_) if matches!(key, Type::Integer(_)) => {
+                key_presence(ty, key).map_or(Type::Boolean, Type::Bool)
+            }
             _ => {
+                self.illegal_argument();
                 self.error(
                     "PNX2322",
                     span,
                     format!(
-                        "contains? expects a map, set, vector or Nil, got {}",
+                        "contains? expects a map, set, vector, string with an integer index or Nil, got {}",
                         ty.inferred()
                     ),
                 );
-                Type::Unknown
+                Type::Never
             }
         }
     }
@@ -346,7 +363,7 @@ fn key_presence(ty: &Type, key: &Type) -> Option<bool> {
             _ => None,
         },
         Type::Nil => Some(false),
-        Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => {
+        Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) | Type::String | Type::Str(_) => {
             let Type::Integer(index) = key else {
                 return Some(false);
             };

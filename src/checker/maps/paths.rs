@@ -142,17 +142,37 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         }
         let value = self.infer(&xs[1], env);
-        let path = self.key_paths(&xs[2], env, "get-in", false);
-        let default = xs.get(3).map(|form| self.infer(form, env));
+        let target_returns = value.known != Type::Never;
+        let path = self.inspect_path(target_returns, |checker| {
+            checker.key_paths(&xs[2], env, "get-in", false)
+        });
+        let path_returns = target_returns && !matches!(path, Err(Type::Never));
+        let default = xs
+            .get(3)
+            .map(|form| self.infer_path(form, env, path_returns, false));
+        if !path_returns
+            || default
+                .as_ref()
+                .is_some_and(|value| value.known == Type::Never)
+        {
+            return Value::new(Type::Never);
+        }
         match path {
             Ok(path) => {
                 let presence = xs[2]
                     .vector()
                     .and_then(|keys| keys.first())
                     .and_then(|key| env.presence(&xs[1], key));
-                self.lookup_paths(&value, &path, default.as_ref(), presence)
+                let result = self.lookup_paths(&value, &path, default.as_ref(), presence);
+                if result.known.contains_unknown() {
+                    self.may_throw();
+                }
+                result
             }
-            Err(ty) => Value::new(ty),
+            Err(ty) => {
+                self.may_throw();
+                Value::new(ty)
+            }
         }
     }
 

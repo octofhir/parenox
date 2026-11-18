@@ -92,7 +92,7 @@ impl Checker<'_> {
         }
     }
 
-    pub(in crate::checker) fn case_miss(&mut self) {
+    pub(in crate::checker) fn illegal_argument(&mut self) {
         if let Some(throws) = &mut self.throws {
             throws.record(ExceptionClass::IllegalArgumentException, Type::Throwable);
         }

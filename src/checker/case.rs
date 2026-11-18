@@ -73,7 +73,7 @@ impl Checker<'_> {
             types.push(branch.known);
             notes.extend(branch.notes);
         } else if remaining != Type::Never {
-            self.case_miss();
+            self.illegal_argument();
             if !matched && remaining != Type::Unknown {
                 self.error(
                     "PNX2802",
