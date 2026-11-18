@@ -19,6 +19,28 @@ fn assert_lossless(source: &str, parsed: &Parse) {
 }
 
 #[test]
+fn edn_data_checks_distinguish_reader_macros_and_preserve_tags_as_data() {
+    for source in [
+        "#:config{:result #vendor/tag ##NaN}",
+        "^:m x",
+        "'symbol",
+        "#_ignored (quote x)",
+    ] {
+        reader::validate_edn(source).unwrap();
+    }
+    for source in [
+        "[1",
+        "#(inc %)",
+        "#\"regex\"",
+        "#?(:clj true)",
+        "::name",
+        "#::opts{:x 1}",
+    ] {
+        assert!(reader::validate_edn(source).is_err(), "{source}");
+    }
+}
+
+#[test]
 fn cst_retains_comments_commas_crlf_unicode_and_discarded_forms() {
     let source =
         " ; лиса\r\n#_ #_ :ignored :also-ignored\r\n{:name, \"лиса\\u0021\", :tags #{:active}}\n";

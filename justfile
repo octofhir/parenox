@@ -36,11 +36,11 @@ bench-export shape="shared" levels="15" iterations="10":
 
 # Run the Rust tests.
 test:
-    cargo test --locked
+    cargo test --locked --workspace
 
 # Check lints without warnings.
 lint:
-    cargo clippy --locked --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets -- -D warnings
 
 # Format Rust sources.
 fmt:

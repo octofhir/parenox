@@ -3,10 +3,10 @@ pub mod expand;
 mod extern_diff;
 pub mod output;
 mod project;
-pub mod reader;
 mod suppressions;
-pub mod syntax;
 mod types;
+
+pub use parenox_frontend::{reader, syntax};
 
 use reader::Span;
 use serde::Serialize;

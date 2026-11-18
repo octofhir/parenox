@@ -1,19 +1,23 @@
+mod edn;
 mod numbers;
 
-use serde::Serialize;
+pub use edn::validate_edn;
 
 use crate::syntax::{Builder, SyntaxKind, SyntaxNode};
 
-pub(crate) const MAX_NESTING_DEPTH: usize = 128;
+#[doc(hidden)]
+pub const MAX_NESTING_DEPTH: usize = 128;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Position {
     pub offset: usize,
     pub line: usize,
     pub column: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Span {
     pub start: Position,
     pub end: Position,
@@ -144,13 +148,15 @@ pub fn read_with(source: &str, conditionals: Conditionals<'_>) -> Result<Vec<For
     Reader::new(source, false, conditionals).read_all()
 }
 
-pub(crate) struct CheckRead {
+#[doc(hidden)]
+pub struct CheckRead {
     pub forms: Vec<Form>,
     pub auto_keywords: Vec<Span>,
     pub comments: Vec<LineComment>,
 }
 
-pub(crate) struct LineComment {
+#[doc(hidden)]
+pub struct LineComment {
     pub span: Span,
     pub following_offset: usize,
 }
@@ -160,7 +166,8 @@ struct CommentCapture {
     comments: Vec<LineComment>,
 }
 
-pub(crate) fn read_for_check(
+#[doc(hidden)]
+pub fn read_for_check(
     source: &str,
     conditionals: Conditionals<'_>,
     comment_marker: Option<&'static str>,
@@ -243,6 +250,7 @@ struct Reader<'a> {
     comment_capture: Option<CommentCapture>,
     tree: Option<Builder<'a>>,
     conditionals: Conditionals<'a>,
+    edn: bool,
 }
 
 enum Item {
@@ -266,6 +274,7 @@ impl<'a> Reader<'a> {
             comment_capture: None,
             tree: capture.then(|| Builder::new(source)),
             conditionals,
+            edn: false,
         }
     }
 
@@ -465,7 +474,11 @@ impl<'a> Reader<'a> {
         let result = self.skip().and_then(|()| {
             let start = self.pos;
             self.start_node(start);
-            let result = self.form_inner();
+            let result = if self.edn && self.edn_dispatch_prefix() {
+                self.edn_dispatch(start)
+            } else {
+                self.form_inner()
+            };
             if let Some(tree) = &mut self.tree {
                 let conditional = self.source[start.offset..].starts_with("#?");
                 let kind = result.as_ref().map_or(SyntaxKind::Error, |item| {
@@ -533,7 +546,7 @@ impl<'a> Reader<'a> {
                 self.token(SyntaxKind::MetadataMark, start);
                 self.metadata_form(start)?
             }
-            Some('\'') => {
+            Some('\'') if !self.edn => {
                 self.token(SyntaxKind::QuoteMark, start);
                 Kind::Quote(Box::new(self.without_comments(Self::form)?))
             }
@@ -592,6 +605,11 @@ impl<'a> Reader<'a> {
                     "true" => Kind::Bool(true),
                     "false" => Kind::Bool(false),
                     s if s.starts_with(':') => {
+                        if self.edn && s.starts_with("::") {
+                            return Err(
+                                self.error(start, "Auto-resolved keywords are unavailable in EDN")
+                            );
+                        }
                         if s.starts_with("::")
                             && let Some(spans) = &mut self.auto_keywords
                         {
@@ -674,7 +692,7 @@ impl<'a> Reader<'a> {
             Kind::Symbol(_) | Kind::AnonymousArgument(_) | Kind::String(_) => {
                 Some((":tag".into(), false))
             }
-            Kind::Vector(_) => Some((":param-tags".into(), false)),
+            Kind::Vector(_) if !self.edn => Some((":param-tags".into(), false)),
             _ => {
                 return Err(self.error(
                     start,
