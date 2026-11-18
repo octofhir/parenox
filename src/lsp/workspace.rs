@@ -11,12 +11,11 @@ use serde_json::{Value, json};
 use super::protocol::write_message;
 use super::text::{Lines, Position, file_path, file_uri, normalize};
 use crate::cli::ProjectOptions;
-use crate::serve::Snapshot;
-use crate::{is_clojure_source, read_externs, read_source_roots};
+use crate::workspace::{DiskProject, FileSnapshot, is_clojure_source};
 
 pub(super) struct Workspace {
     documents: BTreeMap<String, Document>,
-    externs: Vec<Snapshot>,
+    externs: Vec<FileSnapshot>,
     session: Session,
 }
 
@@ -84,10 +83,10 @@ pub(super) struct TextQuery {
 
 impl Workspace {
     pub fn load(root: &Path, options: &ProjectOptions) -> Result<Self, String> {
-        let mut config = options.load_at(root)?;
-        config.externs.append(&mut config.dependency_externs);
-        let externs = read_externs(&config.externs)?;
-        let documents = read_source_roots(&config.paths)?
+        let mut project = DiskProject::read(options.load_at(root)?)?;
+        project.externs.append(&mut project.dependency_externs);
+        let documents = project
+            .files
             .into_iter()
             .map(|(path, source)| {
                 let path = normalize(Path::new(&path)).to_string_lossy().into_owned();
@@ -103,7 +102,7 @@ impl Workspace {
             .collect();
         Ok(Self {
             documents,
-            externs,
+            externs: project.externs,
             session: Session::default(),
         })
     }
@@ -237,7 +236,7 @@ impl Workspace {
                 source: &doc.source,
             })
             .collect();
-        let externs: Vec<_> = self.externs.iter().map(Snapshot::as_source).collect();
+        let externs: Vec<_> = self.externs.iter().map(FileSnapshot::as_source).collect();
         let report = self.session.check_project_with_externs(&sources, &externs);
         for file in report.files {
             if let Some(document) = self.documents.get_mut(&file.path) {

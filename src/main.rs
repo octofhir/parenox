@@ -4,12 +4,12 @@ mod extern_diff_cli;
 mod lsp;
 mod runtime;
 mod serve;
+mod workspace;
 
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -19,7 +19,7 @@ use serde_json::json;
 
 use cli::{CheckOptions, Cli, Color, Command, DefinitionOptions, Format, ProjectOptions};
 use config::ProjectConfig;
-use serve::Snapshot;
+use workspace::{DiskProject, FileSnapshot, read_source_roots};
 
 fn main() -> ExitCode {
     match run() {
@@ -75,7 +75,10 @@ fn syntax(path: &str) -> Result<u8, String> {
 
 fn definition(options: DefinitionOptions) -> Result<u8, String> {
     let config = options.project.load()?;
-    let files = read_sources(&config.paths)?;
+    let files = read_source_roots(&config.paths)?;
+    if files.is_empty() {
+        return Err("No Clojure source files found".into());
+    }
     let requested = Path::new(&options.file);
     let file = if files.contains_key(&options.file) {
         Some(options.file.as_str())
@@ -125,17 +128,21 @@ impl CheckMode {
     }
 }
 
-fn check(mut options: CheckOptions, mode: CheckMode) -> Result<u8, String> {
+fn check(options: CheckOptions, mode: CheckMode) -> Result<u8, String> {
     let validate_externs = mode == CheckMode::ValidateExterns;
-    options.load_config()?;
-    if validate_externs && options.externs.is_empty() {
+    let config = options.resolved_config()?;
+    if validate_externs && config.externs.is_empty() {
         return Err("validate-externs requires at least one --externs file".into());
     }
-    let files = read_sources(&options.project.paths)?;
+    let project = DiskProject::read(config)?;
+    project.require_source_files()?;
+    let DiskProject {
+        files,
+        externs,
+        dependency_externs: dependencies,
+    } = project;
     let format = options.format();
     let color = format == Format::Pretty && options.color.enabled();
-    let externs = read_externs(&options.externs)?;
-    let dependencies = read_externs(&options.dependency_externs)?;
     if files.len() == 1 && externs.is_empty() && dependencies.is_empty() {
         let (path, source) = files.first_key_value().unwrap();
         if format == Format::Pretty {
@@ -173,7 +180,7 @@ fn check(mut options: CheckOptions, mode: CheckMode) -> Result<u8, String> {
     let extern_sources: Vec<_> = externs
         .iter()
         .chain(&dependencies)
-        .map(Snapshot::as_source)
+        .map(FileSnapshot::as_source)
         .collect();
     let mut session = Session::default();
     let mut result = if validate_externs {
@@ -229,16 +236,20 @@ fn check(mut options: CheckOptions, mode: CheckMode) -> Result<u8, String> {
     ))
 }
 
-fn export_externs(mut options: CheckOptions) -> Result<u8, String> {
-    options.load_config()?;
-    let files = read_sources(&options.project.paths)?;
-    let sources: Vec<_> = files
+fn export_externs(options: CheckOptions) -> Result<u8, String> {
+    let project = DiskProject::read(options.resolved_config()?)?;
+    project.require_source_files()?;
+    let sources: Vec<_> = project
+        .files
         .iter()
         .map(|(path, source)| Source { path, source })
         .collect();
-    options.externs.append(&mut options.dependency_externs);
-    let dependencies = read_externs(&options.externs)?;
-    let externs: Vec<_> = dependencies.iter().map(Snapshot::as_source).collect();
+    let externs: Vec<_> = project
+        .externs
+        .iter()
+        .chain(&project.dependency_externs)
+        .map(FileSnapshot::as_source)
+        .collect();
     let export = Session::default().export_externs(&sources, &externs);
     if let Some(edn) = export.edn {
         print!("{edn}");
@@ -273,64 +284,6 @@ fn export_externs(mut options: CheckOptions) -> Result<u8, String> {
     Ok(1)
 }
 
-fn read_externs(paths: &[String]) -> Result<Vec<Snapshot>, String> {
-    paths
-        .iter()
-        .map(|path| {
-            fs::read_to_string(path)
-                .map(|source| Snapshot {
-                    path: path.clone(),
-                    source,
-                })
-                .map_err(|error| format!("{path}: {error}"))
-        })
-        .collect()
-}
-
-fn read_sources(paths: &[String]) -> Result<BTreeMap<String, String>, String> {
-    let files = read_source_roots(paths)?;
-    if files.is_empty() {
-        return Err("No Clojure source files found".into());
-    }
-    Ok(files)
-}
-
-fn read_source_roots(paths: &[String]) -> Result<BTreeMap<String, String>, String> {
-    let mut files = BTreeMap::new();
-    let mut pending: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-    while let Some(path) = pending.pop() {
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if metadata.is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            for child in fs::read_dir(&path).map_err(|e| e.to_string())? {
-                let child = child.map_err(|e| e.to_string())?.path();
-                if child
-                    .file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
-                {
-                    continue;
-                }
-                pending.push(child);
-            }
-        } else if is_clojure_source(&path) {
-            let source =
-                fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            files.insert(path.to_string_lossy().into_owned(), source);
-        }
-    }
-    Ok(files)
-}
-
-fn is_clojure_source(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("clj" | "cljc")
-    )
-}
-
 impl Color {
     fn enabled(self) -> bool {
         match self {
@@ -348,16 +301,17 @@ impl Color {
 }
 
 impl CheckOptions {
-    fn load_config(&mut self) -> Result<(), String> {
-        let config = self.project.load()?;
-        self.project.paths = config.paths;
-        if self.externs.is_empty() {
-            self.externs = config.externs;
+    fn resolved_config(&self) -> Result<ProjectConfig, String> {
+        let mut config = self.project.load()?;
+        if !self.externs.is_empty() {
+            config.externs.clone_from(&self.externs);
         }
-        if self.dependency_externs.is_empty() {
-            self.dependency_externs = config.dependency_externs;
+        if !self.dependency_externs.is_empty() {
+            config
+                .dependency_externs
+                .clone_from(&self.dependency_externs);
         }
-        Ok(())
+        Ok(config)
     }
 }
 

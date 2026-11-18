@@ -1,10 +1,14 @@
 //! JSON Lines requests and an optional in-memory project for incremental edits.
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 
 use parenox::{ProjectReport, Session, Source};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+use crate::cli::ProjectOptions;
+use crate::workspace::{DiskProject, FileSnapshot};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,31 +20,15 @@ struct FileRequest {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Snapshot {
-    pub path: String,
-    pub source: String,
-}
-
-impl Snapshot {
-    pub(super) fn as_source(&self) -> Source<'_> {
-        Source {
-            path: &self.path,
-            source: &self.source,
-        }
-    }
-}
-
-#[derive(Deserialize)]
 #[serde(untagged)]
 enum ExternSnapshots {
-    One(Snapshot),
-    Many(Vec<Snapshot>),
+    One(FileSnapshot),
+    Many(Vec<FileSnapshot>),
 }
 
 fn deserialize_externs<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> Result<Vec<Snapshot>, D::Error> {
+) -> Result<Vec<FileSnapshot>, D::Error> {
     Option::<ExternSnapshots>::deserialize(deserializer).map(|files| match files {
         None => Vec::new(),
         Some(ExternSnapshots::One(file)) => vec![file],
@@ -53,9 +41,19 @@ fn deserialize_externs<'de, D: Deserializer<'de>>(
 struct ProjectRequest {
     #[serde(default)]
     id: Value,
-    files: Vec<Snapshot>,
+    files: Vec<FileSnapshot>,
     #[serde(default, deserialize_with = "deserialize_externs")]
-    externs: Vec<Snapshot>,
+    externs: Vec<FileSnapshot>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenProjectRequest {
+    #[serde(default)]
+    id: Value,
+    root: String,
+    #[serde(default)]
+    aliases: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -64,7 +62,7 @@ struct UpdateRequest {
     #[serde(default)]
     id: Value,
     #[serde(default)]
-    changes: Vec<Snapshot>,
+    changes: Vec<FileSnapshot>,
     #[serde(default)]
     remove: Vec<String>,
     #[serde(default)]
@@ -75,7 +73,7 @@ struct UpdateRequest {
 enum ExternsChange {
     #[default]
     Keep,
-    Replace(Vec<Snapshot>),
+    Replace(Vec<FileSnapshot>),
 }
 
 impl<'de> Deserialize<'de> for ExternsChange {
@@ -97,6 +95,7 @@ struct DefinitionRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 enum ProjectOperation {
     Open(ProjectRequest),
+    OpenProject(OpenProjectRequest),
     Update(UpdateRequest),
     Definition(DefinitionRequest),
 }
@@ -112,20 +111,46 @@ enum Request {
 #[derive(Default)]
 struct TrackedProject {
     files: BTreeMap<String, String>,
-    externs: Vec<Snapshot>,
+    externs: Vec<FileSnapshot>,
     session: Session,
 }
 
 impl TrackedProject {
-    fn open(files: Vec<Snapshot>, externs: Vec<Snapshot>) -> Result<Self, String> {
+    fn open(files: Vec<FileSnapshot>, externs: Vec<FileSnapshot>) -> Result<Self, String> {
         let mut project = Self::default();
         project.update(files, Vec::new(), ExternsChange::Replace(externs))?;
         Ok(project)
     }
 
+    fn open_project(root: &str, aliases: Vec<String>) -> Result<Self, String> {
+        let path = Path::new(root)
+            .canonicalize()
+            .map_err(|error| format!("{root}: {error}"))?;
+        if !path.is_dir() {
+            return Err(format!("{root}: expected a project directory"));
+        }
+        let options = ProjectOptions {
+            aliases,
+            ..ProjectOptions::default()
+        };
+        let project = DiskProject::read(options.load_at(&path)?)?;
+        project.require_source_files()?;
+        let mut tracked = Self {
+            files: project.files,
+            ..Self::default()
+        };
+        let externs = project
+            .externs
+            .into_iter()
+            .chain(project.dependency_externs)
+            .collect();
+        tracked.update(Vec::new(), Vec::new(), ExternsChange::Replace(externs))?;
+        Ok(tracked)
+    }
+
     fn update(
         &mut self,
-        changes: Vec<Snapshot>,
+        changes: Vec<FileSnapshot>,
         remove: Vec<String>,
         externs: ExternsChange,
     ) -> Result<(), String> {
@@ -193,7 +218,7 @@ impl TrackedProject {
             .iter()
             .map(|(path, source)| Source { path, source })
             .collect();
-        let externs: Vec<_> = self.externs.iter().map(Snapshot::as_source).collect();
+        let externs: Vec<_> = self.externs.iter().map(FileSnapshot::as_source).collect();
         self.session.check_project_with_externs(&sources, &externs)
     }
 }
@@ -249,6 +274,12 @@ fn write_tracked(
                 Err(message) => write_error(output, request.id, message),
             }
         }
+        ProjectOperation::OpenProject(request) => {
+            match TrackedProject::open_project(&request.root, request.aliases) {
+                Ok(project) => write_check(output, request.id, tracked.insert(project).check()),
+                Err(message) => write_error(output, request.id, message),
+            }
+        }
         ProjectOperation::Update(request) => {
             let Some(project) = tracked else {
                 return write_error(
@@ -292,8 +323,12 @@ pub(super) fn run() -> Result<u8, String> {
                 snapshot_session.check(&request.path, &request.source),
             ),
             Ok(Request::Project(request)) => {
-                let sources: Vec<_> = request.files.iter().map(Snapshot::as_source).collect();
-                let externs: Vec<_> = request.externs.iter().map(Snapshot::as_source).collect();
+                let sources: Vec<_> = request.files.iter().map(FileSnapshot::as_source).collect();
+                let externs: Vec<_> = request
+                    .externs
+                    .iter()
+                    .map(FileSnapshot::as_source)
+                    .collect();
                 let report = snapshot_session.check_project_with_externs(&sources, &externs);
                 write_check(&mut output, request.id, report)
             }

@@ -117,7 +117,8 @@ Explicit source paths, `--externs` or `--dependency-externs` replace the matchin
 configured list; they don't append to it. If you pass source paths without
 `--config`, Parenox doesn't load the default file. All three keys are optional;
 unknown or repeated keys and non-string paths are errors. The config is read
-as data. `serve` still uses the in-memory snapshots sent by the client.
+as data. `serve` accepts client snapshots or loads the project configuration on
+an explicit `open_project` request.
 
 ### Validating library externs
 
@@ -483,7 +484,19 @@ qualified `name`, the `kind` (`t_sig`, `s_fdef`, `extern`, `extern_literal`,
 file-backed contracts, the `path`. The primary diagnostic span still points
 to the call or return being checked.
 
-For editor sessions, open a tracked project once and send the changed files as
+Use `open_project` to start a tracked session from the same `parenox.edn` and
+`deps.edn` inputs as `check` and `lsp`:
+
+```json
+{"id":3,"op":"open_project","root":"/path/to/project","aliases":["test"]}
+```
+
+The response includes the initial report. Use its paths for later edits and
+definition requests. Updates change the tracked snapshot in memory. A new
+`open_project` reads a fresh disk snapshot, and a failed open keeps the
+previous session available.
+
+Open a supplied snapshot with `open` and send the changed files as
 full source strings in each update. This example checks one file, edits it, and
 then removes it:
 

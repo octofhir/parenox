@@ -6,8 +6,7 @@ use clap::{Args, ValueEnum};
 use parenox::{ExternDiff, ExternSnapshot, Source, compare_externs, output};
 
 use crate::config::ProjectConfig;
-use crate::serve::Snapshot;
-use crate::{read_externs, read_sources};
+use crate::workspace::{DiskProject, FileSnapshot};
 
 #[derive(Args)]
 pub(crate) struct DiffOptions {
@@ -44,7 +43,7 @@ struct Inputs {
 
 struct Files {
     specs: BTreeMap<String, String>,
-    externs: Vec<Snapshot>,
+    externs: Vec<FileSnapshot>,
 }
 
 impl Files {
@@ -58,29 +57,28 @@ impl Files {
 
 impl Inputs {
     fn read(self, side: &str) -> Result<Files, String> {
-        let config = if let Some(path) = self.config {
+        let mut config = if let Some(path) = self.config {
             ProjectConfig::read(Path::new(&path))?
         } else {
             ProjectConfig::default()
         };
-        let paths = if self.externs.is_empty() {
-            &config.externs
-        } else {
-            &self.externs
-        };
-        if paths.is_empty() {
+        if !self.externs.is_empty() {
+            config.externs = self.externs;
+        }
+        if config.externs.is_empty() {
             return Err(format!(
                 "diff-externs requires --{side} or --{side}-config with externs"
             ));
         }
-        let specs = if config.paths.is_empty() {
-            BTreeMap::new()
-        } else {
-            read_sources(&config.paths)?
-        };
+        let uses_source_specs = !config.paths.is_empty();
+        config.dependency_externs.clear();
+        let project = DiskProject::read(config)?;
+        if uses_source_specs {
+            project.require_source_files()?;
+        }
         Ok(Files {
-            specs,
-            externs: read_externs(paths)?,
+            specs: project.files,
+            externs: project.externs,
         })
     }
 }
@@ -88,8 +86,8 @@ impl Inputs {
 fn compare(before: &Files, after: &Files) -> ExternDiff {
     let old_specs = before.spec_sources();
     let new_specs = after.spec_sources();
-    let old_externs: Vec<_> = before.externs.iter().map(Snapshot::as_source).collect();
-    let new_externs: Vec<_> = after.externs.iter().map(Snapshot::as_source).collect();
+    let old_externs: Vec<_> = before.externs.iter().map(FileSnapshot::as_source).collect();
+    let new_externs: Vec<_> = after.externs.iter().map(FileSnapshot::as_source).collect();
     compare_externs(
         ExternSnapshot {
             sources: &old_specs,

@@ -1,4 +1,6 @@
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde_json::{Value, json};
@@ -53,6 +55,71 @@ const CONSUMER: &str = r#"(ns app (:require [store :as store]))
 const PROVIDER: &str = r#"(ns store)
     (defn normalize {:t/sig '[string? :-> string?]} [name] (str name))"#;
 const EXTERNS: &str = "{db/title [string? :-> string?]}";
+
+#[test]
+fn opens_project_configuration_and_keeps_edits_in_memory() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let path = std::env::temp_dir().join(format!("parenox agent project {}", std::process::id()));
+    fs::create_dir(&path).unwrap();
+    let root = Fixture(path.canonicalize().unwrap());
+    fs::create_dir(root.0.join("src")).unwrap();
+    fs::create_dir(root.0.join("test")).unwrap();
+    for (path, source) in [
+        (
+            "deps.edn",
+            r#"{:paths ["src"] :aliases {:test {:extra-paths ["test"]}}}"#,
+        ),
+        ("parenox.edn", r#"{:dependency-externs ["api.edn"]}"#),
+        ("api.edn", EXTERNS),
+        ("src/store.clj", PROVIDER),
+        ("test/caller.cljc", CONSUMER),
+    ] {
+        fs::write(root.0.join(path), source).unwrap();
+    }
+    let caller = root.0.join("test/caller.cljc");
+    let mut client = Client::start();
+    let opened = client.result(json!({
+        "op": "open_project", "root": root.0, "aliases": ["test"]
+    }));
+    let cli = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .current_dir(&root.0)
+        .args(["check", "--alias", "test", "--json"])
+        .output()
+        .unwrap();
+    assert!(cli.status.success());
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(opened["complete"], true);
+    assert_eq!(opened["files"].as_array().unwrap().len(), 3);
+
+    let target = client.result(json!({
+        "op": "definition", "path": caller, "offset": CONSUMER.find("store/normalize").unwrap()
+    }));
+    assert_eq!(target["path"], json!(root.0.join("src/store.clj")));
+
+    let changed = client.result(json!({
+        "op": "update", "changes": [{
+            "path": caller, "source": CONSUMER.replace("store/normalize name", "store/normalize 42")
+        }]
+    }));
+    assert_eq!(changed["stats"]["parsed_files"], 1);
+    assert_eq!(changed["files"][1]["diagnostics"][0]["code"], "PNX2322");
+    assert_eq!(fs::read_to_string(caller).unwrap(), CONSUMER);
+
+    let failed = client.send(json!({
+        "op": "open_project", "root": root.0, "aliases": ["absent"]
+    }));
+    assert_eq!(failed["error"]["code"], "invalid_request");
+    let retained = client.result(json!({ "op": "update" }));
+    assert_eq!(
+        retained["files"][1]["diagnostics"],
+        changed["files"][1]["diagnostics"]
+    );
+}
 
 #[test]
 fn definition_uses_unsaved_aliases_and_current_provider_spans() {
