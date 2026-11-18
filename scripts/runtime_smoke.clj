@@ -814,3 +814,12 @@
 (assert (= ["default" "A" "B"] (demo.reductions/append-open ["A" "B"])))
 (assert (= "last" (reduce (fn [_ item] (str item)) 0 (seq [1 "last"]))))
 (println "Clojure/JVM open reductions: 4 assertions passed")
+
+(assert (= 5 (demo.reductions/sum-before-label)))
+(assert (reduced? (reduce + (reduced 1) [])))
+(assert (reduced? (reduce + [(reduced 1)])))
+(assert (reduced? (reduce (fn [] (reduced 1)) [])))
+(assert (reduced? (reduce (fn [] (reduced 1)) nil)))
+(assert (= "first" (unreduced (reduce (fn [_ x] (reduced (reduced x))) 0 ["first" 1]))))
+(assert (= "only" (unreduced (ensure-reduced (reduced "only")))))
+(println "Clojure/JVM early reduction results: 7 assertions passed")

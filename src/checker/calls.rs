@@ -379,6 +379,10 @@ impl<'model> Checker<'model> {
                     "clojure.core/ex-info"
                         | "clojure.core/ex-data"
                         | "clojure.core/identity"
+                        | "clojure.core/reduced"
+                        | "clojure.core/reduced?"
+                        | "clojure.core/unreduced"
+                        | "clojure.core/ensure-reduced"
                         | "clojure.core/nil?"
                         | "clojure.core/some?"
                         | "clojure.core/not"
@@ -399,6 +403,12 @@ impl<'model> Checker<'model> {
             return Value::new(Type::Never);
         }
         let ty = match name {
+            "clojure.core/reduced"
+            | "clojure.core/reduced?"
+            | "clojure.core/unreduced"
+            | "clojure.core/ensure-reduced" => {
+                return reduction::reduced_operation(name, &args[0].0);
+            }
             "clojure.core/nth" => return self.nth(args),
             "clojure.core/conj" => return self.conj(args),
             "clojure.core/ex-info" => return self.ex_info(args),
@@ -558,6 +568,10 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/next"
             | "clojure.core/rest"
             | "clojure.core/conj"
+            | "clojure.core/reduced"
+            | "clojure.core/reduced?"
+            | "clojure.core/unreduced"
+            | "clojure.core/ensure-reduced"
             | "clojure.core/ex-info"
             | "clojure.core/ex-data"
             | "clojure.string/upper-case"

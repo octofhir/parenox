@@ -30,3 +30,11 @@
   {:t/sig '[(s/coll-of string? :kind vector?) :-> (s/coll-of string? :kind vector?)]}
   [labels]
   (reduce conj ["default"] labels))
+
+(defn sum-before-label {:t/sig '[:-> number?]} []
+  (reduce (fn [total value]
+            (if (string? value)
+              (reduced total)
+              (+ total value)))
+          0
+          [2 3 "stop" false]))

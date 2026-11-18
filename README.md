@@ -502,7 +502,9 @@ an empty input returns that value. Reducer diagnostics identify the failing
 step and point at literal elements when possible. For typed vectors and seqs
 with unknown length, Parenox follows possible accumulator types across steps
 and widens collections whose length grows. Excessive shape growth reports an
-analysis gap. Run `just reductions` for examples.
+analysis gap. A step returning `(reduced value)` stops that path and returns
+the wrapped value. Unexecuted later steps leave its result intact. Run
+`just reductions` for examples.
 
 A closed map supplies a `MapEntry<K, V>` for each present field. Use `key`,
 `val`, or fixed positional bindings such as `(fn [[k v :as entry]] ...)`.

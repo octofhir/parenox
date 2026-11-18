@@ -134,3 +134,41 @@ fn expanding_reduction_states_and_nested_steps_report_analysis_limits() {
             .any(|d| { d.code == "PNX9001" && d.message.contains("step analysis limit") })
     );
 }
+
+#[test]
+fn reduced_results_stop_the_fold_and_only_unwrap_one_layer() {
+    for (expression, contract) in [
+        (
+            r#"(reduce (fn [n item] (if (string? item) (reduced n) (+ n item)))
+                       0 [2 3 "stop" false])"#,
+            "number?",
+        ),
+        (
+            r#"(unreduced (reduce (fn [_ x] (reduced (reduced x))) 0 ["first" 1]))"#,
+            "#{\"first\"}",
+        ),
+        ("(reduced? (reduce + (reduced 1) []))", "#{true}"),
+        ("(reduced? (reduce + [(reduced 1)]))", "#{true}"),
+        ("(reduced? (reduce (fn [] (reduced 1)) []))", "#{true}"),
+        ("(reduced? (reduce (fn [] (reduced 1)) nil))", "#{true}"),
+        (
+            "(unreduced (ensure-reduced (reduced \"only\")))",
+            "#{\"only\"}",
+        ),
+    ] {
+        let report = check(expression, contract);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn mixed_reduced_and_continuing_steps_join_terminal_values_without_reusing_wrappers() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (s/def ::values (s/coll-of (s/or :n number? :s string?) :kind vector?))
+        (defn run {:t/sig '[::values :-> (s/or :n number? :s string?)]} [values]
+          (reduce (fn [n item]
+                    (if (string? item) (reduced item) (+ n item)))
+                  0 values))"#;
+    let report = Session::default().check("reduce.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}

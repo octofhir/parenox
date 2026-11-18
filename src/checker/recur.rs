@@ -278,9 +278,11 @@ pub(super) fn bounded_state(state: &[Value]) -> bool {
             }
             Type::Union(parts) => parts.iter().all(|part| visit(part, remaining)),
             Type::MapEntry(parts) => parts.iter().all(|part| visit(part, remaining)),
-            Type::Vector(part) | Type::Set(part) | Type::Seq(part) | Type::ExceptionInfo(part) => {
-                visit(part, remaining)
-            }
+            Type::Vector(part)
+            | Type::Set(part)
+            | Type::Seq(part)
+            | Type::Reduced(part)
+            | Type::ExceptionInfo(part) => visit(part, remaining),
             Type::Function(signatures) => signatures
                 .iter()
                 .all(|sig| sig.types().all(|arg| visit(arg, remaining))),

@@ -144,8 +144,9 @@ impl Checker<'_> {
         if elements.len() == 0 {
             self.call_prepared(callable, Vec::new(), span, env, false);
         }
+        let mut stopped = Value::new(Type::Never);
         for (step, (item, item_span)) in elements.enumerate() {
-            accumulator = self.reduce_step(
+            let next = self.reduce_step(
                 callable,
                 [(accumulator, accumulator_span), (item, item_span)],
                 literal.is_none().then_some(input.form.span),
@@ -153,12 +154,15 @@ impl Checker<'_> {
                 env,
                 step + 1,
             );
+            let (continuing, finished) = partition_reduced(next);
+            accumulator = continuing;
+            stopped = stopped.join(finished);
             if matches!(accumulator.known, Type::Never | Type::Unknown) {
                 break;
             }
             accumulator_span = span;
         }
-        accumulator
+        stopped.join(accumulator)
     }
 
     fn reduce_open(
@@ -183,7 +187,7 @@ impl Checker<'_> {
 
         let mut seen = vec![vec![accumulator.clone()]];
         for step in 1..=MAX_REDUCE_STATES {
-            let mut next = self.reduce_step(
+            let next = self.reduce_step(
                 callable,
                 [(accumulator, accumulator_span), input.clone()],
                 Some(input.1),
@@ -191,6 +195,8 @@ impl Checker<'_> {
                 env,
                 step,
             );
+            let (mut next, finished) = partition_reduced(next);
+            result = result.join(finished);
             if next.known == Type::Never {
                 return result;
             }
@@ -268,4 +274,52 @@ fn reducer_argument(ty: &Type) -> bool {
         Type::Union(parts) => parts.iter().all(reducer_argument),
         _ => false,
     }
+}
+
+fn partition_reduced(value: Value) -> (Value, Value) {
+    let types = match value.known {
+        Type::Union(parts) => parts,
+        ty => vec![ty],
+    };
+    let mut continuing = Vec::new();
+    let mut finished = Vec::new();
+    for ty in types {
+        match ty {
+            Type::Reduced(value) => finished.push(*value),
+            ty => continuing.push(ty),
+        }
+    }
+    (
+        Value::with_notes(Type::union(continuing), value.notes.clone()),
+        Value::with_notes(Type::union(finished), value.notes),
+    )
+}
+
+pub(super) fn reduced_operation(name: &str, input: &Value) -> Value {
+    if name == "clojure.core/reduced" {
+        return Value::with_notes(
+            Type::Reduced(Box::new(input.known.clone())),
+            input.notes.clone(),
+        );
+    }
+    let parts = match &input.known {
+        Type::Union(parts) => parts.as_slice(),
+        ty => std::slice::from_ref(ty),
+    };
+    let ty = Type::union(parts.iter().map(|ty| match name {
+        "clojure.core/reduced?" => match ty {
+            Type::Unknown => Type::Boolean,
+            ty => Type::Bool(matches!(ty, Type::Reduced(_))),
+        },
+        "clojure.core/unreduced" => match ty {
+            Type::Reduced(value) => value.as_ref().clone(),
+            ty => ty.clone(),
+        },
+        "clojure.core/ensure-reduced" => match ty {
+            Type::Reduced(_) => ty.clone(),
+            ty => Type::Reduced(Box::new(ty.clone())),
+        },
+        _ => unreachable!(),
+    }));
+    Value::with_notes(ty, input.notes.clone())
 }

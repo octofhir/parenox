@@ -125,6 +125,7 @@ pub enum Type {
     /// A sequence of known length, including the empty list.
     SeqTuple(Box<[Type]>),
     Set(Box<Type>),
+    Reduced(Box<Type>),
     Throwable,
     ExceptionInfo(Box<Type>),
     Function(Arc<[Signature]>),
@@ -157,6 +158,7 @@ impl Type {
                 Type::Seq(Box::new(Type::union(items.iter().map(Type::inferred))))
             }
             Type::Set(t) => Type::Set(Box::new(t.inferred())),
+            Type::Reduced(t) => Type::Reduced(Box::new(t.inferred())),
             Type::ExceptionInfo(data) => Type::ExceptionInfo(Box::new(data.inferred())),
             Type::Map(map) => Type::Map(map.inferred()),
             t => t.clone(),
@@ -168,9 +170,11 @@ impl Type {
             Type::Str(_) | Type::Char(_) | Type::Tuple(_) | Type::SeqTuple(_) => true,
             Type::Union(xs) => xs.iter().any(Type::requires_precise_type),
             Type::MapEntry(items) => items.iter().any(Type::requires_precise_type),
-            Type::Vector(t) | Type::Set(t) | Type::Seq(t) | Type::ExceptionInfo(t) => {
-                t.requires_precise_type()
-            }
+            Type::Vector(t)
+            | Type::Set(t)
+            | Type::Seq(t)
+            | Type::Reduced(t)
+            | Type::ExceptionInfo(t) => t.requires_precise_type(),
             Type::Map(map) => map.any_type(Type::requires_precise_type),
             Type::Function(signatures) => signatures
                 .iter()
@@ -325,6 +329,7 @@ impl Type {
             (Type::Vector(a), Type::Vector(e))
             | (Type::Set(a), Type::Set(e))
             | (Type::Seq(a), Type::Seq(e))
+            | (Type::Reduced(a), Type::Reduced(e))
             | (Type::ExceptionInfo(a), Type::ExceptionInfo(e)) => a.subtype_of(e),
             (Type::Function(actual), Type::Function(expected)) => expected.iter().all(|e| {
                 actual.iter().any(|a| {
@@ -348,9 +353,11 @@ impl Type {
             Type::Union(xs) => xs.iter().any(Type::contains_unknown),
             Type::MapEntry(items) => items.iter().any(Type::contains_unknown),
             Type::Tuple(items) | Type::SeqTuple(items) => items.iter().any(Type::contains_unknown),
-            Type::Vector(t) | Type::Set(t) | Type::Seq(t) | Type::ExceptionInfo(t) => {
-                t.contains_unknown()
-            }
+            Type::Vector(t)
+            | Type::Set(t)
+            | Type::Seq(t)
+            | Type::Reduced(t)
+            | Type::ExceptionInfo(t) => t.contains_unknown(),
             Type::Map(m) => m.any_type(Type::contains_unknown),
             Type::Function(signatures) => signatures
                 .iter()
@@ -399,6 +406,7 @@ impl fmt::Display for Type {
                 write!(f, "{name}<{}>", items.join(", "))
             }
             Type::Set(t) => write!(f, "Set<{t}>"),
+            Type::Reduced(t) => write!(f, "Reduced<{t}>"),
             Type::Throwable => write!(f, "Throwable"),
             Type::ExceptionInfo(data) => write!(f, "ExceptionInfo<{data}>"),
             Type::Function(signatures) => {
