@@ -61,9 +61,23 @@ runtime-smoke:
 uri-editor-smoke project:
     PARENOX_URI_PILOT={{quote(project)}} cargo test --locked --release --test lsp uri_pilot_editor_workflow -- --ignored
 
+# Measure fresh initialization and 200 checked editor edits on the pinned URI checkout.
+uri-editor-bench project binary="target/release/parenox": build
+    PARENOX_URI_PILOT={{quote(project)}} PARENOX_LSP_BINARY={{quote(binary)}} cargo test --locked --release --test lsp uri_pilot_editor_benchmark -- --ignored --nocapture
+
 # Exercise passing, failing and unloadable tests on Clojure/JVM (optional).
 jvm-test-smoke:
     cargo test --locked --test runtime_cli project_jvm_pass_failure_and_load_error -- --ignored
+
+# Run the same portable test namespace on JVM Clojure and a supplied cljrs build.
+portable-runtime-smoke native: build
+    #!/bin/sh
+    set -eu
+    fixture=$(mktemp -d)
+    trap 'rm -rf "$fixture"' EXIT
+    cp -R tests/fixtures/jvm-project/. "$fixture"
+    target/release/parenox test --project "$fixture" --alias test demo.portable-test
+    {{quote(native)}} test --no-config --src-path "$fixture/test" demo.portable-test
 
 # Check private inference, then show the deliberate nil error and call chain.
 inference: build

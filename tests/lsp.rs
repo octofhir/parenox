@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
@@ -42,7 +43,11 @@ fn uri(path: &Path) -> String {
 }
 
 fn lsp_server() -> Child {
-    Command::new(env!("CARGO_BIN_EXE_parenox"))
+    lsp_server_with(Path::new(env!("CARGO_BIN_EXE_parenox")))
+}
+
+fn lsp_server_with(binary: &Path) -> Child {
+    Command::new(binary)
         .args(["lsp", "--alias", "test"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -332,6 +337,140 @@ fn uri_pilot_editor_workflow() {
         134,
         82,
     );
+}
+
+#[test]
+#[ignore = "measures the pinned lambdaisland/uri checkout"]
+fn uri_pilot_editor_benchmark() {
+    let root = PathBuf::from(std::env::var_os("PARENOX_URI_PILOT").expect("set PARENOX_URI_PILOT"));
+    let binary = std::env::var_os("PARENOX_LSP_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_parenox")));
+    let caller = root.join("src/lambdaisland/uri.cljc");
+    let provider = root.join("src/lambdaisland/uri/normalize.cljc");
+    let document = uri(&caller);
+    let source = fs::read_to_string(&caller).unwrap();
+    let correct = "normalize/percent-decode";
+    let broken = source.replacen(correct, "normalize/percent-decoe", 1);
+    let line = source.lines().nth(134).unwrap();
+    let character = line.find(correct).unwrap();
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "rootUri":uri(&root),"capabilities":{}
+    }});
+
+    let started = Instant::now();
+    let mut child = lsp_server_with(&binary);
+    let spawn_us = started.elapsed().as_micros();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |message: &Value| {
+        let started = Instant::now();
+        send_message(&mut input, message);
+        let response = read_message(&mut output).expect("language server produced no message");
+        (response, started.elapsed().as_micros())
+    };
+    let (initialized, initialize_round_trip_us) = exchange(&initialize);
+    let startup_us = started.elapsed().as_micros();
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "parenox");
+    let (opened, open_us) = exchange(
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
+        }}),
+    );
+    assert_eq!(opened["params"]["uri"], document);
+
+    let mut edits = Vec::with_capacity(200);
+    let mut hovers = Vec::with_capacity(200);
+    let mut definitions = Vec::with_capacity(200);
+    for version in 2..202 {
+        let typo = version % 2 == 0;
+        let change = json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":version},
+            "contentChanges":[{"text":if typo { &broken } else { &source }}]
+        }});
+        let (published, elapsed) = exchange(&change);
+        assert_eq!(published["params"]["version"], version);
+        let bad_call = published["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "PNX2304");
+        assert_eq!(bad_call, typo, "{published}");
+        edits.push(elapsed);
+        let query = |method, id| {
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":{
+                "textDocument":{"uri":document},"position":{"line":134,"character":character}
+            }})
+        };
+        let (hover, elapsed) = exchange(&query("textDocument/hover", 2 * version));
+        assert!(
+            hover["result"]["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("lambdaisland.uri.normalize/percent-decode")
+        );
+        hovers.push(elapsed);
+        let (definition, elapsed) = exchange(&query("textDocument/definition", 2 * version + 1));
+        assert_eq!(definition["result"]["uri"], uri(&provider));
+        assert_eq!(definition["result"]["range"]["start"]["line"], 81);
+        definitions.push(elapsed);
+    }
+
+    let rss_kib = resident_kib(child.id());
+    assert_eq!(
+        exchange(&json!({"jsonrpc":"2.0","id":500,"method":"shutdown"})).0["result"],
+        Value::Null
+    );
+    send_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"}));
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    let mut fresh_initializations = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let started = Instant::now();
+        let mut child = lsp_server_with(&binary);
+        let mut input = child.stdin.take().unwrap();
+        send_message(&mut input, &initialize);
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let ready = read_message(&mut output).unwrap();
+        fresh_initializations.push(started.elapsed().as_micros());
+        assert_eq!(ready["result"]["serverInfo"]["name"], "parenox");
+        drop(input);
+        assert!(child.wait().unwrap().success());
+    }
+    println!(
+        "{}",
+        json!({
+            "binary":binary,
+            "samples":200,
+            "initialize_us":startup_us,
+            "fresh_initialize_us":latencies(fresh_initializations),
+            "spawn_us":spawn_us,
+            "initialize_round_trip_us":initialize_round_trip_us,
+            "first_open_us":open_us,
+            "warm_edit_us":latencies(edits),
+            "hover_us":latencies(hovers),
+            "definition_us":latencies(definitions),
+            "rss_kib_after_edits":rss_kib
+        })
+    );
+}
+
+fn latencies(mut samples: Vec<u128>) -> Value {
+    samples.sort_unstable();
+    let count = samples.len();
+    json!({"p50":samples[(count - 1) / 2],"p95":samples[(95 * count).div_ceil(100) - 1],"max":samples[count - 1]})
+}
+
+fn resident_kib(pid: u32) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn change_call(root: &Path, caller: &Path, provider: &Path, call_line: usize, target_line: usize) {

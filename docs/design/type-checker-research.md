@@ -100,6 +100,41 @@ Use [lambdaisland/uri at `e439c2ca`](https://github.com/lambdaisland/uri/tree/e4
 
 The first editor trial used Neovim 0.12.5 with its built-in LSP client. The call in `src/lambdaisland/uri.cljc` at line 134 resolves to `src/lambdaisland/uri/normalize.cljc` at line 82. Hover identifies the qualified var, and an unfinished form appended in the editor produces a reader diagnostic while the earlier reference still resolves. The project has no checked contract for this var, so the hover reports unavailable type information.
 
+### Portable runtime trial
+
+The [portable test namespace](../../tests/fixtures/jvm-project/test/demo/portable_test.cljc)
+ran on Clojure/JVM `1.13.0-alpha11` and clojurust `793ad97e`. Each runtime passed
+three tests and seven assertions, including its reader branch, present nil
+values versus absent keys, Clojure truthiness, and dereferencing an updated
+map. Run the comparison with `just portable-runtime-smoke /path/to/cljrs`.
+
+On macOS 26.5 arm64 and Java 21.0.2, ten fresh processes per runtime with
+warmed dependency caches had median times of 631 ms for `parenox test` on the
+JVM and 15.2 ms for `cljrs test`. The clojurust release build took 3m 08s and
+produced a 41.2 MB executable. These timings cover this fixture's test
+execution and runtime startup. [Pinned clojurust source](https://github.com/csm/clojurust/tree/793ad97e57cc797878a09c66771d651cfab1ee9b)
+
+### Pinned URI editor measurements
+
+On macOS 26.5 arm64 with Rust 1.100.0, the same URI checkout used five Clojure
+files under `src` and `test`. Both builds located `percent-decode` and detected
+and cleared the exact same unsaved typo in each pair of edits.
+
+| Workload | Baseline `6125176` | Iteration `3b4f056` |
+|---|---:|---:|
+| Fresh CLI check median, 50 processes | 3.20 ms | 3.36 ms |
+| Fresh LSP initialize median, 10 subsequent processes | 2.12 ms | 2.20 ms |
+| Warm edit and diagnostic p95, 200 edits | 0.415 ms | 0.420 ms |
+| Warm hover p95 | 32 µs | 29 µs |
+| Warm definition p95 | 37 µs | 35 µs |
+| LSP resident memory after edits | 5.80 MiB | 5.81 MiB |
+| Release binary | 4,661,024 bytes | 4,762,144 bytes |
+
+The first interactive startup also showed a 311 ms sample on the iteration
+build. The subsequent launches used warmed filesystem caches. The warm
+timings cover the stdio round trip. Run `just uri-editor-bench /path/to/uri`
+and pass a second argument to compare a separately built binary.
+
 ### Performance and correctness
 
 - Run `just agent-loop` for regressions in the existing incremental path. Verify that warm diagnostics and definition targets match a clean session after source, alias and dependency changes. Check that CLI and editor diagnostics agree on the same revision and that stale editor results are discarded.
