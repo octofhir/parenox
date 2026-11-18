@@ -1225,7 +1225,8 @@ options and lookup keys outside keywords, strings and known decimal integer
 indices report gaps.
 
 Clojure 1.13 checked lookups support keyword and string keys in `req!` and
-explicit map bindings, plus `:keys!` and its namespaced directives.
+explicit map bindings, plus `:keys!`, namespaced keyword directives and
+`:strs!` for string keys.
 Keys after `&` in a keys vector are not bound; checked directives require their
 presence. Ordinary keyword renaming and nested map patterns use the same binding
 analysis. Run `just checked` for passing examples and two deliberate errors.
@@ -1239,7 +1240,7 @@ remains an explicit analysis gap; presence-only checks after `&` need no value t
 Refinement applies to bound locals and checked lookup results. Source-map aliases
 keep their declared types.
 
-Map `:or` defaults can use local symbols or literal keyword lookup keys, including
+Map `:or` defaults can use local symbols or literal keyword and string lookup keys, including
 renamed, namespaced and nested bindings. An absent key uses its default; a present
 nil or false is preserved. Every default expression is analyzed eagerly in the
 outer lexical scope, including unused defaults and defaults for present keys.

@@ -1192,3 +1192,12 @@
 (assert (= "a b" (demo.query-string/normalized-value {:value "a+b"})))
 (assert (= "a+b" (clojure.string/replace "a-b" \- \+)))
 (println "Clojure/JVM blank strings and replacements: 5 assertions passed")
+
+(load-file "examples/json_fields.cljc")
+(assert (= "Anonymous" (demo.json-fields/display-name {})))
+(assert (= "Unknown" (demo.json-fields/display-name {"name" nil})))
+(assert (= "Ada" (demo.json-fields/required-name {"name" "Ada" "schema" nil})))
+(assert (= "Missing required key: \"schema\""
+           (try (demo.json-fields/required-name {"name" "Ada"})
+                (catch Exception e (.getMessage e)))))
+(println "Clojure/JVM destructuring string keys: 4 assertions passed")

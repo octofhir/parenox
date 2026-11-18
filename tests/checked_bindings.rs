@@ -162,3 +162,26 @@ fn checked_lookup_preserves_literal_inference_and_project_functions_shadow_core(
     );
     assert!(report.ok && report.complete, "{report:#?}");
 }
+
+#[test]
+fn checked_string_binding_requires_presence_but_accepts_a_nil_marker() {
+    let source = r#"(defn f {:t/sig '[:-> string?]} []
+      (let [{:strs! [name & "schema"]} {"name" "Ada" "schema" nil}] name))"#;
+    let report = check(source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let report = check(&source.replace(" \"schema\" nil", " :schema nil"));
+    assert!(!report.ok && report.complete, "{report:#?}");
+    assert!(report.diagnostics[0].message.contains("\"schema\""));
+
+    let report = check(&source.replace(
+        ":strs! [name & \"schema\"]",
+        ":strs! [name & \"schema\"] :or {\"name\" \"Default\"}",
+    ));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "PNX1001"),
+        "{report:#?}"
+    );
+}

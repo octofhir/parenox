@@ -40,6 +40,26 @@ fn defaults_handle_absence_and_preserve_nil_false_and_precise_values() {
 }
 
 #[test]
+fn string_key_defaults_distinguish_explicit_nil_from_absence() {
+    let source = include_str!("../examples/json_fields.cljc");
+    let mut session = Session::default();
+    let checked = session.check("json_fields.cljc", source);
+    assert!(checked.ok && checked.complete, "{checked:#?}");
+    let edit = source.replace("(or name \"Unknown\")", "name");
+    let bad = session.check("json_fields.cljc", &edit);
+    let [error] = bad.diagnostics.as_slice() else {
+        panic!("{bad:#?}");
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.actual.as_deref(), Some("Nil | String"));
+
+    let result = check(
+        r#"(defn f {:t/sig '[:-> string?]} [] (let [{:strs [name] :or {:name 1 "name" "default"}} {}] name))"#,
+    );
+    assert!(result.ok && result.complete, "{result:#?}");
+}
+
+#[test]
 fn defaults_are_eager_and_share_outer_scope_instead_of_new_map_locals() {
     let report = Session::default().check("bad.clj", include_str!("../examples/defaults_bad.clj"));
     assert!(!report.ok && report.complete, "{report:#?}");
