@@ -41,6 +41,7 @@ pub enum SyntaxKind {
     Nil,
     AnonymousFunction,
     OpenAnonymousFunction,
+    Regex,
     ErrorToken,
 }
 

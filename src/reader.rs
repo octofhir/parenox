@@ -31,6 +31,7 @@ pub enum Kind {
     AnonymousArgument(String),
     Keyword(String),
     String(String),
+    Regex,
     Character(char),
     Number,
     Bool(bool),
@@ -471,6 +472,7 @@ impl<'a> Reader<'a> {
                                 Kind::Symbol(_) | Kind::AnonymousArgument(_) => SyntaxKind::Symbol,
                                 Kind::Keyword(_) => SyntaxKind::Keyword,
                                 Kind::String(_) => SyntaxKind::String,
+                                Kind::Regex => SyntaxKind::Regex,
                                 Kind::Character(_) => SyntaxKind::Character,
                                 Kind::Metadata(_, _) => SyntaxKind::Metadata,
                                 Kind::Tagged(_, _) => SyntaxKind::Tagged,
@@ -525,6 +527,20 @@ impl<'a> Reader<'a> {
                 Kind::Quote(Box::new(self.without_comments(Self::form)?))
             }
             Some('#') if self.peek() == Some('(') => self.anonymous_function(start)?,
+            Some('#') if self.peek() == Some('"') => {
+                self.bump();
+                loop {
+                    match self.bump() {
+                        Some('"') => break,
+                        Some('\\') if self.bump().is_some() => {}
+                        Some('\\') | None => {
+                            return Err(self.error(start, "Unterminated regex literal"));
+                        }
+                        Some(_) => {}
+                    }
+                }
+                Kind::Regex
+            }
             Some('#') if self.peek() == Some('{') => {
                 self.bump();
                 self.token(SyntaxKind::OpenSet, start);

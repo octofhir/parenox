@@ -78,6 +78,23 @@ fn mismatched_delimiters_keep_later_forms_and_all_original_tokens() {
 }
 
 #[test]
+fn regex_literals_preserve_pattern_escapes_instead_of_decoding_strings() {
+    let source = r##"#"\A[\d\p{L}]+\"\z" :after"##;
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_lossless(source, &parsed);
+    assert!(matches!(parsed.forms[0].kind, Kind::Regex));
+    assert_eq!(parsed.forms[1].keyword(), Some(":after"));
+    assert!(
+        parsed
+            .syntax()
+            .descendants_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::Regex)
+    );
+    assert!(reader::read(r##"#"pattern\"##).is_err());
+}
+
+#[test]
 fn malformed_and_unsupported_reader_syntax_is_lossless_and_terminates() {
     for source in [
         "#_",
