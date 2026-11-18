@@ -684,3 +684,26 @@
                      (throw (ex-info "second" {:stage :second})))
              (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
 (println "Clojure/JVM vector argument evaluation: 3 assertions passed")
+
+(assert (= :updater (demo.updates/updater-stage)))
+(assert (= :target
+           (try
+             (update (throw (ex-info "target" {:stage :target}))
+                     (throw (ex-info "key" {:stage :key}))
+                     (fnil + (throw (ex-info "updater" {:stage :updater}))))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(assert (= :path
+           (try
+             (update-in {} [:nested (throw (ex-info "path" {:stage :path}))]
+                            (fnil + (throw (ex-info "updater" {:stage :updater}))))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(assert (= :inside
+           (try
+             (update {} :visits (fn [_] (throw (ex-info "inside" {:stage :inside}))))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(assert (= :extra
+           (try
+             (update-in {} [:visits] (fn [_ delta] delta)
+                            (throw (ex-info "extra" {:stage :extra})))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(println "Clojure/JVM update argument evaluation: 5 assertions passed")

@@ -34,7 +34,7 @@ impl Checker<'_> {
             .eval_args(collections, env, callable.returns())
             .collect();
         if !call_returns(&inputs) {
-            self.call_prepared(&callable, Vec::new(), callback.span, span, env, false);
+            self.call_prepared(&callable, Vec::new(), span, env, false);
             return Value::new(Type::Never);
         }
         self.may_throw();
@@ -45,7 +45,7 @@ impl Checker<'_> {
         let invoked = args.iter().all(|(element, _)| element.known != Type::Never);
         let filtered = filter.then(|| args[0].0.known.clone());
         let start = self.diagnostics.len();
-        let result = self.call_prepared(&callable, args, callback.span, span, env, invoked);
+        let result = self.call_prepared(&callable, args, span, env, invoked);
         for diagnostic in &mut self.diagnostics[start..] {
             if diagnostic.code == "PNX2322"
                 && collections.iter().any(|form| diagnostic.span == form.span)

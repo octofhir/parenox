@@ -21,7 +21,7 @@ impl Checker<'_> {
             .collect();
         let (collection, _) = args.pop().unwrap();
         if collection.known == Type::Never || !call_returns(&args) {
-            return self.call_prepared(&callable, args, callee.span, span, env, false);
+            return self.call_prepared(&callable, args, span, env, false);
         }
         let types = match &collection.known {
             Type::Union(types) => types.as_slice(),
@@ -70,7 +70,7 @@ impl Checker<'_> {
                 )
             }));
             let start = self.diagnostics.len();
-            let value = self.call_prepared(&callable, actual, callee.span, span, env, true);
+            let value = self.call_prepared(&callable, actual, span, env, true);
             if literal.is_none() {
                 for diagnostic in &mut self.diagnostics[start..] {
                     if diagnostic.code == "PNX2322" && diagnostic.span == spread.span {

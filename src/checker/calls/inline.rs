@@ -4,7 +4,7 @@ use super::super::{
     function_forms::{MAX_FIXED_PARAMETERS, function_clauses, pack_arguments},
     nil_part,
 };
-use super::{Callable, call_returns};
+use super::{Callable, PreparedCallable, call_returns};
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
 use crate::types::Type;
 
@@ -15,8 +15,7 @@ pub(super) enum InlineFunction<'a> {
 }
 
 pub(super) struct Fnil<'form, 'model> {
-    target: Callable<'form, 'model>,
-    target_span: Span,
+    target: PreparedCallable<'form, 'model>,
     defaults: Vec<(Value, Span)>,
     pub(super) returns: bool,
 }
@@ -167,7 +166,6 @@ impl<'model> Checker<'model> {
         let returns = target_returns && call_returns(&defaults);
         Callable::Fnil(Box::new(Fnil {
             target,
-            target_span: parts[0].span,
             defaults,
             returns,
         }))
@@ -206,14 +204,7 @@ impl<'model> Checker<'model> {
                 }
             }
         }
-        self.call_prepared(
-            &wrapper.target,
-            args,
-            wrapper.target_span,
-            call,
-            env,
-            invoked,
-        )
+        self.call_prepared(&wrapper.target, args, call, env, invoked)
     }
 }
 

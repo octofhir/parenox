@@ -1,5 +1,5 @@
 //! Source-mapped key paths and nested map operations.
-use super::super::{Checker, Env, Value};
+use super::super::{Checker, Env, Value, calls::call_returns};
 use super::Lookup;
 use crate::reader::{Form, Span};
 use crate::types::{MapSlot, MapType, Type};
@@ -29,23 +29,31 @@ impl Checker<'_> {
         writing: bool,
     ) -> Result<KeyPaths, Type> {
         if let Some(keys) = form.vector() {
-            self.check_path_length(keys.len(), form.span, name, writing)?;
-            let path = keys
-                .iter()
-                .map(|form| {
-                    let key = self
+            let mut path = Vec::with_capacity(keys.len());
+            let mut reachable = true;
+            for form in keys {
+                let key = self.inspect_path(reachable, |checker| {
+                    checker
                         .literal_map_key(form)
-                        .or_else(|| self.read_map_key(form, env, name, !writing));
+                        .or_else(|| checker.read_map_key(form, env, name, !writing))
+                });
+                if reachable {
                     match key {
-                        Some(ty) if !ty.contains_unknown() && ty != Type::Never => {
-                            Ok((ty, form.span))
-                        }
-                        Some(Type::Never) => Err(Type::Never),
-                        _ => Err(Type::Unknown),
+                        Some(Type::Never) => reachable = false,
+                        Some(ty) if !ty.contains_unknown() => path.push((ty, form.span)),
+                        _ => {}
                     }
-                })
-                .collect::<Result<_, _>>()?;
-            return Ok(KeyPaths::Single(path));
+                }
+            }
+            if !reachable {
+                return Err(Type::Never);
+            }
+            self.check_path_length(keys.len(), form.span, name, writing)?;
+            return if path.len() == keys.len() {
+                Ok(KeyPaths::Single(path))
+            } else {
+                Err(Type::Unknown)
+            };
         }
         let inferred = self.infer(form, env).known;
         if let Type::Union(parts) = inferred {
@@ -222,29 +230,46 @@ impl Checker<'_> {
             env.presence(target, key)
         };
         let target = self.infer(target, env);
-        let path = if nested {
-            match self.key_paths(key, env, name, true) {
-                Ok(path) => path,
-                Err(ty) => return Value::new(ty),
+        let target_returns = target.known != Type::Never;
+        let path = self.inspect_path(target_returns, |checker| {
+            if nested {
+                checker.key_paths(key, env, name, true)
+            } else {
+                match checker.read_map_key(key, env, name, false) {
+                    Some(ty) if !matches!(ty, Type::Never | Type::Unknown) => {
+                        Ok(KeyPaths::Single(vec![(ty, key.span)]))
+                    }
+                    Some(ty) => Err(ty),
+                    None => Err(Type::Unknown),
+                }
             }
-        } else {
-            let Some(key_type) = self.read_map_key(key, env, name, false) else {
-                return Value::new(Type::Unknown);
-            };
-            if matches!(key_type, Type::Never | Type::Unknown) {
-                return Value::new(key_type);
+        });
+        let key_returns = target_returns && !matches!(path, Err(Type::Never));
+        let callable = self.inspect_path(key_returns, |checker| {
+            checker.prepare_callable(updater, env)
+        });
+        let ready = key_returns && callable.returns();
+        let extra: Vec<_> = self.eval_args(extra, env, ready).collect();
+        if !ready || !call_returns(&extra) {
+            self.call_prepared(&callable, Vec::new(), span, env, false);
+            return Value::new(Type::Never);
+        }
+        let path = match path {
+            Ok(path) => path,
+            Err(ty) => {
+                self.call_prepared(&callable, Vec::new(), span, env, false);
+                return Value::new(ty);
             }
-            KeyPaths::Single(vec![(key_type, key.span)])
         };
         let (last_key, old_span) = path.as_slice()[0].last().unwrap();
         let old = self.lookup_paths(&target, &path, None, presence);
         let unknown = old.known.contains_unknown();
         let mut args = Vec::with_capacity(extra.len() + 1);
         args.push((old, *old_span));
-        args.extend(extra.iter().map(|arg| (self.infer(arg, env), arg.span)));
+        args.extend(extra);
 
         let start = self.diagnostics.len();
-        let value = self.call_form(updater, args, span, env, true);
+        let value = self.call_prepared(&callable, args, span, env, true);
         for diagnostic in &mut self.diagnostics[start..] {
             if diagnostic.span == *old_span && diagnostic.code == "PNX2322" {
                 diagnostic.suggestions.clear();
@@ -259,6 +284,10 @@ impl Checker<'_> {
                 diagnostic.help = Some("Handle the old value in the updater or ensure the field has the required type before updating it.".into());
             }
         }
+        if value.known == Type::Never {
+            return value;
+        }
+        self.may_throw();
         if unknown {
             return Value::new(Type::Unknown);
         }

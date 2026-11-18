@@ -105,6 +105,18 @@ impl Checker<'_> {
         reachable: bool,
         check: impl FnOnce(&mut Self) -> Value,
     ) -> Value {
+        let mut value = self.inspect_path(reachable, check);
+        if !reachable {
+            value.narrow(Type::Never);
+        }
+        value
+    }
+
+    pub(super) fn inspect_path<T>(
+        &mut self,
+        reachable: bool,
+        check: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         if reachable {
             return check(self);
         }
@@ -114,7 +126,7 @@ impl Checker<'_> {
             .recur_target
             .as_mut()
             .map(|target| std::mem::replace(&mut target.reachable, false));
-        let mut value = check(self);
+        let value = check(self);
         self.throws = enclosing_throws;
         if let Some((target, old)) = self.recur_target.as_mut().zip(old) {
             target.reachable = old;
@@ -127,7 +139,6 @@ impl Checker<'_> {
                 "PNX2322" | "PNX2741" | "PNX2801" | "PNX2802"
             )
         }));
-        value.narrow(Type::Never);
         value
     }
 

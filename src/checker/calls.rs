@@ -30,6 +30,17 @@ impl Callable<'_, '_> {
     }
 }
 
+pub(super) struct PreparedCallable<'form, 'model> {
+    kind: Callable<'form, 'model>,
+    span: Span,
+}
+
+impl PreparedCallable<'_, '_> {
+    pub(super) fn returns(&self) -> bool {
+        self.kind.returns()
+    }
+}
+
 impl<'model> Checker<'model> {
     fn inferred_call(&mut self, function: &Function, args: Vec<Value>, span: Span) -> Value {
         if self.throws.is_some() && args.iter().all(|arg| arg.known != Type::Never) {
@@ -153,8 +164,6 @@ impl<'model> Checker<'model> {
                         | "clojure.core/get-in"
                         | "clojure.core/assoc"
                         | "clojure.core/assoc-in"
-                        | "clojure.core/update"
-                        | "clojure.core/update-in"
                 )
             {
                 self.may_throw();
@@ -215,10 +224,14 @@ impl<'model> Checker<'model> {
                 _ => {}
             }
         }
-        if let Some(callable) = self.prepare_inline(&xs[0], env) {
+        if let Some(kind) = self.prepare_inline(&xs[0], env) {
+            let callable = PreparedCallable {
+                kind,
+                span: xs[0].span,
+            };
             let args: Vec<_> = self.eval_args(&xs[1..], env, callable.returns()).collect();
             let invoked = call_returns(&args);
-            return self.call_prepared(&callable, args, xs[0].span, span, env, invoked);
+            return self.call_prepared(&callable, args, span, env, invoked);
         }
         let function = self.infer(&xs[0], env);
         let args = self
@@ -293,54 +306,47 @@ impl<'model> Checker<'model> {
         }
     }
 
-    pub(super) fn call_form(
-        &mut self,
-        callee: &Form,
-        args: Vec<(Value, Span)>,
-        span: Span,
-        env: &Env,
-        invoked: bool,
-    ) -> Value {
-        let callable = self.prepare_callable(callee, env);
-        self.call_prepared(&callable, args, callee.span, span, env, invoked)
-    }
-
-    fn prepare_callable<'form>(
+    pub(super) fn prepare_callable<'form>(
         &mut self,
         callee: &'form Form,
         env: &Env,
-    ) -> Callable<'form, 'model> {
+    ) -> PreparedCallable<'form, 'model> {
+        let prepare = |kind| PreparedCallable {
+            kind,
+            span: callee.span,
+        };
         if let Some(callable) = self.prepare_inline(callee, env) {
-            return callable;
+            return prepare(callable);
         }
         if let Some(name) = callee.symbol()
             && !env.contains_key(name)
         {
             if let Some(function) = self.model.local_function(name).filter(|f| f.inferred) {
-                return Callable::Private(function);
+                return prepare(Callable::Private(function));
             }
             if self.model.declared_value(name, self.globals).is_none() {
                 let resolved = self.model.resolve(name);
                 if is_builtin(&resolved) {
-                    return Callable::Builtin(resolved);
+                    return prepare(Callable::Builtin(resolved));
                 }
             }
         }
-        Callable::Value(self.infer(callee, env))
+        prepare(Callable::Value(self.infer(callee, env)))
     }
 
-    fn call_prepared(
+    pub(super) fn call_prepared(
         &mut self,
-        callable: &Callable<'_, '_>,
+        callable: &PreparedCallable<'_, '_>,
         args: Vec<(Value, Span)>,
-        head: Span,
         span: Span,
         env: &Env,
         invoked: bool,
     ) -> Value {
         let invoked = invoked && callable.returns();
-        match callable {
-            Callable::Inline(parts) => self.call_inline(*parts, args, head, span, env, invoked),
+        match &callable.kind {
+            Callable::Inline(parts) => {
+                self.call_inline(*parts, args, callable.span, span, env, invoked)
+            }
             Callable::Fnil(wrapper) => self.call_fnil(wrapper, args, span, env, invoked),
             _ if !invoked => Value::new(Type::Never),
             Callable::Private(function) => self.inferred_call(
@@ -349,7 +355,7 @@ impl<'model> Checker<'model> {
                 span,
             ),
             Callable::Builtin(name) => self.builtin(name, &args, span),
-            Callable::Value(function) => self.call_value(function, &args, head, span),
+            Callable::Value(function) => self.call_value(function, &args, callable.span, span),
         }
     }
 
@@ -497,7 +503,7 @@ pub(super) fn predicate_type(name: &str) -> Option<Type> {
     }
 }
 
-fn call_returns(args: &[(Value, Span)]) -> bool {
+pub(super) fn call_returns(args: &[(Value, Span)]) -> bool {
     args.iter().all(|(value, _)| value.known != Type::Never)
 }
 

@@ -132,3 +132,49 @@ fn fnil_reports_bad_defaults_and_wrapper_arity() {
         assert_eq!(report.diagnostics[0].code, code, "{report:#?}");
     }
 }
+
+#[test]
+fn updates_evaluate_the_updater_expression_before_extras_and_skip_the_write_on_throw() {
+    for (label, expression) in [
+        (
+            "updater",
+            r#"(update {} :n (fnil + (throw (ex-info "updater" {:stage :updater})))
+                            (throw (ex-info "extra" {:stage :extra})))"#,
+        ),
+        (
+            "target",
+            r#"(update (throw (ex-info "target" {:stage :target}))
+                       (throw (ex-info "key" {:stage :key}))
+                       (fnil + (throw (ex-info "updater" {:stage :updater}))))"#,
+        ),
+        (
+            "path",
+            r#"(update-in {} [:nested (throw (ex-info "path" {:stage :path}))]
+                             (fnil + (throw (ex-info "updater" {:stage :updater}))))"#,
+        ),
+        (
+            "inside",
+            r#"(update {} :n (fn [_] (throw (ex-info "inside" {:stage :inside}))))"#,
+        ),
+        (
+            "extra",
+            r#"(update-in {} [:n] (fn [_ _] (throw (ex-info "inside" {:stage :inside})))
+                                 (throw (ex-info "extra" {:stage :extra})))"#,
+        ),
+    ] {
+        let source = format!(
+            "(ns demo) (defn f {{:t/sig '[:-> #{{:{label}}}]}} []
+               (try {expression}
+                 (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))"
+        );
+        let report = Session::default().check("updates.clj", &source);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = Session::default().check(
+        "updates.clj",
+        "(defn f {:t/sig '[:-> nil?]} []
+           (update-in {} [(throw (ex-info \"stop\" {})) missing-key] (fn [x] (dummy x))))",
+    );
+    assert_eq!(report.diagnostics.len(), 2, "{report:#?}");
+    assert!(report.diagnostics.iter().all(|d| d.code == "PNX2304"));
+}

@@ -20,3 +20,9 @@
     (-> request
         (update-in [:patient :name] (fn [name] (str/upper-case (or name fallback))))
         (get-in [:patient :name]))))
+
+(defn updater-stage {:t/sig '[:-> #{:updater}]} []
+  (try
+    (update {} :visits (fnil + (throw (ex-info "Counter unavailable" {:stage :updater})))
+                       (throw (ex-info "Delta unavailable" {:stage :extra})))
+    (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))
