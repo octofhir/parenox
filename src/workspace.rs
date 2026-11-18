@@ -62,7 +62,18 @@ fn read_externs(paths: &[String]) -> Result<Vec<FileSnapshot>, String> {
 }
 
 pub(super) fn read_source_roots(paths: &[String]) -> Result<BTreeMap<String, String>, String> {
-    let mut files = BTreeMap::new();
+    source_paths(paths)?
+        .into_iter()
+        .map(|path| {
+            let source = fs::read_to_string(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            Ok((path.to_string_lossy().into_owned(), source))
+        })
+        .collect()
+}
+
+pub(super) fn source_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
     let mut pending: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     while let Some(path) = pending.pop() {
         let metadata =
@@ -82,11 +93,11 @@ pub(super) fn read_source_roots(paths: &[String]) -> Result<BTreeMap<String, Str
                 pending.push(child);
             }
         } else if is_clojure_source(&path) {
-            let source = fs::read_to_string(&path)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
-            files.insert(path.to_string_lossy().into_owned(), source);
+            files.push(path);
         }
     }
+    files.sort_unstable();
+    files.dedup();
     Ok(files)
 }
 

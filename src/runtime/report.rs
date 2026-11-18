@@ -1,7 +1,7 @@
 //! Decode the JVM runner's EDN summary for exit status and machine output.
 use std::fmt;
 
-use parenox::reader::{self, Form, Kind};
+use parenox::reader::{self, Form, Kind, Span};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -122,6 +122,13 @@ impl RunError {
             line: None,
             column: None,
         }
+    }
+
+    pub fn at_file(mut self, path: String, span: Option<Span>) -> Self {
+        self.path = Some(path);
+        self.line = span.map(|span| span.start.line);
+        self.column = span.map(|span| span.start.column);
+        self
     }
 }
 

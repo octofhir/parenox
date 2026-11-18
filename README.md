@@ -30,9 +30,9 @@ paths from `deps.edn`. CI can use `--format json` for machine-readable diagnosti
 `parenox check --allow-incomplete` accepts coverage warnings when adding
 contracts gradually. The report still shows which checks were incomplete.
 
-Run project tests with `parenox test --alias test my-app.routes-test`. It uses
-the standard Clojure CLI and reports local assertion locations and a CI exit
-status. [JVM test reference](docs/reference.md#jvm-tests)
+Run project tests with `parenox test --alias test --discover` or name a test
+namespace. Parenox uses the standard Clojure CLI and reports local assertion
+locations and a CI exit status. [JVM test reference](docs/reference.md#jvm-tests)
 
 Try the included clinic project to see a diagnostic with its contract source:
 

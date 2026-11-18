@@ -70,8 +70,11 @@ pub(crate) struct TestOptions {
         conflicts_with = "namespaces"
     )]
     pub(crate) vars: Vec<String>,
+    /// Find conventional *_test.clj and *_test.cljc namespaces in project source roots.
+    #[arg(long, conflicts_with_all = ["namespaces", "vars"])]
+    pub(crate) discover: bool,
     /// Namespaces to require and run with clojure.test.
-    #[arg(value_name = "NAMESPACE", required_unless_present = "vars")]
+    #[arg(value_name = "NAMESPACE", required_unless_present_any = ["vars", "discover"])]
     pub(crate) namespaces: Vec<String>,
 }
 

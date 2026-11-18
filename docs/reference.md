@@ -77,6 +77,10 @@ parenox test --alias test --var my-app.routes-test/decodes-unicode
 Repeat `--var` to run several tests together. The selected vars run with their
 `:once` and `:each` fixtures. Namespace hooks apply to whole-namespace runs.
 
+`parenox test --alias test --discover` selects namespaces declared in
+`*_test.clj` and `*_test.cljc` files under the local `deps.edn` source paths
+and selected aliases. Use a namespace or `--var` for other test layouts.
+
 Test output includes the regular `clojure.test` report. When the assertion's JVM
 location resolves to a local test file, Parenox adds a `path:line` line with the
 qualified test var. Macros can report the location of the expanded assertion's

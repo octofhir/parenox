@@ -11,7 +11,7 @@ use parenox::reader::{self, Form, Kind, Span};
 use crate::cli::ProjectOptions;
 
 const DEFAULT_PATH: &str = "parenox.edn";
-use deps::deps_paths;
+pub(super) use deps::deps_paths;
 
 #[derive(Default)]
 pub(super) struct ProjectConfig {

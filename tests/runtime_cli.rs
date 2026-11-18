@@ -70,6 +70,40 @@ fn rejects_unqualified_test_var_selectors() {
 }
 
 #[test]
+fn discovery_reports_a_broken_namespace_before_starting_clojure() {
+    let fixture = Fixture::new("broken discovered namespace");
+    fs::write(
+        fixture.0.join("test/demo/broken_test.cljc"),
+        "(ns demo.broken-test [:oops})",
+    )
+    .unwrap();
+    let output = fixture.run(
+        &["--discover"],
+        &[
+            "--format",
+            "json",
+            "--clojure",
+            "parenox-missing-executable",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let failure = &report["run_error"];
+    assert_eq!(failure["phase"], "selection");
+    assert!(
+        std::path::Path::new(failure["path"].as_str().unwrap())
+            .ends_with("test/demo/broken_test.cljc")
+    );
+    assert_eq!(failure["line"], 1);
+    assert!(
+        failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("closing delimiter")
+    );
+}
+
+#[test]
 #[ignore = "requires the Clojure CLI and JVM"]
 fn project_jvm_pass_failure_and_load_error() {
     let fixture = Fixture::new("project");
@@ -125,6 +159,21 @@ fn project_jvm_pass_failure_and_load_error() {
     let output = fixture.run(&["demo.routing-test"], &[]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("2 tests containing 3 assertions"));
+
+    fs::write(
+        fixture.0.join("test/demo/helper.clj"),
+        "unread unrelated file",
+    )
+    .unwrap();
+    let output = fixture.run(&["--discover"], &["--format", "json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["tests"], 2);
+    assert_eq!(report["assertions"], 3);
+    let output = run_ci(&["test", "--discover", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["run_error"]["phase"], "selection");
 
     let edited = SOURCE.replace(
         "(if (some? (:route request)) :found :missing)",

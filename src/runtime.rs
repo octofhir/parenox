@@ -1,4 +1,5 @@
 //! Explicit Clojure CLI invocations. Static analysis remains source-only.
+mod discover;
 mod report;
 
 use std::env;
@@ -47,7 +48,12 @@ fn execute_tests(options: TestOptions) -> Result<TestReport, RunError> {
     }
     let aliases =
         cli_aliases(&options.aliases).map_err(|error| RunError::new(Phase::Selection, error))?;
-    let (mode, selectors) = if options.vars.is_empty() {
+    let (mode, selectors) = if options.discover {
+        (
+            "namespaces",
+            discover::namespaces(&project, &options.aliases)?,
+        )
+    } else if options.vars.is_empty() {
         for name in &options.namespaces {
             if !namespace_symbol(name) {
                 return Err(RunError::new(
