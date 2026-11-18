@@ -49,8 +49,8 @@
     (if active? :unexpected :ran)))
 
 (defn next-status {:t/sig '[:-> #{:pending}]} []
-  (loop [statuses ["skip" :pending]]
+  (loop [statuses [:ready :pending]]
     (when-first [status statuses]
-      (if (string? status)
+      (if (= status :ready)
         (recur (next statuses))
         status))))

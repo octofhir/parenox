@@ -448,6 +448,7 @@ impl<'model> Checker<'model> {
             | "clojure.core/ensure-reduced" => {
                 return reduction::reduced_operation(name, &args[0].0);
             }
+            "clojure.core/=" => equality(args),
             "clojure.core/empty?" | "clojure.core/not-empty" => {
                 return self.emptiness_call(name, &args[0]);
             }
@@ -577,6 +578,55 @@ pub(super) fn predicate_type(name: &str) -> Option<Type> {
 
 pub(super) fn call_returns(args: &[(Value, Span)]) -> bool {
     args.iter().all(|(value, _)| value.known != Type::Never)
+}
+
+fn equality(args: &[(Value, Span)]) -> Type {
+    let mut result = Type::Bool(true);
+    for pair in args.windows(2) {
+        match literal_equality(&pair[0].0.known, &pair[1].0.known) {
+            Some(false) => return Type::Bool(false),
+            Some(true) => {}
+            None => result = Type::Boolean,
+        }
+    }
+    result
+}
+
+fn literal_equality(left: &Type, right: &Type) -> Option<bool> {
+    fn alternatives(ty: &Type) -> &[Type] {
+        match ty {
+            Type::Union(parts) => parts,
+            ty => std::slice::from_ref(ty),
+        }
+    }
+
+    fn is_atom(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Nil
+                | Type::Bool(_)
+                | Type::Key(_)
+                | Type::Str(_)
+                | Type::Char(_)
+                | Type::Integer(_)
+        )
+    }
+
+    let (left, right) = (alternatives(left), alternatives(right));
+    if left.len().saturating_mul(right.len()) > 64 {
+        return None;
+    }
+    let mut known = None;
+    for a in left {
+        for b in right {
+            let equal = (is_atom(a) && is_atom(b)).then(|| a == b)?;
+            if known.is_some_and(|previous| previous != equal) {
+                return None;
+            }
+            known = Some(equal);
+        }
+    }
+    known
 }
 
 fn predicate_result(actual: &Type, expected: &Type) -> Type {

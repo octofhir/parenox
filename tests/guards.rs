@@ -171,3 +171,21 @@ fn when_first_reports_invalid_syntax_inputs_and_unresolved_skipped_forms() {
         assert_eq!(diagnostic.code, code);
     }
 }
+
+#[test]
+fn scalar_equality_keeps_only_possible_literal_branches() {
+    let source = r#"(ns demo)
+      (defn same {:t/sig '[:-> #{true}]} [] (= :ready :ready :ready))
+      (defn distinct {:t/sig '[:-> #{false}]} [] (= :ready :pending))
+      (defn nil-vs-false {:t/sig '[:-> #{false}]} [] (= nil false))
+      (defn char-vs-string {:t/sig '[:-> #{false}]} [] (= \a "a"))
+      (defn singleton {:t/sig '[number? :-> #{true}]} [n] (= n))
+      (defn all-distinct {:t/sig '[#{:stopped :paused} :-> #{false}]} [status]
+        (= :ready status))
+      (defn possibly-equal {:t/sig '[#{:ready :paused} :-> #{:ok :wait}]} [status]
+        (if (= status :ready) :ok :wait))
+      (defn opaque-values {:t/sig '[:-> #{:same :different}]} []
+        (if (= 1 1N) :same :different))"#;
+    let report = Session::default().check("status.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}

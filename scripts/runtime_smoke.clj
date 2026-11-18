@@ -998,3 +998,12 @@
 (doseq [token ["08" "2r10N" "1/00" "1e10000000000M"]]
   (assert (try (read-string token) false (catch RuntimeException _ true))))
 (println "Clojure/JVM numeric literals: 9 assertions passed")
+
+(assert (= :pending (demo.guards/next-status)))
+(assert (= :ready :ready :ready))
+(assert (not (= :ready :pending)))
+(assert (not (= nil false)))
+(assert (not (= \a "a")))
+(assert (= 1 1N))
+(assert (not (= 1 1.0)))
+(println "Clojure/JVM scalar equality: 7 assertions passed")

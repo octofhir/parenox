@@ -444,7 +444,9 @@ Their guards narrow values in the selected branch and preserve tail position.
 narrowed value through a local symbol or a supported map destructuring pattern.
 The fallback runs in the outer scope and defaults to nil.
 `when-first` enters its body for a nonempty input and binds the first element,
-including nil or false. Its final expression can recur to the enclosing loop. Run `just guards`
+including nil or false. Its final expression can recur to the enclosing loop.
+Known scalar literals let `=` resolve branches, including status comparisons
+on each iteration of that loop. Run `just guards`
 to see the result type when no fallback is supplied and a type error when
 `if-some` passes `false` into a numeric call.
 
