@@ -57,6 +57,10 @@ verify: fmt-check lint test
 runtime-smoke:
     clojure -M scripts/runtime_smoke.clj
 
+# Check editor behavior and CLI agreement on a local pinned lambdaisland/uri checkout.
+uri-editor-smoke project:
+    PARENOX_URI_PILOT={{quote(project)}} cargo test --locked --release --test lsp uri_pilot_editor_workflow -- --ignored
+
 # Check private inference, then show the deliberate nil error and call chain.
 inference: build
     @./target/release/parenox check examples/inferred.clj

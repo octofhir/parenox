@@ -399,6 +399,12 @@ values are read as inert data. Clojure navigation is available for `.clj` and
 Open a Clojure project and check the **Language Servers** tool window for
 Parenox. Use `lsp --alias test` in the command to include test roots from `deps.edn`.
 
+Run `just uri-editor-smoke /absolute/path/to/uri` against the pinned
+[lambdaisland/uri pilot](design/type-checker-research.md#first-pilot-project).
+The smoke test exercises the stdio protocol with an unsaved typo and an invalid
+EDN buffer, checks the definition location, and compares the typo diagnostics
+with a fresh CLI check. It leaves the pilot checkout intact.
+
 ## Agent sessions
 
 ```sh
