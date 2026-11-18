@@ -292,6 +292,9 @@ and public literal vars. Changes to the set of exports refresh the referral
 mapping. Externs describe selected contracts, so use an explicit referral list
 for extern-only namespaces. Run `just all-refers` for examples.
 
+`clojure.test` also supports `:refer :all` using public names from the pinned
+JVM reference. Recognized test declarations retain their coverage warnings.
+
 `:import` resolves short class names in `catch` for modeled JVM exception
 classes, including the `IOException` hierarchy. It accepts qualified names
 and package groups with lists or vectors. Custom exception classes report

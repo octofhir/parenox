@@ -1,5 +1,30 @@
 use parenox::{Session, Source};
 
+#[test]
+fn resolves_clojure_test_refer_all_and_renamed_test_macros() {
+    let source = r#"
+        (ns app-test (:require [clojure.test :refer :all :rename {deftest scenario}]))
+        (scenario finds-a-label (is (= "label" "label")))
+    "#;
+    let report = Session::default().check("app_test.clj", source);
+    assert!(!report.complete);
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    let gap = &report.diagnostics[0];
+    assert_eq!(gap.severity, "warning");
+    assert!(gap.message.contains("Analysis for scenario declarations"));
+
+    let excluded = source.replace(":rename {deftest scenario}", ":exclude [deftest]");
+    let excluded = excluded.replace("(scenario ", "(deftest ");
+    let report = Session::default().check("app_test.clj", &excluded);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.diagnostics[0].severity, "error");
+    assert!(
+        report.diagnostics[0]
+            .message
+            .contains("Unsupported top-level declaration deftest")
+    );
+}
+
 const LIBRARY: &str = include_str!("../examples/all_refers/library.clj");
 const APP: &str = include_str!("../examples/all_refers/app.clj");
 

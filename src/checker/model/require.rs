@@ -5,6 +5,50 @@ use super::{Declarations, Globals};
 use crate::checker::calls::is_builtin;
 use crate::reader::{Form, Kind, Span};
 
+// Public var names from the pinned Clojure/JVM reference. These are name
+// declarations for referrals, without signatures or macro expansion.
+const CLOJURE_TEST_PUBLIC_VARS: &[&str] = &[
+    "*initial-report-counters*",
+    "*load-tests*",
+    "*report-counters*",
+    "*stack-trace-depth*",
+    "*test-out*",
+    "*testing-contexts*",
+    "*testing-vars*",
+    "are",
+    "assert-any",
+    "assert-expr",
+    "assert-predicate",
+    "compose-fixtures",
+    "deftest",
+    "deftest-",
+    "do-report",
+    "file-position",
+    "function?",
+    "get-possibly-unbound-var",
+    "inc-report-counter",
+    "is",
+    "join-fixtures",
+    "report",
+    "run-all-tests",
+    "run-test",
+    "run-test-var",
+    "run-tests",
+    "set-test",
+    "successful?",
+    "test-all-vars",
+    "test-ns",
+    "test-var",
+    "test-vars",
+    "testing",
+    "testing-contexts-str",
+    "testing-vars-str",
+    "try-expr",
+    "use-fixtures",
+    "with-test",
+    "with-test-out",
+];
+
 impl Declarations {
     pub(super) fn read_libspec(&mut self, lib: &Form, globals: Option<&Globals>) {
         if let Some(namespace) = lib.symbol() {
@@ -75,21 +119,30 @@ impl Declarations {
                 return;
             }
             self.all_refers.insert(namespace.to_owned());
-            let Some(globals) = globals else {
-                return;
-            };
-            let Some(exports) = globals.exports.get(namespace) else {
-                self.error(
-                    "PNX9001",
-                    refer.span,
-                    format!(":refer :all requires the source of namespace {namespace}"),
-                );
-                return;
-            };
-            exports
-                .public_var_names()
-                .map(|name| (name, refer.span))
-                .collect()
+            if namespace == "clojure.test"
+                && globals.is_none_or(|globals| !globals.project_namespaces.contains(namespace))
+            {
+                CLOJURE_TEST_PUBLIC_VARS
+                    .iter()
+                    .map(|&name| (name, refer.span))
+                    .collect()
+            } else {
+                let Some(globals) = globals else {
+                    return;
+                };
+                let Some(exports) = globals.exports.get(namespace) else {
+                    self.error(
+                        "PNX9001",
+                        refer.span,
+                        format!(":refer :all requires the source of namespace {namespace}"),
+                    );
+                    return;
+                };
+                exports
+                    .public_var_names()
+                    .map(|name| (name, refer.span))
+                    .collect()
+            }
         } else {
             self.symbols(refer, ":refer")
                 .into_iter()

@@ -357,7 +357,7 @@ fn known_unsupported_declaration(qualified: &str, items: &[Form]) -> bool {
     match qualified {
         "clojure.core/defrecord" => items.get(2).and_then(Form::vector).is_some(),
         "clojure.core/defmethod" => items.len() >= 4,
-        "clojure.test/deftest" => true,
+        "clojure.test/deftest" | "clojure.test/deftest-" => true,
         "clojure.test.check.clojure-test/defspec" => items.len() >= 3,
         _ => false,
     }
