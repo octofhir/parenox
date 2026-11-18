@@ -100,6 +100,13 @@ fn opens_project_configuration_and_keeps_edits_in_memory() {
         "op": "definition", "path": caller, "offset": CONSUMER.find("store/normalize").unwrap()
     }));
     assert_eq!(target["path"], json!(root.0.join("src/store.clj")));
+    let hover = client.result(json!({
+        "op": "hover", "path": caller, "offset": CONSUMER.find("store/normalize").unwrap()
+    }));
+    assert_eq!(hover["name"], "store/normalize");
+    assert_eq!(hover["signatures"], json!(["[String -> String]"]));
+    assert_eq!(hover["contract"]["kind"], "t_sig");
+    assert_eq!(hover["contract"]["path"], target["path"]);
 
     let changed = client.result(json!({
         "op": "update", "changes": [{
@@ -127,6 +134,29 @@ fn opens_project_configuration_and_keeps_edits_in_memory() {
     }));
     assert_eq!(reopened["ok"], true, "{reopened}");
     assert_eq!(reopened["files"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn agent_hover_reads_the_current_overlay_and_reports_untyped_vars() {
+    let mut client = Client::start();
+    let app = "(ns app (:require [store :as p])) (defn f [] (p/label))";
+    let hover = || json!({"op":"hover","path":"app.cljc","offset":app.find("p/label").unwrap()});
+    let first = client.send(hover());
+    assert_eq!(first["error"]["code"], "invalid_request");
+    client.result(json!({"op":"open","files":[
+        {"path":"app.cljc","source":app},
+        {"path":"store.clj","source":"(ns store) (defn label [] \"a\")"}
+    ]}));
+    let untyped = client.result(hover());
+    assert_eq!(untyped, json!({"name":"store/label","signatures":[]}));
+    client.result(json!({"op":"update","changes":[
+        {"path":"store.clj","source":"(ns store) (defn label {:t/sig '[:-> string?]} [] \"a\")"}
+    ]}));
+    let typed = client.result(hover());
+    assert_eq!(typed["signatures"], json!(["[ -> String]"]));
+    client.result(json!({"op":"update","remove":["store.clj"]}));
+    let gone = client.send(hover());
+    assert_eq!(gone, json!({"id":null,"result":null}));
 }
 
 #[test]

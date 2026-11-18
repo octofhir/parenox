@@ -588,8 +588,8 @@ Use `open_project` to start a tracked session from the same `parenox.edn` and
 {"id":3,"op":"open_project","root":"/path/to/project","aliases":["test"]}
 ```
 
-The response includes the initial report. Use its paths for later edits and
-definition requests. Updates change the tracked snapshot in memory. A new
+The response includes the initial report. Use its paths for later edits,
+definition and hover requests. Updates change the tracked snapshot in memory. A new
 `open_project` reads a fresh disk snapshot, and a failed open keeps the
 previous session available.
 
@@ -616,19 +616,23 @@ operations leave the tracked project intact. A valid edit is
 saved even when it produces diagnostics. Single-file and complete-snapshot
 requests work independently of the tracked project.
 
-Query a qualified source var after `open` or `update` with a zero-based UTF-8
-byte offset inside the reference:
+Query a source var after `open` or `update` with a zero-based UTF-8 byte
+offset inside a qualified reference or an explicit namespace referral:
 
 ```json
 {"id":6,"op":"definition","path":"src/app.clj","offset":105}
+{"id":7,"op":"hover","path":"src/app.clj","offset":105}
 ```
 
-The response contains the target `path` and `span`, or a `null` result when no
+The definition response contains the target `path` and `span`, or a `null` result when no
 unique source definition can be resolved. The query supports qualified `def`
 and `defn` references, including namespace aliases and functions without type
 annotations. For a file-backed query, run
 `parenox definition --file src/app.clj --offset 105` with the same project path
 options as `check`.
+
+Hover returns the qualified var name, display signatures and the contract
+origin when available. The signatures array is empty for an untyped var.
 
 - Unchanged sources reuse their parsed forms and declaration models.
 - Unchanged externs reuse their declarations until a referenced spec changes.

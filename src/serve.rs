@@ -85,7 +85,7 @@ impl<'de> Deserialize<'de> for ExternsChange {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DefinitionRequest {
+struct QueryRequest {
     #[serde(default)]
     id: Value,
     path: String,
@@ -98,7 +98,8 @@ enum ProjectOperation {
     Open(ProjectRequest),
     OpenProject(OpenProjectRequest),
     Update(UpdateRequest),
-    Definition(DefinitionRequest),
+    Definition(QueryRequest),
+    Hover(QueryRequest),
 }
 
 #[derive(Deserialize)]
@@ -309,6 +310,18 @@ fn write_tracked(
                 output,
                 request.id,
                 "Open a project before querying a definition".into(),
+            ),
+        },
+        ProjectOperation::Hover(request) => match tracked {
+            Some(project) => write_check(
+                output,
+                request.id,
+                project.session.var_at(&request.path, request.offset),
+            ),
+            None => write_error(
+                output,
+                request.id,
+                "Open a project before querying hover information".into(),
             ),
         },
     }

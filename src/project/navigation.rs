@@ -12,9 +12,11 @@ pub struct Definition {
     pub span: Span,
 }
 
+#[derive(Serialize)]
 pub struct VarInfo {
     pub name: String,
     pub signatures: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub contract: Option<ContractOrigin>,
 }
 
