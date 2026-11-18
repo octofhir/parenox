@@ -499,8 +499,10 @@ index and report known out-of-bounds calls. Run `just callables` for examples.
 an initial value it invokes the reducer with zero arguments on empty input and
 uses the first item as the accumulator on nonempty input. With an initial value,
 an empty input returns that value. Reducer diagnostics identify the failing
-step and point at literal elements when possible. Run `just reductions` for
-examples.
+step and point at literal elements when possible. For typed vectors and seqs
+with unknown length, Parenox follows possible accumulator types across steps
+and widens collections whose length grows. Excessive shape growth reports an
+analysis gap. Run `just reductions` for examples.
 
 A closed map supplies a `MapEntry<K, V>` for each present field. Use `key`,
 `val`, or fixed positional bindings such as `(fn [[k v :as entry]] ...)`.

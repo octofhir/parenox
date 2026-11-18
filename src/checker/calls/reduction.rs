@@ -1,4 +1,5 @@
-//! Ordered reduction of collections whose positions are known.
+//! Ordered and bounded abstract reduction of sequences.
+use super::super::recur::{bounded_state, widen_growing_collections};
 use super::{
     Callable, Checker, Env, PreparedCallable, Value, vectors::CollectionError,
     vectors::element_type,
@@ -7,6 +8,8 @@ use crate::reader::{Form, Span};
 use crate::types::Type;
 
 const MAX_REDUCE_ALTERNATIVES: usize = 16;
+const MAX_REDUCE_STATES: usize = 16;
+const MAX_REDUCE_STEPS: usize = 128;
 
 struct ReductionInput<'a> {
     items: &'a [Type],
@@ -48,6 +51,7 @@ impl Checker<'_> {
             );
         }
         let mut result = Value::new(Type::Never);
+        let start = self.diagnostics.len();
         for shape in shapes {
             let casts_reducer = matches!(shape, Type::Tuple(_) | Type::Vector(_))
                 || matches!(shape, Type::SeqTuple(items) if !items.is_empty());
@@ -68,6 +72,19 @@ impl Checker<'_> {
                 Type::Vector(element) if **element == Type::Never => &[][..],
                 Type::Tuple(items) | Type::SeqTuple(items) => items,
                 Type::MapEntry(items) => items.as_slice(),
+                Type::Vector(element) | Type::Seq(element) => {
+                    let item =
+                        Value::with_notes(element.as_ref().clone(), collection.notes.clone());
+                    result = result.join(self.reduce_open(
+                        &callable,
+                        initial,
+                        (item, source.span),
+                        matches!(shape, Type::Seq(_)),
+                        span,
+                        env,
+                    ));
+                    continue;
+                }
                 Type::Unknown => {
                     self.call_prepared(&callable, Vec::new(), span, env, false);
                     return Value::new(Type::Unknown);
@@ -96,6 +113,7 @@ impl Checker<'_> {
             };
             result = result.join(self.reduce_exact(&callable, initial, input, span, env));
         }
+        self.dedup_diagnostics(start);
         result
     }
 
@@ -127,40 +145,110 @@ impl Checker<'_> {
             self.call_prepared(callable, Vec::new(), span, env, false);
         }
         for (step, (item, item_span)) in elements.enumerate() {
-            let start = self.diagnostics.len();
-            accumulator = self.call_prepared(
+            accumulator = self.reduce_step(
                 callable,
-                vec![(accumulator, accumulator_span), (item, item_span)],
+                [(accumulator, accumulator_span), (item, item_span)],
+                literal.is_none().then_some(input.form.span),
                 span,
                 env,
-                true,
+                step + 1,
             );
-            for diagnostic in &mut self.diagnostics[start..] {
-                diagnostic
-                    .notes
-                    .push(format!("While checking reduction step {}", step + 1));
-                if diagnostic.code == "PNX2322" {
-                    if diagnostic.span == span {
-                        diagnostic.suggestions.clear();
-                        diagnostic.help = Some(
-                            "The reducer's first argument receives the previous step's result."
-                                .into(),
-                        );
-                    } else if literal.is_none() && diagnostic.span == input.form.span {
-                        diagnostic.suggestions.clear();
-                        diagnostic.help = Some(
-                            "Check the collection's elements against the reducer's argument types."
-                                .into(),
-                        );
-                    }
-                }
-            }
             if matches!(accumulator.known, Type::Never | Type::Unknown) {
                 break;
             }
             accumulator_span = span;
         }
         accumulator
+    }
+
+    fn reduce_open(
+        &mut self,
+        callable: &PreparedCallable<'_, '_>,
+        initial: Option<&(Value, Span)>,
+        input: (Value, Span),
+        nonempty: bool,
+        span: Span,
+        env: &Env,
+    ) -> Value {
+        let (mut accumulator, mut accumulator_span) =
+            initial.cloned().unwrap_or_else(|| input.clone());
+        let mut result = if nonempty && initial.is_some() {
+            Value::new(Type::Never)
+        } else {
+            accumulator.clone()
+        };
+        if initial.is_none() && !nonempty {
+            result = result.join(self.call_prepared(callable, Vec::new(), span, env, true));
+        }
+
+        let mut seen = vec![vec![accumulator.clone()]];
+        for step in 1..=MAX_REDUCE_STATES {
+            let mut next = self.reduce_step(
+                callable,
+                [(accumulator, accumulator_span), input.clone()],
+                Some(input.1),
+                span,
+                env,
+                step,
+            );
+            if next.known == Type::Never {
+                return result;
+            }
+            if next.known == Type::Unknown {
+                return next;
+            }
+            widen_growing_collections(std::slice::from_mut(&mut next), &seen);
+            if !bounded_state(std::slice::from_ref(&next)) {
+                break;
+            }
+            result = result.join(next.clone());
+            if seen.iter().any(|state| state[0].known == next.known) {
+                return result;
+            }
+            seen.push(vec![next.clone()]);
+            accumulator = next;
+            accumulator_span = span;
+        }
+        self.unsupported(
+            span,
+            "reduce accumulator types did not stabilize within the analysis limit",
+        )
+    }
+
+    fn reduce_step(
+        &mut self,
+        callable: &PreparedCallable<'_, '_>,
+        args: [(Value, Span); 2],
+        projected: Option<Span>,
+        span: Span,
+        env: &Env,
+        step: usize,
+    ) -> Value {
+        if self.reduction_steps >= MAX_REDUCE_STEPS {
+            return self.unsupported(span, "reduce step analysis limit (128) exceeded");
+        }
+        self.reduction_steps += 1;
+        let start = self.diagnostics.len();
+        let result = self.call_prepared(callable, Vec::from(args), span, env, true);
+        for diagnostic in &mut self.diagnostics[start..] {
+            diagnostic
+                .notes
+                .push(format!("While checking reduction step {step}"));
+            if diagnostic.code == "PNX2322" {
+                let help = if diagnostic.span == span {
+                    Some("The reducer's first argument receives the previous step's result.")
+                } else if projected == Some(diagnostic.span) {
+                    Some("Check the collection's elements against the reducer's argument types.")
+                } else {
+                    None
+                };
+                if let Some(help) = help {
+                    diagnostic.suggestions.clear();
+                    diagnostic.help = Some(help.into());
+                }
+            }
+        }
+        result
     }
 }
 

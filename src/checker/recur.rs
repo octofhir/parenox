@@ -1,5 +1,5 @@
 //! Tail transfers and bounded type inference for loop and function bodies.
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 
 use super::{Checker, Env, Value};
 use crate::reader::{Form, Kind, Span};
@@ -125,7 +125,7 @@ impl Checker<'_> {
             checker.body(&xs[2..], &local, true)
         });
         if destructures {
-            self.dedup_recur_diagnostics(start);
+            self.dedup_diagnostics(start);
         }
         result
     }
@@ -206,27 +206,10 @@ impl Checker<'_> {
                 pending.extend(std::mem::take(&mut target.edges));
                 seen.push(state);
             }
-            self.dedup_recur_diagnostics(start);
+            self.dedup_diagnostics(start);
         }
         self.recur_target = enclosing;
         result
-    }
-
-    fn dedup_recur_diagnostics(&mut self, start: usize) {
-        if self.diagnostics.len() - start < 2 {
-            return;
-        }
-        let mut reported = BTreeSet::new();
-        let diagnostics = self.diagnostics.split_off(start);
-        self.diagnostics
-            .extend(diagnostics.into_iter().filter(|diagnostic| {
-                reported.insert((
-                    diagnostic.span.start.offset,
-                    diagnostic.span.end.offset,
-                    diagnostic.code.clone(),
-                    diagnostic.message.clone(),
-                ))
-            }));
     }
 }
 
@@ -236,7 +219,7 @@ fn same_types(left: &[Value], right: &[Value]) -> bool {
         .all(|(left, right)| left.known == right.known)
 }
 
-fn widen_growing_collections(state: &mut [Value], seen: &[Vec<Value>]) -> bool {
+pub(super) fn widen_growing_collections(state: &mut [Value], seen: &[Vec<Value>]) -> bool {
     // Two earlier states with the same other slots distinguish repeated growth
     // from a single append before a loop exits.
     let mut prior = Vec::new();
@@ -283,7 +266,7 @@ fn growing_slots(current: &[Value], previous: &[Value]) -> Option<Vec<usize>> {
 
 // A growing shape such as (recur [state state]) can otherwise double in size
 // at every step, even before it reaches the iteration limit.
-fn bounded_state(state: &[Value]) -> bool {
+pub(super) fn bounded_state(state: &[Value]) -> bool {
     fn visit(ty: &Type, remaining: &mut usize) -> bool {
         let Some(next) = remaining.checked_sub(1) else {
             return false;

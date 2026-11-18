@@ -1,4 +1,5 @@
-(ns demo.reductions)
+(ns demo.reductions
+  (:require [clojure.spec.alpha :as s]))
 
 (defn sum-values {:t/sig '[:-> number?]} []
   (reduce + [1 2 3]))
@@ -19,3 +20,13 @@
 
 (defn empty-count {:t/sig '[:-> number?]} []
   (reduce + (rest [1])))
+
+(defn sum-open
+  {:t/sig '[(s/coll-of number? :kind vector?) :-> number?]}
+  [values]
+  (reduce + 0 values))
+
+(defn append-open
+  {:t/sig '[(s/coll-of string? :kind vector?) :-> (s/coll-of string? :kind vector?)]}
+  [labels]
+  (reduce conj ["default"] labels))

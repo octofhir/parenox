@@ -808,3 +808,9 @@
              (try (run)
                   (catch ClassCastException _ :not-a-number)))))
 (println "Clojure/JVM ordered reductions: 10 assertions passed")
+
+(assert (= 0 (demo.reductions/sum-open [])))
+(assert (= 6 (demo.reductions/sum-open [1 2 3])))
+(assert (= ["default" "A" "B"] (demo.reductions/append-open ["A" "B"])))
+(assert (= "last" (reduce (fn [_ item] (str item)) 0 (seq [1 "last"]))))
+(println "Clojure/JVM open reductions: 4 assertions passed")

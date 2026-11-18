@@ -18,7 +18,7 @@ pub(crate) use model::{
 };
 use recur::RecurTarget;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, ExtraFields, Field, MAX_TUPLE_ITEMS, MapType, Type};
@@ -117,6 +117,7 @@ struct Checker<'a> {
     specializations: BTreeMap<(String, Vec<Value>), (Value, Vec<Diagnostic>)>,
     recur_target: Option<RecurTarget>,
     recur_checks: usize,
+    reduction_steps: usize,
     throws: Option<Throws>,
 }
 
@@ -132,6 +133,7 @@ impl<'a> Checker<'a> {
             specializations: BTreeMap::new(),
             recur_target: None,
             recur_checks: 0,
+            reduction_steps: 0,
             throws: None,
         }
     }
@@ -140,6 +142,23 @@ impl<'a> Checker<'a> {
 impl Checker<'_> {
     fn error(&mut self, code: &str, span: Span, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::new(code, span, message));
+    }
+
+    fn dedup_diagnostics(&mut self, start: usize) {
+        if self.diagnostics.len() - start < 2 {
+            return;
+        }
+        let mut reported = BTreeSet::new();
+        let diagnostics = self.diagnostics.split_off(start);
+        self.diagnostics
+            .extend(diagnostics.into_iter().filter(|diagnostic| {
+                reported.insert((
+                    diagnostic.span.start.offset,
+                    diagnostic.span.end.offset,
+                    diagnostic.code.clone(),
+                    diagnostic.message.clone(),
+                ))
+            }));
     }
 
     fn unsupported(&mut self, span: Span, message: impl Into<String>) -> Value {
