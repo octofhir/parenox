@@ -1,12 +1,12 @@
 //! Namespace imports from Clojure ns declarations.
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::Declarations;
+use super::{Declarations, Globals};
 use crate::checker::calls::is_builtin;
 use crate::reader::{Form, Kind, Span};
 
 impl Declarations {
-    pub(super) fn read_libspec(&mut self, lib: &Form) {
+    pub(super) fn read_libspec(&mut self, lib: &Form, globals: Option<&Globals>) {
         if let Some(namespace) = lib.symbol() {
             self.dependencies.push(namespace.to_owned());
             return;
@@ -31,7 +31,8 @@ impl Declarations {
         ) else {
             return;
         };
-        if !options.contains_key(":as-alias") || options.contains_key(":as") {
+        let alias_only = options.contains_key(":as-alias") && !options.contains_key(":as");
+        if !alias_only {
             self.dependencies.push(namespace.to_owned());
         }
         for key in [":as", ":as-alias"] {
@@ -52,7 +53,6 @@ impl Declarations {
         let Some(refer) = options.get(":refer") else {
             return;
         };
-        let names = self.symbols(refer, ":refer");
         let excluded = options
             .get(":exclude")
             .map_or_else(Vec::new, |form| self.symbols(form, ":exclude"));
@@ -65,22 +65,52 @@ impl Declarations {
         } else {
             &[]
         };
+        let names: Vec<_> = if refer.keyword() == Some(":all") {
+            if alias_only {
+                self.error(
+                    "PNX9001",
+                    refer.span,
+                    ":refer :all depends on whether an :as-alias namespace is loaded",
+                );
+                return;
+            }
+            self.all_refers.insert(namespace.to_owned());
+            let Some(globals) = globals else {
+                return;
+            };
+            let Some(exports) = globals.exports.get(namespace) else {
+                self.error(
+                    "PNX9001",
+                    refer.span,
+                    format!(":refer :all requires the source of namespace {namespace}"),
+                );
+                return;
+            };
+            exports
+                .public_var_names()
+                .map(|name| (name, refer.span))
+                .collect()
+        } else {
+            self.symbols(refer, ":refer")
+                .into_iter()
+                .map(|(name, form)| (name, form.span))
+                .collect()
+        };
         for (name, source) in names {
             if excluded.iter().any(|(excluded, _)| *excluded == name) {
                 continue;
             }
-            let local = renames
+            let renamed = renames
                 .iter()
                 .rev()
                 .find(|[from, _]| from.symbol() == Some(name))
-                .map_or(source, |[_, to]| to);
-            let Some(alias) = local
-                .symbol()
-                .filter(|name| !name.contains('/') || *name == "/")
-            else {
+                .map(|[_, to]| to);
+            let span = renamed.map_or(source, |form| form.span);
+            let alias = renamed.map_or(Some(name), unqualified);
+            let Some(alias) = alias.filter(|name| !name.contains('/') || *name == "/") else {
                 self.error(
                     "PNX1001",
-                    local.span,
+                    span,
                     "A referred name must be an unqualified symbol",
                 );
                 continue;
@@ -93,7 +123,7 @@ impl Declarations {
             {
                 self.error(
                     "PNX2790",
-                    local.span,
+                    span,
                     format!("{alias} already refers to {previous}"),
                 );
                 continue;

@@ -1,6 +1,7 @@
 //! Source declarations and the namespace context used to read them.
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::Globals;
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 
@@ -69,6 +70,7 @@ pub(super) struct SpecDeclaration {
 pub(crate) struct Declarations {
     pub(super) names: Names,
     pub dependencies: Vec<String>,
+    pub(super) all_refers: BTreeSet<String>,
     pub(super) specs: BTreeMap<String, SpecDeclaration>,
     pub(super) functions: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
@@ -85,6 +87,10 @@ impl Declarations {
     }
 
     pub fn read(forms: &[Form]) -> Self {
+        Self::read_with_imports(forms, None)
+    }
+
+    pub(super) fn read_with_imports(forms: &[Form], globals: Option<&Globals>) -> Self {
         let mut model = Self {
             names: Names {
                 namespace: "user".into(),
@@ -104,7 +110,7 @@ impl Declarations {
                     model.error("PNX9001", form.span, "Only one ns declaration is supported");
                 }
                 seen_ns = true;
-                model.read_ns(xs, form.span);
+                model.read_ns(xs, form.span, globals);
             }
         }
         let mut dependencies: BTreeSet<_> = model.dependencies.iter().map(String::as_str).collect();
@@ -180,7 +186,7 @@ impl Declarations {
         model
     }
 
-    fn read_ns(&mut self, xs: &[Form], span: Span) {
+    fn read_ns(&mut self, xs: &[Form], span: Span, globals: Option<&Globals>) {
         let Some(name) = xs.get(1).and_then(Form::symbol) else {
             self.error("PNX9001", span, "ns requires a namespace name");
             return;
@@ -199,7 +205,7 @@ impl Declarations {
             match items.first().and_then(Form::keyword) {
                 Some(":require") => {
                     for lib in &items[1..] {
-                        self.read_libspec(lib);
+                        self.read_libspec(lib, globals);
                     }
                 }
                 Some(":refer-clojure") if !has_core_clause => {

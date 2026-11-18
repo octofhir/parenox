@@ -161,6 +161,12 @@ same spec key in separate files report an analysis gap.
 mappings. Qualified calls to `clojure.core` continue to resolve when an
 unqualified name is excluded.
 
+`:require` supports `:refer :all` for a namespace supplied as project source,
+including `:exclude` and `:rename`. It resolves public functions with contracts
+and public literal vars. Changes to the set of exports refresh the referral
+mapping. Externs describe selected contracts, so use an explicit referral list
+for extern-only namespaces. Run `just all-refers` for examples.
+
 `def` supports literal maps, vectors, sets and scalar values. Their inferred
 types are available to importing namespaces, subject to `^:private`. Changes
 to exported values invalidate their consumers. Dynamic vars, unbound vars and

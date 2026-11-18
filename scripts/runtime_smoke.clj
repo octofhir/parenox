@@ -727,3 +727,20 @@
 (assert (= 0 (apply + (rest [4]))))
 (assert (= "reset" (first (conj (rest [4]) "reset"))))
 (println "Clojure/JVM rest and empty lists: 11 assertions passed")
+
+(load-file "examples/all_refers/library.clj")
+(load-file "examples/all_refers/app.clj")
+(assert (= "ready" (demo.all-refers.app/render)))
+(assert (= 17 (demo.all-refers.app/window-size)))
+(assert (= 4 (demo.all-refers.app/fallback-size)))
+(assert (nil? (ns-resolve 'demo.all-refers.app 'label)))
+(assert (nil? (ns-resolve 'demo.all-refers.app 'skipped)))
+(assert (nil? (ns-resolve 'demo.all-refers.app 'hidden)))
+(assert (= :excluded
+           (try
+             (load-file "examples/all_refers/bad.clj")
+             (catch clojure.lang.Compiler$CompilerException e
+               (when (clojure.string/includes? (ex-message (ex-cause e))
+                                               "Unable to resolve symbol: skipped")
+                 :excluded)))))
+(println "Clojure/JVM all referrals: 7 assertions passed")

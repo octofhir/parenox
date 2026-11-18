@@ -220,3 +220,8 @@ spread format="pretty": build
 anonymous format="pretty": build
     @./target/release/parenox check examples/anonymous.clj --format {{quote(format)}}
     @./target/release/parenox check examples/anonymous_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check source-backed :refer :all and show excluded/private names.
+all-refers format="pretty": build
+    @./target/release/parenox check examples/all_refers/library.clj examples/all_refers/app.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/all_refers/library.clj examples/all_refers/bad.clj --format {{quote(format)}} || test "$?" -eq 1

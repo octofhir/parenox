@@ -14,6 +14,15 @@ pub(super) struct Exports {
     specs: Arc<BTreeMap<String, Type>>,
 }
 
+impl Exports {
+    pub(super) fn public_var_names(&self) -> impl Iterator<Item = &str> {
+        self.functions
+            .keys()
+            .chain(self.literals.keys())
+            .map(|qualified| qualified.split_once('/').unwrap().1)
+    }
+}
+
 #[derive(Default, PartialEq, Eq)]
 pub(super) struct LocalInterface {
     names: Names,

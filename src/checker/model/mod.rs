@@ -98,6 +98,7 @@ pub(crate) struct Model {
     exports: Arc<Exports>,
     local_interface: Arc<LocalInterface>,
     external_specs: BTreeMap<String, Option<Type>>,
+    external_refers: BTreeMap<String, Option<Arc<Exports>>>,
     pub functions: BTreeMap<String, Function>,
     // Conservative references to unannotated helpers, including transitive cache dependencies.
     helper_dependencies: BTreeMap<String, BTreeSet<String>>,
@@ -111,9 +112,30 @@ impl Model {
         source: &str,
         globals: &Globals,
     ) -> Self {
+        let resolved;
+        let declarations = if declarations.all_refers.is_empty() {
+            declarations
+        } else {
+            let mut imports = Declarations::read_with_imports(forms, Some(globals));
+            if imports.specs.keys().ne(declarations.specs.keys()) {
+                let span = forms.first().map_or(Span::default(), |form| form.span);
+                imports.error(
+                    "PNX9001",
+                    span,
+                    "Use qualified spec declarations when :refer :all changes their resolution",
+                );
+            }
+            resolved = imports;
+            &resolved
+        };
         let mut model = Self {
             names: declarations.names.clone(),
             diagnostics: declarations.diagnostics.clone(),
+            external_refers: declarations
+                .all_refers
+                .iter()
+                .map(|namespace| (namespace.clone(), globals.exports.get(namespace).cloned()))
+                .collect(),
             ..Self::default()
         };
         let mut specs = BTreeMap::new();
@@ -169,10 +191,26 @@ impl Model {
         }
     }
 
-    pub fn external_specs_current(&self, globals: &Globals) -> bool {
+    pub fn refresh_external_inputs(&mut self, globals: &Globals) -> bool {
         self.external_specs
             .iter()
             .all(|(key, previous)| globals.specs.get(key) == previous.as_ref())
+            && self
+                .external_refers
+                .iter_mut()
+                .all(|(namespace, previous)| {
+                    match (previous.as_ref(), globals.exports.get(namespace)) {
+                        (Some(old), Some(current)) if Arc::ptr_eq(old, current) => true,
+                        (Some(old), Some(current))
+                            if old.public_var_names().eq(current.public_var_names()) =>
+                        {
+                            *previous = Some(current.clone());
+                            true
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    }
+                })
     }
 
     pub(super) fn local_function(&self, name: &str) -> Option<&Function> {

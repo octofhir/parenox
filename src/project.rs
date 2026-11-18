@@ -257,8 +257,8 @@ impl Session {
             if let Some(declarations) = &cache.declarations {
                 if cache
                     .model
-                    .as_ref()
-                    .is_none_or(|model| !model.external_specs_current(&globals))
+                    .as_mut()
+                    .is_none_or(|model| !model.refresh_external_inputs(&globals))
                 {
                     cache.model = Some(Model::build(
                         declarations,
@@ -275,8 +275,8 @@ impl Session {
             if cache.parse_error.is_none() {
                 if cache
                     .model
-                    .as_ref()
-                    .is_none_or(|model| !model.external_specs_current(&globals))
+                    .as_mut()
+                    .is_none_or(|model| !model.refresh_external_inputs(&globals))
                 {
                     cache.model = Some(Model::externs(&cache.forms, &globals));
                 }
