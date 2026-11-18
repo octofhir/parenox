@@ -394,7 +394,8 @@ impl<'model> Checker<'model> {
             "clojure.core/conj" => return self.conj(args),
             "clojure.core/ex-info" => return self.ex_info(args),
             "clojure.core/ex-data" => return self.ex_data(&args[0].0),
-            "clojure.core/seq" | "clojure.core/first" | "clojure.core/next" => {
+            "clojure.core/seq" | "clojure.core/first" | "clojure.core/next"
+            | "clojure.core/rest" => {
                 return self.sequence_call(name, &args[0]);
             }
             "clojure.core/+" | "clojure.core/-" | "clojure.core/*" | "clojure.core/inc"
@@ -546,6 +547,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/seq"
             | "clojure.core/first"
             | "clojure.core/next"
+            | "clojure.core/rest"
             | "clojure.core/conj"
             | "clojure.core/ex-info"
             | "clojure.core/ex-data"

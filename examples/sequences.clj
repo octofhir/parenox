@@ -15,3 +15,9 @@
 (defn positional-label {:t/sig '[:-> string?]} []
   (let [[_ label] (seq [1 "label"])]
     label))
+
+(defn accumulate-with-rest {:t/sig '[::amounts :-> number?]} [amounts]
+  (loop [remaining amounts total 0]
+    (if-let [items (seq remaining)]
+      (recur (rest items) (+ total (first items)))
+      total)))

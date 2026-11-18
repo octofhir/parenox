@@ -122,7 +122,7 @@ pub enum Type {
     Tuple(Box<[Type]>),
     /// A nonempty seq with an unknown length.
     Seq(Box<Type>),
-    /// A nonempty seq whose individual positions are known.
+    /// A sequence of known length, including the empty list.
     SeqTuple(Box<[Type]>),
     Set(Box<Type>),
     Throwable,
@@ -132,6 +132,10 @@ pub enum Type {
 }
 
 impl Type {
+    pub fn empty_seq() -> Self {
+        Self::SeqTuple(Box::new([]))
+    }
+
     /// General expression type. Exact string values remain available separately as refinements.
     /// Keywords and booleans retain precision for Clojure lookup and truthiness semantics.
     pub fn inferred(&self) -> Type {
@@ -149,7 +153,7 @@ impl Type {
                 Type::Vector(Box::new(Type::union(items.iter().map(Type::inferred))))
             }
             Type::Seq(t) => Type::Seq(Box::new(t.inferred())),
-            Type::SeqTuple(items) => {
+            Type::SeqTuple(items) if !items.is_empty() => {
                 Type::Seq(Box::new(Type::union(items.iter().map(Type::inferred))))
             }
             Type::Set(t) => Type::Set(Box::new(t.inferred())),
@@ -309,7 +313,9 @@ impl Type {
             }
             (Type::MapEntry(items), Type::Vector(e)) => items.iter().all(|item| item.subtype_of(e)),
             (Type::Tuple(items), Type::Vector(e)) => items.iter().all(|item| item.subtype_of(e)),
-            (Type::SeqTuple(items), Type::Seq(e)) => items.iter().all(|item| item.subtype_of(e)),
+            (Type::SeqTuple(items), Type::Seq(e)) => {
+                !items.is_empty() && items.iter().all(|item| item.subtype_of(e))
+            }
             (Type::Tuple(a), Type::Tuple(e)) | (Type::SeqTuple(a), Type::SeqTuple(e)) => {
                 a.len() == e.len() && a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
             }
@@ -382,6 +388,7 @@ impl fmt::Display for Type {
             Type::MapEntry(items) => write!(f, "MapEntry<{}, {}>", items[0], items[1]),
             Type::Vector(t) => write!(f, "Vector<{t}>"),
             Type::Seq(t) => write!(f, "Seq<{t}>"),
+            Type::SeqTuple(items) if items.is_empty() => write!(f, "()"),
             Type::Tuple(items) | Type::SeqTuple(items) => {
                 let name = if matches!(self, Type::SeqTuple(_)) {
                     "SeqTuple"

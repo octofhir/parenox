@@ -564,7 +564,9 @@ omitted default throws when no clause matches, and Parenox reports a definite
 miss at the input expression. Supported constants are nil, booleans, characters,
 strings, keywords and known decimal integers in the i32 range.
 
-`seq`, `first` and `next` model traversal of vectors and inferred seqs. Guarding
+`seq`, `first`, `next` and `rest` model traversal of vectors and inferred
+sequences. An exhausted `rest` returns a truthy empty list. Use `seq` to
+detect exhaustion and refine the remaining elements. Guarding
 the result of `seq` or `next` establishes that a first item exists. That item
 can still be nil. A seq made from a fixed vector retains its positions for
 `first`, `next`, `nth` and positional destructuring.

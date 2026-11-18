@@ -53,3 +53,34 @@ fn seq_emptiness_preserves_nil_elements_and_index_errors() {
         );
     }
 }
+
+#[test]
+fn rest_returns_a_truthy_empty_list_and_keeps_remaining_positions() {
+    for (expression, contract) in [
+        ("(if (rest nil) \"truthy\" 0)", "string?"),
+        ("(if (rest [1]) \"truthy\" 0)", "string?"),
+        ("(seq (rest []))", "nil?"),
+        ("(seq (rest [nil]))", "nil?"),
+        ("(first (rest [1 nil]))", "nil?"),
+        ("(next (rest [1 2]))", "nil?"),
+        ("(nth (rest [1 \"tail\"]) 0)", "string?"),
+        ("(nth (rest [1]) 0 \"missing\")", "string?"),
+        ("(seq ())", "nil?"),
+        ("(seq '())", "nil?"),
+        ("(seq (#()))", "nil?"),
+        ("(apply + (rest [4]))", "number?"),
+        ("(first (conj (rest [4]) \"reset\"))", "string?"),
+    ] {
+        let report = check(expression, contract);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check("(rest false)", "number?");
+    let [diagnostic] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX2322");
+    assert_eq!(diagnostic.expected.as_deref(), Some("Seqable or Nil"));
+
+    let report = check("(nth (rest nil) 0)", "number?");
+    assert_eq!(report.diagnostics[0].code, "PNX2801", "{report:#?}");
+}

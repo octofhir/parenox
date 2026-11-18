@@ -337,14 +337,15 @@ impl Checker<'_> {
                     extra: ExtraFields::Closed,
                 }))
             }
-            Kind::List(xs) if xs.is_empty() => {
-                self.unsupported(form.span, "Empty list values are not supported yet")
-            }
+            Kind::List(xs) if xs.is_empty() => Value::new(Type::empty_seq()),
             Kind::List(xs) => self.list(xs, form.span, env, tail),
             Kind::AnonymousFunction(_) => self.unsupported(
                 form.span,
                 "#() is currently supported in direct calls and inline callbacks",
             ),
+            Kind::Quote(inner) if matches!(&inner.without_metadata().kind, Kind::List(items) if items.is_empty()) => {
+                Value::new(Type::empty_seq())
+            }
             Kind::Quote(_) => self.unsupported(form.span, "Quoted data is not supported yet"),
         }
     }

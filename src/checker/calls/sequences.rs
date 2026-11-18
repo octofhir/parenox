@@ -9,6 +9,7 @@ enum ReadSequence {
     Start,
     Head,
     Tail,
+    Rest,
 }
 
 impl ReadSequence {
@@ -17,6 +18,7 @@ impl ReadSequence {
             Self::Start => nonempty_seq(items),
             Self::Head => items.first().cloned().unwrap_or(Type::Nil),
             Self::Tail => nonempty_seq(items.get(1..).unwrap_or_default()),
+            Self::Rest => Type::SeqTuple(items.get(1..).unwrap_or_default().into()),
         }
     }
 
@@ -24,6 +26,9 @@ impl ReadSequence {
         let result = match self {
             Self::Head => element.clone(),
             Self::Start | Self::Tail => Type::Seq(Box::new(element.clone())),
+            Self::Rest => {
+                return Type::union([Type::empty_seq(), Type::Seq(Box::new(element.clone()))]);
+            }
         };
         if nonempty && !matches!(self, Self::Tail) {
             result
@@ -104,6 +109,7 @@ impl Checker<'_> {
             "clojure.core/seq" => ReadSequence::Start,
             "clojure.core/first" => ReadSequence::Head,
             "clojure.core/next" => ReadSequence::Tail,
+            "clojure.core/rest" => ReadSequence::Rest,
             _ => unreachable!(),
         };
         let result = self.read_sequence(operation, &value.known, name, *span);
@@ -112,10 +118,11 @@ impl Checker<'_> {
 
     fn read_sequence(&mut self, op: ReadSequence, ty: &Type, name: &str, span: Span) -> Type {
         match ty {
-            Type::Nil | Type::Never | Type::Unknown => ty.clone(),
+            Type::Never | Type::Unknown => ty.clone(),
+            Type::Nil => op.fixed(&[]),
             Type::Tuple(items) | Type::SeqTuple(items) => op.fixed(items),
             Type::MapEntry(items) => op.fixed(items.as_ref()),
-            Type::Vector(element) if **element == Type::Never => Type::Nil,
+            Type::Vector(element) if **element == Type::Never => op.fixed(&[]),
             Type::Vector(element) => op.open(element, false),
             Type::Seq(element) => op.open(element, true),
             Type::Union(parts) => Type::union(
@@ -126,7 +133,7 @@ impl Checker<'_> {
             Type::Map(_) | Type::Set(_) | Type::Str(_) | Type::String => {
                 self.unsupported(
                     span,
-                    format!("{name} analysis currently supports vectors, nonempty seqs and Nil"),
+                    format!("{name} analysis currently supports vectors, seqs and Nil"),
                 )
                 .known
             }
