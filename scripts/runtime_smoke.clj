@@ -75,6 +75,11 @@
   (assert (Double/isNaN (read "## ; comment\n #_discard NaN"))))
 (println "Clojure/JVM and EDN strings and symbolic numbers: 8 assertions passed")
 
+(defmacro reader-template [value options] `(let [item# ~value] [item# ~@options]))
+(assert (= [:first :second :third] (reader-template :first [:second :third])))
+(assert (try (read-string "`~@items") false (catch RuntimeException _ true)))
+(println "Clojure/JVM syntax quote: 2 assertions passed")
+
 (println "Runtime reference:" (clojure-version))
 (load-file "examples/portable.cljc")
 (assert (= "ALICE" (demo.portable/label "Alice")))

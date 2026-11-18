@@ -158,6 +158,45 @@ fn symbolic_numbers_use_the_same_reader_in_code_and_edn() {
 }
 
 #[test]
+fn syntax_quote_preserves_templates_and_embedded_forms_without_expanding_them() {
+    let source = "`(let [x# ~ ; note\n value] `[x# ~@items]) :after";
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_lossless(source, &parsed);
+    let Kind::SyntaxQuote(template) = &parsed.forms[0].kind else {
+        panic!("{:?}", parsed.forms);
+    };
+    let Kind::List(parts) = &template.kind else {
+        panic!("{template:?}");
+    };
+    let Some([name, value]) = parts[1].vector() else {
+        panic!("{parts:?}");
+    };
+    assert_eq!(name.symbol(), Some("x#"));
+    assert!(
+        matches!(&value.kind, Kind::Unquote { splicing: false, form }
+        if form.symbol() == Some("value"))
+    );
+    let Kind::SyntaxQuote(nested) = &parts[2].kind else {
+        panic!("{parts:?}");
+    };
+    assert!(
+        matches!(&nested.vector().unwrap()[1].kind, Kind::Unquote { splicing: true, form }
+        if form.symbol() == Some("items"))
+    );
+    assert_eq!(parsed.forms[1].keyword(), Some(":after"));
+    let nodes: Vec<_> = parsed
+        .syntax()
+        .descendants()
+        .map(|node| node.kind())
+        .collect();
+    assert!(nodes.contains(&SyntaxKind::UnquoteSplicing));
+    assert!(reader::read("`~@items").is_err());
+    assert!(reader::read("`(foo ~)").is_err());
+    assert!(reader::validate_edn(source).is_err());
+}
+
+#[test]
 fn deref_and_var_quote_keep_source_and_expand_to_jvm_reader_forms() {
     let source = "@ #_ignored app/state\n#' ; reference\n app/read-state";
     let parsed = reader::parse(source);

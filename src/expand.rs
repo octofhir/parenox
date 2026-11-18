@@ -90,7 +90,10 @@ pub fn temporary(forms: &[Form], is_bound: impl Fn(&str) -> bool) -> String {
                     symbols(form, names);
                 }
             }
-            Kind::Quote(form) | Kind::Conditional { form, .. } => symbols(form, names),
+            Kind::Quote(form)
+            | Kind::SyntaxQuote(form)
+            | Kind::Unquote { form, .. }
+            | Kind::Conditional { form, .. } => symbols(form, names),
             Kind::Metadata(a, b) | Kind::Tagged(a, b) => {
                 symbols(a, names);
                 symbols(b, names);

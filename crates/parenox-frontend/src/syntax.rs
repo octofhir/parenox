@@ -47,6 +47,12 @@ pub enum SyntaxKind {
     DerefMark,
     VarQuoteMark,
     SymbolicNumber,
+    SyntaxQuote,
+    Unquote,
+    UnquoteSplicing,
+    SyntaxQuoteMark,
+    UnquoteMark,
+    UnquoteSplicingMark,
     ErrorToken,
 }
 
@@ -68,6 +74,9 @@ impl SyntaxKind {
                 | Self::Tagged
                 | Self::Conditional
                 | Self::SymbolicNumber
+                | Self::SyntaxQuote
+                | Self::Unquote
+                | Self::UnquoteSplicing
                 | Self::Error
         )
     }

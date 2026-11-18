@@ -437,6 +437,8 @@ In Clojure source, the reader preserves `@value` and `#'name` in the CST and
 provides the JVM reader forms `(clojure.core/deref value)` and `(var name)` to
 analysis. Var objects and dereferenced value types are reported as coverage gaps
 when encountered in a checked function.
+Syntax quote, unquote and unquote splicing retain their source structure.
+Macro expansion and type checking of syntax quote results remain coverage gaps.
 
 Repeated simple values in set literals report a reader error at the repeated
 element. This check compares decoded strings and characters, symbols, keywords,

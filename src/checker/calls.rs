@@ -166,7 +166,7 @@ impl<'model> Checker<'model> {
                 if let [target] = &xs[1..]
                     && target.symbol().is_some()
                 {
-                    return self.reference_type_unknown(span, "Var object types are not supported");
+                    return self.unchecked_form(span, "Var object types are not supported");
                 }
                 self.error("PNX1001", span, "var requires one symbol");
                 return Value::new(Type::Unknown);
@@ -238,16 +238,9 @@ impl<'model> Checker<'model> {
                 self.may_throw();
             }
         } else if returns {
-            return self.reference_type_unknown(span, "Dereferenced value types are not supported");
+            return self.unchecked_form(span, "Dereferenced value types are not supported");
         }
         Value::new(if returns { Type::Unknown } else { Type::Never })
-    }
-
-    fn reference_type_unknown(&mut self, span: Span, message: &str) -> Value {
-        self.may_throw();
-        self.diagnostics
-            .push(Diagnostic::analysis_gap("PNX9001", span, message));
-        Value::new(Type::Unknown)
     }
 
     fn call_args(

@@ -38,6 +38,38 @@ fn references_report_type_coverage_without_a_reader_error() {
 }
 
 #[test]
+fn syntax_quote_leaves_macro_coverage_open_and_checks_later_functions() {
+    let source = r#"
+        (ns templates)
+        (defmacro wrap [value options] `(vector ~value ~@options))
+        (defn template {:t/sig '[:-> symbol?]} [] `tools/unknown)
+        (defn checked {:t/sig '[:-> string?]} [] 42)
+    "#;
+    let report = Session::default().check("templates.clj", source);
+    assert!(!report.complete);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic.code.as_str(),
+                diagnostic.severity,
+                diagnostic.span.start.line,
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX9001", "warning", 3),
+            ("PNX9001", "warning", 4),
+            ("PNX2322", "error", 5),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn metadata_shorthands_and_stacked_precedence_share_the_lossless_reader() {
     for (source, key) in [
         ("^:private item", ":private"),

@@ -210,6 +210,13 @@ impl Checker<'_> {
         Value::new(Type::Unknown)
     }
 
+    fn unchecked_form(&mut self, span: Span, message: &str) -> Value {
+        self.may_throw();
+        self.diagnostics
+            .push(Diagnostic::analysis_gap("PNX9001", span, message));
+        Value::new(Type::Unknown)
+    }
+
     fn expect(&mut self, actual: &Value, expected: &Type, span: Span, context: &str) {
         let compatibility = actual.known.compatibility(expected);
         if compatibility == Compatibility::Unproven {
@@ -414,6 +421,10 @@ impl Checker<'_> {
                 "#() is currently supported in direct calls and inline callbacks",
             ),
             Kind::Quote(inner) => self.quoted_data(inner),
+            Kind::SyntaxQuote(_) | Kind::Unquote { .. } => self.unchecked_form(
+                form.span,
+                "Syntax quote and unquote expansion is not supported",
+            ),
         }
     }
 }

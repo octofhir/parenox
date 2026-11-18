@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::Globals;
 use super::contracts::function_parts;
 use crate::Diagnostic;
+use crate::checker::function_forms::function_clauses;
 use crate::reader::{Form, Kind, ReadError, Span};
 use crate::types::Arity;
 
@@ -365,6 +366,8 @@ fn known_unsupported_declaration(qualified: &str, items: &[Form]) -> bool {
     }
     match qualified {
         "clojure.core/defrecord" => items.get(2).and_then(Form::vector).is_some(),
+        "clojure.core/defmacro" => !function_clauses(function_parts(&items[2..]).0, items[1].span)
+            .is_err_and(|diagnostic| diagnostic.severity == "error"),
         "clojure.core/defmethod" => items.len() >= 4,
         "clojure.test/deftest" | "clojure.test/deftest-" => true,
         "clojure.test.check.clojure-test/defspec" => items.len() >= 3,

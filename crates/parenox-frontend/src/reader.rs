@@ -50,6 +50,11 @@ pub enum Kind {
     Map(Vec<Form>),
     Set(Vec<Form>),
     Quote(Box<Form>),
+    SyntaxQuote(Box<Form>),
+    Unquote {
+        splicing: bool,
+        form: Box<Form>,
+    },
     Metadata(Box<Form>, Box<Form>),
     Tagged(Box<Form>, Box<Form>),
     Conditional {
@@ -524,6 +529,11 @@ impl<'a> Reader<'a> {
                                 Kind::Map(_) => SyntaxKind::Map,
                                 Kind::Set(_) => SyntaxKind::Set,
                                 Kind::Quote(_) => SyntaxKind::Quote,
+                                Kind::SyntaxQuote(_) => SyntaxKind::SyntaxQuote,
+                                Kind::Unquote {
+                                    splicing: false, ..
+                                } => SyntaxKind::Unquote,
+                                Kind::Unquote { splicing: true, .. } => SyntaxKind::UnquoteSplicing,
                                 Kind::Symbol(_) | Kind::AnonymousArgument(_) => SyntaxKind::Symbol,
                                 Kind::Keyword(_) => SyntaxKind::Keyword,
                                 Kind::String(_) | Kind::Utf16String(_) => SyntaxKind::String,
@@ -582,6 +592,8 @@ impl<'a> Reader<'a> {
                 self.token(SyntaxKind::QuoteMark, start);
                 Kind::Quote(Box::new(self.without_comments(Self::form)?))
             }
+            Some('`') if !self.edn => return self.syntax_quote(start),
+            Some('~') if !self.edn => return self.unquote(start),
             Some('@') if !self.edn => {
                 return self.prefix_call(start, SyntaxKind::DerefMark, "clojure.core/deref");
             }
@@ -723,6 +735,34 @@ impl<'a> Reader<'a> {
         Ok(self.form_item(start, Kind::List(vec![head, operand])))
     }
 
+    fn syntax_quote(&mut self, start: Position) -> Result<Item, ReadError> {
+        self.token(SyntaxKind::SyntaxQuoteMark, start);
+        let form = self.without_comments(Self::form)?;
+        if matches!(
+            form.without_metadata().kind,
+            Kind::Unquote { splicing: true, .. }
+        ) {
+            return Err(self.error(
+                form.span.start,
+                "Unquote splicing requires a surrounding collection",
+            ));
+        }
+        Ok(self.form_item(start, Kind::SyntaxQuote(Box::new(form))))
+    }
+
+    fn unquote(&mut self, start: Position) -> Result<Item, ReadError> {
+        let splicing = self.peek() == Some('@');
+        let mark = if splicing {
+            self.bump();
+            SyntaxKind::UnquoteSplicingMark
+        } else {
+            SyntaxKind::UnquoteMark
+        };
+        self.token(mark, start);
+        let form = Box::new(self.without_comments(Self::form)?);
+        Ok(self.form_item(start, Kind::Unquote { splicing, form }))
+    }
+
     fn anonymous_function(&mut self, start: Position) -> Result<Kind, ReadError> {
         if self.arguments.is_some() {
             return Err(self.error(start, "Nested #() forms are not allowed"));
@@ -815,6 +855,8 @@ impl<'a> Reader<'a> {
                 | Kind::Map(_)
                 | Kind::Set(_)
                 | Kind::Quote(_)
+                | Kind::SyntaxQuote(_)
+                | Kind::Unquote { .. }
                 | Kind::Tagged(_, _)
                 | Kind::Conditional { .. }
         ) {
