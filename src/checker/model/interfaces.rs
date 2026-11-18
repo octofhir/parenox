@@ -44,6 +44,7 @@ struct LocalFunction {
 #[derive(PartialEq, Eq)]
 pub(crate) struct InterfaceKey {
     local: Arc<LocalInterface>,
+    own_externs: Option<Arc<Signatures>>,
     dependencies: Vec<Dependency>,
 }
 
@@ -119,6 +120,13 @@ impl Model {
             .collect();
         InterfaceKey {
             local: self.local_interface.clone(),
+            // A partially described namespace may have extern-only vars
+            // outside the supplied sources. They do not form a load edge.
+            own_externs: globals
+                .externs
+                .as_ref()
+                .and_then(|table| table.namespaces.get(&self.names.namespace))
+                .cloned(),
             dependencies,
         }
     }

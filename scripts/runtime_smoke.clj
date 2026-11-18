@@ -752,3 +752,17 @@
                (when (clojure.string/includes? (ex-message (ex-cause e)) "is not public")
                  :private)))))
 (println "Clojure/JVM source visibility: 1 assertion passed")
+
+(let [runtime (create-ns 'demo.runtime-backend)]
+  (intern runtime 'backend (fn [] 41))
+  (load-string "(ns demo.runtime-backend)
+                 (defn run [] (inc (backend)))
+                 (defn run-qualified [] (inc (demo.runtime-backend/backend)))")
+  (doseq [name '[run run-qualified]]
+    (assert (= 42 ((ns-resolve runtime name)))))
+  (intern runtime 'backend (fn [] "changed"))
+  (doseq [name '[run run-qualified]]
+    (assert (= :not-a-number
+               (try ((ns-resolve runtime name))
+                    (catch ClassCastException _ :not-a-number))))))
+(println "Clojure/JVM same-namespace var bindings: 4 assertions passed")

@@ -150,3 +150,42 @@ fn request_errors_are_atomic_and_legacy_snapshots_are_independent() {
     let replaced = client.result(json!({"op": "open", "id": 6, "files": []}));
     assert_eq!(replaced["files"], json!([]));
 }
+
+#[test]
+fn replacing_an_extern_in_the_sources_own_namespace_invalidates_warm_checks() {
+    let mut client = Client::start();
+    let source = r#"(ns runtime)
+        (defn run {:t/sig '[:-> number?]} [] (inc (backend)))
+        (defn run-qualified {:t/sig '[:-> number?]} [] (inc (runtime/backend)))"#;
+    let opened = client.result(json!({
+        "id": 1, "op": "open", "files": [{"path": "runtime.clj", "source": source}],
+        "externs": {"path": "external.edn", "source": "{runtime/backend [:-> number?]}"}
+    }));
+    assert_eq!(opened["ok"], true, "{opened}");
+    let warm = client.result(json!({"id": 2, "op": "update"}));
+    assert_eq!(warm["stats"]["reused_functions"], 2, "{warm}");
+
+    let changed = client.result(json!({
+        "id": 3, "op": "update",
+        "externs": {"path": "external.edn", "source": "{runtime/backend [:-> string?]}"}
+    }));
+    assert_eq!(changed["ok"], false, "{changed}");
+    assert_eq!(changed["stats"]["checked_functions"], 2, "{changed}");
+    assert_eq!(changed["stats"]["parsed_files"], 1, "{changed}");
+    for d in changed["files"][0]["diagnostics"].as_array().unwrap() {
+        assert_eq!(d["code"], "PNX2322");
+        assert_eq!(d["actual"], "String");
+    }
+
+    let removed = client.result(json!({"id": 4, "op": "update", "externs": null}));
+    assert_eq!(removed["stats"]["checked_functions"], 2, "{removed}");
+    let diagnostics = removed["files"][0]["diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 2, "{removed}");
+    assert!(diagnostics.iter().all(|d| d["code"] == "PNX2304"));
+
+    let restored = client.result(json!({
+        "id": 5, "op": "update",
+        "externs": {"path": "external.edn", "source": "{runtime/backend [:-> number?]}"}
+    }));
+    assert_eq!(restored["ok"], true, "{restored}");
+}
