@@ -29,13 +29,29 @@ pub(super) fn run_tests(options: TestOptions) -> Result<u8, String> {
         ));
     }
     let aliases = cli_aliases(&options.aliases)?;
-    for name in &options.namespaces {
-        if name.contains(['/', ':'])
-            || !single_form(name).is_some_and(|form| form.symbol() == Some(name))
-        {
-            return Err(format!("{name:?} is not a Clojure namespace name"));
+    let (mode, selectors) = if options.vars.is_empty() {
+        for name in &options.namespaces {
+            if !namespace_symbol(name) {
+                return Err(format!("Expected a Clojure namespace, got {name:?}"));
+            }
         }
-    }
+        ("namespaces", options.namespaces)
+    } else {
+        for name in &options.vars {
+            let qualified = name.split_once('/').is_some_and(|(namespace, local)| {
+                namespace_symbol(namespace)
+                    && !local.is_empty()
+                    && (local == "/" || !local.contains(['/', ':']))
+                    && single_form(name).is_some_and(|form| form.symbol() == Some(name))
+            });
+            if !qualified {
+                return Err(format!(
+                    "Expected a qualified Clojure test var, got {name:?}"
+                ));
+            }
+        }
+        ("vars", options.vars)
+    };
 
     let executable =
         if options.clojure.is_relative() && options.clojure.parent() != Some(Path::new("")) {
@@ -56,7 +72,8 @@ pub(super) fn run_tests(options: TestOptions) -> Result<u8, String> {
         .args(["-Sdeps", RUNNER_DEPS, &aliases])
         .arg(script)
         .arg(&result)
-        .args(options.namespaces);
+        .arg(mode)
+        .args(selectors);
     if options.format == TestFormat::Json {
         command.stdout(Stdio::piped());
     }
@@ -81,7 +98,7 @@ pub(super) fn run_tests(options: TestOptions) -> Result<u8, String> {
     let report = TestReport::read(&result)
         .ok_or_else(|| "Clojure returned an invalid test report".to_owned())?;
     if report.tests == 0 {
-        return Err("no clojure.test vars ran in the requested namespaces".into());
+        return Err("no clojure.test vars ran for the requested selection".into());
     }
     if options.format == TestFormat::Json {
         println!(
@@ -114,6 +131,10 @@ fn cli_aliases(aliases: &[String]) -> Result<String, String> {
 fn single_form(source: &str) -> Option<Form> {
     let mut forms = reader::read(source).ok()?;
     (forms.len() == 1).then(|| forms.remove(0))
+}
+
+fn namespace_symbol(name: &str) -> bool {
+    !name.contains(['/', ':']) && single_form(name).is_some_and(|form| form.symbol() == Some(name))
 }
 
 struct RunDirectory(PathBuf);

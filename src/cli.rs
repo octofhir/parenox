@@ -63,8 +63,15 @@ pub(crate) struct TestOptions {
     /// Test report format. JSON sends the runtime log to stderr.
     #[arg(long, value_enum, default_value_t = TestFormat::Text)]
     pub(crate) format: TestFormat,
+    /// Run a test var with its fixtures. Repeat to select multiple vars.
+    #[arg(
+        long = "var",
+        value_name = "NAMESPACE/NAME",
+        conflicts_with = "namespaces"
+    )]
+    pub(crate) vars: Vec<String>,
     /// Namespaces to require and run with clojure.test.
-    #[arg(value_name = "NAMESPACE", required = true)]
+    #[arg(value_name = "NAMESPACE", required_unless_present = "vars")]
     pub(crate) namespaces: Vec<String>,
 }
 

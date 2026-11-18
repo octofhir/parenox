@@ -68,6 +68,15 @@ fixtures and namespace hooks. It supplies its own main entry point. Use
 `--project DIR` to select a project or `--clojure EXECUTABLE` to select a CLI.
 Run it after saving the changes you want the JVM to load.
 
+For a focused run, select one or more qualified test vars:
+
+```sh
+parenox test --alias test --var my-app.routes-test/decodes-unicode
+```
+
+Repeat `--var` to run several tests together. The selected vars run with their
+`:once` and `:each` fixtures. Namespace hooks apply to whole-namespace runs.
+
 Test output includes the regular `clojure.test` report. When the assertion's JVM
 location resolves to a local test file, Parenox adds a `path:line` line with the
 qualified test var. Macros can report the location of the expanded assertion's
@@ -77,7 +86,8 @@ test. Unmapped locations retain the runtime's report.
 
 Use the same command in CI. Exit status **0** means the requested tests passed.
 **1** means an assertion failed or a test reported an error. **2** means the
-run did not complete or no test vars ran. Run `just jvm-test-smoke` to exercise
+run did not complete, a requested test var was unavailable, or no test vars ran.
+Run `just jvm-test-smoke` to exercise
 the command on the pinned Clojure/JVM version.
 
 With `--format json`, stdout contains one report for a completed test run,

@@ -61,12 +61,34 @@
                             (when test (str " in " test))))))))
       (report event))))
 
-(let [[result & names] *command-line-args*
-      namespaces (distinct (map symbol names))]
+(defn- test-var [name]
+  (let [v (find-var name)]
+    (when-not (:test (meta v))
+      (throw (ex-info (str "Expected a clojure.test var: " name) {:test name})))
+    v))
+
+(defn- run-vars [namespaces names]
+  (let [by-ns (group-by (comp ns-name :ns meta) (mapv test-var names))]
+    (binding [t/*report-counters* (ref t/*initial-report-counters*)]
+      (doseq [name namespaces
+              :let [ns (the-ns name)]]
+        (t/do-report {:type :begin-test-ns :ns ns})
+        (t/test-vars (get by-ns name))
+        (t/do-report {:type :end-test-ns :ns ns}))
+      (let [summary (assoc @t/*report-counters* :type :summary)]
+        (t/do-report summary)
+        summary))))
+
+(let [[result mode & names] *command-line-args*
+      names (distinct (map symbol names))
+      vars? (= mode "vars")
+      namespaces (if vars? (distinct (map (comp symbol namespace) names)) names)]
   (apply require namespaces)
   (let [findings (atom [])
         {:keys [test pass fail error]} (binding [t/report (reporter t/report findings)]
-                                        (apply t/run-tests namespaces))]
+                                        (if vars?
+                                          (run-vars namespaces names)
+                                          (apply t/run-tests namespaces)))]
     (binding [*print-length* nil *print-level* nil *print-readably* true]
       (spit result (pr-str [test (+ pass fail error) fail error @findings])))
     (shutdown-agents)))

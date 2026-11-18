@@ -25,14 +25,14 @@ impl Fixture {
         Self(path)
     }
 
-    fn run(&self, namespace: &str, args: &[&str]) -> Output {
+    fn run(&self, selectors: &[&str], args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_parenox"))
             .arg("test")
             .arg("--project")
             .arg(&self.0)
             .args(["--alias", ":test"])
             .args(args)
-            .arg(namespace)
+            .args(selectors)
             .output()
             .unwrap()
     }
@@ -49,11 +49,21 @@ fn reports_a_missing_clojure_executable_as_a_launch_error() {
     let fixture = Fixture::new("missing executable");
     let missing = fixture.0.join("missing-clojure");
     let output = fixture.run(
-        "demo.routing-test",
+        &["demo.routing-test"],
         &["--clojure", missing.to_str().unwrap()],
     );
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("could not start"));
+}
+
+#[test]
+fn rejects_unqualified_test_var_selectors() {
+    let fixture = Fixture::new("invalid var selector");
+    let output = fixture.run(&["--var", "route-status"], &[]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Expected a qualified Clojure test var")
+    );
 }
 
 #[test]
@@ -109,7 +119,7 @@ fn project_jvm_pass_failure_and_load_error() {
     );
     fs::write(fixture.0.join(SOURCE_PATH), SOURCE).unwrap();
 
-    let output = fixture.run("demo.routing-test", &[]);
+    let output = fixture.run(&["demo.routing-test"], &[]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("2 tests containing 3 assertions"));
 
@@ -118,7 +128,7 @@ fn project_jvm_pass_failure_and_load_error() {
         "(if (some? (:route request)) :found :found)",
     );
     fs::write(fixture.0.join(SOURCE_PATH), edited).unwrap();
-    let output = fixture.run("demo.routing-test", &["--format", "json"]);
+    let output = fixture.run(&["demo.routing-test"], &["--format", "json"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let logs = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -141,7 +151,7 @@ fn project_jvm_pass_failure_and_load_error() {
         "(throw (ex-info \"route unavailable\" {}))",
     );
     fs::write(fixture.0.join(SOURCE_PATH), throwing).unwrap();
-    let output = fixture.run("demo.routing-test", &[]);
+    let output = fixture.run(&["demo.routing-test"], &[]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -151,8 +161,41 @@ fn project_jvm_pass_failure_and_load_error() {
         "{stdout}"
     );
 
-    let output = fixture.run("demo.does-not-exist", &["--format", "json"]);
+    let output = fixture.run(&["demo.does-not-exist"], &["--format", "json"]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Clojure test run did not complete"));
+
+    fs::write(
+        fixture.0.join("test/demo/focused_test.clj"),
+        include_str!("fixtures/focused_test.clj"),
+    )
+    .unwrap();
+    let first = "demo.focused-test/passes";
+    let second = "demo.focused-test/private-pass";
+    let output = fixture.run(
+        &["--var", first, "--var", first, "--var", second],
+        &["--format", "json"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["tests"], 2);
+    assert_eq!(result["assertions"], 2);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .matches("once fixture")
+            .count(),
+        1
+    );
+
+    let output = fixture.run(&["--var", "demo.focused-test/fails"], &["--format", "json"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["tests"], 1);
+    assert_eq!(result["findings"][0]["test"], "demo.focused-test/fails");
+    assert_eq!(result["findings"][0]["line"], 20);
+
+    let output = fixture.run(&["--var", "demo.focused-test/no-test"], &[]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Expected a clojure.test var"));
 }
