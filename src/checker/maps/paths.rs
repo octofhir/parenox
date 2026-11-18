@@ -335,11 +335,21 @@ impl Checker<'_> {
             .and_then(|keys| keys.first())
             .and_then(|key| env.presence(&xs[1], key));
         let target = self.infer(&xs[1], env);
-        let path = self.key_paths(&xs[2], env, "assoc-in", true);
-        let value = self.infer(&xs[3], env);
+        let target_returns = target.known != Type::Never;
+        let path = self.inspect_path(target_returns, |checker| {
+            checker.key_paths(&xs[2], env, "assoc-in", true)
+        });
+        let path_returns = target_returns && !matches!(path, Err(Type::Never));
+        let value = self.infer_path(&xs[3], env, path_returns, false);
+        if value.known == Type::Never {
+            return value;
+        }
         let path = match path {
             Ok(path) => path,
-            Err(ty) => return Value::new(ty),
+            Err(ty) => {
+                self.may_throw();
+                return Value::new(ty);
+            }
         };
         Value::new(self.assoc_paths(
             target.known,

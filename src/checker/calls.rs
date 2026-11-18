@@ -139,14 +139,6 @@ impl<'model> Checker<'model> {
             && self.model.declared_value(name, self.globals).is_none()
         {
             let resolved = self.model.resolve(name);
-            if self.throws.is_some()
-                && matches!(
-                    resolved.as_str(),
-                    "clojure.core/assoc" | "clojure.core/assoc-in"
-                )
-            {
-                self.may_throw();
-            }
             if let Some(threading) = Threading::from_core_symbol(&resolved) {
                 return self.thread_form(xs, span, env, threading, &resolved, tail);
             }

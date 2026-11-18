@@ -462,9 +462,11 @@ fallback handles absence and preserves present nil. Index expressions
 whose exact decimal integer value is unavailable report an analysis gap.
 Run `just indices pretty always` for examples and diagnostics.
 
-Lookup arguments run from left to right. The default expression in `get` and
-`get-in` runs even when the key exists. Run `just lookup-order` to see a
-diagnostic for a recovery value that differs from the declared return type.
+Lookup and update arguments run from left to right. The default expression in
+`get` and `get-in` runs even when the key exists. `assoc` and `assoc-in`
+evaluate every argument before validating the write. Run `just lookup-order` to
+see which error reaches the handler and how the checker reports a mismatched
+recovery type.
 
 `contains?` checks keyword and string keys. A guard such as `(contains? patient :name)`
 refines a local map in each branch. The successful branch can read a declared

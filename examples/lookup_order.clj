@@ -21,3 +21,14 @@
 
 (defn string-index-present? {:t/sig '[:-> #{true}]} []
   (contains? "😀" 1))
+
+(defn rejected-write {:t/sig '[:-> #{:value}]} []
+  (try
+    (assoc-in {:request {:status :ready}} [:request :status]
+              (throw (ex-info "Value failed" {:stage :value})))
+    (catch ExceptionInfo e (:stage (ex-data e)))))
+
+(defn saved-status {:t/sig '[:-> #{:ready}]} []
+  (try
+    (get (assoc {} :status :ready :attempt 1) :status)
+    (catch Throwable _ :failed)))

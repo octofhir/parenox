@@ -917,3 +917,13 @@
            (try (req! 42 :missing)
                 (catch IllegalArgumentException e (ex-message e)))))
 (println "Clojure/JVM lookup evaluation order: 7 assertions passed")
+
+(assert (= :value (demo.lookup-order/rejected-write)))
+(assert (= :ready (demo.lookup-order/saved-status)))
+(assert (= :value
+           (try (assoc 42 :status (throw (ex-info "value" {:stage :value})))
+                (catch ExceptionInfo e (:stage (ex-data e))))))
+(assert (= :wrong-parent
+           (try (assoc-in {:request 7} [:request :status] :ready)
+                (catch ClassCastException _ :wrong-parent))))
+(println "Clojure/JVM map write evaluation order: 4 assertions passed")

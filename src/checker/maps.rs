@@ -298,15 +298,26 @@ impl Checker<'_> {
                 fields: BTreeMap::new(),
                 extra: ExtraFields::Closed,
             }),
-            Type::Unknown | Type::Never => Err(target),
+            Type::Never => Err(Type::Never),
+            Type::Unknown => {
+                self.may_throw();
+                Err(Type::Unknown)
+            }
+            Type::Tuple(_) | Type::Vector(_) | Type::MapEntry(_) => {
+                self.may_throw();
+                Err(self
+                    .unsupported(span, format!("{name} does not yet analyze vector writes"))
+                    .known)
+            }
             _ => {
+                self.class_cast();
                 self.diagnostics.push(Diagnostic::type_mismatch(
                     span,
                     name,
                     "Map | Nil".into(),
                     target.inferred().to_string(),
                 ));
-                Err(Type::Unknown)
+                Err(Type::Never)
             }
         }
     }
@@ -316,22 +327,22 @@ impl Checker<'_> {
             self.error("PNX2554", span, "assoc requires a map and key/value pairs");
             return Value::new(Type::Unknown);
         }
-        let target = self.infer(&xs[1], env);
+        let args: Vec<_> = self.eval_args(&xs[1..], env, true).collect();
+        if !call_returns(&args) {
+            return Value::new(Type::Never);
+        }
         let mut updates = Vec::new();
-        for pair in xs[2..].as_chunks::<2>().0 {
-            let key = self.read_map_key(&pair[0], env, "assoc", false);
-            let value = self.infer(&pair[1], env);
-            let Some(key) = key else {
+        for [(key, key_span), (value, _)] in args[1..].as_chunks::<2>().0 {
+            let key = self.validate_map_key(key.clone(), *key_span, "assoc", false);
+            let Some(key) = key.filter(|key| !key.contains_unknown()) else {
+                self.may_throw();
                 return Value::new(Type::Unknown);
             };
-            if matches!(key, Type::Never | Type::Unknown) {
-                return Value::new(key);
-            }
-            updates.push((key, value.known));
+            updates.push((key, &value.known));
         }
-        let parts = match target.known {
-            Type::Union(xs) => xs,
-            t => vec![t],
+        let parts = match &args[0].0.known {
+            Type::Union(xs) => xs.clone(),
+            t => vec![t.clone()],
         };
         let mut results = Vec::new();
         for part in parts {

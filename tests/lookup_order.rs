@@ -68,3 +68,38 @@ fn successful_lookups_do_not_add_impossible_exception_paths() {
     };
     assert_eq!(diagnostic.code, "PNX2741");
 }
+
+#[test]
+fn map_writes_wait_for_every_argument_before_validating_the_write() {
+    for expression in [
+        r#"(assoc (throw (ex-info "target" {:stage :first})) :status (throw (ex-info "later" {:stage :later})))"#,
+        r#"(assoc {} (throw (ex-info "key" {:stage :first})) (throw (ex-info "later" {:stage :later})) :status (throw (ex-info "later" {:stage :later})))"#,
+        r#"(assoc 42 :status (throw (ex-info "value" {:stage :first})))"#,
+        r#"(assoc-in (throw (ex-info "target" {:stage :first})) [(throw (ex-info "later" {:stage :later}))] (throw (ex-info "later" {:stage :later})))"#,
+        r#"(assoc-in {} [(throw (ex-info "key" {:stage :first}))] (throw (ex-info "later" {:stage :later})))"#,
+    ] {
+        let form = format!("(try {expression} (catch ExceptionInfo e (:stage (ex-data e))))");
+        let report = check(&form, "#{:first}");
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check("(assoc {} :status (throw nil) :later unresolved)", "nil?");
+    let [diagnostic] = &report.diagnostics[..] else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX2304");
+}
+
+#[test]
+fn invalid_scalar_writes_raise_only_class_cast_exceptions() {
+    let report = check(
+        "(try (assoc-in {:request 7} [:request :status] :ready)
+              (catch ExceptionInfo _ :unexpected)
+              (catch ClassCastException _ :wrong-parent))",
+        "#{:wrong-parent}",
+    );
+    let [diagnostic] = &report.diagnostics[..] else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX2322");
+    assert_eq!(diagnostic.actual.as_deref(), Some("Number"));
+}
