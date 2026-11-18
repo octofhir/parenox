@@ -7,6 +7,25 @@ use crate::types::Type;
 
 const MAX_THREAD_EXPANSION_DEPTH: usize = 32;
 
+#[derive(Clone, Copy)]
+pub(super) enum Conditional {
+    If,
+    When,
+    IfNot,
+    WhenNot,
+}
+
+impl Conditional {
+    fn name(self) -> &'static str {
+        match self {
+            Self::If => "if",
+            Self::When => "when",
+            Self::IfNot => "if-not",
+            Self::WhenNot => "when-not",
+        }
+    }
+}
+
 impl Checker<'_> {
     pub(super) fn thread_form(
         &mut self,
@@ -346,25 +365,37 @@ impl Checker<'_> {
         xs: &[Form],
         span: Span,
         env: &Env,
-        when: bool,
+        mode: Conditional,
         tail: bool,
     ) -> Value {
+        let when = matches!(mode, Conditional::When | Conditional::WhenNot);
         if xs.len() < 2 || (!when && !(3..=4).contains(&xs.len())) {
-            return self.unsupported(span, "Invalid conditional arity");
+            self.error(
+                "PNX2554",
+                span,
+                format!("Invalid arity for {}", mode.name()),
+            );
+            return Value::new(Type::Unknown);
         }
         let condition = self.infer(&xs[1], env);
-        let yes_reachable = condition.known.truthy() != Type::Never;
-        let no_reachable = condition.known.falsey() != Type::Never;
+        let truthy = condition.known.truthy() != Type::Never;
+        let falsey = condition.known.falsey() != Type::Never;
+        let runs_on_truth = matches!(mode, Conditional::If | Conditional::When);
+        let (yes_reachable, no_reachable) = if runs_on_truth {
+            (truthy, falsey)
+        } else {
+            (falsey, truthy)
+        };
         let yes = {
             let mut local = env.clone();
-            self.narrow(&xs[1], true, &mut local);
+            self.narrow(&xs[1], runs_on_truth, &mut local);
             self.check_path(yes_reachable, |checker| {
                 checker.body(&xs[2..if when { xs.len() } else { 3 }], &local, tail)
             })
         };
         let no = {
             let mut local = env.clone();
-            self.narrow(&xs[1], false, &mut local);
+            self.narrow(&xs[1], !runs_on_truth, &mut local);
             let body = if when { &[] } else { &xs[3..] };
             self.check_path(no_reachable, |checker| checker.body(body, &local, tail))
         };

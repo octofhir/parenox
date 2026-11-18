@@ -89,3 +89,43 @@ fn binding_guards_validate_arity_and_binding_shape() {
         assert_eq!(report.diagnostics[0].code, code, "{report:#?}");
     }
 }
+
+#[test]
+fn negated_conditionals_invert_guards_and_preserve_branch_tail_position() {
+    for body in [
+        r#"(defn f {:t/sig '[(s/nilable string?) :-> string?]} [name]
+             (if-not (nil? name) (str/upper-case name) "UNKNOWN"))"#,
+        r#"(defn f {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]} [name]
+             (when-not (nil? name) (str/upper-case name)))"#,
+        r#"(defn f {:t/sig '[:-> nil?]} [] (if-not true (inc "unreachable")))"#,
+        r#"(defn f {:t/sig '[:-> string?]} [] (when-not false 42 "last"))"#,
+        "(defn f {:t/sig '[:-> nil?]} [] (when-not false))",
+        "(defn f {:t/sig '[:-> #{:done}]} [] (loop [ready true] (if-not ready :done (recur false))))",
+        "(defn f {:t/sig '[:-> #{:done}]} [] (loop [again true] (if again (when-not false (recur false)) :done)))",
+        r#"(defn if-not {:t/sig '[number? :-> number?]} [n] n)
+           (defn f {:t/sig '[:-> number?]} [] (if-not 3))"#,
+    ] {
+        let report = check(body);
+        assert!(report.ok && report.complete, "{body}: {report:#?}");
+    }
+    for (form, code) in [
+        ("(if-not false)", "PNX2554"),
+        ("(when-not)", "PNX2554"),
+        ("(when-not true unresolved)", "PNX2304"),
+        (
+            "(loop [again true] (when-not again (recur false)) 1)",
+            "PNX1001",
+        ),
+        ("(clojure.core/if true 1 2)", "PNX9003"),
+        ("(clojure.core/do 1)", "PNX9003"),
+    ] {
+        let report = check(&format!("(defn f {{:t/sig '[:-> number?]}} [] {form})"));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == code),
+            "{report:#?}"
+        );
+    }
+}

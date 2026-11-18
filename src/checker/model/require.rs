@@ -280,6 +280,8 @@ fn known_core_var(name: &str) -> bool {
                 | "cond"
                 | "case"
                 | "when"
+                | "if-not"
+                | "when-not"
                 | "if-let"
                 | "when-let"
                 | "if-some"

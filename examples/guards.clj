@@ -30,3 +30,16 @@
   [active?]
   (when-some [value active?]
     (if value "active" "inactive")))
+
+(defn normalize-name
+  {:t/sig '[(s/nilable string?) :-> string?]}
+  [name]
+  (if-not (nil? name)
+    (str/upper-case name)
+    "UNKNOWN"))
+
+(defn when-normalized
+  {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]}
+  [name]
+  (when-not (nil? name)
+    (str/upper-case name)))

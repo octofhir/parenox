@@ -823,3 +823,12 @@
 (assert (= "first" (unreduced (reduce (fn [_ x] (reduced (reduced x))) 0 ["first" 1]))))
 (assert (= "only" (unreduced (ensure-reduced (reduced "only")))))
 (println "Clojure/JVM early reduction results: 7 assertions passed")
+
+(assert (= "ADA" (demo.guards/normalize-name "Ada")))
+(assert (= "UNKNOWN" (demo.guards/normalize-name nil)))
+(assert (nil? (demo.guards/when-normalized nil)))
+(assert (= "last" (when-not false 42 "last")))
+(assert (nil? (if-not true "skipped")))
+(assert (= :done (loop [again true] (if-not again :done (recur false)))))
+(assert (= :done (loop [again true] (if again (when-not false (recur false)) :done))))
+(println "Clojure/JVM negated conditionals: 7 assertions passed")

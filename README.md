@@ -416,6 +416,9 @@ inside transformed calls are withheld when source replacement could change the
 threading semantics. User macro execution, a general macroexpander and full
 expansion provenance remain future work.
 
+`if-not` and `when-not` select their body when the condition is falsey.
+Their guards narrow values in the selected branch and preserve tail position.
+
 `if-let` and `when-let` bind truthy values. `if-some` and `when-some` also bind
 `false`. Each initializer is checked once. The successful branch can use the
 narrowed value through a local symbol or a supported map destructuring pattern.
@@ -569,7 +572,7 @@ inferred helper work is included in the check of their callers.
 |---|---|
 | Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
 | Spec forms | `s/keys`, `s/map-of`, `s/tuple`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
-| Control flow | `let`, `do`, `if`, `when`, `cond`, `case`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, `loop`/`recur`, local predicate narrowing |
+| Control flow | `let`, `do`, `if`/`if-not`, `when`/`when-not`, `cond`, `case`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, `loop`/`recur`, local predicate narrowing |
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
 | Data operations | Keyword calls, string and keyword lookups and updates, ordered vector paths, indexed reads, positional and nested map destructuring and checked keys |
 | Functions | Fixed and variadic arities, forward calls, bare requires, namespace aliases, `:as-alias`, explicit `:refer` with `:exclude` and `:rename`, private-var boundaries, direct private-helper inference |

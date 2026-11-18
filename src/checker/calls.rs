@@ -6,6 +6,7 @@ mod reduction;
 mod sequences;
 mod vectors;
 
+use super::flow::Conditional;
 use super::{Checker, Env, Value, function_forms::pack_arguments, model::Function, nil_part};
 use crate::Diagnostic;
 use crate::expand::Threading;
@@ -114,7 +115,7 @@ impl<'model> Checker<'model> {
         match xs[0].symbol() {
             Some("recur") => return self.recur_form(&xs[1..], span, env, tail),
             Some("loop*") => return self.loop_form(xs, span, env, true),
-            Some("if") => return self.if_form(xs, span, env, false, tail),
+            Some("if") => return self.if_form(xs, span, env, Conditional::If, tail),
             Some("do") => return self.body(&xs[1..], env, tail),
             Some("throw") => return self.throw_form(&xs[1..], span, env),
             Some("try") => return self.try_form(&xs[1..], env, tail),
@@ -157,8 +158,14 @@ impl<'model> Checker<'model> {
                 "clojure.core/loop" => return self.loop_form(xs, span, env, false),
                 "clojure.core/cond" => return self.cond_form(&xs[1..], span, env, tail),
                 "clojure.core/case" => return self.case_form(&xs[1..], span, env, tail),
-                "clojure.core/if" | "clojure.core/when" => {
-                    return self.if_form(xs, span, env, resolved.ends_with("/when"), tail);
+                "clojure.core/when" => {
+                    return self.if_form(xs, span, env, Conditional::When, tail);
+                }
+                "clojure.core/if-not" => {
+                    return self.if_form(xs, span, env, Conditional::IfNot, tail);
+                }
+                "clojure.core/when-not" => {
+                    return self.if_form(xs, span, env, Conditional::WhenNot, tail);
                 }
                 "clojure.core/if-let"
                 | "clojure.core/when-let"
@@ -166,7 +173,6 @@ impl<'model> Checker<'model> {
                 | "clojure.core/when-some" => {
                     return self.binding_conditional(xs, span, env, &resolved, tail);
                 }
-                "clojure.core/do" => return self.body(&xs[1..], env, tail),
 
                 "clojure.core/or" | "clojure.core/and" => {
                     return self.short_circuit(xs, env, resolved.ends_with("/or"), tail);
