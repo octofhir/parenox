@@ -478,6 +478,9 @@ Saving a project manifest or an indexed extern file refreshes the workspace
 while preserving open buffers. The server logs configuration failures and keeps
 its last loaded snapshot. If startup configuration is invalid, open-file
 diagnostics remain available while you repair and save the manifest.
+When the editor supports dynamic file watching, Parenox also refreshes its
+snapshot after changes to closed `.clj` and `.cljc` project files and watched
+EDN configuration files. File watching uses workspace events from the editor.
 
 ### RustRover and JetBrains IDEs
 

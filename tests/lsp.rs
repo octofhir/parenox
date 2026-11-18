@@ -219,6 +219,84 @@ fn edn_buffers_get_reader_diagnostics_and_clear_on_edit() {
 }
 
 #[test]
+fn watched_source_changes_refresh_closed_files_and_preserve_overlays() {
+    let fixture = Fixture::new("watched sources");
+    let provider = fixture.0.join("src/shop.cljc");
+    let caller = fixture.0.join("test/caller.cljc");
+    let string_contract =
+        "(ns shop)\n(defn title {:t/sig '[string? :-> string?]} [name] (str name))";
+    let number_contract = string_contract.replace("string? :->", "number? :->");
+    fs::write(&provider, string_contract).unwrap();
+    let saved = "(ns shop-test (:require [shop :as p]))\n(defn label {:t/sig '[:-> string?]} [] (p/title \"Alice\"))";
+    fs::write(&caller, saved).unwrap();
+    let overlay = saved.replace("\"Alice\"", "42");
+
+    let mut child = lsp_server();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |message| {
+        send_message(&mut input, &message);
+        read_message(&mut output).expect("language server produced no message")
+    };
+    let initialized = exchange(
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),"capabilities":{"workspace":{"didChangeWatchedFiles":{"dynamicRegistration":true}}}
+        }}),
+    );
+    assert_eq!(initialized["id"], 1);
+    let register = exchange(json!({"jsonrpc":"2.0","method":"initialized","params":{}}));
+    assert_eq!(register["method"], "client/registerCapability");
+    let watch = &register["params"]["registrations"][0];
+    assert_eq!(watch["method"], "workspace/didChangeWatchedFiles");
+    assert!(
+        watch["registerOptions"]["watchers"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"globPattern":"**/*.cljc"}))
+    );
+
+    send_message(
+        &mut input,
+        &json!({"jsonrpc":"2.0","id":register["id"],"result":null}),
+    );
+    let open = json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+        "textDocument":{"uri":uri(&caller),"languageId":"clojure","version":7,"text":overlay}
+    }});
+    send_message(&mut input, &open);
+    let broken = read_message(&mut output).unwrap();
+    assert_eq!(broken["params"]["diagnostics"][0]["code"], "PNX2322");
+
+    let mut exchange = |message| {
+        send_message(&mut input, &message);
+        read_message(&mut output).expect("language server produced no message")
+    };
+    let event = |kind| {
+        json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{
+            "changes":[{"uri":uri(&provider),"type":kind}]
+        }})
+    };
+    fs::write(&provider, &number_contract).unwrap();
+    let fixed = exchange(event(2));
+    assert_eq!(fixed["params"]["version"], 7);
+    assert_eq!(fixed["params"]["diagnostics"], json!([]));
+    fs::remove_file(&provider).unwrap();
+    let removed = exchange(event(3));
+    assert_eq!(removed["params"]["diagnostics"][0]["code"], "PNX9003");
+    fs::write(&provider, string_contract).unwrap();
+    let created = exchange(event(1));
+    assert_eq!(created["params"]["diagnostics"][0]["code"], "PNX2322");
+    assert_eq!(fs::read_to_string(&caller).unwrap(), saved);
+
+    assert_eq!(
+        exchange(json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}))["id"],
+        2
+    );
+    send_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"}));
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn invalid_project_manifest_recovers_on_save_without_losing_overlays() {
     let fixture = Fixture::new("manifest reload");
     let manifest = fixture.0.join("deps.edn");
@@ -337,6 +415,67 @@ fn uri_pilot_editor_workflow() {
         134,
         82,
     );
+    let checkout = Fixture::new("uri disk edits");
+    copy_sources(&root, &checkout.0, Path::new("src"));
+    copy_sources(&root, &checkout.0, Path::new("test"));
+    fs::copy(root.join("deps.edn"), checkout.0.join("deps.edn")).unwrap();
+    uri_closed_provider_edit(&checkout.0);
+}
+
+fn uri_closed_provider_edit(root: &Path) {
+    let provider = root.join("src/lambdaisland/uri/normalize.cljc");
+    let caller = root.join("src/lambdaisland/uri.cljc");
+    let library = fs::read_to_string(&provider).unwrap();
+    let source = fs::read_to_string(&caller).unwrap();
+    let mut child = lsp_server();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |message| {
+        send_message(&mut input, &message);
+        read_message(&mut output).expect("language server produced no message")
+    };
+    let initialized = exchange(
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(root),"capabilities":{}
+        }}),
+    );
+    assert_eq!(initialized["id"], 1);
+    let initial = exchange(
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri(&caller),"languageId":"clojure","version":1,"text":source}
+        }}),
+    );
+    let edit_event = || {
+        json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{
+            "changes":[{"uri":uri(&provider),"type":2}]
+        }})
+    };
+
+    let renamed = library.replacen("(defn percent-decode", "(defn percent-decode-renamed", 1);
+    assert_ne!(renamed, library);
+    fs::write(&provider, renamed).unwrap();
+    let affected = exchange(edit_event());
+    assert_eq!(affected["params"]["uri"], uri(&caller));
+    assert!(
+        affected["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| {
+                diagnostic["code"] == "PNX2304" && diagnostic["range"]["start"]["line"] == 133
+            })
+    );
+    fs::write(&provider, library).unwrap();
+    let fixed = exchange(edit_event());
+    assert_eq!(fixed["params"], initial["params"]);
+
+    assert_eq!(
+        exchange(json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}))["id"],
+        2
+    );
+    send_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"}));
+    drop(input);
+    assert!(child.wait().unwrap().success());
 }
 
 #[test]

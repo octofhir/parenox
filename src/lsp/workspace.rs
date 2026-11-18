@@ -8,6 +8,7 @@ use parenox::{Diagnostic, Session, Source, output::contract_note, reader::valida
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::WATCH_REQUEST_ID;
 use super::protocol::write_message;
 use super::text::{Lines, Position, file_path, file_uri, normalize};
 use crate::cli::ProjectOptions;
@@ -16,6 +17,8 @@ use crate::workspace::{DiskProject, FileSnapshot, is_clojure_source};
 pub(super) struct Workspace {
     root: PathBuf,
     options: ProjectOptions,
+    source_roots: Vec<PathBuf>,
+    register_watches: bool,
     documents: BTreeMap<String, Document>,
     externs: Vec<FileSnapshot>,
     session: Session,
@@ -78,6 +81,18 @@ pub(super) struct DocumentParams {
 }
 
 #[derive(Deserialize)]
+pub(super) struct WatchedFiles {
+    changes: Vec<FileEvent>,
+}
+
+#[derive(Deserialize)]
+struct FileEvent {
+    uri: String,
+    #[serde(rename = "type")]
+    kind: u8,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TextQuery {
     text_document: DocumentUri,
@@ -85,10 +100,12 @@ pub(super) struct TextQuery {
 }
 
 impl Workspace {
-    pub fn load(root: PathBuf, options: &ProjectOptions) -> Self {
+    pub fn load(root: PathBuf, options: &ProjectOptions, register_watches: bool) -> Self {
         let mut workspace = Self {
             root,
             options: options.clone(),
+            source_roots: Vec::new(),
+            register_watches,
             documents: BTreeMap::new(),
             externs: Vec::new(),
             session: Session::default(),
@@ -99,6 +116,20 @@ impl Workspace {
     }
 
     pub fn initialized(&mut self, output: &mut impl Write) -> io::Result<()> {
+        if std::mem::take(&mut self.register_watches) {
+            write_message(
+                output,
+                &json!({
+                    "jsonrpc":"2.0", "id":WATCH_REQUEST_ID, "method":"client/registerCapability",
+                    "params":{"registrations":[{
+                        "id":WATCH_REQUEST_ID, "method":"workspace/didChangeWatchedFiles",
+                        "registerOptions":{"watchers":[
+                            {"globPattern":"**/*.clj"}, {"globPattern":"**/*.cljc"}, {"globPattern":"**/*.edn"}
+                        ]}
+                    }]}
+                }),
+            )?;
+        }
         if let Some(message) = self.load_error.take() {
             log_load_error(output, &message)?;
         }
@@ -106,7 +137,13 @@ impl Workspace {
     }
 
     fn reload(&mut self) -> Result<(), String> {
-        let mut project = DiskProject::read(self.options.load_at(&self.root)?)?;
+        let settings = self.options.load_at(&self.root)?;
+        let source_roots = settings
+            .paths
+            .iter()
+            .map(|path| normalize(Path::new(path)))
+            .collect();
+        let mut project = DiskProject::read(settings)?;
         project.externs.append(&mut project.dependency_externs);
         let mut documents: BTreeMap<_, _> = project
             .files
@@ -137,6 +174,7 @@ impl Workspace {
             }
         }
         self.documents = documents;
+        self.source_roots = source_roots;
         self.externs = project.externs;
         Ok(())
     }
@@ -193,32 +231,78 @@ impl Workspace {
         let Some(file) = file_path(&params.text_document.uri) else {
             return Ok(());
         };
-        let config = self
-            .options
-            .manifests(&self.root)
-            .iter()
-            .any(|manifest| normalize(manifest) == file);
-        let classpath = self
-            .options
-            .classpath
-            .as_ref()
-            .is_some_and(|path| normalize(&self.root.join(path)) == file);
-        let externs = self
-            .externs
-            .iter()
-            .any(|snapshot| normalize(Path::new(&snapshot.path)) == file);
         let new_source = is_clojure_source(&file)
             && self
                 .documents
                 .get(file.to_string_lossy().as_ref())
                 .is_some_and(|doc| !doc.indexed && doc.editor.is_some());
-        if config || classpath || externs || new_source {
-            match self.reload() {
-                Ok(()) => self.check(output),
-                Err(message) => log_load_error(output, &message),
+        if new_source || self.is_project_input(&file) {
+            self.refresh(output)?;
+        }
+        Ok(())
+    }
+
+    pub fn changed_files(
+        &mut self,
+        params: WatchedFiles,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        for event in params.changes {
+            let Some(path) = file_path(&event.uri) else {
+                continue;
+            };
+            if matches!(event.kind, 1..=3)
+                && (self.is_project_input(&path) || self.is_changed_source(&path, event.kind))
+            {
+                return self.refresh(output);
             }
-        } else {
-            Ok(())
+        }
+        Ok(())
+    }
+
+    fn is_changed_source(&self, path: &Path, kind: u8) -> bool {
+        if !is_clojure_source(path) {
+            return false;
+        }
+        if let Some(document) = self
+            .documents
+            .get(path.to_string_lossy().as_ref())
+            .filter(|doc| doc.indexed)
+        {
+            // A change to an open document arrives through its editor overlay.
+            return kind != 2 || document.editor.is_none();
+        }
+        // A newly created source can also create a previously absent manifest root.
+        let workspace = (kind == 1).then_some(&self.root);
+        self.source_roots.iter().chain(workspace).any(|root| {
+            path.strip_prefix(root).is_ok_and(|tail| {
+                !tail
+                    .components()
+                    .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
+            })
+        })
+    }
+
+    fn is_project_input(&self, file: &Path) -> bool {
+        self.options
+            .manifests(&self.root)
+            .iter()
+            .any(|manifest| normalize(manifest) == file)
+            || self
+                .options
+                .classpath
+                .as_ref()
+                .is_some_and(|path| normalize(&self.root.join(path)) == file)
+            || self
+                .externs
+                .iter()
+                .any(|snapshot| normalize(Path::new(&snapshot.path)) == file)
+    }
+
+    fn refresh(&mut self, output: &mut impl Write) -> io::Result<()> {
+        match self.reload() {
+            Ok(()) => self.check(output),
+            Err(message) => log_load_error(output, &message),
         }
     }
 

@@ -15,11 +15,14 @@ use self::text::file_path;
 use self::workspace::Workspace;
 use crate::cli::ProjectOptions;
 
+const WATCH_REQUEST_ID: &str = "parenox/file-watch";
+
 #[derive(Deserialize)]
 struct Message {
     jsonrpc: String,
     id: Option<Value>,
-    method: String,
+    method: Option<String>,
+    error: Option<Value>,
     #[serde(default)]
     params: Value,
 }
@@ -30,6 +33,8 @@ struct Initialize {
     root_uri: Option<String>,
     root_path: Option<String>,
     workspace_folders: Option<Vec<Folder>>,
+    #[serde(default)]
+    capabilities: Value,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +81,22 @@ pub(super) fn run(options: ProjectOptions) -> Result<u8, String> {
                 continue;
             }
         };
+        let Some(method) = message.method else {
+            if message.id.as_ref().and_then(Value::as_str) == Some(WATCH_REQUEST_ID) {
+                if let Some(error) = message.error {
+                    write_message(&mut output, &json!({
+                        "jsonrpc":"2.0", "method":"window/logMessage", "params":{
+                            "type":2, "message":format!("Could not register Parenox file watches ({error})")
+                        }
+                    }))
+                    .map_err(|err| err.to_string())?;
+                }
+            } else {
+                send_error(&mut output, Value::Null, -32600, "Invalid request")
+                    .map_err(|err| err.to_string())?;
+            }
+            continue;
+        };
         let response = if let Some(id) = message.id {
             request(
                 &mut output,
@@ -83,13 +104,13 @@ pub(super) fn run(options: ProjectOptions) -> Result<u8, String> {
                 &mut workspace,
                 &mut shutdown,
                 id,
-                &message.method,
+                &method,
                 message.params,
             )
-        } else if message.method == "exit" {
+        } else if method == "exit" {
             return Ok(if shutdown { 0 } else { 1 });
         } else if !shutdown && let Some(workspace) = &mut workspace {
-            notification(&mut output, workspace, &message.method, message.params)
+            notification(&mut output, workspace, &method, message.params)
         } else {
             Ok(())
         };
@@ -114,14 +135,20 @@ fn request(
         if workspace.is_some() {
             return send_error(output, id, -32600, "Server is already initialized");
         }
-        let root = match serde_json::from_value::<Initialize>(params)
-            .map_err(|err| err.to_string())
-            .and_then(|params| params.root())
-        {
+        let init: Initialize = match serde_json::from_value(params) {
+            Ok(init) => init,
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        };
+        let root = match init.root() {
             Ok(root) => root,
             Err(message) => return send_error(output, id, -32602, &message),
         };
-        *workspace = Some(Workspace::load(root, options));
+        let watch = init
+            .capabilities
+            .pointer("/workspace/didChangeWatchedFiles/dynamicRegistration")
+            .and_then(Value::as_bool)
+            == Some(true);
+        *workspace = Some(Workspace::load(root, options, watch));
         return result(
             output,
             id,
@@ -178,6 +205,11 @@ fn notification(
         "textDocument/didSave" => {
             if let Ok(params) = serde_json::from_value(params) {
                 workspace.save(params, output)?;
+            }
+        }
+        "workspace/didChangeWatchedFiles" => {
+            if let Ok(params) = serde_json::from_value(params) {
+                workspace.changed_files(params, output)?;
             }
         }
         _ => {}
