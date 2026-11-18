@@ -485,6 +485,17 @@ than runtime or frontend dependencies.
 See [type checker research](docs/design/type-checker-research.md) for proposed
 next steps, including Crabjure's macro scopes and dependency resolution.
 
+## Editor integration
+
+Configure your editor to start `parenox lsp` over stdin and stdout. The server
+loads one workspace using the same `parenox.edn` and `deps.edn` settings as
+`check`. Use `parenox lsp --alias test` to include test source roots.
+
+The server publishes Parenox diagnostics for open `.clj` and `.cljc` files and
+supports go-to-definition for qualified source vars, including namespace aliases.
+Unsaved buffers participate in checks and navigation. Positions use UTF-16 and
+the server requests full document synchronization from the editor.
+
 ## Agent sessions
 
 ```sh

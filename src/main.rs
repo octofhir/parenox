@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod extern_diff_cli;
+mod lsp;
 mod serve;
 
 use std::collections::BTreeMap;
@@ -37,6 +38,7 @@ fn run() -> Result<u8, String> {
         Some(Command::ExportExterns(options)) => export_externs(options),
         Some(Command::DiffExterns(options)) => extern_diff_cli::run(options),
         Some(Command::Serve) => serve::run(),
+        Some(Command::Lsp(options)) => lsp::run(options),
         Some(Command::Syntax { path }) => syntax(&path),
         Some(Command::Bench { path, iterations }) => bench(&path, iterations as usize),
         None => {
@@ -243,6 +245,14 @@ fn read_externs(paths: &[String]) -> Result<Vec<Snapshot>, String> {
 }
 
 fn read_sources(paths: &[String]) -> Result<BTreeMap<String, String>, String> {
+    let files = read_source_roots(paths)?;
+    if files.is_empty() {
+        return Err("No Clojure source files found".into());
+    }
+    Ok(files)
+}
+
+fn read_source_roots(paths: &[String]) -> Result<BTreeMap<String, String>, String> {
     let mut files = BTreeMap::new();
     let mut pending: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     while let Some(path) = pending.pop() {
@@ -262,19 +272,20 @@ fn read_sources(paths: &[String]) -> Result<BTreeMap<String, String>, String> {
                 }
                 pending.push(child);
             }
-        } else if matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("clj" | "cljc")
-        ) {
+        } else if is_clojure_source(&path) {
             let source =
                 fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             files.insert(path.to_string_lossy().into_owned(), source);
         }
     }
-    if files.is_empty() {
-        return Err("No Clojure source files found".into());
-    }
     Ok(files)
+}
+
+fn is_clojure_source(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("clj" | "cljc")
+    )
 }
 
 impl Color {
@@ -309,36 +320,50 @@ impl CheckOptions {
 
 impl ProjectOptions {
     fn load(&self) -> Result<ProjectConfig, String> {
-        let default = Path::new(config::DEFAULT_PATH);
-        let mut settings = if let Some(path) = &self.config {
-            ProjectConfig::read(Path::new(path))?
-        } else if self.paths.is_empty() && file_exists(default)? {
-            ProjectConfig::read(default)?
+        let settings = self.load_at(Path::new(""))?;
+        if settings.paths.is_empty() {
+            return Err(
+                "No source paths. Specify paths or configure :paths in parenox.edn or deps.edn"
+                    .into(),
+            );
+        }
+        Ok(settings)
+    }
+
+    fn load_at(&self, root: &Path) -> Result<ProjectConfig, String> {
+        let default = root.join(config::DEFAULT_PATH);
+        let config = self.config.as_ref().map(|path| root.join(path));
+        let mut settings = if let Some(path) = &config {
+            ProjectConfig::read(path)?
+        } else if self.paths.is_empty() && file_exists(&default)? {
+            ProjectConfig::read(&default)?
         } else {
             ProjectConfig::default()
         };
         if !self.paths.is_empty() {
-            settings.paths.clone_from(&self.paths);
+            settings.paths = self
+                .paths
+                .iter()
+                .map(|path| root.join(path).to_string_lossy().into_owned())
+                .collect();
         } else {
-            let manifest = self.deps.as_deref().map(PathBuf::from).unwrap_or_else(|| {
-                self.config
-                    .as_deref()
-                    .and_then(|path| Path::new(path).parent())
-                    .unwrap_or_else(|| Path::new(""))
-                    .join("deps.edn")
-            });
+            let manifest = self
+                .deps
+                .as_ref()
+                .map(|path| root.join(path))
+                .unwrap_or_else(|| {
+                    config
+                        .as_deref()
+                        .and_then(Path::parent)
+                        .unwrap_or(root)
+                        .join("deps.edn")
+                });
             if self.deps.is_some()
                 || !self.aliases.is_empty()
                 || (settings.paths.is_empty() && file_exists(&manifest)?)
             {
                 settings.paths = config::deps_paths(&manifest, &self.aliases)?;
             }
-        }
-        if settings.paths.is_empty() {
-            return Err(
-                "No source paths. Specify paths or configure :paths in parenox.edn or deps.edn"
-                    .into(),
-            );
         }
         Ok(settings)
     }

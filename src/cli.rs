@@ -28,6 +28,8 @@ pub(crate) enum Command {
     },
     /// Check in-memory source snapshots over the JSON Lines protocol.
     Serve,
+    /// Serve editor diagnostics and navigation using LSP over stdio.
+    Lsp(ProjectOptions),
     /// Measure repeated checks of a single source file.
     Bench {
         #[arg(value_name = "FILE")]
