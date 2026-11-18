@@ -9,7 +9,7 @@ mod reduction;
 mod sequences;
 mod vectors;
 
-pub(super) use sequences::narrow_emptiness;
+pub(super) use sequences::{iteration_may_throw, narrow_emptiness};
 
 use super::flow::Conditional;
 use super::{
@@ -463,12 +463,17 @@ impl<'model> Checker<'model> {
                     "clojure.core/ex-info"
                         | "clojure.core/ex-data"
                         | "clojure.core/identity"
+                        | "clojure.core/dissoc"
+                        | "clojure.core/find"
                         | "clojure.core/list"
                         | "clojure.core/cons"
                         | "clojure.core/seq"
                         | "clojure.core/first"
                         | "clojure.core/next"
                         | "clojure.core/rest"
+                        | "clojure.core/keys"
+                        | "clojure.core/vals"
+                        | "clojure.core/zipmap"
                         | "clojure.core/reduced"
                         | "clojure.core/reduced?"
                         | "clojure.core/unreduced"
@@ -508,11 +513,18 @@ impl<'model> Checker<'model> {
             "clojure.core/cons" => return self.cons(args),
             "clojure.core/conj" => return self.conj(args),
             "clojure.core/merge" => return self.merge(args, span),
+            "clojure.core/dissoc" => return self.dissoc(args),
+            "clojure.core/find" => return self.find_entry(&args[0], &args[1]),
+            "clojure.core/select-keys" => return self.select_keys(&args[0], &args[1]),
+            "clojure.core/zipmap" => return self.zipmap(&args[0], &args[1], span),
             "clojure.core/ex-info" => return self.ex_info(args),
             "clojure.core/ex-data" => return self.ex_data(&args[0].0),
             "clojure.core/seq" | "clojure.core/first" | "clojure.core/next"
             | "clojure.core/rest" => {
                 return self.sequence_call(name, &args[0].0, args[0].1);
+            }
+            "clojure.core/keys" | "clojure.core/vals" => {
+                return self.map_sequence_call(name, &args[0]);
             }
             "clojure.core/+" | "clojure.core/-" | "clojure.core/*" | "clojure.core/inc"
             | "clojure.core/dec" => {
@@ -612,9 +624,12 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
     match name {
         "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj"
         | "clojure.core/list" | "clojure.core/merge" => &[Arity::Variadic(0)],
-        "clojure.core/-" | "clojure.core/=" => &[Arity::Variadic(1)],
+        "clojure.core/-" | "clojure.core/=" | "clojure.core/dissoc" => &[Arity::Variadic(1)],
         "clojure.core/nth" | "clojure.core/ex-info" => &[Arity::Fixed(2), Arity::Fixed(3)],
-        "clojure.core/cons" => &[Arity::Fixed(2)],
+        "clojure.core/cons"
+        | "clojure.core/find"
+        | "clojure.core/select-keys"
+        | "clojure.core/zipmap" => &[Arity::Fixed(2)],
         _ => &[Arity::Fixed(1)],
     }
 }
@@ -727,8 +742,14 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/first"
             | "clojure.core/next"
             | "clojure.core/rest"
+            | "clojure.core/keys"
+            | "clojure.core/vals"
             | "clojure.core/conj"
             | "clojure.core/merge"
+            | "clojure.core/dissoc"
+            | "clojure.core/find"
+            | "clojure.core/select-keys"
+            | "clojure.core/zipmap"
             | "clojure.core/list"
             | "clojure.core/cons"
             | "clojure.core/reduced"

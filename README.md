@@ -82,6 +82,12 @@ just vectors pretty always  # mapv and filterv with colored callback diagnostics
 just entries pretty always  # map entry pipelines and diagnostics
 just dictionaries pretty always  # map-of contracts and diagnostics
 just map-keys pretty always  # string and dynamic map keys
+just map-projection  # verify projected and redacted public responses
+just map-sequences   # typed keys and values from a dictionary
+just reduce-kv       # typed reductions over map entries and vector indices
+just update-vals     # transform map values while retaining key types and presence
+just map-builders    # build a map with zipmap and rename keys with update-keys
+just group-by        # group typed items without losing known positions
 just dynamic-paths pretty always  # nested maps with dynamic path segments
 just ordered-paths pretty always  # saved vector paths and positional contracts
 just indices pretty always  # indexed reads and out-of-bounds diagnostics
@@ -240,9 +246,14 @@ vars, macro scopes or the narrowing behavior of `:t/guard`.
 
 EDN goes to stdout only after a complete source check and a second check of the
 generated snapshot in isolation. Parenox compares the reloaded signatures and
-literal values with the originals. Errors, suppressions and unreadable output
-prevent export (exit `1`); diagnostics go to stderr in the requested `--format`.
+literal values with the originals. Export stops at the 1 MiB snapshot limit or
+if an expanded signature exceeds the reader's nesting limit. Both limits
+report `PNX9012` at the affected declaration. A failed export exits with status
+`1` and writes diagnostics to stderr in the requested `--format`.
 The resulting file works with `check`, `validate-externs` and `diff-externs`.
+
+Run `just bench-export chain 45` and `just bench-export shared 15` to measure
+the nesting and snapshot size limits on synthetic named specs.
 
 ### Literal externs
 
@@ -918,6 +929,46 @@ nil. An optional right-hand field can change the value type without removing a
 required left-hand field. An undeclared field in an open map can overwrite a
 known value; if its type remains unknown after the merge, Parenox reports a gap.
 
+`select-keys` derives a closed result shape from a map or nil and a
+collection of statically known keyword or string choices. It preserves field
+types, including present nil and false. A field is required when the input
+requires it and every possible selection includes it. Unbounded key types and
+selected fields with undeclared types report analysis gaps. Run
+`just map-projection` to check a public response derived from an open record.
+
+`dissoc` tracks a removed keyword or string even when the input map is open.
+A dynamic key makes overlapping required fields optional and preserves the
+others. The one-argument call returns its input and removing keys from nil
+returns nil. An `:opt` entry with type `#{}` can declare an absent field in
+an open result contract. An `apply` spread with unknown length reports an
+analysis gap.
+
+`update-vals` checks direct calls on closed maps, typed dictionaries, and nil.
+It checks the updater against each declared field's value type and preserves
+key types and presence on normal returns. Present nil and false are passed to
+the updater. Nil and empty maps produce an empty map with zero invocations.
+A field whose updater always throws can only be absent in a successful result.
+An open map with undeclared values or excessive callback analysis reports a gap.
+Run `just update-vals` for examples.
+
+`zipmap` pairs sequence items up to the shorter input and keeps the later
+value for duplicate keys. Fixed positions produce precise fields. A later pair
+that may be absent leaves room for an earlier value at the same key. Typed
+sequences can produce a dictionary. The supported keys are keywords and strings.
+
+`update-keys` checks direct calls on maps with finite keyword or string keys,
+and on nil. The updater must produce known key choices. The returned shape
+preserves the source values and tracks which destination keys are guaranteed.
+Definite collisions report `PNX2790`. Possible collisions and excessive key
+expansion report `PNX9001`. Run `just map-builders` for examples.
+
+`group-by` checks the grouping callback and returns map entries whose values
+are vectors of the original items. Fixed inputs with known group keys retain
+the item order and length in each group. With dynamic groups, the checker
+tracks a typed dictionary and the collection may be empty. Group keys must
+be keywords or strings. The operation shares the map callback analysis limit
+with `update-vals` and `update-keys`. Run `just group-by` for examples.
+
 `get-in`, `assoc-in`, and `update-in` accept vectors and sequences with
 known keyword or string positions, including computed paths such as
 `(list sku tier)`. Paths can pass through locals or typed arguments.
@@ -1017,12 +1068,26 @@ analysis gap. A step returning `(reduced value)` stops that path and returns
 the wrapped value. Unexecuted later steps leave its result intact. Run
 `just reductions` for examples.
 
+`reduce-kv` checks direct calls over maps with declared entry types, vectors
+and nil. The reducer receives the accumulator, key and value. Map keys stay
+paired with their value types and each step allows any possible entry.
+Fixed vectors supply ordered integer indices starting at zero. Empty input
+returns the initial value and `reduced` stops the fold. Open map entries,
+protocol fallbacks and reductions beyond the analysis limits report gaps.
+Run `just reduce-kv` for examples.
+
 A closed map supplies a `MapEntry<K, V>` for each present field. Use `key`,
 `val`, or fixed positional bindings such as `(fn [[k v :as entry]] ...)`.
 Optional fields contribute entries only when present, and a present nil remains
 nil. An entry satisfies vector contracts for its two items. Iterating an open
 map, including an `s/keys` contract, reports an analysis gap because undeclared
 fields can have arbitrary types. Run `just entries pretty always` for examples.
+
+`find` returns the entry for a present key and nil for an absent one. Use
+`if-let` with `find` when a fallback should apply only to missing fields.
+An entry holding nil or false still takes the present branch. The checker
+supports maps, vectors and map entries as targets with keyword or string
+keys or known decimal integer indices in the i32 range.
 
 A contract of the form `(s/map-of key-spec value-spec)` types the entries of
 a dictionary. It allows empty maps. The key and value specs flow into
@@ -1131,6 +1196,13 @@ false still has an element. Guarding
 the result of `seq` or `next` establishes that a first item exists. That item
 can still be nil. A seq made from a fixed vector retains its positions for
 `first`, `next`, `nth` and positional destructuring.
+
+`keys` and `vals` preserve the key or value types of a typed map. Nil and an
+empty map produce nil. A nonempty map produces a sequence even if its values
+are nil or false. The checker retains known lengths and uses all possible
+element types at each position. Open maps with undeclared entry types and
+sequences passed directly to `keys` or `vals` report analysis gaps. Run
+`just map-sequences` for a reduction over typed dictionary values.
 
 `conj` appends to vectors, prepends to seqs, and adds items to sets. Short fixed
 vectors retain their positions. Repeated growth across loop iterations widens

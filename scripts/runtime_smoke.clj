@@ -294,6 +294,15 @@
                 (catch ClassCastException _ :throws))))
 (println "Clojure/JVM map entries: 7 assertions passed")
 
+(assert (= "Unlabeled" (demo.entries/preferred-label {})))
+(assert (nil? (demo.entries/preferred-label {:label nil})))
+(assert (= "Ada" (demo.entries/preferred-label {:label "Ada"})))
+(assert (map-entry? (find {:enabled false} :enabled)))
+(assert (false? (val (find {:enabled false} :enabled))))
+(assert (= [0 nil] (find [nil false] 0)))
+(assert (nil? (find [nil false] -1)))
+(println "Clojure/JVM entry lookup: 7 assertions passed")
+
 (load-file "examples/dictionaries.clj")
 (load-file "examples/dictionaries_bad.clj")
 (assert (clojure.spec.alpha/valid? :demo.dictionaries/prices {}))
@@ -331,6 +340,71 @@
                :demo.map-keys/prices
                (demo.map-keys-bad/mark-pending {"SKU-17" 120} "SKU-17"))))
 (println "Clojure/JVM map keys: 11 assertions passed")
+
+(load-file "examples/map_projection.clj")
+(assert (= {:id "p-1" :enabled false "display" nil}
+           (demo.map-projection/public-profile
+             {:id "p-1" :enabled false "display" nil :internal-token "internal" :extra 1})))
+(assert (= {:id "p-2" :enabled true}
+           (demo.map-projection/public-profile {:id "p-2" :enabled true :internal-token "internal"})))
+(assert (= {} (select-keys nil [:missing]) (select-keys {:id 42} nil)))
+(println "Clojure/JVM map projection: 3 assertions passed")
+
+(assert (= {:id "p-1" "internal-token" false :other nil}
+           (demo.map-projection/redact-profile
+             {:id "p-1" :internal-token "internal" "internal-token" false :other nil})))
+(assert (= {"id" nil} (dissoc {:id 42 "id" nil} :id)))
+(assert (= 42 (dissoc 42)))
+(assert (nil? (dissoc nil :x 42)))
+(assert (= :class-cast
+           (try (dissoc 42 :id)
+                (catch ClassCastException _ :class-cast))))
+(println "Clojure/JVM map removal: 5 assertions passed")
+
+(load-file "examples/map_sequences.clj")
+(assert (= 3 (demo.map-sequences/total-quota {:alpha 1 :beta 2})))
+(assert (= 0 (demo.map-sequences/total-quota {})))
+(assert (nil? (demo.map-sequences/first-service {})))
+(let [row (array-map :beta 2 :alpha 1)]
+  (assert (= '(:beta :alpha) (keys row)))
+  (assert (= '(2 1) (vals row))))
+(assert (= '(nil false) (vals (array-map :missing nil :disabled false))))
+(assert (= '(:entry) (keys (seq {:entry 1}))))
+(println "Clojure/JVM map keys and values: 7 assertions passed")
+
+(load-file "examples/update_vals.clj")
+(assert (= {:daily "UNTITLED" :weekly "REPORT"}
+           (demo.update-vals/normalize-labels {:daily nil :weekly "report"})))
+(assert (= {:count 2} (demo.update-vals/advance {:count 1})))
+(assert (= {:count 5 :label "label"} (demo.update-vals/advance {:count 4 :label " label "})))
+(assert (= {} (update-vals nil 42)))
+(assert (= {:a true :b false} (update-vals {:a nil :b false} nil?)))
+(assert (reduced? (:value (update-vals {:value 1} reduced))))
+(assert (= :caught
+           (try (update-vals {:value nil} (fn [_] (throw (ex-info "failed" {}))))
+                (catch clojure.lang.ExceptionInfo _ :caught))))
+(println "Clojure/JVM map value transforms: 7 assertions passed")
+
+(load-file "examples/map_builders.clj")
+(assert (= {"amount" 5 "unit" "meters"} (demo.map-builders/public-reading [5 "meters"])))
+(assert (= {:a 2} (demo.map-builders/totals [:a :a :extra] [1 2])))
+(assert (= {"done" false} (demo.map-builders/statuses {:done false})))
+(assert (= {:a false :b nil} (zipmap [:a :b :a :unused] [1 nil false])))
+(assert (= {} (zipmap [:unused] [])))
+(assert (= {} (update-keys nil 42)))
+(assert (= {"new" nil} (update-keys {:old nil} (fn [_] "new"))))
+(println "Clojure/JVM map builders: 7 assertions passed")
+
+(load-file "examples/group_by.clj")
+(assert (= {:queued [{:status :queued :id 2} {:status :queued :id 3}]
+            :done [{:status :done :id 1}]}
+           (demo.group-by/tasks-by-status [{:status :queued :id 2}
+                                           {:status :done :id 1}
+                                           {:status :queued :id 3}])))
+(assert (= {:text ["first" "last"] :flag [false]} (demo.group-by/labels-by-kind)))
+(assert (= {"state" [nil false]} (group-by (fn [_] "state") [nil false])))
+(assert (= {} (group-by 42 nil)))
+(println "Clojure/JVM grouping: 4 assertions passed")
 
 (load-file "examples/dynamic_paths.clj")
 (load-file "examples/dynamic_paths_bad.clj")
@@ -823,6 +897,20 @@
 (assert (= "first" (unreduced (reduce (fn [_ x] (reduced (reduced x))) 0 ["first" 1]))))
 (assert (= "only" (unreduced (ensure-reduced (reduced "only")))))
 (println "Clojure/JVM early reduction results: 7 assertions passed")
+
+(load-file "examples/reduce_kv.clj")
+(assert (= 7 (demo.reduce-kv/total-usage {:first 2 :second 5})))
+(assert (= 0 (demo.reduce-kv/total-usage {})))
+(assert (= 5 (demo.reduce-kv/config-score {:label "abc" :count 2})))
+(assert (= 12 (demo.reduce-kv/weighted-total [2 5])))
+(assert (= [[0 "first"] [1 false]]
+           (reduce-kv (fn [result index value] (conj result [index value]))
+                      [] ["first" false])))
+(assert (= "stop" (reduce-kv (fn [_ index value]
+                               (if (zero? index) (reduced value) (inc value)))
+                             nil ["stop" false])))
+(assert (= :initial (reduce-kv 42 :initial nil)))
+(println "Clojure/JVM key-value reduction: 7 assertions passed")
 
 (assert (= "ADA" (demo.guards/normalize-name "Ada")))
 (assert (= "UNKNOWN" (demo.guards/normalize-name nil)))

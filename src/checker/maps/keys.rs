@@ -1,8 +1,9 @@
 //! Lookup and presence for keys supplied as expressions.
 use super::super::{Checker, Env, Value, calls::call_returns};
 use super::{Lookup, key_presence, narrow_key_presence};
+use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
-use crate::types::Type;
+use crate::types::{IndexedItem, MapSlot, Type};
 
 impl Checker<'_> {
     pub(in crate::checker) fn literal_map_key(&self, form: &Form) -> Option<Type> {
@@ -116,6 +117,91 @@ impl Checker<'_> {
             Some(true) => self.lookup_value(target, key, Lookup::Required, span),
             Some(false) => default.cloned().unwrap_or_else(|| Value::new(Type::Nil)),
             None => self.lookup_default(target, key, default, span),
+        }
+    }
+
+    pub(in crate::checker) fn find_entry(
+        &mut self,
+        (target, span): &(Value, Span),
+        key: &(Value, Span),
+    ) -> Value {
+        let start = self.diagnostics.len();
+        let result = self.find_type(&target.known, key, *span);
+        self.dedup_diagnostics(start);
+        Value::with_notes(result, target.notes.clone())
+    }
+
+    fn find_type(&mut self, target: &Type, key: &(Value, Span), span: Span) -> Type {
+        match target {
+            Type::Nil | Type::Never => target.clone(),
+            Type::Unknown => {
+                self.may_throw();
+                Type::Unknown
+            }
+            Type::Union(parts) => {
+                Type::union(parts.iter().map(|part| self.find_type(part, key, span)))
+            }
+            Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
+                self.find_type(upper, key, span)
+            }
+            Type::Map(_) | Type::MapEntry(_) | Type::Tuple(_) | Type::Vector(_) => {
+                let (key, key_span) = key;
+                let valid = self.validate_map_key(key.clone(), *key_span, "find", true);
+                valid.map_or(Type::Unknown, |key| self.find_at(target, &key, *key_span))
+            }
+            actual => {
+                self.illegal_argument();
+                self.diagnostics.push(Diagnostic::type_mismatch(
+                    span,
+                    "clojure.core/find",
+                    "Map, Vector or Nil".into(),
+                    actual.inferred().to_string(),
+                ));
+                Type::Never
+            }
+        }
+    }
+
+    fn find_at(&mut self, target: &Type, key: &Type, span: Span) -> Type {
+        match key {
+            Type::Unknown => {
+                self.may_throw();
+                return Type::Unknown;
+            }
+            Type::Never => return Type::Never,
+            Type::Union(parts) => {
+                return Type::union(parts.iter().map(|key| self.find_at(target, key, span)));
+            }
+            _ => {}
+        }
+        let entry = |value: &Type| Type::MapEntry(Box::new([key.clone(), value.clone()]));
+        if let Type::Map(map) = target {
+            // An associative input can use a comparator that rejects the key.
+            self.may_throw();
+            if !key.is_literal_map_key() {
+                return match map.possible_values(key) {
+                    Some(Type::Never) => Type::Nil,
+                    Some(value) => entry(&value).nilable(),
+                    None => self.undeclared_key(key, span),
+                };
+            }
+            return match map.slot(key) {
+                MapSlot::Present(value) => entry(value),
+                MapSlot::Optional(value) => entry(value).nilable(),
+                MapSlot::Absent => Type::Nil,
+                MapSlot::Undeclared => self.undeclared_key(key, span),
+            };
+        }
+        let Type::Integer(index) = key else {
+            return Type::Nil;
+        };
+        match target
+            .indexed_item(*index)
+            .expect("an indexed associative target")
+        {
+            IndexedItem::Present(value) => entry(value),
+            IndexedItem::Optional(value) => entry(value).nilable(),
+            IndexedItem::Absent(_) => Type::Nil,
         }
     }
 

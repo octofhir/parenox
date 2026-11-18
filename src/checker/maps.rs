@@ -1,13 +1,19 @@
 //! Map lookup, path updates and key presence.
+mod grouping;
 mod keys;
 mod merge;
 mod paths;
+mod projection;
+mod transform;
+mod zip;
 use std::collections::BTreeMap;
 
 use super::{Checker, Env, Value, calls::call_returns, nil_part};
 use crate::Diagnostic;
 use crate::reader::{Form, Span};
 use crate::types::{ExtraFields, Field, IndexedItem, MapSlot, MapType, Type};
+
+const MAX_MAP_CALLBACK_CHECKS: usize = 128;
 
 #[derive(Clone, Copy)]
 pub(super) enum Lookup<'a> {
@@ -18,6 +24,14 @@ pub(super) enum Lookup<'a> {
 }
 
 impl Checker<'_> {
+    fn take_map_callback_step(&mut self) -> bool {
+        if self.map_callback_checks >= MAX_MAP_CALLBACK_CHECKS {
+            return false;
+        }
+        self.map_callback_checks += 1;
+        true
+    }
+
     pub(super) fn map_literal(
         &mut self,
         xs: &[Form],
@@ -361,6 +375,58 @@ impl Checker<'_> {
         }
         Value::new(Type::union(results))
     }
+
+    pub(super) fn dissoc(&mut self, args: &[(Value, Span)]) -> Value {
+        let [(target, span), keys @ ..] = args else {
+            unreachable!("arity was checked");
+        };
+        if keys.is_empty() {
+            return target.clone();
+        }
+        let start = self.diagnostics.len();
+        let result = self.dissoc_type(&target.known, keys, *span);
+        self.dedup_diagnostics(start);
+        Value::with_notes(result, target.notes.clone())
+    }
+
+    fn dissoc_type(&mut self, target: &Type, keys: &[(Value, Span)], span: Span) -> Type {
+        match target {
+            Type::Map(map) => {
+                // A runtime map can have a comparator that rejects a key.
+                self.may_throw();
+                let mut map = map.clone();
+                for (value, span) in keys {
+                    let key = self.validate_map_key(value.clone(), *span, "dissoc", false);
+                    let Some(key) = key.filter(|key| !key.contains_unknown()) else {
+                        return Type::Unknown;
+                    };
+                    map.dissociate(&key);
+                }
+                Type::Map(map)
+            }
+            Type::Nil | Type::Never => target.clone(),
+            Type::Union(parts) => {
+                Type::union(parts.iter().map(|part| self.dissoc_type(part, keys, span)))
+            }
+            Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
+                self.dissoc_type(upper, keys, span)
+            }
+            Type::Unknown => {
+                self.may_throw();
+                Type::Unknown
+            }
+            _ => {
+                self.class_cast();
+                self.diagnostics.push(Diagnostic::type_mismatch(
+                    span,
+                    "clojure.core/dissoc",
+                    "Map | Nil".into(),
+                    target.inferred().to_string(),
+                ));
+                Type::Never
+            }
+        }
+    }
 }
 
 /// Presence is independent of the stored value's truthiness.
@@ -415,17 +481,8 @@ pub(super) fn narrow_key_presence(ty: &Type, key: &Type, present: bool) -> Type 
                         },
                     );
                 }
-            } else if !matches!(map.extra, ExtraFields::Closed) {
-                // An explicit absent field masks a possible extra entry.
-                map.set_field(
-                    key.to_owned(),
-                    Field {
-                        ty: Type::Never,
-                        required: false,
-                    },
-                );
             } else {
-                map.fields.remove(key);
+                map.dissociate(key);
             }
             Type::Map(map)
         }

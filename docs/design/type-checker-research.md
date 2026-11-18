@@ -11,9 +11,16 @@ Parenox checks Clojure source without loading namespaces or running project code
 | Library contract validation | Compare selected promises to public source contracts and check source bodies without trusting those promises. Check fixed and variadic dispatch, and report incompatible or unproved promises at their EDN location. |
 | Contract change reports | Compare old and new extern snapshots with independent spec environments. Check whether every old call is still covered without analyzing implementation bodies. Report invalid inputs instead of inferring removals from them. |
 | Compatibility explanations | Report a rejected arity, argument, result or nested field. Follow the failed comparison only after it has been classified, so ordinary checking does not build diagnostic paths. |
-| Exported contracts | Export checked public function signatures and literal vars as standalone EDN. Reload the generated snapshot without source specs and refuse incomplete, unreadable or lossy exports. |
+| Exported contracts | Export checked public function signatures and literal vars as standalone EDN. Bound inline expansion by snapshot bytes and reader nesting. Reload the generated snapshot without source specs and refuse incomplete, unreadable or lossy exports. |
 | Literal externs | Keep exact EDN data separate from its inferred type. Compare initializer values in release reports without executing code. |
 | Nil, maps and guards | `get` distinguishes explicit nil from absence. Truthiness and `some?` disagree on false. Right-biased `merge` preserves required keys when an optional field can overwrite their value. |
+| Map projection and removal | `select-keys` projects finite keyword and string choices into a closed shape. `dissoc` tracks the absence of a removed literal key even in an open shape. |
+| Map traversal | `keys` and `vals` preserve the selected entry component, including optional emptiness. Finite map sequences retain known length and treat each position as any possible element. |
+| Entry lookup | `find` returns a typed entry for a present key and nil for absence. With a finite set of possible keys, each result entry keeps its key paired with its associated value type. |
+| Key-value reduction | `reduce-kv` checks a three-argument reducer with paired map entry types or vector ordinals. It shares the accumulator and early-exit analysis used by `reduce`. |
+| Map value transforms | `update-vals` checks the updater against declared field and dictionary value types. Successful returns preserve key types and track fields that may be absent. |
+| Map construction | `zipmap` checks matching positions and rightmost duplicate keys. `update-keys` preserves values and rejects overlapping destination keys when uniqueness cannot be proven. |
+| Grouping | `group-by` checks the key callback and preserves known order within each group. Dynamic groups use a dictionary of vectors and share the map callback budget. |
 | Tagged unions | Literal tests on a map selector narrow its owner. Local aliases keep that relation until rebinding, and finite map tags support exhaustiveness checks in `case`. |
 | Checked predicates | `:t/guard` verifies true and false implications independently for a restricted Boolean expression. A body edit that changes the proven contract invalidates that predicate's callers. |
 | Contextual callbacks | Fixed-arity `s/fspec` supplies parameter and result types to inline callbacks passed in direct calls. Checking the body does not execute it or add its throws to argument evaluation. |
@@ -51,7 +58,5 @@ Parenox checks Clojure source without loading namespaces or running project code
 Do not compare Crabjure's cold lint benchmarks against Parenox's warm type-check timings. Use the same corpus, separate cold and warm runs, and report coverage alongside speed. Keep Parenox's one crate and source-only default; JNI reflection, clj-kondo config compatibility and a new reader are not prerequisites.
 
 ## What to implement next
-
-1. **Bound large export expansions.** Measure nested and shared specs, then limit expansion work before allocating oversized standalone snapshots.
 
 Keep JVM contracts, recursive types, general rows, and latent effect summaries as separate slices. Do not add runtime instrumentation or project macro execution to make a static check pass.

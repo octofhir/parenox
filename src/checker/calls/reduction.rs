@@ -1,4 +1,6 @@
 //! Ordered and bounded abstract reduction of modeled collections.
+mod kv;
+
 use std::borrow::Cow;
 
 use super::super::recur::{bounded_state, widen_growing_collections};
@@ -162,33 +164,47 @@ impl Checker<'_> {
                 element_span,
             )
         });
-        let Some((mut accumulator, mut accumulator_span)) =
-            initial.cloned().or_else(|| elements.next())
-        else {
+        let Some(accumulator) = initial.cloned().or_else(|| elements.next()) else {
             return self.call_prepared(callable, Vec::new(), span, env, true);
         };
         if elements.len() == 0 {
             self.call_prepared(callable, Vec::new(), span, env, false);
         }
+        self.reduce_exact_with(
+            accumulator,
+            elements,
+            span,
+            |checker, accumulator, item, step| {
+                checker.reduce_step(
+                    callable,
+                    [accumulator, item],
+                    literal.is_none().then_some(input.form.span),
+                    span,
+                    env,
+                    step,
+                )
+            },
+        )
+    }
+
+    fn reduce_exact_with<T>(
+        &mut self,
+        mut accumulator: (Value, Span),
+        items: impl Iterator<Item = T>,
+        span: Span,
+        mut apply: impl FnMut(&mut Self, (Value, Span), T, usize) -> Value,
+    ) -> Value {
         let mut stopped = Value::new(Type::Never);
-        for (step, (item, item_span)) in elements.enumerate() {
-            let next = self.reduce_step(
-                callable,
-                [(accumulator, accumulator_span), (item, item_span)],
-                literal.is_none().then_some(input.form.span),
-                span,
-                env,
-                step + 1,
-            );
+        for (index, item) in items.enumerate() {
+            let next = apply(self, accumulator, item, index + 1);
             let (continuing, finished) = partition_reduced(next);
-            accumulator = continuing;
+            accumulator = (continuing, span);
             stopped = stopped.join(finished);
-            if matches!(accumulator.known, Type::Never | Type::Unknown) {
+            if matches!(accumulator.0.known, Type::Never | Type::Unknown) {
                 break;
             }
-            accumulator_span = span;
         }
-        stopped.join(accumulator)
+        stopped.join(accumulator.0)
     }
 
     fn reduce_open(
@@ -200,27 +216,45 @@ impl Checker<'_> {
         span: Span,
         env: &Env,
     ) -> Value {
-        let (mut accumulator, mut accumulator_span) =
-            initial.cloned().unwrap_or_else(|| input.clone());
+        let accumulator = initial.cloned().unwrap_or_else(|| input.clone());
         let mut result = if nonempty && initial.is_some() {
             Value::new(Type::Never)
         } else {
-            accumulator.clone()
+            accumulator.0.clone()
         };
         if initial.is_none() && !nonempty {
             result = result.join(self.call_prepared(callable, Vec::new(), span, env, true));
         }
 
-        let mut seen = vec![vec![accumulator.clone()]];
+        self.reduce_open_with(
+            accumulator,
+            result,
+            "reduce",
+            span,
+            |checker, accumulator, step| {
+                checker.reduce_step(
+                    callable,
+                    [accumulator, input.clone()],
+                    Some(input.1),
+                    span,
+                    env,
+                    step,
+                )
+            },
+        )
+    }
+
+    fn reduce_open_with(
+        &mut self,
+        mut accumulator: (Value, Span),
+        mut result: Value,
+        name: &str,
+        span: Span,
+        mut apply: impl FnMut(&mut Self, (Value, Span), usize) -> Value,
+    ) -> Value {
+        let mut seen = vec![vec![accumulator.0.clone()]];
         for step in 1..=MAX_REDUCE_STATES {
-            let next = self.reduce_step(
-                callable,
-                [(accumulator, accumulator_span), input.clone()],
-                Some(input.1),
-                span,
-                env,
-                step,
-            );
+            let next = apply(self, accumulator, step);
             let (mut next, finished) = partition_reduced(next);
             result = result.join(finished);
             if next.known == Type::Never {
@@ -238,19 +272,18 @@ impl Checker<'_> {
                 return result;
             }
             seen.push(vec![next.clone()]);
-            accumulator = next;
-            accumulator_span = span;
+            accumulator = (next, span);
         }
         self.unsupported(
             span,
-            "reduce accumulator types did not stabilize within the analysis limit",
+            format!("{name} accumulator types did not stabilize within the analysis limit"),
         )
     }
 
     fn reduce_step(
         &mut self,
         callable: &PreparedCallable<'_, '_>,
-        args: [(Value, Span); 2],
+        args: impl Into<Vec<(Value, Span)>>,
         projected: Option<Span>,
         span: Span,
         env: &Env,
@@ -261,7 +294,7 @@ impl Checker<'_> {
         }
         self.reduction_steps += 1;
         let start = self.diagnostics.len();
-        let result = self.call_prepared(callable, Vec::from(args), span, env, true);
+        let result = self.call_prepared(callable, args.into(), span, env, true);
         for diagnostic in &mut self.diagnostics[start..] {
             diagnostic
                 .notes
@@ -290,6 +323,7 @@ fn reducer_argument(ty: &Type) -> bool {
         | Type::Unknown
         | Type::Never
         | Type::Function(_)
+        | Type::Symbol
         | Type::Key(_)
         | Type::Keyword
         | Type::Map(_)

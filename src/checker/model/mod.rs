@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 pub(crate) use declarations::Declarations;
 use declarations::Names;
-pub(crate) use externs::ExternCache;
 pub(super) use externs::MacroScope;
+pub(crate) use externs::{EncodeError, ExternCache, SnapshotWriter};
 use externs::{ExternFile, Externs};
 pub(super) use guards::VerifiedGuard;
 pub(crate) use interfaces::InterfaceKey;

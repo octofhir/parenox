@@ -4,6 +4,7 @@ mod encode;
 mod literals;
 mod validation;
 
+pub(crate) use encode::{EncodeError, SnapshotWriter};
 use literals::LiteralExtern;
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};

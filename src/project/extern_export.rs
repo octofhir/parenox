@@ -6,8 +6,9 @@ use super::{
     ExternExport, FileCache, FileKind, ProjectReport, Session, Source, identify_diagnostics,
 };
 use crate::Diagnostic;
-use crate::checker::{Globals, Model};
+use crate::checker::{EncodeError, Globals, Model, SnapshotWriter};
 use crate::reader::Span;
+use crate::types::Signature;
 
 const SNAPSHOT_PATH: &str = "<exported externs>";
 
@@ -75,32 +76,42 @@ struct Entry<'a> {
     span: Span,
     index: usize,
     model: &'a Model,
-    item: Exported,
+    item: Exported<'a>,
 }
 
-enum Exported {
-    Signature(String),
+enum Exported<'a> {
+    Signature(&'a [Signature]),
     Literal(String),
 }
 
-fn encode_and_verify<'a>(entries: &'a [Entry<'a>]) -> Result<String, (&'a Entry<'a>, String)> {
-    if entries.is_empty() {
-        return Ok("{}\n".into());
+impl Entry<'_> {
+    fn encode(&self, edn: &mut SnapshotWriter, separator: bool) -> Result<usize, EncodeError> {
+        if separator {
+            edn.write_str("\n ")?;
+        }
+        let offset = edn.len();
+        write!(edn, "{} ", self.name)?;
+        match &self.item {
+            Exported::Signature(signatures) => edn.signatures(signatures)?,
+            Exported::Literal(value) => write!(edn, "{{:value {value}}}")?,
+        }
+        Ok(offset)
     }
-    let mut edn = String::from("{");
+}
+
+fn encode_and_verify<'a>(entries: &'a [Entry<'a>]) -> Result<String, (&'a Entry<'a>, String)> {
+    let Some(last) = entries.last() else {
+        return Ok("{}\n".into());
+    };
+    let mut edn = SnapshotWriter::new();
     let mut offsets = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
-        if index != 0 {
-            edn.push_str("\n ");
-        }
-        offsets.push(edn.len());
-        let name = entry.name;
-        match &entry.item {
-            Exported::Signature(signature) => write!(edn, "{name} {signature}").unwrap(),
-            Exported::Literal(value) => write!(edn, "{name} {{:value {value}}}").unwrap(),
-        }
+        let offset = entry
+            .encode(&mut edn, index != 0)
+            .map_err(|reason| (entry, reason.to_string()))?;
+        offsets.push(offset);
     }
-    edn.push_str("}\n");
+    let edn = edn.finish().map_err(|reason| (last, reason.to_string()))?;
 
     let mut snapshot = FileCache::default();
     snapshot.update(&edn, SNAPSHOT_PATH, FileKind::Externs);

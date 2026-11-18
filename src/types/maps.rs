@@ -182,14 +182,19 @@ impl MapType {
     }
 
     pub fn set_field(&mut self, key: Type, field: Field) {
+        self.exclude_extra_key(&key);
+        self.fields.insert(key, field);
+    }
+
+    fn exclude_extra_key(&mut self, key: &Type) {
         if let ExtraFields::Typed(types) = &mut self.extra {
             // A fixed field replaces that entry of a finite key domain.
             let keys = &mut types[0];
-            if *keys == key {
+            if *keys == *key {
                 *keys = Type::Never;
             } else if let Type::Union(parts) = keys {
                 let previous_len = parts.len();
-                parts.retain(|part| *part != key);
+                parts.retain(|part| part != key);
                 if parts.len() != previous_len {
                     *keys = Type::union(std::mem::take(parts));
                 }
@@ -198,7 +203,6 @@ impl MapType {
                 self.extra = ExtraFields::Closed;
             }
         }
-        self.fields.insert(key, field);
     }
 
     /// Possible values of a nonconstant key. Open shapes can contain undeclared values.
@@ -250,6 +254,29 @@ impl MapType {
                 if !value.subtype_of(old_value) {
                     *old_value =
                         Type::union([std::mem::replace(old_value, Type::Never), value.clone()]);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn dissociate(&mut self, key: &Type) {
+        if key.is_literal_map_key() {
+            self.exclude_extra_key(key);
+            self.fields.remove(key);
+            if !matches!(self.slot(key), MapSlot::Absent) {
+                // Mask this key when the remaining extra domain still admits it.
+                self.fields.insert(
+                    key.clone(),
+                    Field {
+                        ty: Type::Never,
+                        required: false,
+                    },
+                );
+            }
+        } else {
+            for (name, field) in &mut self.fields {
+                if field.required && key.key_overlaps(name) {
+                    field.required = false;
                 }
             }
         }

@@ -166,8 +166,71 @@ impl Checker<'_> {
         Value::with_notes(result, value.notes.clone())
     }
 
-    pub(super) fn seq_type(&mut self, ty: &Type, name: &str, span: Span) -> Type {
+    pub(in crate::checker) fn seq_type(&mut self, ty: &Type, name: &str, span: Span) -> Type {
         self.read_sequence(ReadSequence::Start, ty, name, span)
+    }
+
+    pub(super) fn map_sequence_call(&mut self, name: &str, (value, span): &(Value, Span)) -> Value {
+        let start = self.diagnostics.len();
+        let result = self.read_map_component(&value.known, name, *span);
+        self.dedup_diagnostics(start);
+        Value::with_notes(result, value.notes.clone())
+    }
+
+    fn read_map_component(&mut self, ty: &Type, name: &str, span: Span) -> Type {
+        match ty {
+            Type::Nil | Type::Never => ty.clone(),
+            Type::Unknown => {
+                self.may_throw();
+                Type::Unknown
+            }
+            Type::Union(parts) => Type::union(
+                parts
+                    .iter()
+                    .map(|part| self.read_map_component(part, name, span)),
+            ),
+            Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
+                self.read_map_component(upper, name, span)
+            }
+            Type::Map(map) => {
+                let keys = name == "clojure.core/keys";
+                let additional = match &map.extra {
+                    ExtraFields::Closed => None,
+                    ExtraFields::Typed(pair) => Some(&pair[usize::from(!keys)]),
+                    ExtraFields::Open => {
+                        return self
+                            .unsupported(
+                                span,
+                                format!("{name} cannot infer element types for an open map"),
+                            )
+                            .known;
+                    }
+                };
+                let fields = map.fields.iter().filter_map(|(key, field)| {
+                    (field.ty != Type::Never).then_some(if keys { key } else { &field.ty })
+                });
+                let item = Type::union(fields.chain(additional).cloned());
+                map_items(ReadSequence::Start, map, item)
+            }
+            _ if collection_emptiness(ty).is_some() => {
+                // JVM keys and vals can also traverse sequences of map entries.
+                self.unsupported(
+                    span,
+                    format!("{name} analysis currently supports Map or Nil"),
+                )
+                .known
+            }
+            actual => {
+                self.illegal_argument();
+                self.diagnostics.push(Diagnostic::type_mismatch(
+                    span,
+                    name,
+                    "Map or Nil".into(),
+                    actual.inferred().to_string(),
+                ));
+                Type::Never
+            }
+        }
     }
 
     fn read_sequence(&mut self, op: ReadSequence, ty: &Type, name: &str, span: Span) -> Type {
@@ -229,26 +292,31 @@ impl Checker<'_> {
                 )
                 .known;
         };
-        let minimum = map
+        map_items(op, map, entry)
+    }
+}
+
+fn map_items(op: ReadSequence, map: &MapType, item: Type) -> Type {
+    let minimum = map
+        .fields
+        .values()
+        .filter(|field| field.required && field.ty != Type::Never)
+        .count();
+    if matches!(map.extra, ExtraFields::Closed) {
+        let possible = map
             .fields
             .values()
-            .filter(|field| field.required && field.ty != Type::Never)
+            .filter(|field| field.ty != Type::Never)
             .count();
-        if matches!(map.extra, ExtraFields::Closed) {
-            let possible = map
-                .fields
-                .values()
-                .filter(|field| field.ty != Type::Never)
-                .count();
-            if possible == minimum && possible <= MAX_TUPLE_ITEMS {
-                return op.fixed(&vec![entry; possible]);
-            }
-            if possible == 1 {
-                return Type::union([op.fixed(&[]), op.fixed(&[entry])]);
-            }
+        if possible == minimum && possible <= MAX_TUPLE_ITEMS {
+            // Count is known. Any position can hold any of the map's items.
+            return op.fixed(&vec![item; possible]);
         }
-        op.open(&entry, minimum)
+        if possible == 1 {
+            return Type::union([op.fixed(&[]), op.fixed(&[item])]);
+        }
     }
+    op.open(&item, minimum)
 }
 
 fn conj_seq(previous: &[Type], items: &[Type]) -> Type {
@@ -260,7 +328,7 @@ fn conj_seq(previous: &[Type], items: &[Type]) -> Type {
     }
 }
 
-pub(super) fn iteration_may_throw(ty: &Type) -> bool {
+pub(in crate::checker) fn iteration_may_throw(ty: &Type) -> bool {
     match ty {
         Type::Seq(_) | Type::Unknown => true,
         Type::Union(parts) => parts.iter().any(iteration_may_throw),

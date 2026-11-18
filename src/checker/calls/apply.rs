@@ -169,7 +169,10 @@ impl Checker<'_> {
                 })
             }
             Callable::Builtin(name)
-                if !matches!(name.as_str(), "clojure.core/conj" | "clojure.core/merge") =>
+                if !matches!(
+                    name.as_str(),
+                    "clojure.core/conj" | "clojure.core/merge" | "clojure.core/dissoc"
+                ) =>
             {
                 let arities = builtin_arities(name);
                 self.check_spread_arities(arities, minimum, spread.span);

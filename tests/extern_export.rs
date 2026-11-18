@@ -1,3 +1,6 @@
+#[path = "../examples/support/extern_expansion.rs"]
+mod expansion;
+
 use std::process::Command;
 
 use parenox::{ExternChangeKind, ExternSnapshot, Session, Source, compare_externs};
@@ -110,7 +113,7 @@ fn deeply_expanded_specs_cannot_produce_an_unreadable_export() {
     let mut specs = String::from(
         "(ns shapes (:require [clojure.spec.alpha :as s]))\n(s/def ::level0 string?)\n",
     );
-    for level in 1..=45 {
+    for level in 1..=42 {
         writeln!(
             specs,
             "(s/def ::level{level} (s/keys :req-un [::level{}]))",
@@ -125,7 +128,7 @@ fn deeply_expanded_specs_cannot_produce_an_unreadable_export() {
     let library = "\
 (ns lib (:require [shapes :as shapes]))
 (def status :ready)
-(defn too-deep {:t/sig '[::shapes/level45 :-> nil?]} [_] nil)";
+(defn too-deep {:t/sig '[::shapes/level42 :-> nil?]} [_] nil)";
     let candidate = Source {
         path: "lib.clj",
         source: library,
@@ -142,10 +145,14 @@ fn deeply_expanded_specs_cannot_produce_an_unreadable_export() {
     assert_eq!(error.span.start.line, 3);
     assert!(error.id.is_some());
     assert!(error.message.contains("Cannot export lib/too-deep"));
-    assert!(error.message.contains("Reader nesting limit"));
+    assert!(
+        error
+            .message
+            .contains("expanded signature exceeds the reader nesting limit")
+    );
     assert!(failed.report.files[1].ok);
 
-    let fixed = library.replace("level45", "level30");
+    let fixed = library.replace("level42", "level41");
     let repaired = session.export_externs(
         &[
             Source {
@@ -168,6 +175,76 @@ fn deeply_expanded_specs_cannot_produce_an_unreadable_export() {
         }],
     );
     assert!(reloaded.ok && reloaded.complete, "{reloaded:#?}");
+}
+
+#[test]
+fn shared_specs_hit_the_snapshot_budget_during_export() {
+    let library = expansion::library(expansion::Shape::Shared, 14);
+    let candidate = Source {
+        path: "expansion.clj",
+        source: &library,
+    };
+    let mut session = Session::default();
+    let checked = session.check_project_with_externs(&[candidate], &[]);
+    assert!(checked.ok && checked.complete, "{checked:#?}");
+
+    let failed = session.export_externs(&[candidate], &[]);
+    assert!(failed.edn.is_none() && !failed.report.ok && !failed.report.complete);
+    let [error] = failed.report.files[0].diagnostics.as_slice() else {
+        panic!("{failed:#?}");
+    };
+    assert_eq!(error.code, "PNX9012");
+    assert_eq!(error.span.start.line, library.lines().count());
+    assert!(error.message.contains("Cannot export expansion/submit"));
+    assert!(error.message.contains("snapshot size limit"));
+
+    let smaller = expansion::library(expansion::Shape::Shared, 13);
+    let candidate = Source {
+        source: &smaller,
+        ..candidate
+    };
+    let edn = export(&[candidate]);
+    assert!(edn.starts_with("{expansion/status {:value :ready}\n expansion/submit ["));
+    assert!(!edn.contains("::level"));
+    let report = Session::default().validate_externs(
+        &[candidate],
+        &[Source {
+            path: "expansion.edn",
+            source: &edn,
+        }],
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn cli_size_limit_applies_to_the_whole_snapshot_without_partial_stdout() {
+    use std::fs;
+
+    let mut library = expansion::library(expansion::Shape::Shared, 13);
+    library.push_str("(defn z-submit {:t/sig '[::level13 :-> nil?]} [_] nil)\n");
+    let path = std::env::temp_dir().join(format!("parenox-export-{}.clj", std::process::id()));
+    fs::write(&path, &library).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .args(["export-externs", "--json"])
+        .arg(&path)
+        .output();
+    fs::remove_file(path).unwrap();
+    let output = output.unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    let [error] = report["files"][0]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .as_slice()
+    else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error["code"], "PNX9012");
+    assert_eq!(error["span"]["start"]["line"], library.lines().count());
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("Cannot export expansion/z-submit"));
+    assert!(message.contains("snapshot size limit"));
 }
 
 #[test]

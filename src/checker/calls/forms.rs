@@ -22,8 +22,11 @@ pub(super) enum CoreForm {
     Fn,
     Fnil,
     Update,
+    MapTransform,
+    GroupBy,
     Apply,
     Reduce,
+    ReduceKv,
     VectorTransform,
 }
 
@@ -51,8 +54,11 @@ impl CoreForm {
             "fn" => Self::Fn,
             "fnil" => Self::Fnil,
             "update" | "update-in" => Self::Update,
+            "update-keys" | "update-vals" => Self::MapTransform,
+            "group-by" => Self::GroupBy,
             "apply" => Self::Apply,
             "reduce" => Self::Reduce,
+            "reduce-kv" => Self::ReduceKv,
             "mapv" | "filterv" => Self::VectorTransform,
             _ => return Threading::from_core_symbol(name).map(Self::Thread),
         })
@@ -92,8 +98,11 @@ impl Checker<'_> {
                 ),
             ),
             CoreForm::Update => self.update(xs, span, env, name),
+            CoreForm::MapTransform => self.map_transform(&xs[1..], span, env, name),
+            CoreForm::GroupBy => self.group_by(&xs[1..], span, env),
             CoreForm::Apply => self.apply_form(&xs[1..], span, env),
             CoreForm::Reduce => self.reduce_form(&xs[1..], span, env),
+            CoreForm::ReduceKv => self.reduce_kv_form(&xs[1..], span, env),
             CoreForm::VectorTransform => self.vector_transform(xs, span, env, name),
         }
     }

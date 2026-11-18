@@ -30,6 +30,10 @@ agent-loop iterations="100" binary="target/release/parenox" extra_externs="0" sh
 bench iterations="100" functions="1000": build
     cargo run --locked --release --example agent_loop -- --iterations {{quote(iterations)}} --functions {{quote(functions)}}
 
+# Measure checked source and verified EDN for a chain or a shared spec graph.
+bench-export shape="shared" levels="15" iterations="10":
+    cargo run --locked --release --example extern_expansion -- {{quote(shape)}} {{quote(levels)}} {{quote(iterations)}}
+
 # Run the Rust tests.
 test:
     cargo test --locked
@@ -188,6 +192,26 @@ map-keys format="pretty" color="auto": build
     @./target/release/parenox check examples/map_keys.clj --format {{quote(format)}} --color {{quote(color)}}
     @./target/release/parenox check examples/map_keys_bad.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
 
+# Check public responses projected or redacted from an open record.
+map-projection format="pretty": build
+    @./target/release/parenox check examples/map_projection.clj --format {{quote(format)}}
+
+# Check dictionary keys, values and possible empty results.
+map-sequences format="pretty": build
+    @./target/release/parenox check examples/map_sequences.clj --format {{quote(format)}}
+
+# Check eager map value transforms and their result shapes.
+update-vals format="pretty": build
+    @./target/release/parenox check examples/update_vals.clj --format {{quote(format)}}
+
+# Build and rename maps while checking key and value types.
+map-builders format="pretty": build
+    @./target/release/parenox check examples/map_builders.clj --format {{quote(format)}}
+
+# Check typed groups and their ordered elements.
+group-by format="pretty": build
+    @./target/release/parenox check examples/group_by.clj --format {{quote(format)}}
+
 # Check nested operations using computed keys and show two deliberate errors.
 dynamic-paths format="pretty" color="auto": build
     @./target/release/parenox check examples/dynamic_paths.clj --format {{quote(format)}} --color {{quote(color)}}
@@ -296,6 +320,10 @@ callables format="pretty": build
 reductions format="pretty": build
     @./target/release/parenox check examples/reductions.clj --format {{quote(format)}}
     @./target/release/parenox check examples/reductions_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check key-value reductions over maps and vectors.
+reduce-kv format="pretty": build
+    @./target/release/parenox check examples/reduce_kv.clj --format {{quote(format)}}
 
 # Check explicit namespace aliases in auto-resolved keywords.
 keyword-aliases format="pretty": build

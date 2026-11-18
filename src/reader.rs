@@ -4,6 +4,8 @@ use serde::Serialize;
 
 use crate::syntax::{Builder, SyntaxKind, SyntaxNode};
 
+pub(crate) const MAX_NESTING_DEPTH: usize = 128;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Position {
     pub offset: usize,
@@ -334,6 +336,13 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn nesting_error(&self, start: Position) -> ReadError {
+        self.error(
+            start,
+            format!("Reader nesting limit ({MAX_NESTING_DEPTH}) exceeded"),
+        )
+    }
+
     // Discards remain syntax in a CST and disappear from semantic forms.
     fn skip(&mut self) -> Result<(), ReadError> {
         let first_comment = self
@@ -380,8 +389,8 @@ impl<'a> Reader<'a> {
                     self.bump();
                     self.token(SyntaxKind::DiscardMark, start);
                     let result = self.without_comments(|reader| {
-                        if reader.depth >= 128 {
-                            return Err(reader.error(start, "Reader nesting limit (128) exceeded"));
+                        if reader.depth >= MAX_NESTING_DEPTH {
+                            return Err(reader.nesting_error(start));
                         }
                         reader.depth += 1;
                         let skipped = reader.skip();
@@ -437,8 +446,8 @@ impl<'a> Reader<'a> {
     }
 
     fn item(&mut self) -> Result<Item, ReadError> {
-        if self.depth >= 128 {
-            return Err(self.error(self.pos, "Reader nesting limit (128) exceeded"));
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(self.nesting_error(self.pos));
         }
         self.depth += 1;
         let result = self.skip().and_then(|()| {

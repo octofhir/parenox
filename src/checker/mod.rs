@@ -15,7 +15,8 @@ use env::Env;
 use exceptions::Throws;
 use model::{Contract, DeclaredValue, Function, VerifiedGuard};
 pub(crate) use model::{
-    Declarations, ExternCache, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
+    Declarations, EncodeError, ExternCache, Globals, InterfaceKey, Model, SnapshotWriter,
+    SpecCache, SpecFingerprint, SpecSource,
 };
 use recur::RecurTarget;
 
@@ -153,6 +154,7 @@ struct Checker<'a> {
     recur_target: Option<RecurTarget>,
     recur_checks: usize,
     reduction_steps: usize,
+    map_callback_checks: usize,
     callback_depth: usize,
     macro_scope_depth: usize,
     throws: Option<Throws>,
@@ -171,6 +173,7 @@ impl<'a> Checker<'a> {
             recur_target: None,
             recur_checks: 0,
             reduction_steps: 0,
+            map_callback_checks: 0,
             callback_depth: 0,
             macro_scope_depth: 0,
             throws: None,
