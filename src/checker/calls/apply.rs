@@ -126,7 +126,7 @@ impl Checker<'_> {
                     self.may_throw();
                     Value::new(Type::Unknown)
                 }
-                Type::Set(_) => {
+                Type::Set(_) | Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => {
                     self.check_spread_arities(&[Arity::Fixed(1)], minimum, spread.span);
                     self.may_throw();
                     Value::new(Type::Unknown)

@@ -20,3 +20,6 @@
 
 (defn safe-label {:t/sig '[:-> string?]} []
   (:label 42 "Fallback"))
+
+(defn choose-stage {:t/sig '[:-> string?]} []
+  (["draft" "ready"] 1))

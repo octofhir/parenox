@@ -288,6 +288,9 @@ impl<'model> Checker<'model> {
                 let alternative = Value::with_notes(part.clone(), function.notes.clone());
                 result.join(self.call_value(&alternative, args, head, span))
             }),
+            Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => {
+                self.vector_call(function, head, args, span)
+            }
             Type::Set(_) => {
                 if args.len() != 1 {
                     self.error(

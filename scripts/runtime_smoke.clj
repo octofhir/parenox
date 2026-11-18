@@ -781,3 +781,13 @@
              (try (run)
                   (catch clojure.lang.ArityException _ :arity)))))
 (println "Clojure/JVM callable lookups: 9 assertions passed")
+
+(assert (= "ready" (demo.callables/choose-stage)))
+(assert (= "chosen" ([1 "chosen"] 4294967297)))
+(assert (= "chosen" ([1 "chosen"] 01)))
+(assert (= ["value"] (mapv (fn [entry] (entry 1)) {:a "value"})))
+(assert (= :bounds (try (demo.callables-bad/outside-vector)
+                         (catch IndexOutOfBoundsException _ :bounds))))
+(assert (= :not-integer (try ([1] 0.0)
+                              (catch IllegalArgumentException _ :not-integer))))
+(println "Clojure/JVM vector invocation: 6 assertions passed")
