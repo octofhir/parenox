@@ -1,4 +1,5 @@
 //! Inert EDN project settings for command-line checks.
+mod classpath;
 mod deps;
 
 use std::collections::BTreeSet;
@@ -45,13 +46,22 @@ impl ProjectOptions {
 
     pub(super) fn load_at(&self, root: &Path) -> Result<ProjectConfig, String> {
         let [config, manifest] = self.manifests(root);
+        if self.classpath.is_some()
+            && (!self.paths.is_empty() || self.deps.is_some() || !self.aliases.is_empty())
+        {
+            return Err(
+                "Classpath input cannot be combined with source paths, deps or aliases".into(),
+            );
+        }
         let mut settings =
             if self.config.is_some() || (self.paths.is_empty() && file_exists(&config)?) {
                 ProjectConfig::read(&config)?
             } else {
                 ProjectConfig::default()
             };
-        if !self.paths.is_empty() {
+        if let Some(file) = &self.classpath {
+            settings.paths = classpath::directories(root, &root.join(file))?;
+        } else if !self.paths.is_empty() {
             settings.paths = self
                 .paths
                 .iter()

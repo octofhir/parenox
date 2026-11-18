@@ -162,6 +162,63 @@ fn deps_edn_aliases_compose_project_source_roots() {
 }
 
 #[test]
+fn resolved_classpath_enables_navigation_to_local_dependency_source() {
+    let dir = TestDir::new("classpath");
+    fs::create_dir(dir.0.join("src")).unwrap();
+    fs::create_dir(dir.0.join("library sources")).unwrap();
+    fs::write(dir.0.join("deps.edn"), "{:paths [\"src\"]}").unwrap();
+    let app = r#"(ns shop (:require [library.catalog :as lib]))
+      (defn title {:t/sig '[:-> string?]} [] (lib/item))"#;
+    let provider = "(ns library.catalog) (defn item {:t/sig '[:-> string?]} [] \"item\")";
+    fs::write(dir.0.join("src/shop.clj"), app).unwrap();
+    fs::write(dir.0.join("library sources/catalog.cljc"), provider).unwrap();
+    fs::write(dir.0.join("dependency.jar"), b"compiled dependency").unwrap();
+    let classpath = std::env::join_paths([
+        "src",
+        "library sources",
+        "dependency.jar",
+        "generated",
+        "./src",
+    ])
+    .unwrap();
+    fs::write(
+        dir.0.join("classpath.txt"),
+        format!("{}\r\n", classpath.to_str().unwrap()),
+    )
+    .unwrap();
+    let lookup = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_parenox"))
+            .current_dir(&dir.0)
+            .args(["definition", "--file", "src/shop.clj", "--offset"])
+            .arg(app.find("lib/item").unwrap().to_string())
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    assert_eq!(lookup(&[]).status.code(), Some(1));
+    let result = lookup(&["--classpath", "classpath.txt"]);
+    assert!(result.status.success(), "{result:?}");
+    let target: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(
+        PathBuf::from(target["path"].as_str().unwrap()),
+        PathBuf::from("library sources").join("catalog.cljc")
+    );
+    assert_eq!(
+        target["span"]["start"]["offset"],
+        provider.find("item").unwrap()
+    );
+    let report = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .current_dir(&dir.0)
+        .args(["check", "--classpath", "classpath.txt", "--json"])
+        .output()
+        .unwrap();
+    assert!(report.status.success(), "{report:?}");
+    let report: Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(report["files"].as_array().unwrap().len(), 2);
+    assert_eq!(report["complete"], true);
+}
+
+#[test]
 fn cyclic_deps_path_alias_is_reported() {
     let dir = TestDir::new("deps-cycle");
     fs::write(

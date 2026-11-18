@@ -119,6 +119,14 @@ fn opens_project_configuration_and_keeps_edits_in_memory() {
         retained["files"][1]["diagnostics"],
         changed["files"][1]["diagnostics"]
     );
+
+    let classpath = std::env::join_paths(["src", "test"]).unwrap();
+    fs::write(root.0.join("classpath.txt"), classpath.to_str().unwrap()).unwrap();
+    let reopened = client.result(json!({
+        "op":"open_project","root":root.0,"classpath":"classpath.txt"
+    }));
+    assert_eq!(reopened["ok"], true, "{reopened}");
+    assert_eq!(reopened["files"].as_array().unwrap().len(), 3);
 }
 
 #[test]

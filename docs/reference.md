@@ -294,6 +294,20 @@ Parenox reads project paths, including path aliases, `:extra-paths`, and path
 replacements, as EDN. Supply dependency sources as paths or configure their
 contracts as externs. [Clojure CLI project configuration](https://clojure.org/reference/deps_edn)
 
+To include source directories from the Clojure CLI's resolved classpath,
+generate a file from the project directory:
+
+```sh
+clojure -Spath -M:test > classpath.txt
+parenox check --classpath classpath.txt
+parenox lsp --classpath classpath.txt
+```
+
+The file selects source directories, including those of local dependencies.
+Relative classpath entries are resolved from the project root. This mode reads
+directories from disk and skips JARs and missing generated directories. Classpath
+selection replaces the `--deps`, `--alias` and positional source options.
+
 Named specs resolve against the supplied project declarations, including keys
 whose namespace differs from the file that declares them. Input file order does
 not affect resolution. An alias created with `:as-alias` can qualify keywords
@@ -539,6 +553,9 @@ The response includes the initial report. Use its paths for later edits and
 definition requests. Updates change the tracked snapshot in memory. A new
 `open_project` reads a fresh disk snapshot, and a failed open keeps the
 previous session available.
+
+Use `"classpath":"classpath.txt"` in place of `"aliases"` to open an externally
+resolved classpath in an agent session.
 
 Open a supplied snapshot with `open` and send the changed files as
 full source strings in each update. This example checks one file, edits it, and

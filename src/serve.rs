@@ -54,6 +54,7 @@ struct OpenProjectRequest {
     root: String,
     #[serde(default)]
     aliases: Vec<String>,
+    classpath: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,7 +123,11 @@ impl TrackedProject {
         Ok(project)
     }
 
-    fn open_project(root: &str, aliases: Vec<String>) -> Result<Self, String> {
+    fn open_project(
+        root: &str,
+        aliases: Vec<String>,
+        classpath: Option<String>,
+    ) -> Result<Self, String> {
         let path = Path::new(root)
             .canonicalize()
             .map_err(|error| format!("{root}: {error}"))?;
@@ -131,6 +136,7 @@ impl TrackedProject {
         }
         let options = ProjectOptions {
             aliases,
+            classpath,
             ..ProjectOptions::default()
         };
         let project = DiskProject::read(options.load_at(&path)?)?;
@@ -275,7 +281,7 @@ fn write_tracked(
             }
         }
         ProjectOperation::OpenProject(request) => {
-            match TrackedProject::open_project(&request.root, request.aliases) {
+            match TrackedProject::open_project(&request.root, request.aliases, request.classpath) {
                 Ok(project) => write_check(output, request.id, tracked.insert(project).check()),
                 Err(message) => write_error(output, request.id, message),
             }

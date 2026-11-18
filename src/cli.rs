@@ -88,6 +88,9 @@ pub(crate) struct ProjectOptions {
     /// Select a local deps.edn alias. Repeat to combine aliases in order.
     #[arg(long = "alias", value_name = "NAME", conflicts_with = "paths")]
     pub(crate) aliases: Vec<String>,
+    /// Use the source directories in a file produced by clojure -Spath.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["paths", "deps", "aliases"])]
+    pub(crate) classpath: Option<String>,
 }
 
 #[derive(Args)]

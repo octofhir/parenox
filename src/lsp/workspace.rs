@@ -198,6 +198,11 @@ impl Workspace {
             .manifests(&self.root)
             .iter()
             .any(|manifest| normalize(manifest) == file);
+        let classpath = self
+            .options
+            .classpath
+            .as_ref()
+            .is_some_and(|path| normalize(&self.root.join(path)) == file);
         let externs = self
             .externs
             .iter()
@@ -207,7 +212,7 @@ impl Workspace {
                 .documents
                 .get(file.to_string_lossy().as_ref())
                 .is_some_and(|doc| !doc.indexed && doc.editor.is_some());
-        if config || externs || new_source {
+        if config || classpath || externs || new_source {
             match self.reload() {
                 Ok(()) => self.check(output),
                 Err(message) => log_load_error(output, &message),
