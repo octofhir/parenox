@@ -38,24 +38,24 @@ struct FileCache {
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
     interface: Option<InterfaceKey>,
+    checked_source: Arc<str>,
     functions: BTreeMap<String, CheckedFunction>,
 }
 
 struct CheckedFunction {
-    source: Arc<str>,
     ranges: Vec<Span>,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl CheckedFunction {
-    fn reusable(&self, source: &str, ranges: &[Span]) -> bool {
+    fn reusable(&self, previous_source: &str, source: &str, ranges: &[Span]) -> bool {
         // Diagnostics and call-chain notes contain absolute source positions.
         if !self.diagnostics.is_empty() && self.ranges != ranges {
             return false;
         }
         self.ranges.len() == ranges.len()
             && self.ranges.iter().zip(ranges).all(|(old, new)| {
-                self.source[old.start.offset..old.end.offset]
+                previous_source[old.start.offset..old.end.offset]
                     == source[new.start.offset..new.end.offset]
             })
     }
@@ -331,32 +331,45 @@ impl Session {
                             .flat_map(|function| function.diagnostics.iter().cloned()),
                     );
                 } else {
-                    let previous = std::mem::take(&mut cache.functions);
                     for function in model.functions.values().filter(|f| !f.inferred) {
                         let ranges = model.function_ranges(function);
-                        let diagnostics = if let Some(cached) =
-                            previous.get(&function.name).filter(|cached| {
-                                cached.reusable(source.source, &ranges)
+                        if let Some(cached) =
+                            cache.functions.get_mut(&function.name).filter(|cached| {
+                                cached.reusable(&cache.checked_source, source.source, &ranges)
                                     && changes.as_ref().is_some_and(|changes| {
                                         changes.allows_reuse(model, function)
                                     })
-                            }) {
+                            })
+                        {
                             report.stats.reused_functions += 1;
-                            cached.diagnostics.clone()
+                            report
+                                .diagnostics
+                                .extend(cached.diagnostics.iter().cloned());
+                            cached.ranges = ranges;
                         } else {
                             report.stats.checked_functions += 1;
-                            model.check_function(function, source.source, &globals)
-                        };
-                        report.diagnostics.extend(diagnostics.iter().cloned());
-                        cache.functions.insert(
-                            function.name.clone(),
-                            CheckedFunction {
-                                source: cache.source.clone(),
-                                ranges,
-                                diagnostics,
-                            },
-                        );
+                            let diagnostics =
+                                model.check_function(function, source.source, &globals);
+                            report.diagnostics.extend(diagnostics.iter().cloned());
+                            cache.functions.insert(
+                                function.name.clone(),
+                                CheckedFunction {
+                                    ranges,
+                                    diagnostics,
+                                },
+                            );
+                        }
                     }
+                    let active = report.stats.checked_functions + report.stats.reused_functions;
+                    if cache.functions.len() != active {
+                        cache.functions.retain(|name, _| {
+                            model
+                                .functions
+                                .get(name)
+                                .is_some_and(|function| !function.inferred)
+                        });
+                    }
+                    cache.checked_source = cache.source.clone();
                 }
                 cache.interface = Some(interface);
             }

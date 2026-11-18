@@ -220,3 +220,49 @@ fn tracked_projects_isolate_cache_entries_and_release_removed_snapshots() {
     assert_eq!(reopened["stats"]["parsed_files"], 1, "{reopened}");
     assert_eq!(reopened["stats"]["checked_functions"], 1, "{reopened}");
 }
+
+#[test]
+fn repeated_file_edits_rebase_reused_checks_and_drop_deleted_results() {
+    let mut client = Client::start();
+    let original = "(ns shifted)\n(defn unchanged {:t/sig '[:-> number?]} [] 7)\n(defn removed {:t/sig '[:-> number?]} [] \"invalid\")";
+    let update = |client: &mut Client, id, source| {
+        client.result(json!({
+            "id": id,
+            "op": "update",
+            "changes": [{"path": "shifted.clj", "source": source}]
+        }))
+    };
+    let opened = client.result(json!({
+        "id": 1,
+        "op": "open",
+        "files": [{"path": "shifted.clj", "source": original}]
+    }));
+    assert_eq!(opened["stats"]["checked_functions"], 2);
+    assert_eq!(
+        opened["files"][0]["diagnostics"][0]["span"]["start"]["line"],
+        3
+    );
+
+    let shifted = update(&mut client, 2, format!("; first edit\n{original}"));
+    assert_eq!(shifted["stats"]["reused_functions"], 1);
+    assert_eq!(
+        shifted["files"][0]["diagnostics"][0]["span"]["start"]["line"],
+        4
+    );
+
+    let broken = update(&mut client, 3, format!("{original}\n("));
+    assert_eq!(broken["stats"]["checked_functions"], 0);
+    assert_eq!(broken["files"][0]["diagnostics"][0]["code"], "PNX9000");
+
+    let without_error = original.lines().take(2).collect::<Vec<_>>().join("\n");
+    let replacement = format!(
+        "; restored in a second location\n\n{without_error}\n(defn new {{:t/sig '[:-> number?]}} [] 9)"
+    );
+    let restored = update(&mut client, 4, replacement);
+    assert_eq!(restored["ok"], true, "{restored}");
+    assert_eq!(restored["stats"]["checked_functions"], 1);
+    assert_eq!(restored["stats"]["reused_functions"], 1);
+    let warm = client.result(json!({"id": 5, "op": "update"}));
+    assert_eq!(warm["ok"], true, "{warm}");
+    assert_eq!(warm["stats"]["reused_functions"], 2);
+}
