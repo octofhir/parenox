@@ -137,6 +137,11 @@ pub struct Session {
 }
 
 impl Session {
+    /// Discard cached data for a path. The next check uses the supplied source.
+    pub fn forget_file(&mut self, path: &str) {
+        self.files.remove(path);
+    }
+
     pub fn check(&mut self, path: &str, source: &str) -> Report {
         let mut project = self.check_project(&[Source { path, source }], None);
         let mut report = project.files.remove(0);

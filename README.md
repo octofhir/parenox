@@ -311,8 +311,10 @@ requests work independently of the tracked project.
 - Removed files and externs disappear from the current environment immediately.
 - Unchanged functions with successful checks can be reused after their source ranges move.
   Functions with diagnostics are rechecked if their own ranges or a helper's ranges move.
-- There is no disk cache, filesystem watcher, socket daemon or cache eviction yet.
-  Retained file snapshots live until the process exits.
+- Tracked projects discard cached files when they are removed or the project is
+  reopened. One-off snapshot requests have their own cache.
+- The one-off cache lasts for the process lifetime. The protocol uses in-memory
+  snapshots; it has no filesystem watcher or disk cache.
 
 `source_hash` is a session fingerprint, not a cryptographic digest. Cache validity
 uses exact source, positions and interface comparisons.

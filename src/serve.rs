@@ -85,6 +85,7 @@ enum Request {
 struct TrackedProject {
     files: BTreeMap<String, String>,
     externs: Option<Snapshot>,
+    session: Session,
 }
 
 impl TrackedProject {
@@ -125,23 +126,31 @@ impl TrackedProject {
         }
 
         for path in &remove {
-            self.files.remove(path);
+            if self.files.remove(path).is_some() {
+                self.session.forget_file(path);
+            }
         }
         self.files
             .extend(changes.into_iter().map(|file| (file.path, file.source)));
         if let ExternsChange::Replace(file) = externs {
+            if let Some(previous) = &self.externs
+                && file.as_ref().is_none_or(|next| next.path != previous.path)
+            {
+                self.session.forget_file(&previous.path);
+            }
             self.externs = file;
         }
         Ok(())
     }
 
-    fn check(&self, session: &mut Session) -> ProjectReport {
+    fn check(&mut self) -> ProjectReport {
         let sources: Vec<_> = self
             .files
             .iter()
             .map(|(path, source)| Source { path, source })
             .collect();
-        session.check_project(&sources, self.externs.as_ref().map(Snapshot::as_source))
+        self.session
+            .check_project(&sources, self.externs.as_ref().map(Snapshot::as_source))
     }
 }
 
@@ -187,18 +196,18 @@ fn write_error(output: &mut impl Write, id: Value, message: String) -> serde_jso
 fn update_project(
     tracked: &mut Option<TrackedProject>,
     op: ProjectOperation,
-) -> (Value, Result<&TrackedProject, String>) {
+) -> (Value, Result<&mut TrackedProject, String>) {
     match op {
         ProjectOperation::Open(request) => {
             let result = TrackedProject::open(request.files, request.externs)
-                .map(|project| &*tracked.insert(project));
+                .map(|project| tracked.insert(project));
             (request.id, result)
         }
         ProjectOperation::Update(request) => {
             let result = match tracked {
                 Some(project) => project
                     .update(request.changes, request.remove, request.externs)
-                    .map(|()| &*project),
+                    .map(|()| project),
                 None => Err("Open a project before sending updates".into()),
             };
             (request.id, result)
@@ -207,7 +216,7 @@ fn update_project(
 }
 
 pub(super) fn run() -> Result<u8, String> {
-    let mut session = Session::default();
+    let mut snapshot_session = Session::default();
     let mut tracked = None;
     let mut input = io::stdin().lock();
     let stdout = io::stdout();
@@ -218,18 +227,18 @@ pub(super) fn run() -> Result<u8, String> {
             Ok(Request::File(request)) => write_check(
                 &mut output,
                 request.id,
-                session.check(&request.path, &request.source),
+                snapshot_session.check(&request.path, &request.source),
             ),
             Ok(Request::Project(request)) => {
                 let sources: Vec<_> = request.files.iter().map(Snapshot::as_source).collect();
-                let report = session
+                let report = snapshot_session
                     .check_project(&sources, request.externs.as_ref().map(Snapshot::as_source));
                 write_check(&mut output, request.id, report)
             }
             Ok(Request::Tracked(op)) => {
                 let (id, project) = update_project(&mut tracked, op);
                 match project {
-                    Ok(project) => write_check(&mut output, id, project.check(&mut session)),
+                    Ok(project) => write_check(&mut output, id, project.check()),
                     Err(message) => write_error(&mut output, id, message),
                 }
             }

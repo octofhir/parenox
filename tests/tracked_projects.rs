@@ -189,3 +189,34 @@ fn replacing_an_extern_in_the_sources_own_namespace_invalidates_warm_checks() {
     }));
     assert_eq!(restored["ok"], true, "{restored}");
 }
+
+#[test]
+fn tracked_projects_isolate_cache_entries_and_release_removed_snapshots() {
+    let mut client = Client::start();
+    let file = json!({"path": "store.clj", "source": PROVIDER});
+    let externs = |path| json!({"path": path, "source": EXTERNS});
+    let opened = client.result(json!({
+        "op": "open", "files": [file], "externs": externs("first.edn")
+    }));
+    assert_eq!(opened["stats"]["parsed_files"], 2);
+
+    let one_off = client.result(json!({"path": "store.clj", "source": "(ns temporary)"}));
+    assert_eq!(one_off["ok"], true);
+    let unchanged = client.result(json!({"op": "update"}));
+    assert_eq!(unchanged["stats"]["parsed_files"], 0, "{unchanged}");
+    assert_eq!(unchanged["stats"]["reused_functions"], 1, "{unchanged}");
+
+    let removed = client.result(json!({
+        "op": "update", "remove": ["store.clj"], "externs": externs("next.edn")
+    }));
+    assert_eq!(removed["ok"], true);
+    let restored = client.result(json!({
+        "op": "update", "changes": [file], "externs": externs("first.edn")
+    }));
+    assert_eq!(restored["stats"]["parsed_files"], 2, "{restored}");
+    assert_eq!(restored["stats"]["checked_functions"], 1, "{restored}");
+
+    let reopened = client.result(json!({"op": "open", "files": [file]}));
+    assert_eq!(reopened["stats"]["parsed_files"], 1, "{reopened}");
+    assert_eq!(reopened["stats"]["checked_functions"], 1, "{reopened}");
+}
