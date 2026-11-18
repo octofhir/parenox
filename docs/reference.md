@@ -472,6 +472,11 @@ of strings. Its length is unknown to the checker, so destructuring a
 second field preserves the possibility of nil. Java regex validation is
 performed by the JVM. [Regex split example](../examples/regex_split.cljc)
 
+`clojure.string/replace` checks character pairs, string pairs and a regex
+with a string replacement. Regex callback type checking remains incomplete.
+A false result from `clojure.string/blank?` excludes nil from the tested
+value, including a stable lookup of an optional map field.
+
 Design references include [clojure-reader](https://github.com/Grinkers/clojure-reader)
 for data reading, [Crabjure](https://github.com/ribelo/crabjure) for static analysis,
 and [clojurust](https://github.com/csm/clojurust) for future reader/expansion/runtime

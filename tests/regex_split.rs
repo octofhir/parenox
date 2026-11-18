@@ -55,3 +55,50 @@ fn pattern_contract_survives_export_and_checks_consumers() {
     );
     assert!(report.ok && report.complete, "{report:#?}");
 }
+
+#[test]
+fn blank_string_guards_narrow_optional_map_fields_before_replacement() {
+    let mut session = Session::default();
+    assert!(session.check("regex_split.cljc", SOURCE).ok);
+    let edited = SOURCE.replace("(str/blank? (:value request))", "false");
+    let report = session.check("regex_split.cljc", &edited);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.expected.as_deref(), Some("String"));
+    assert_eq!(error.actual.as_deref(), Some("Nil | String"));
+    assert_eq!(
+        &edited[error.span.start.offset..error.span.end.offset],
+        "(:value request)"
+    );
+    assert_eq!(
+        error.contract.as_ref().unwrap().name,
+        "clojure.string/replace"
+    );
+}
+
+#[test]
+fn replacement_dispatch_checks_character_and_string_pairs_and_marks_callback_gaps() {
+    let source = r##"(ns replacements (:require [clojure.string :as str]))
+        (defn chars {:t/sig '[:-> string?]} [] (str/replace "a-b" \- \+))
+        (defn text {:t/sig '[:-> string?]} [] (str/replace "a-b" "-" "+"))
+        (defn redact {:t/sig '[string? :-> string?]} [_] "x")
+        (defn callback {:t/sig '[string? :-> string?]} [x] (str/replace x #"[0-9]" redact))"##;
+    let mut session = Session::default();
+    let report = session.check("replace.clj", source);
+    let [gap] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(gap.severity, "warning");
+    assert!(gap.message.contains("callback"));
+
+    let edited = source.replace(r#"\- \+"#, r#"\- "+""#);
+    let report = session.check("replace.clj", &edited);
+    assert!(
+        report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "PNX2322" && diagnostic.expected.as_deref() == Some("Character")
+        }),
+        "{report:#?}"
+    );
+}

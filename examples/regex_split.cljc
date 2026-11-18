@@ -12,3 +12,10 @@
   [text]
   (let [[_ value] (str/split text (re-pattern #"=") 2)]
     value))
+
+(defn normalized-value
+  {:t/sig '[(t/map {:opt {:value (s/nilable string?)}}) :-> string?]}
+  [request]
+  (if (str/blank? (:value request))
+    ""
+    (str/replace (:value request) #"\+" " ")))

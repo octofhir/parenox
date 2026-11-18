@@ -23,7 +23,7 @@ impl Checker<'_> {
                     return (selector.keys.len() <= MAX_SELECTOR_KEYS).then_some(selector);
                 }
                 let [target, key] = args else { return None };
-                let op = self.unshadowed_core(head, env)?;
+                let op = self.unshadowed_operation(head, env)?;
                 if !matches!(op.as_str(), "clojure.core/get" | "clojure.core/get-in") {
                     return None;
                 }

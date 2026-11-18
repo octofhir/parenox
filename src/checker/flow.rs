@@ -597,7 +597,7 @@ impl Checker<'_> {
         Value::with_notes(Type::union(types), notes)
     }
 
-    fn unshadowed_core(&self, head: &Form, env: &Env) -> Option<String> {
+    fn unshadowed_operation(&self, head: &Form, env: &Env) -> Option<String> {
         let op = head.symbol()?;
         // Locals and project functions may shadow core predicates.
         if env.contains_key(op)
@@ -607,7 +607,7 @@ impl Checker<'_> {
             return None;
         }
         let op = self.model.resolve(op);
-        op.starts_with("clojure.core/").then_some(op)
+        (op.starts_with("clojure.core/") || op == "clojure.string/blank?").then_some(op)
     }
 
     fn narrow(&self, test: &Form, truth: bool, env: &mut Env) {
@@ -625,7 +625,7 @@ impl Checker<'_> {
         let Some((head, args)) = xs.split_first() else {
             return;
         };
-        let Some(op) = self.unshadowed_core(head, env) else {
+        let Some(op) = self.unshadowed_operation(head, env) else {
             if head.keyword().is_some() {
                 self.narrow_subject(test, env, truthy);
             } else if let Some(name) = head.symbol() {
@@ -690,6 +690,9 @@ impl Checker<'_> {
                         nil_part(ty)
                     }
                 });
+            }
+            ("clojure.string/blank?", [operand]) if !truth => {
+                self.narrow_subject(operand, env, Type::without_nil);
             }
             (_, [operand]) => {
                 if let Some(wanted) = predicate_type(&op) {

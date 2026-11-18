@@ -7,6 +7,7 @@ mod inline;
 mod macro_scopes;
 mod reduction;
 mod sequences;
+mod strings;
 mod vectors;
 
 pub(super) use sequences::{iteration_may_throw, narrow_emptiness};
@@ -570,6 +571,8 @@ impl<'model> Checker<'model> {
                 self.expect(&args[0].0, &Type::String, args[0].1, name);
                 Type::String
             }
+            "clojure.string/blank?" => self.blank_string(&args[0]),
+            "clojure.string/replace" => self.replace_string(args, span),
             "clojure.core/re-pattern" => {
                 self.expect(
                     &args[0].0,
@@ -693,6 +696,7 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         "clojure.core/nth" | "clojure.core/ex-info" | "clojure.string/split" => {
             &[Arity::Fixed(2), Arity::Fixed(3)]
         }
+        "clojure.string/replace" => &[Arity::Fixed(3)],
         "clojure.core/cons"
         | "clojure.core/find"
         | "clojure.core/select-keys"
@@ -829,6 +833,8 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.string/upper-case"
             | "clojure.string/lower-case"
             | "clojure.string/trim"
+            | "clojure.string/blank?"
+            | "clojure.string/replace"
             | "clojure.string/split"
     ) || predicate_type(name).is_some()
 }
