@@ -119,6 +119,7 @@ impl<'model> Checker<'model> {
             Some("loop*") => return self.loop_form(xs, span, env, true),
             Some("if") => return self.if_form(xs, span, env, Conditional::If, tail),
             Some("do") => return self.body(&xs[1..], env, tail),
+            Some("quote") => return self.quote_form(&xs[1..], span),
             Some("throw") => return self.throw_form(&xs[1..], span, env),
             Some("try") => return self.try_form(&xs[1..], env, tail),
             _ => {}
@@ -537,6 +538,7 @@ pub(super) fn predicate_type(name: &str) -> Option<Type> {
         "clojure.core/number?" => Some(Type::Number),
         "clojure.core/boolean?" => Some(Type::Boolean),
         "clojure.core/keyword?" => Some(Type::Keyword),
+        "clojure.core/symbol?" => Some(Type::Symbol),
         _ => None,
     }
 }

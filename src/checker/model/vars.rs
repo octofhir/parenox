@@ -117,8 +117,14 @@ fn literal(form: &Form) -> bool {
         | Kind::Number
         | Kind::String(_)
         | Kind::Character(_)
-        | Kind::Keyword(_) => true,
+        | Kind::Keyword(_)
+        | Kind::Quote(_) => true,
         Kind::Vector(forms) | Kind::Map(forms) | Kind::Set(forms) => forms.iter().all(literal),
+        Kind::List(forms) => match forms.as_slice() {
+            [] => true,
+            [head, _] => head.symbol() == Some("quote"),
+            _ => false,
+        },
         _ => false,
     }
 }

@@ -178,6 +178,10 @@ types are available to importing namespaces, subject to `^:private`. Changes
 to exported values invalidate their consumers. Dynamic vars, unbound vars and
 computed initializers report an analysis gap.
 
+Quoted lists, vectors, sets and maps with literal keyword or string keys can
+also be used as data and exported as literal vars. Quoted symbols have type
+`Symbol`. Run `just quoted` for examples.
+
 ## Lossless syntax
 
 ```sh

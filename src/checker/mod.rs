@@ -8,6 +8,7 @@ mod flow;
 mod function_forms;
 mod maps;
 mod model;
+mod quote;
 mod recur;
 
 use env::Env;
@@ -21,7 +22,7 @@ use recur::RecurTarget;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, ExtraFields, Field, MAX_TUPLE_ITEMS, MapType, Type};
+use crate::types::{Arity, MAX_TUPLE_ITEMS, Type};
 use crate::{Diagnostic, Suggestion};
 
 impl Model {
@@ -312,11 +313,7 @@ impl Checker<'_> {
                 if types.last() == Some(&Type::Never) {
                     return Value::new(Type::Never);
                 }
-                Value::new(if xs.len() <= MAX_TUPLE_ITEMS {
-                    Type::Tuple(types.into_boxed_slice())
-                } else {
-                    Type::Vector(collection_element(types))
-                })
+                Value::new(vector_type(types))
             }
             Kind::Set(xs) => {
                 let types: Vec<_> = xs.iter().map(|x| self.infer(x, env).known).collect();
@@ -325,48 +322,23 @@ impl Checker<'_> {
                 }
                 Value::new(Type::Set(collection_element(types)))
             }
-            Kind::Map(xs) => {
-                let mut fields = BTreeMap::new();
-                let mut returns = true;
-                for pair in xs.as_chunks::<2>().0 {
-                    let value = self.infer(&pair[1], env);
-                    returns &= value.known != Type::Never;
-                    if let Some(key) = self.literal_map_key(&pair[0]) {
-                        if fields
-                            .insert(
-                                key.clone(),
-                                Field {
-                                    ty: value.known,
-                                    required: true,
-                                },
-                            )
-                            .is_some()
-                        {
-                            self.error("PNX2790", pair[0].span, format!("Duplicate map key {key}"));
-                        }
-                    } else {
-                        self.unsupported(pair[0].span, "Map literals currently require keyword or string keys");
-                    }
-                }
-                if !returns {
-                    return Value::new(Type::Never);
-                }
-                Value::new(Type::Map(MapType {
-                    fields,
-                    extra: ExtraFields::Closed,
-                }))
-            }
+            Kind::Map(xs) => self.map_literal(xs, |checker, form| checker.infer(form, env)),
             Kind::List(xs) if xs.is_empty() => Value::new(Type::empty_seq()),
             Kind::List(xs) => self.list(xs, form.span, env, tail),
             Kind::AnonymousFunction(_) => self.unsupported(
                 form.span,
                 "#() is currently supported in direct calls and inline callbacks",
             ),
-            Kind::Quote(inner) if matches!(&inner.without_metadata().kind, Kind::List(items) if items.is_empty()) => {
-                Value::new(Type::empty_seq())
-            }
-            Kind::Quote(_) => self.unsupported(form.span, "Quoted data is not supported yet"),
+            Kind::Quote(inner) => self.quoted_data(inner),
         }
+    }
+}
+
+fn vector_type(items: Vec<Type>) -> Type {
+    if items.len() <= MAX_TUPLE_ITEMS {
+        Type::Tuple(items.into_boxed_slice())
+    } else {
+        Type::Vector(collection_element(items))
     }
 }
 

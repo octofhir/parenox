@@ -46,6 +46,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                 "clojure.core/number?" => Type::Number,
                 "clojure.core/boolean?" => Type::Boolean,
                 "clojure.core/keyword?" => Type::Keyword,
+                "clojure.core/symbol?" => Type::Symbol,
                 "clojure.core/nil?" => Type::Nil,
                 "clojure.core/map?" => Type::Map(MapType {
                     fields: BTreeMap::new(),

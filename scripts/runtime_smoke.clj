@@ -876,3 +876,16 @@
              (clojure.edn/read-string "::status")
              (catch RuntimeException _ :invalid-edn))))
 (println "Clojure/JVM keyword aliases: 6 assertions passed")
+
+(load-file "examples/quoted.clj")
+(load-file "examples/quoted_bad.clj")
+(assert (= "fallback" (demo.quoted/fallback-label)))
+(assert (= 'demo.external/command (demo.quoted/command-tag)))
+(assert (= [:online :offline] (demo.quoted/modes)))
+(assert (= "guest" (demo.quoted/guest-label)))
+(assert (= 'quote (first ''command)))
+(assert (= :not-a-number
+           (try
+             (demo.quoted-bad/invalid-number)
+             (catch ClassCastException _ :not-a-number))))
+(println "Clojure/JVM quoted literal data: 6 assertions passed")

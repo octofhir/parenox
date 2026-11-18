@@ -214,7 +214,7 @@ fn vectors_are_checked_structurally() {
 fn unsupported_code_is_not_silently_accepted() {
     let report = Session::default().check(
         "test.clj",
-        &source("(defn f {:t/sig '[:-> string?]} [] (str '(1 2)))"),
+        &source("(defn f {:t/sig '[:-> string?]} [] (str '(#demo/opaque {:value 1})))"),
     );
     assert!(!report.ok);
     assert!(!report.complete);

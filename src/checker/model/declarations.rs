@@ -226,13 +226,13 @@ impl Declarations {
 pub(super) fn symbols_match<'a>(form: &'a Form, test: &mut impl FnMut(&'a str) -> bool) -> bool {
     match &form.kind {
         Kind::Symbol(name) => test(name),
+        Kind::List(forms) if forms.first().and_then(Form::symbol) == Some("quote") => true,
         Kind::List(forms) | Kind::Vector(forms) | Kind::Map(forms) | Kind::Set(forms) => {
             forms.iter().all(|form| symbols_match(form, test))
         }
         Kind::AnonymousFunction(function) => {
             function.body.iter().all(|form| symbols_match(form, test))
         }
-        Kind::Quote(inner) => symbols_match(inner, test),
         Kind::Metadata(metadata, target) => {
             symbols_match(metadata, test) && symbols_match(target, test)
         }

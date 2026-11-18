@@ -17,6 +17,45 @@ pub(super) enum Lookup<'a> {
 }
 
 impl Checker<'_> {
+    pub(super) fn map_literal(
+        &mut self,
+        xs: &[Form],
+        mut evaluate: impl FnMut(&mut Self, &Form) -> Value,
+    ) -> Value {
+        let mut fields = BTreeMap::new();
+        let mut returns = true;
+        for pair in xs.as_chunks::<2>().0 {
+            let value = evaluate(self, &pair[1]);
+            returns &= value.known != Type::Never;
+            if let Some(key) = self.literal_map_key(&pair[0]) {
+                if fields
+                    .insert(
+                        key.clone(),
+                        Field {
+                            ty: value.known,
+                            required: true,
+                        },
+                    )
+                    .is_some()
+                {
+                    self.error("PNX2790", pair[0].span, format!("Duplicate map key {key}"));
+                }
+            } else {
+                self.unsupported(
+                    pair[0].span,
+                    "Map literals currently require keyword or string keys",
+                );
+            }
+        }
+        if !returns {
+            return Value::new(Type::Never);
+        }
+        Value::new(Type::Map(MapType {
+            fields,
+            extra: ExtraFields::Closed,
+        }))
+    }
+
     pub(super) fn lookup(
         &mut self,
         value: &Value,

@@ -230,11 +230,11 @@ impl Model {
                             names.insert(function.name.clone());
                         }
                     }
+                    Kind::List(xs) if xs.first().and_then(Form::symbol) == Some("quote") => {}
                     Kind::List(xs) | Kind::Vector(xs) | Kind::Map(xs) | Kind::Set(xs) => {
                         visit(xs, model, names)
                     }
                     Kind::AnonymousFunction(function) => visit(&function.body, model, names),
-                    Kind::Quote(x) => visit(std::slice::from_ref(x), model, names),
                     Kind::Metadata(_, target) => visit(std::slice::from_ref(target), model, names),
                     _ => {}
                 }

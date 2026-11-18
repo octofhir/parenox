@@ -240,3 +240,8 @@ reductions format="pretty": build
 keyword-aliases format="pretty": build
     @./target/release/parenox check examples/keyword_aliases.clj --format {{quote(format)}}
     @./target/release/parenox check examples/keyword_aliases_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check literal configuration data and values from quoted lists.
+quoted format="pretty": build
+    @./target/release/parenox check examples/quoted.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/quoted_bad.clj --format {{quote(format)}} || test "$?" -eq 1
