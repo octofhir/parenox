@@ -600,8 +600,10 @@ omitted default throws when no clause matches, and Parenox reports a definite
 miss at the input expression. Supported constants are nil, booleans, characters,
 strings, keywords and known decimal integers in the i32 range.
 
-`seq`, `first`, `next` and `rest` model traversal of vectors and inferred
-sequences. An exhausted `rest` returns a truthy empty list. Use `seq` to
+`seq`, `first`, `next` and `rest` model traversal of vectors, sequences,
+sets, strings and maps with declared entry types. Strings use JVM UTF-16
+positions. Map traversal preserves entry types and known lengths without
+assuming their order. An exhausted `rest` returns a truthy empty list. Use `seq` to
 detect exhaustion and refine the remaining elements. The `empty?` and
 `not-empty` guards narrow known empty and nonempty alternatives. Empty
 collections, empty strings and nil satisfy `empty?`; a collection holding nil or

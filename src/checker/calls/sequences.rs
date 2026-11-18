@@ -24,18 +24,16 @@ impl ReadSequence {
         }
     }
 
-    fn open(self, element: &Type, nonempty: bool) -> Type {
+    fn open(self, element: &Type, minimum: usize) -> Type {
         let result = match self {
             Self::Head => element.clone(),
-            Self::Start | Self::Tail => Type::Seq(Box::new(element.clone())),
-            Self::Rest => {
-                return Type::union([Type::empty_seq(), Type::Seq(Box::new(element.clone()))]);
-            }
+            Self::Start | Self::Tail | Self::Rest => Type::Seq(Box::new(element.clone())),
         };
-        if nonempty && !matches!(self, Self::Tail) {
-            result
-        } else {
-            result.nilable()
+        match self {
+            Self::Rest if minimum < 2 => Type::union([Type::empty_seq(), result]),
+            Self::Tail if minimum < 2 => result.nilable(),
+            Self::Start | Self::Head if minimum == 0 => result.nilable(),
+            _ => result,
         }
     }
 }
@@ -146,21 +144,28 @@ impl Checker<'_> {
             Type::Nil => op.fixed(&[]),
             Type::Tuple(items) | Type::SeqTuple(items) => op.fixed(items),
             Type::MapEntry(items) => op.fixed(items.as_ref()),
-            Type::Vector(element) if **element == Type::Never => op.fixed(&[]),
-            Type::Vector(element) => op.open(element, false),
-            Type::Seq(element) => op.open(element, true),
+            Type::Vector(element) | Type::Set(element) if **element == Type::Never => op.fixed(&[]),
+            Type::Vector(element) | Type::Set(element) => op.open(element, 0),
+            Type::Seq(element) => op.open(element, 1),
+            Type::Str(text) => {
+                let items: Vec<_> = text
+                    .encode_utf16()
+                    .take(MAX_TUPLE_ITEMS + 1)
+                    .map(|unit| char::from_u32(u32::from(unit)).map_or(Type::Character, Type::Char))
+                    .collect();
+                if items.len() <= MAX_TUPLE_ITEMS {
+                    op.fixed(&items)
+                } else {
+                    op.open(&Type::Character, 2)
+                }
+            }
+            Type::String => op.open(&Type::Character, 0),
+            Type::Map(map) => self.read_map_sequence(op, map, name, span),
             Type::Union(parts) => Type::union(
                 parts
                     .iter()
                     .map(|part| self.read_sequence(op, part, name, span)),
             ),
-            Type::Map(_) | Type::Set(_) | Type::Str(_) | Type::String => {
-                self.unsupported(
-                    span,
-                    format!("{name} analysis currently supports vectors, seqs and Nil"),
-                )
-                .known
-            }
             actual => {
                 self.diagnostics.push(Diagnostic::type_mismatch(
                     span,
@@ -171,6 +176,42 @@ impl Checker<'_> {
                 Type::Unknown
             }
         }
+    }
+
+    fn read_map_sequence(
+        &mut self,
+        op: ReadSequence,
+        map: &MapType,
+        name: &str,
+        span: Span,
+    ) -> Type {
+        let Some(entry) = map.clone().into_entry_type() else {
+            return self
+                .unsupported(
+                    span,
+                    format!("{name} cannot infer entry types for an open map"),
+                )
+                .known;
+        };
+        let minimum = map
+            .fields
+            .values()
+            .filter(|field| field.required && field.ty != Type::Never)
+            .count();
+        if matches!(map.extra, ExtraFields::Closed) {
+            let possible = map
+                .fields
+                .values()
+                .filter(|field| field.ty != Type::Never)
+                .count();
+            if possible == minimum && possible <= MAX_TUPLE_ITEMS {
+                return op.fixed(&vec![entry; possible]);
+            }
+            if possible == 1 {
+                return Type::union([op.fixed(&[]), op.fixed(&[entry])]);
+            }
+        }
+        op.open(&entry, minimum)
     }
 }
 

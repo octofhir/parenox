@@ -42,7 +42,6 @@ fn seq_emptiness_preserves_nil_elements_and_index_errors() {
     for (expression, code) in [
         ("(nth (seq [1]) 1)", "PNX2801"),
         ("(next false)", "PNX2322"),
-        ("(seq \"abc\")", "PNX9001"),
         ("(seq [] [])", "PNX2554"),
     ] {
         let report = check(expression, "number?");
@@ -138,4 +137,34 @@ fn emptiness_guards_refine_sequence_state_and_open_empty_shapes() {
                "configured"))"#,
     );
     assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn seq_operations_handle_entry_types_sets_and_jvm_string_positions() {
+    for (expression, contract) in [
+        ("(seq {})", "nil?"),
+        ("(next {:only 1})", "nil?"),
+        ("(val (first {:only \"Ada\"}))", "#{\"Ada\"}"),
+        ("(key (first (next {:a 1 :b 2})))", "keyword?"),
+        ("(nth (seq {:a 1 :b 2}) 2 \"missing\")", "#{\"missing\"}"),
+        ("(seq #{})", "nil?"),
+        (
+            "(first (seq #{:a :b}))",
+            "(clojure.spec.alpha/nilable keyword?)",
+        ),
+        ("(first \"Ada\")", "#{\\A}"),
+        ("(next \"\")", "nil?"),
+        ("(nth (seq \"🚀\") 1)", "char?"),
+        ("(nth (rest \"🚀x\") 1)", "#{\\x}"),
+    ] {
+        let report = check(expression, contract);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn f {:t/sig '[(s/keys) :-> string?]} [source]
+          (str (first source)))"#;
+    let report = Session::default().check("sequences.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX9001");
+    assert!(report.diagnostics[0].message.contains("open map"));
 }

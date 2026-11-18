@@ -27,3 +27,12 @@
     (if-not (empty? items)
       (recur (next items) (+ total (first items)))
       total)))
+
+(defn entry-keys {:t/sig '[:-> (s/coll-of keyword? :kind vector?)]} []
+  (mapv key (seq {:received 2 :queued 3})))
+
+(defn first-entry-label {:t/sig '[:-> string?]} []
+  (val (first {:label "Ready"})))
+
+(defn after-surrogates {:t/sig '[:-> char?]} []
+  (nth (rest "🚀x") 1))

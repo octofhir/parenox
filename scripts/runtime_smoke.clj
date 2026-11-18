@@ -843,3 +843,13 @@
 (assert (= [nil] (not-empty [nil])))
 (assert (= ["Ada"] (filterv not-empty ["" "Ada"])))
 (println "Clojure/JVM emptiness guards: 9 assertions passed")
+
+(assert (= #{:received :queued} (set (demo.sequences/entry-keys))))
+(assert (= "Ready" (demo.sequences/first-entry-label)))
+(assert (= \x (demo.sequences/after-surrogates)))
+(assert (nil? (next {:only 1})))
+(assert (nil? (seq #{})))
+(assert (= \A (first "Ada")))
+(assert (= 2 (count (seq "🚀"))))
+(assert (char? (nth (seq "🚀") 1)))
+(println "Clojure/JVM maps, sets and string sequence views: 8 assertions passed")
