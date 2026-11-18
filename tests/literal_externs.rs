@@ -188,19 +188,19 @@ fn invalid_or_conflicting_literal_externs_are_not_published() {
             .iter()
             .all(|file| file.diagnostics[0].code == "PNX2790")
     );
-    for bad in [
-        "{lib/data {:value #vendor/read [1 2]}}",
-        "{lib/data {:value 'x}}",
-        "{lib/data {:value #{:x :x}}}",
-        "{lib/data {:value {1 :x}}}",
-        "{lib/data {:value nil :macro :let-like}}",
+    for (bad, code) in [
+        ("{lib/data {:value #vendor/read [1 2]}}", "PNX9001"),
+        ("{lib/data {:value 'x}}", "PNX9001"),
+        ("{lib/data {:value #{:x :x}}}", "PNX9000"),
+        ("{lib/data {:value {1 :x}}}", "PNX9001"),
+        ("{lib/data {:value nil :macro :let-like}}", "PNX9001"),
     ] {
         let invalid = compare(value.source, bad);
         assert!(
             !invalid.complete && invalid.changes.is_empty(),
             "{invalid:#?}"
         );
-        assert_eq!(invalid.after.files[0].diagnostics[0].code, "PNX9001");
+        assert_eq!(invalid.after.files[0].diagnostics[0].code, code);
     }
 }
 

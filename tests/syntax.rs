@@ -152,6 +152,36 @@ fn deref_and_var_quote_keep_source_and_expand_to_jvm_reader_forms() {
 }
 
 #[test]
+fn duplicate_atomic_set_members_point_to_the_repeated_value() {
+    let source = r#"#{:found :found} :later"#;
+    let parsed = reader::parse(source);
+    assert_lossless(source, &parsed);
+    assert_eq!(parsed.forms[0].keyword(), Some(":later"));
+    let error = &parsed.errors[0];
+    assert_eq!(error.message, "Duplicate element in set literal");
+    assert_eq!(error.span.start.offset, 9);
+    assert_eq!(
+        &source[error.span.start.offset..error.span.end.offset],
+        ":found"
+    );
+
+    assert!(reader::validate_edn(r#"#{ "name" "n\u0061me" }"#).is_err());
+    assert!(reader::read(r##"#{nil false :name "name" name #"x" #"x" 1 1.0}"##).is_ok());
+    let selected = reader::read_with(
+        "#{:found #?@(:clj [:found] :cljs [:missing])}",
+        reader::Conditionals::Select(":clj"),
+    );
+    assert!(selected.is_err());
+    assert!(
+        reader::read_with(
+            "#?(:clj 1 :cljs #{:a :a})",
+            reader::Conditionals::Select(":clj")
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn malformed_and_unsupported_reader_syntax_is_lossless_and_terminates() {
     for source in [
         "#_",

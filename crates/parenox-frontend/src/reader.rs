@@ -1,5 +1,6 @@
 mod edn;
 mod numbers;
+mod uniqueness;
 
 pub use edn::validate_edn;
 
@@ -576,9 +577,7 @@ impl<'a> Reader<'a> {
                 Kind::Regex
             }
             Some('#') if self.peek() == Some('{') => {
-                self.bump();
-                self.token(SyntaxKind::OpenSet, start);
-                Kind::Set(self.collection('}', start)?)
+                return self.set(start);
             }
             Some('#') if self.peek() == Some('?') => return self.conditional(start),
             Some('#') if self.peek().is_some_and(char::is_alphabetic) => {
@@ -613,6 +612,14 @@ impl<'a> Reader<'a> {
                 end: self.pos,
             },
         })
+    }
+
+    fn set(&mut self, start: Position) -> Result<Item, ReadError> {
+        self.bump(); // {
+        self.token(SyntaxKind::OpenSet, start);
+        let values = self.collection('}', start)?;
+        uniqueness::check_set(&values, self.source)?;
+        Ok(self.form_item(start, Kind::Set(values)))
     }
 
     fn atom(&mut self, start: Position) -> Result<Item, ReadError> {

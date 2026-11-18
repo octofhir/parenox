@@ -421,6 +421,10 @@ provides the JVM reader forms `(clojure.core/deref value)` and `(var name)` to
 analysis. Var objects and dereferenced value types are reported as coverage gaps
 when encountered in a checked function.
 
+Repeated simple values in set literals report a reader error at the repeated
+element. This check compares decoded strings and characters, symbols, keywords,
+booleans, nil, and identical numeric spellings.
+
 Design references include [clojure-reader](https://github.com/Grinkers/clojure-reader)
 for data reading, [Crabjure](https://github.com/ribelo/crabjure) for static analysis,
 and [clojurust](https://github.com/csm/clojurust) for future reader/expansion/runtime
