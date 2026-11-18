@@ -530,3 +530,47 @@ fn equivalent_rebuilt_interfaces_reuse_the_callers_check() {
         Some("String")
     );
 }
+
+#[test]
+fn source_contracts_win_and_private_vars_do_not_resolve_through_externs() {
+    let caller = r#"(ns caller (:require [library :as lib]))
+        (defn convert {:t/sig '[:-> string?]} [] (lib/label))
+        (defn hidden {:t/sig '[:-> string?]} [] (lib/hidden))
+        (defn secret {:t/sig '[:-> string?]} [] (lib/secret))
+        (defn external {:t/sig '[:-> string?]} [] (lib/external))"#;
+    let library = r#"(ns library)
+        (defn label {:t/sig '[:-> number?]} [] 120)
+        (defn- hidden {:t/sig '[:-> string?]} [] "internal")
+        (def ^:private secret "42")"#;
+    let externs = Some(
+        "{library/label [:-> string?] library/hidden [:-> string?]
+          library/secret [:-> string?] library/external [:-> string?]}",
+    );
+    let mut files = BTreeMap::from([
+        ("caller.clj", caller.to_owned()),
+        ("library.clj", library.to_owned()),
+    ]);
+    let mut session = Session::default();
+    let source_wins = run(&mut session, &files, externs);
+    assert!(source_wins.complete, "{source_wins:#?}");
+    let [result, function, literal] = source_wins.files[0].diagnostics.as_slice() else {
+        panic!("{source_wins:#?}")
+    };
+    assert_eq!(result.code, "PNX2322");
+    assert_eq!(result.actual.as_deref(), Some("Number"));
+    assert_eq!(function.code, "PNX2304");
+    assert_eq!(literal.code, "PNX2304");
+    assert!(function.message.contains("lib/hidden"));
+    assert!(literal.message.contains("lib/secret"));
+
+    let warm = run(&mut session, &files, externs);
+    assert_eq!(warm.files[0].stats.reused_functions, 4);
+    assert!(files.remove("library.clj").is_some());
+    let fallback = run(&mut session, &files, externs);
+    assert!(fallback.ok && fallback.complete, "{fallback:#?}");
+
+    files.insert("library.clj", library.to_owned());
+    let restored = run(&mut session, &files, externs);
+    assert_eq!(restored.files[0].stats.checked_functions, 4);
+    assert_eq!(restored.files[0].diagnostics.len(), 3);
+}

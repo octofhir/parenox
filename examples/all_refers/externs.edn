@@ -1,0 +1,2 @@
+{demo.all-refers.library/label [:-> number?]
+ demo.all-refers.library/hidden [:-> string?]}

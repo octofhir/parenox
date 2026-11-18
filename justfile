@@ -223,5 +223,5 @@ anonymous format="pretty": build
 
 # Check source-backed :refer :all and show excluded/private names.
 all-refers format="pretty": build
-    @./target/release/parenox check examples/all_refers/library.clj examples/all_refers/app.clj --format {{quote(format)}}
-    @./target/release/parenox check examples/all_refers/library.clj examples/all_refers/bad.clj --format {{quote(format)}} || test "$?" -eq 1
+    @./target/release/parenox check examples/all_refers/library.clj examples/all_refers/app.clj --externs examples/all_refers/externs.edn --format {{quote(format)}}
+    @./target/release/parenox check examples/all_refers/library.clj examples/all_refers/bad.clj --externs examples/all_refers/externs.edn --format {{quote(format)}} || test "$?" -eq 1

@@ -77,15 +77,21 @@ impl Globals {
 
     fn declared_value(&self, name: &str) -> Option<DeclaredValue<'_>> {
         let (namespace, _) = name.split_once('/')?;
-        let source = self.exports.get(namespace);
-        if let Some(ty) = source.and_then(|exports| exports.literals.get(name)) {
-            return Some(DeclaredValue::Literal(ty));
+        if let Some(source) = self.exports.get(namespace) {
+            if let Some(ty) = source.literals.get(name) {
+                return Some(DeclaredValue::Literal(ty));
+            }
+            if let Some(signatures) = source.functions.get(name) {
+                return Some(DeclaredValue::Function(signatures));
+            }
+            if source.private_vars.contains(name) {
+                return None;
+            }
         }
         self.externs
             .as_ref()
             .and_then(|table| table.namespaces.get(namespace))
             .and_then(|functions| functions.get(name))
-            .or_else(|| source.and_then(|exports| exports.functions.get(name)))
             .map(DeclaredValue::Function)
     }
 }

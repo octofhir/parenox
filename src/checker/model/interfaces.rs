@@ -1,5 +1,5 @@
 //! Immutable declarations used to validate cached checks.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::{Globals, LiteralVar, Model, Names, Signature};
@@ -11,6 +11,7 @@ pub(super) type Signatures = BTreeMap<String, Arc<[Signature]>>;
 pub(super) struct Exports {
     pub functions: Signatures,
     pub literals: BTreeMap<String, Type>,
+    pub private_vars: BTreeSet<String>,
     specs: Arc<BTreeMap<String, Type>>,
 }
 
@@ -65,7 +66,9 @@ impl Model {
         };
         let mut functions = Vec::with_capacity(self.functions.len());
         for f in self.functions.values() {
-            if !f.private {
+            if f.private {
+                exports.private_vars.insert(f.name.clone());
+            } else {
                 exports
                     .functions
                     .insert(f.name.clone(), f.signatures.clone());
@@ -77,8 +80,12 @@ impl Model {
                 inferred: f.inferred,
             });
         }
-        for (name, value) in self.literals.iter().filter(|(_, value)| !value.private) {
-            exports.literals.insert(name.clone(), value.ty.clone());
+        for (name, value) in &self.literals {
+            if value.private {
+                exports.private_vars.insert(name.clone());
+            } else {
+                exports.literals.insert(name.clone(), value.ty.clone());
+            }
         }
         self.exports = Arc::new(exports);
         self.local_interface = Arc::new(LocalInterface {

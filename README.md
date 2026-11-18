@@ -130,7 +130,8 @@ The [clinic example](examples/clinic) has four namespaces:
 
 It also declares a contract for the real library function
 `clojure.string/starts-with?` in [externs.edn](examples/clinic/externs.edn).
-Externs are trusted declarations, not independently verified library implementations.
+Externs are trusted declarations for library functions. A matching project
+source declaration takes precedence, and source privacy applies to every caller.
 
 ```sh
 ./target/release/parenox check examples/clinic \

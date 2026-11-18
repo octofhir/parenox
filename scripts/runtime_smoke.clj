@@ -744,3 +744,11 @@
                                                "Unable to resolve symbol: skipped")
                  :excluded)))))
 (println "Clojure/JVM all referrals: 7 assertions passed")
+
+(assert (= :private
+           (try
+             (load-string "(demo.all-refers.library/hidden)")
+             (catch clojure.lang.Compiler$CompilerException e
+               (when (clojure.string/includes? (ex-message (ex-cause e)) "is not public")
+                 :private)))))
+(println "Clojure/JVM source visibility: 1 assertion passed")
