@@ -27,6 +27,18 @@ impl Checker<'_> {
         self.lookup_value(value, key, Lookup::Optional(default), span)
     }
 
+    pub(super) fn lookup_invocation(
+        &mut self,
+        value: &Value,
+        key: &Type,
+        default: Option<&Value>,
+        span: Span,
+    ) -> Value {
+        // Keyword invocation delegates to Clojure's default-aware lookup, which
+        // also allows targets without any supported lookup keys.
+        self.lookup_value(value, key, Lookup::Path(default), span)
+    }
+
     pub(super) fn checked_lookup(
         &mut self,
         value: &Value,

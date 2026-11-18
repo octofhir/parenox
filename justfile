@@ -225,3 +225,8 @@ anonymous format="pretty": build
 all-refers format="pretty": build
     @./target/release/parenox check examples/all_refers/library.clj examples/all_refers/app.clj --externs examples/all_refers/externs.edn --format {{quote(format)}}
     @./target/release/parenox check examples/all_refers/library.clj examples/all_refers/bad.clj --externs examples/all_refers/externs.edn --format {{quote(format)}} || test "$?" -eq 1
+
+# Check collections and keywords in function position.
+callables format="pretty": build
+    @./target/release/parenox check examples/callables.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/callables_bad.clj --format {{quote(format)}} || test "$?" -eq 1

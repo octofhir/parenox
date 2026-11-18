@@ -766,3 +766,18 @@
                (try ((ns-resolve runtime name))
                     (catch ClassCastException _ :not-a-number))))))
 (println "Clojure/JVM same-namespace var bindings: 4 assertions passed")
+
+(load-file "examples/callables.clj")
+(load-file "examples/callables_bad.clj")
+(assert (= [3 nil] (demo.callables/priorities)))
+(assert (= [true false nil] (demo.callables/statuses)))
+(assert (= "Ready" (demo.callables/selected-label false)))
+(assert (= "Prêt" (demo.callables/selected-label true)))
+(assert (nil? (demo.callables/explicit-nil)))
+(assert (= "Fallback" (demo.callables/safe-label)))
+(assert (= "ready" (apply :label [{:label "ready"}])))
+(doseq [run [demo.callables-bad/missing-key demo.callables-bad/extra-default]]
+  (assert (= :arity
+             (try (run)
+                  (catch clojure.lang.ArityException _ :arity)))))
+(println "Clojure/JVM callable lookups: 9 assertions passed")

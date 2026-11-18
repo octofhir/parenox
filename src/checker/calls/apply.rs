@@ -117,6 +117,15 @@ impl Checker<'_> {
                     self.check_spread_arities(&arities, minimum, spread.span);
                     self.check_spread_signatures(signatures, prefix, minimum, &element, spread.span)
                 }
+                Type::Map(_) | Type::Key(_) | Type::Keyword => {
+                    self.check_spread_arities(
+                        &[Arity::Fixed(1), Arity::Fixed(2)],
+                        minimum,
+                        spread.span,
+                    );
+                    self.may_throw();
+                    Value::new(Type::Unknown)
+                }
                 Type::Set(_) => {
                     self.check_spread_arities(&[Arity::Fixed(1)], minimum, spread.span);
                     self.may_throw();

@@ -490,6 +490,10 @@ input element type unless the callback is known to always return a falsey
 value. Run `just vectors pretty always` for a patient-label pipeline and
 two callback diagnostics.
 
+Maps and keywords work in function position and as inline callbacks, for
+example `(mapv :active patients)`. Lookup defaults apply to missing entries
+and preserve explicit nil and false. Run `just callables` for examples.
+
 A closed map supplies a `MapEntry<K, V>` for each present field. Use `key`,
 `val`, or fixed positional bindings such as `(fn [[k v :as entry]] ...)`.
 Optional fields contribute entries only when present, and a present nil remains

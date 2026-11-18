@@ -129,27 +129,6 @@ impl<'model> Checker<'model> {
                 .collect();
             return self.inferred_call(function, args, span);
         }
-        if let Some(key) = xs[0].keyword() {
-            if !(2..=3).contains(&xs.len()) {
-                self.error(
-                    "PNX2554",
-                    span,
-                    "Keyword lookup requires a map or set and optional default",
-                );
-                return Value::new(Type::Unknown);
-            }
-            let args = self.typed_args(&xs[1..], env);
-            if !call_returns(&args) {
-                return Value::new(Type::Never);
-            }
-            self.may_throw();
-            return self.lookup(
-                &args[0].0,
-                &Type::Key(self.model.key(key)),
-                args.get(1).map(|(value, _)| value),
-                xs[0].span,
-            );
-        }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
             && self.model.declared_value(name, self.globals).is_none()
@@ -284,6 +263,31 @@ impl<'model> Checker<'model> {
                 }
                 Value::new(signature.ret.clone())
             }
+            kind @ (Type::Key(_) | Type::Keyword | Type::Map(_)) => {
+                let is_map = matches!(kind, Type::Map(_));
+                if !(1..=2).contains(&args.len()) {
+                    let kind = if is_map { "Map" } else { "Keyword" };
+                    self.error(
+                        "PNX2554",
+                        span,
+                        format!(
+                            "{kind} invocation expects 1 or 2 arguments, got {}",
+                            args.len()
+                        ),
+                    );
+                    return Value::new(Type::Unknown);
+                }
+                let default = args.get(1).map(|(value, _)| value);
+                if is_map {
+                    self.lookup_invocation(function, &args[0].0.known, default, args[0].1)
+                } else {
+                    self.lookup_invocation(&args[0].0, kind, default, head)
+                }
+            }
+            Type::Union(parts) => parts.iter().fold(Value::new(Type::Never), |result, part| {
+                let alternative = Value::with_notes(part.clone(), function.notes.clone());
+                result.join(self.call_value(&alternative, args, head, span))
+            }),
             Type::Set(_) => {
                 if args.len() != 1 {
                     self.error(
