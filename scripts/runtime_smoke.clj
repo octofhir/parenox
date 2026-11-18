@@ -671,3 +671,16 @@
              (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
 (assert (= 6 (apply (fnil (fnil + 1 2) nil 5) [nil nil])))
 (println "Clojure/JVM fnil evaluation: 4 assertions passed")
+
+(assert (= :collection (demo.vectors/collection-stage)))
+(assert (= :callback
+           (try
+             (mapv (fnil identity (throw (ex-info "callback" {:stage :callback})))
+                   (throw (ex-info "collection" {:stage :collection})))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(assert (= :first
+           (try
+             (mapv + (throw (ex-info "first" {:stage :first}))
+                     (throw (ex-info "second" {:stage :second})))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(println "Clojure/JVM vector argument evaluation: 3 assertions passed")

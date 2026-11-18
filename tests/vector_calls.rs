@@ -170,3 +170,37 @@ fn map_entry_diagnostics_distinguish_vectors_and_open_maps() {
         "{report:#?}"
     );
 }
+
+#[test]
+fn vector_calls_evaluate_the_callback_expression_then_their_collection_arguments() {
+    for (label, expression) in [
+        (
+            "callback",
+            r#"(mapv (fnil identity (throw (ex-info "callback" {:stage :callback})))
+                     (throw (ex-info "collection" {:stage :collection})))"#,
+        ),
+        (
+            "first",
+            r#"(mapv + (throw (ex-info "first" {:stage :first}))
+                       (throw (ex-info "second" {:stage :second})))"#,
+        ),
+        (
+            "collection",
+            r#"(filterv #(some? %) (throw (ex-info "collection" {:stage :collection})))"#,
+        ),
+    ] {
+        let report = check(&format!(
+            "(defn f {{:t/sig '[:-> #{{:{label}}}]}} []
+               (try {expression}
+                 (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))"
+        ));
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+
+    let report = check(
+        "(defn f {:t/sig '[:-> nil?]} []
+           (mapv (fn [x] (dummy x)) (throw (ex-info \"stop\" {}))))",
+    );
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX2304");
+}

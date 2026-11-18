@@ -155,8 +155,6 @@ impl<'model> Checker<'model> {
                         | "clojure.core/assoc-in"
                         | "clojure.core/update"
                         | "clojure.core/update-in"
-                        | "clojure.core/mapv"
-                        | "clojure.core/filterv"
                 )
             {
                 self.may_throw();

@@ -27,3 +27,8 @@
   {:t/sig '[::optional-counts :-> ::counts]}
   [counts]
   (mapv inc (filterv some? (next (seq counts)))))
+
+(defn collection-stage {:t/sig '[:-> #{:collection}]} []
+  (try
+    (filterv some? (throw (ex-info "Collection unavailable" {:stage :collection})))
+    (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))

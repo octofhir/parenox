@@ -1,6 +1,6 @@
 //! Contextual calls over collections that produce eager Clojure vectors.
 use super::super::{Checker, Env, Value, flow::narrow_by_type, nil_part};
-use super::predicate_type;
+use super::{call_returns, predicate_type};
 use crate::reader::{Form, Span};
 use crate::types::Type;
 
@@ -29,14 +29,23 @@ impl Checker<'_> {
 
         let callback = &xs[1];
         let collections = &xs[2..];
-        let args: Vec<_> = collections
-            .iter()
-            .map(|form| (self.collection_element(form, env, name), form.span))
+        let callable = self.prepare_callable(callback, env);
+        let inputs: Vec<_> = self
+            .eval_args(collections, env, callable.returns())
+            .collect();
+        if !call_returns(&inputs) {
+            self.call_prepared(&callable, Vec::new(), callback.span, span, env, false);
+            return Value::new(Type::Never);
+        }
+        self.may_throw();
+        let args: Vec<_> = inputs
+            .into_iter()
+            .map(|(input, span)| (self.collection_element(input, span, name), span))
             .collect();
         let invoked = args.iter().all(|(element, _)| element.known != Type::Never);
         let filtered = filter.then(|| args[0].0.known.clone());
         let start = self.diagnostics.len();
-        let result = self.call_form(callback, args, span, env, invoked);
+        let result = self.call_prepared(&callable, args, callback.span, span, env, invoked);
         for diagnostic in &mut self.diagnostics[start..] {
             if diagnostic.code == "PNX2322"
                 && collections.iter().any(|form| diagnostic.span == form.span)
@@ -57,18 +66,17 @@ impl Checker<'_> {
         Value::new(Type::Vector(Box::new(element)))
     }
 
-    fn collection_element(&mut self, form: &Form, env: &Env, name: &str) -> Value {
-        let collection = self.infer(form, env);
+    fn collection_element(&mut self, collection: Value, span: Span, name: &str) -> Value {
         match element_type(collection.known) {
             Ok(element) => Value::with_notes(element, collection.notes),
             Err(CollectionError::OpenMap) => self.unsupported(
-                form.span,
+                span,
                 format!("{name} cannot infer entry types for an open map"),
             ),
             Err(CollectionError::NotSeqable) => {
                 self.error(
                     "PNX2322",
-                    form.span,
+                    span,
                     format!("{name} expects a seqable collection, got {}", collection.ty),
                 );
                 Value::new(Type::Unknown)
