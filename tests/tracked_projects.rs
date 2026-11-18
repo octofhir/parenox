@@ -55,6 +55,38 @@ const PROVIDER: &str = r#"(ns store)
 const EXTERNS: &str = "{db/title [string? :-> string?]}";
 
 #[test]
+fn definition_uses_unsaved_aliases_and_current_provider_spans() {
+    let mut client = Client::start();
+    let app = "(ns app (:require [first.store :as store]))\n(defn read-id [] (store/get-id))\n(def literal 'store/get-id)";
+    let provider = "(ns first.store)\n(defn ^String get-id [] \"one\")";
+    let lookup =
+        |id, offset| json!({"op": "definition", "id": id, "path": "app.clj", "offset": offset});
+    let offset = app.find("store/get-id").unwrap();
+    client.result(json!({"op": "open", "id": 1, "files": [
+        {"path": "app.clj", "source": app},
+        {"path": "first.clj", "source": provider},
+        {"path": "second.clj", "source": "(ns next.store)\n\n(defn get-id [] \"two\")"}
+    ]}));
+    let first = client.result(lookup(2, offset));
+    let start = provider.find("get-id").unwrap();
+    assert_eq!(first["path"], "first.clj");
+    assert_eq!(first["span"]["start"]["offset"], start);
+    assert_eq!(first["span"]["end"]["offset"], start + "get-id".len());
+    assert!(client.send(lookup(3, app.rfind("store/get-id").unwrap()))["result"].is_null());
+
+    let edited = app.replace("first.store", "next.store");
+    client.result(
+        json!({"op": "update", "id": 4, "changes": [{"path": "app.clj", "source": edited}]}),
+    );
+    let offset = edited.find("store/get-id").unwrap();
+    let second = client.result(lookup(5, offset));
+    assert_eq!(second["path"], "second.clj");
+    assert_eq!(second["span"]["start"]["line"], 3);
+    client.result(json!({"op": "update", "id": 6, "remove": ["second.clj"]}));
+    assert!(client.send(lookup(7, offset))["result"].is_null());
+}
+
+#[test]
 fn closing_one_diagnostic_keeps_the_other_occurrence_id() {
     let mut client = Client::start();
     let source = r#"(ns app)

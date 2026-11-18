@@ -2,6 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Globals;
+use super::contracts::function_parts;
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, ReadError, Span};
 
@@ -87,6 +88,53 @@ impl Declarations {
 
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    pub(crate) fn qualified_reference<'a>(&'a self, symbol: &'a str) -> Option<(&'a str, &'a str)> {
+        let (prefix, local) = symbol.split_once('/')?;
+        if prefix.is_empty() || local.is_empty() || local.contains('/') {
+            return None;
+        }
+        Some(self.names.resolve_parts(symbol))
+    }
+
+    pub(crate) fn source_var(
+        &self,
+        forms: &[Form],
+        local: &str,
+        public_only: bool,
+    ) -> Option<Span> {
+        let mut matches = self
+            .functions
+            .iter()
+            .chain(&self.literal_vars)
+            .filter_map(|&index| {
+                let Kind::List(items) = &forms[index].without_metadata().kind else {
+                    return None;
+                };
+                let name = items.get(1)?;
+                (name.symbol() == Some(local)).then_some(items.as_slice())
+            });
+        let items = matches.next()?;
+        if matches.next().is_some() || (public_only && self.private_var(items)) {
+            return None;
+        }
+        Some(items[1].without_metadata().span)
+    }
+
+    fn private_var(&self, items: &[Form]) -> bool {
+        let private =
+            |form: &Form| !matches!(form.without_metadata().kind, Kind::Nil | Kind::Bool(false));
+        let op = items[0].symbol().unwrap();
+        if op == "def" {
+            return items[1].metadata(":private").is_some_and(private);
+        }
+        let mut attrs = function_parts(&items[2..]).1;
+        if let Some([_, value]) = attrs.find(|[key, _]| key.keyword() == Some(":private")) {
+            return private(value);
+        }
+        self.names.resolve(op) == "clojure.core/defn-"
+            || items[1].metadata(":private").is_some_and(private)
     }
 
     pub(super) fn error(&mut self, code: &str, span: Span, message: impl Into<String>) {

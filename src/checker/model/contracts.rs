@@ -1,5 +1,33 @@
 //! Annotated signatures and function declarations.
 use std::collections::BTreeMap;
+
+pub(super) fn function_parts(tail: &[Form]) -> (&[Form], impl Iterator<Item = &[Form; 2]> + Clone) {
+    let tail = if matches!(tail.first().map(|form| &form.kind), Some(Kind::String(_))) {
+        &tail[1..]
+    } else {
+        tail
+    };
+    let (attrs, arms) = match tail.split_first() {
+        Some((first, rest)) if first.map().is_some() => (first.map().unwrap(), rest),
+        _ => (&[][..], tail),
+    };
+    let (trailing, arms) = match arms.split_last() {
+        Some((last, rest))
+            if arms.first().and_then(Form::vector).is_none() && last.map().is_some() =>
+        {
+            (last.map().unwrap(), rest)
+        }
+        _ => (&[][..], arms),
+    };
+    (
+        arms,
+        trailing
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .chain(attrs.as_chunks::<2>().0),
+    )
+}
 use std::sync::Arc;
 
 use super::{
@@ -47,36 +75,11 @@ impl Model {
             self.error("PNX2790", xs[1].span, format!("Duplicate var {name}"));
             return;
         }
-        let mut index = 2;
-        if xs
-            .get(index)
-            .is_some_and(|x| matches!(x.kind, Kind::String(_)))
-        {
-            index += 1;
-        }
-        let attrs = if let Some(attrs) = xs.get(index).and_then(Form::map) {
-            index += 1;
-            attrs
-        } else {
-            &[]
-        };
-        let mut arms = &xs[index..];
-        let trailing_attrs = if arms.first().and_then(Form::vector).is_none()
-            && let Some(attrs) = arms.last().and_then(Form::map)
-        {
-            arms = &arms[..arms.len() - 1];
-            attrs
-        } else {
-            &[]
-        };
+        let (arms, attrs) = function_parts(&xs[2..]);
         let attribute = |key| {
-            trailing_attrs
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .chain(attrs.as_chunks::<2>().0)
-                .find(|[name, _]| name.keyword() == Some(key))
-                .map(|[_, value]| value)
+            attrs
+                .clone()
+                .find_map(|[name, value]| (name.keyword() == Some(key)).then_some(value))
         };
         let default_private = xs[0]
             .symbol()

@@ -1,4 +1,7 @@
 mod extern_export;
+mod navigation;
+
+pub use navigation::Definition;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -86,6 +89,7 @@ pub fn compare_externs(before: ExternSnapshot<'_>, after: ExternSnapshot<'_>) ->
 struct FileCache {
     source: Arc<str>,
     source_hash: u64,
+    snapshot: u64,
     parsed: bool,
     kind: FileKind,
     forms: Vec<Form>,
@@ -229,6 +233,7 @@ pub struct Session {
     files: BTreeMap<String, FileCache>,
     specs: SpecCache,
     externs: ExternCache,
+    snapshot: u64,
 }
 
 impl Session {
@@ -299,6 +304,7 @@ impl Session {
         mode: SnapshotMode,
     ) -> ProjectReport {
         let started = Instant::now();
+        self.snapshot += 1;
         let mut entries = Vec::new();
         let mut reports = Vec::new();
         let mut paths = BTreeSet::new();
@@ -319,7 +325,13 @@ impl Session {
             let mut cache = self.files.remove(source.path).unwrap_or_default();
             let parsed = cache.update(source.source, source.path, kind);
             let mut diagnostics: Vec<_> = cache.parse_error.iter().cloned().collect();
-            if !paths.insert(source.path) {
+            let unique = paths.insert(source.path);
+            cache.snapshot = if unique && index < count {
+                self.snapshot
+            } else {
+                0
+            };
+            if !unique {
                 diagnostics.push(Diagnostic::new(
                     "PNX2790",
                     cache.start_span(),

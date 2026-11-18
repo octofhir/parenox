@@ -15,7 +15,7 @@ use clap::{CommandFactory, Parser};
 use parenox::{Diagnostic, Session, Source, output, reader};
 use serde_json::json;
 
-use cli::{CheckOptions, Cli, Color, Command, Format, ProjectOptions};
+use cli::{CheckOptions, Cli, Color, Command, DefinitionOptions, Format, ProjectOptions};
 use config::ProjectConfig;
 use serve::Snapshot;
 
@@ -32,6 +32,7 @@ fn main() -> ExitCode {
 fn run() -> Result<u8, String> {
     match Cli::parse().command {
         Some(Command::Check(options)) => check(options, false),
+        Some(Command::Definition(options)) => definition(options),
         Some(Command::ValidateExterns(options)) => check(options, true),
         Some(Command::ExportExterns(options)) => export_externs(options),
         Some(Command::DiffExterns(options)) => extern_diff_cli::run(options),
@@ -56,6 +57,40 @@ fn syntax(path: &str) -> Result<u8, String> {
         output::diagnostics(path, &source, &diagnostics, Color::Auto.enabled())
     );
     Ok(u8::from(!diagnostics.is_empty()))
+}
+
+fn definition(options: DefinitionOptions) -> Result<u8, String> {
+    let config = options.project.load()?;
+    let files = read_sources(&config.paths)?;
+    let requested = Path::new(&options.file);
+    let file = if files.contains_key(&options.file) {
+        Some(options.file.as_str())
+    } else {
+        requested.canonicalize().ok().and_then(|requested| {
+            files
+                .keys()
+                .find(|path| {
+                    Path::new(path)
+                        .canonicalize()
+                        .is_ok_and(|found| found == requested)
+                })
+                .map(String::as_str)
+        })
+    };
+    let target = file.and_then(|path| {
+        let sources: Vec<_> = files
+            .iter()
+            .map(|(path, source)| Source { path, source })
+            .collect();
+        let mut session = Session::default();
+        session.check_project(&sources, None);
+        session.definition(path, options.offset)
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&target).map_err(|err| err.to_string())?
+    );
+    Ok(u8::from(target.is_none()))
 }
 
 fn check(mut options: CheckOptions, validate_externs: bool) -> Result<u8, String> {

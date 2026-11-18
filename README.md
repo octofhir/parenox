@@ -414,6 +414,9 @@ Clojure numeric tokens include octal, hexadecimal, radix integers, ratios,
 and the `N` and `M` suffixes. The checker tracks these as `Number` and reports
 invalid tokens at their source spans. Run `just numbers` for a checked example.
 
+The reader preserves the original text of regex literals such as `#"\d+"`.
+The checker reports incomplete type analysis for regex values.
+
 The checker selects `:clj` branches in `.cljc` files. First matching feature wins;
 `:default` matches in order, an unmatched `#?` contributes no form, and `#?@`
 inserts a selected list or vector into its surrounding collection. Selected forms
@@ -542,6 +545,20 @@ source path, followed by the extern reports in the supplied order. Invalid
 operations leave the tracked project intact. A valid edit is
 saved even when it produces diagnostics. Single-file and complete-snapshot
 requests work independently of the tracked project.
+
+Query a qualified source var after `open` or `update` with a zero-based UTF-8
+byte offset inside the reference:
+
+```json
+{"id":6,"op":"definition","path":"src/app.clj","offset":105}
+```
+
+The response contains the target `path` and `span`, or a `null` result when no
+unique source definition can be resolved. The query supports qualified `def`
+and `defn` references, including namespace aliases and functions without type
+annotations. For a file-backed query, run
+`parenox definition --file src/app.clj --offset 105` with the same project path
+options as `check`.
 
 - Unchanged sources reuse their parsed forms and declaration models.
 - Unchanged externs reuse their declarations until a referenced spec changes.

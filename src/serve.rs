@@ -85,10 +85,20 @@ impl<'de> Deserialize<'de> for ExternsChange {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefinitionRequest {
+    #[serde(default)]
+    id: Value,
+    path: String,
+    offset: usize,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum ProjectOperation {
     Open(ProjectRequest),
     Update(UpdateRequest),
+    Definition(DefinitionRequest),
 }
 
 #[derive(Deserialize)]
@@ -227,25 +237,43 @@ fn write_error(output: &mut impl Write, id: Value, message: String) -> serde_jso
     )
 }
 
-fn update_project(
+fn write_tracked(
+    output: &mut impl Write,
     tracked: &mut Option<TrackedProject>,
     op: ProjectOperation,
-) -> (Value, Result<&mut TrackedProject, String>) {
+) -> serde_json::Result<()> {
     match op {
         ProjectOperation::Open(request) => {
-            let result = TrackedProject::open(request.files, request.externs)
-                .map(|project| tracked.insert(project));
-            (request.id, result)
+            match TrackedProject::open(request.files, request.externs) {
+                Ok(project) => write_check(output, request.id, tracked.insert(project).check()),
+                Err(message) => write_error(output, request.id, message),
+            }
         }
         ProjectOperation::Update(request) => {
-            let result = match tracked {
-                Some(project) => project
-                    .update(request.changes, request.remove, request.externs)
-                    .map(|()| project),
-                None => Err("Open a project before sending updates".into()),
+            let Some(project) = tracked else {
+                return write_error(
+                    output,
+                    request.id,
+                    "Open a project before sending updates".into(),
+                );
             };
-            (request.id, result)
+            match project.update(request.changes, request.remove, request.externs) {
+                Ok(()) => write_check(output, request.id, project.check()),
+                Err(message) => write_error(output, request.id, message),
+            }
         }
+        ProjectOperation::Definition(request) => match tracked {
+            Some(project) => write_check(
+                output,
+                request.id,
+                project.session.definition(&request.path, request.offset),
+            ),
+            None => write_error(
+                output,
+                request.id,
+                "Open a project before querying a definition".into(),
+            ),
+        },
     }
 }
 
@@ -269,13 +297,7 @@ pub(super) fn run() -> Result<u8, String> {
                 let report = snapshot_session.check_project_with_externs(&sources, &externs);
                 write_check(&mut output, request.id, report)
             }
-            Ok(Request::Tracked(op)) => {
-                let (id, project) = update_project(&mut tracked, op);
-                match project {
-                    Ok(project) => write_check(&mut output, id, project.check()),
-                    Err(message) => write_error(&mut output, id, message),
-                }
-            }
+            Ok(Request::Tracked(op)) => write_tracked(&mut output, &mut tracked, op),
             Err(error) => write_error(&mut output, Value::Null, error.to_string()),
         }
         .map_err(|e| e.to_string())?;

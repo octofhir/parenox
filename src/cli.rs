@@ -13,6 +13,8 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Check Clojure files or a configured project.
     Check(CheckOptions),
+    /// Find the definition of a qualified source var.
+    Definition(DefinitionOptions),
     /// Check library bodies and validate the extern promises they ship.
     ValidateExterns(CheckOptions),
     /// Write checked public signatures and literal values as EDN to stdout.
@@ -49,6 +51,18 @@ pub(crate) struct ProjectOptions {
     /// Select a local deps.edn alias. Repeat to combine aliases in order.
     #[arg(long = "alias", value_name = "NAME", conflicts_with = "paths")]
     pub(crate) aliases: Vec<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct DefinitionOptions {
+    #[command(flatten)]
+    pub(crate) project: ProjectOptions,
+    /// Source file containing the reference.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) file: String,
+    /// Zero-based UTF-8 byte offset inside the reference.
+    #[arg(long)]
+    pub(crate) offset: usize,
 }
 
 #[derive(Args)]

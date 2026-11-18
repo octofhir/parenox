@@ -15,7 +15,7 @@ pub use extern_diff::{
     ExternChange, ExternChangeKind, ExternDefinition, ExternDiff, ExternMismatch,
     ExternMismatchReason, ExternPathStep, ExternSnapshot,
 };
-pub use project::{ExternExport, ProjectReport, Session, Source, compare_externs};
+pub use project::{Definition, ExternExport, ProjectReport, Session, Source, compare_externs};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Diagnostic {

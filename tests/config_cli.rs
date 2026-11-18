@@ -147,6 +147,49 @@ fn explicit_extern_flags_replace_the_configured_list() {
 }
 
 #[test]
+fn definition_loads_test_paths_from_deps_edn() {
+    let dir = TestDir::new("deps-definition");
+    fs::write(
+        dir.0.join("deps.edn"),
+        r#"{:paths ["src"] :aliases {:test {:extra-paths ["test"]}}}"#,
+    )
+    .unwrap();
+    for name in ["src", "test"] {
+        fs::create_dir(dir.0.join(name)).unwrap();
+    }
+    let caller =
+        "(ns app.test (:require [app.impl :as impl]))\n(defn check [] (impl/normalize \"é\"))";
+    fs::write(dir.0.join("test/check.clj"), caller).unwrap();
+    fs::write(
+        dir.0.join("src/impl.clj"),
+        "(ns app.impl)\n(defn normalize [value] value)",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .current_dir(&dir.0)
+        .args([
+            "definition",
+            "--alias",
+            "test",
+            "--file",
+            "test/check.clj",
+            "--offset",
+        ])
+        .arg(caller.find("impl/normalize").unwrap().to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = serde_json::from_slice::<Value>(&output.stdout).unwrap();
+    assert_eq!(result["path"], "src/impl.clj");
+    assert_eq!(result["span"]["start"]["line"], 2);
+    assert_eq!(result["span"]["start"]["column"], 7);
+}
+
+#[test]
 fn invalid_configurations_report_the_failing_key_or_value() {
     let dir = TestDir::new("config-errors");
     let path = dir.0.join("parenox.edn");
