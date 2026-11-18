@@ -80,6 +80,13 @@
 (assert (try (read-string "`~@items") false (catch RuntimeException _ true)))
 (println "Clojure/JVM syntax quote: 2 assertions passed")
 
+(load-file "examples/jvm_forms.clj")
+(let [box (demo.jvm-forms/->TextBox "text")]
+  (assert (= "text" (.text ^demo.jvm_forms.TextSource box)))
+  (assert (= :ready (demo.jvm-forms/ready box))))
+(assert (= "Untitled" (demo.jvm-forms/display-name {:name nil})))
+(println "Clojure/JVM declarations: 3 assertions passed")
+
 (println "Runtime reference:" (clojure-version))
 (load-file "examples/portable.cljc")
 (assert (= "ALICE" (demo.portable/label "Alice")))

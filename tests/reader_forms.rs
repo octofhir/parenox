@@ -70,6 +70,31 @@ fn syntax_quote_leaves_macro_coverage_open_and_checks_later_functions() {
 }
 
 #[test]
+fn jvm_declaration_gaps_allow_checking_a_typed_function_in_the_same_namespace() {
+    let source = include_str!("../examples/jvm_forms.clj");
+    let report = Session::default().check("jvm_forms.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(report.stats.checked_functions, 1);
+    assert_eq!(report.diagnostics.len(), 6, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|diagnostic| { diagnostic.code == "PNX9001" && diagnostic.severity == "warning" }),
+        "{report:#?}"
+    );
+
+    let malformed = source.replace("TextBox [^String value]", "TextBox :missing-fields");
+    let report = Session::default().check("jvm_forms.clj", &malformed);
+    assert!(
+        report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == "error" && diagnostic.message.contains("deftype")
+        }),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn metadata_shorthands_and_stacked_precedence_share_the_lossless_reader() {
     for (source, key) in [
         ("^:private item", ":private"),

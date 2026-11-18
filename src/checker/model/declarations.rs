@@ -261,6 +261,17 @@ impl Declarations {
                     model.literal_vars.push(index);
                     continue;
                 }
+                "set!"
+                    if matches!(xs.as_slice(), [_, target, value]
+                    if target.symbol() == Some("*warn-on-reflection*") && matches!(value.kind, Kind::Bool(_))) =>
+                {
+                    model.diagnostics.push(Diagnostic::analysis_gap(
+                        "PNX9001",
+                        xs[0].span,
+                        "Analysis for compiler flag assignments is unavailable",
+                    ));
+                    continue;
+                }
                 _ => {}
             }
             let resolved = model.names.resolve(op);
@@ -396,11 +407,24 @@ impl Declarations {
 }
 
 fn known_unsupported_declaration(qualified: &str, items: &[Form]) -> bool {
-    if items.get(1).and_then(Form::symbol).is_none() {
-        return false;
+    if qualified == "clojure.core/comment" {
+        return true;
     }
+    if qualified == "clojure.core/extend" {
+        return items.len() >= 2 && items.len().is_multiple_of(2);
+    }
+    let Some(name) = items.get(1).and_then(Form::symbol) else {
+        return false;
+    };
     match qualified {
-        "clojure.core/defrecord" => items.get(2).and_then(Form::vector).is_some(),
+        "clojure.core/defrecord" | "clojure.core/deftype" => {
+            !name.contains('/') && items.get(2).and_then(Form::vector).is_some()
+        }
+        "clojure.core/definterface" => !name.contains('/') && items[2..].iter().all(|method| {
+            matches!(&method.without_metadata().kind, Kind::List(xs)
+                if matches!(xs.as_slice(), [name, params] if name.symbol().is_some() && params.vector().is_some()))
+        }),
+        "clojure.core/defprotocol" => !name.contains('/'),
         "clojure.core/defmacro" => !function_clauses(function_parts(&items[2..]).0, items[1].span)
             .is_err_and(|diagnostic| diagnostic.severity == "error"),
         "clojure.core/defmethod" => items.len() >= 4,
