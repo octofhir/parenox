@@ -2,18 +2,25 @@
 use std::collections::BTreeSet;
 
 use crate::Diagnostic;
+use crate::checker::calls::arity_counts;
 use crate::checker::function_forms::function_clauses;
 use crate::reader::{Form, Kind};
 
 use super::contracts::function_parts;
-use super::declarations::symbols_match;
+use super::declarations::{SourceDeclaration, symbols_match};
 use super::{Declarations, Model};
+
+pub(crate) enum ProjectCall {
+    Unknown,
+    Missing,
+    Function { expected_arity: Option<String> },
+}
 
 impl Declarations {
     /// An opaque top-level form or a known namespace mutation prevents
     /// diagnosing absence from the source declarations.
     pub(crate) fn has_known_var_surface(&self, forms: &[Form]) -> bool {
-        self.diagnostics.is_empty()
+        !self.opaque_var_surface
             && forms.iter().all(|form| {
                 symbols_match(form, &mut |symbol| {
                     let name = symbol.rsplit('/').next().unwrap_or(symbol);
@@ -26,16 +33,58 @@ impl Declarations {
                             | "load-string"
                             | "in-ns"
                             | "ns-unmap"
+                            | "alter-var-root"
                     )
                 })
             })
+    }
+
+    pub(crate) fn project_call(&self, forms: &[Form], name: &str, actual: usize) -> ProjectCall {
+        let mut declarations = self.source_declarations(forms, name);
+        let Some(declaration) = declarations.next() else {
+            return ProjectCall::Missing;
+        };
+        if declarations.next().is_some() {
+            return ProjectCall::Unknown;
+        }
+        if self.source_private(&declaration) {
+            return ProjectCall::Missing;
+        }
+        let expected_arity = match declaration {
+            SourceDeclaration::Value(_) => return ProjectCall::Unknown,
+            SourceDeclaration::RecordFactory { arity, .. } => {
+                (!arity.accepts(actual)).then(|| arity.to_string())
+            }
+            SourceDeclaration::Function(items) => {
+                let (arms, attrs) = function_parts(&items[2..]);
+                if [":macro", ":dynamic", ":inline"].iter().any(|key| {
+                    attrs
+                        .clone()
+                        .find_map(|[attribute, value]| {
+                            (attribute.keyword() == Some(*key)).then_some(value)
+                        })
+                        .or_else(|| items[1].metadata(key))
+                        .is_some_and(|value| {
+                            !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
+                        })
+                }) {
+                    return ProjectCall::Unknown;
+                }
+                let Ok(clauses) = function_clauses(arms, items[1].span) else {
+                    return ProjectCall::Unknown;
+                };
+                (!clauses.keys().any(|arity| arity.accepts(actual)))
+                    .then(|| arity_counts(clauses.keys().copied()))
+            }
+        };
+        ProjectCall::Function { expected_arity }
     }
 
     pub(crate) fn check_untyped_references(
         &self,
         forms: &[Form],
         model: &Model,
-        mut unresolved: impl FnMut(&str, &str) -> bool,
+        mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Vec<Diagnostic> {
         // A PNX9002 at the definition means no typed root checks this body.
         let unchecked: BTreeSet<_> = model
@@ -59,7 +108,7 @@ impl Declarations {
         let mut visit = References {
             names: self,
             core_let,
-            unresolved: &mut unresolved,
+            resolve: &mut resolve,
             diagnostics: &mut diagnostics,
         };
         for &index in &self.functions {
@@ -81,11 +130,11 @@ impl Declarations {
 struct References<'a, F> {
     names: &'a Declarations,
     core_let: bool,
-    unresolved: &'a mut F,
+    resolve: &'a mut F,
     diagnostics: &'a mut Vec<Diagnostic>,
 }
 
-impl<F: FnMut(&str, &str) -> bool> References<'_, F> {
+impl<F: FnMut(&str, &str, usize) -> ProjectCall> References<'_, F> {
     fn forms(&mut self, forms: &[Form]) {
         for form in forms {
             match &form.without_metadata().kind {
@@ -107,19 +156,33 @@ impl<F: FnMut(&str, &str) -> bool> References<'_, F> {
             "let*" | "clojure.core/let" => self.bindings(args),
             "let" if self.core_let => self.bindings(args),
             _ => {
-                // Argument evaluation of other macros and calls is left to
-                // the typed checker. Inspect only this call head.
                 if let Some((alias, _)) = symbol.split_once('/')
                     && self.names.names.aliases.contains_key(alias)
                     && let Some((namespace, local)) = self.names.qualified_reference(symbol)
                     && namespace != self.names.namespace()
-                    && (self.unresolved)(namespace, local)
                 {
-                    self.diagnostics.push(Diagnostic::new(
-                        "PNX2304",
-                        head.without_metadata().span,
-                        format!("Unresolved or private project var {symbol}"),
-                    ));
+                    let span = head.without_metadata().span;
+                    match (self.resolve)(namespace, local, args.len()) {
+                        ProjectCall::Unknown => {}
+                        ProjectCall::Missing => self.diagnostics.push(Diagnostic::new(
+                            "PNX2304",
+                            span,
+                            format!("Unresolved or private project var {symbol}"),
+                        )),
+                        ProjectCall::Function { expected_arity } => {
+                            if let Some(expected) = expected_arity {
+                                self.diagnostics.push(Diagnostic::new(
+                                    "PNX2554",
+                                    span,
+                                    format!(
+                                        "{symbol} expects {expected} arguments, got {}",
+                                        args.len()
+                                    ),
+                                ));
+                            }
+                            self.forms(args);
+                        }
+                    }
                 }
             }
         }

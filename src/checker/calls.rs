@@ -764,7 +764,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
     ) || predicate_type(name).is_some()
 }
 
-fn arity_counts(counts: impl Iterator<Item = Arity>) -> String {
+pub(super) fn arity_counts(counts: impl Iterator<Item = Arity>) -> String {
     let counts: Vec<_> = counts.collect();
     let minimum = counts.last().and_then(|arity| match arity {
         Arity::Variadic(minimum) => Some(*minimum),

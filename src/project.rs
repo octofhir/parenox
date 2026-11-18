@@ -11,7 +11,8 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::checker::{
-    Declarations, ExternCache, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
+    Declarations, ExternCache, Globals, InterfaceKey, Model, ProjectCall, SpecCache,
+    SpecFingerprint, SpecSource,
 };
 use crate::reader::{self, Form, Position, Span};
 use crate::suppressions::{MARKER, Suppressions};
@@ -524,22 +525,23 @@ impl Session {
                         .extend(declarations.check_untyped_references(
                             &file.forms,
                             model,
-                            |namespace, local| {
+                            |namespace, local, actual| {
                                 let Some(&index) = namespaces.get(namespace) else {
-                                    return false;
+                                    return ProjectCall::Unknown;
                                 };
                                 let (_, provider, _) = &entries[index];
-                                built[index]
+                                let declarations = provider.declarations.as_ref().unwrap();
+                                if built[index]
                                     && provider.snapshot == self.snapshot
                                     && !ambiguous.contains(namespace)
-                                    && provider.declarations.as_ref().is_some_and(|declarations| {
-                                        declarations
-                                            .source_var(&provider.forms, local, true)
-                                            .is_none()
-                                            && *provider.known_var_surface.get_or_init(|| {
-                                                declarations.has_known_var_surface(&provider.forms)
-                                            })
+                                    && *provider.known_var_surface.get_or_init(|| {
+                                        declarations.has_known_var_surface(&provider.forms)
                                     })
+                                {
+                                    declarations.project_call(&provider.forms, local, actual)
+                                } else {
+                                    ProjectCall::Unknown
+                                }
                             },
                         ));
                 }

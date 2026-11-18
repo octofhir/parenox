@@ -53,6 +53,94 @@ fn checks_aliased_calls_in_unannotated_bodies_when_source_exports_are_known() {
     }
 }
 
+#[test]
+fn checks_source_arities_and_record_factories_without_contracts() {
+    let app = r#"(ns shop (:require [catalog :as c]))
+      (defn products []
+        [(c/->Item "first" 1)
+         (c/map->Item {:name "second" :count 2})
+         (c/->Item "too few")
+         (c/map->Item {} :unexpected)
+         (c/label (c/laebl "typo"))
+         (c/label)
+         (c/label "one" "two" "three")
+         (c/dynamic)
+         (c/redefined)])"#;
+    let provider = r#"(ns catalog)
+        (defrecord ^:private Item [name count])
+        (defmethod print-method Item [item writer] (.write writer (:name item)))
+        (defn label ([x] x) ([x y & more] (list x y more)))
+        (defn ^:dynamic dynamic [x] x)
+        (defn redefined [x] x)
+        (defn redefined [] :last)"#;
+    let mut session = Session::default();
+    let sources = |provider| {
+        [
+            Source {
+                path: "shop.clj",
+                source: app,
+            },
+            Source {
+                path: "catalog.clj",
+                source: provider,
+            },
+        ]
+    };
+    let report = session.check_project(&sources(provider), None);
+    let findings: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .map(|diagnostic| {
+            let span = diagnostic.span;
+            (
+                diagnostic.code.as_str(),
+                &app[span.start.offset..span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2554", "c/->Item"),
+            ("PNX2554", "c/map->Item"),
+            ("PNX2304", "c/laebl"),
+            ("PNX2554", "c/label"),
+        ],
+        "{report:#?}"
+    );
+    assert!(!report.complete);
+
+    for name in ["c/->Item", "c/map->Item"] {
+        let definition = session
+            .definition("shop.clj", app.find(name).unwrap())
+            .unwrap();
+        assert_eq!(definition.path, "catalog.clj");
+        assert_eq!(
+            &provider[definition.span.start.offset..definition.span.end.offset],
+            "Item"
+        );
+    }
+
+    let edited_provider = provider.replace("([x] x)", "([] :none) ([x] x)");
+    let warm = session.check_project(&sources(&edited_provider), None);
+    let cold = Session::default().check_project(&sources(&edited_provider), None);
+    let messages = |report: &ProjectReport| {
+        report.files[0]
+            .diagnostics
+            .iter()
+            .map(|d| (&d.code, &d.message))
+            .map(|(code, message)| (code.clone(), message.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(messages(&warm), messages(&cold));
+    assert!(
+        !messages(&warm)
+            .iter()
+            .any(|(_, message)| message.contains("c/label expects"))
+    );
+}
+
 fn clinic() -> BTreeMap<&'static str, String> {
     [
         (

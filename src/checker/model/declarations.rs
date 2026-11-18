@@ -5,6 +5,13 @@ use super::Globals;
 use super::contracts::function_parts;
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, ReadError, Span};
+use crate::types::Arity;
+
+pub(super) enum SourceDeclaration<'a> {
+    Function(&'a [Form]),
+    Value(&'a [Form]),
+    RecordFactory { name: &'a Form, arity: Arity },
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Names {
@@ -78,6 +85,8 @@ pub(crate) struct Declarations {
     pub(super) fdefs: Vec<usize>,
     pub(super) functions: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
+    records: Vec<usize>,
+    pub(super) opaque_var_surface: bool,
     pub(super) diagnostics: Vec<Diagnostic>,
 }
 
@@ -104,22 +113,66 @@ impl Declarations {
         local: &str,
         public_only: bool,
     ) -> Option<Span> {
-        let mut matches = self
+        let mut matches = self.source_declarations(forms, local);
+        let declaration = matches.next()?;
+        if matches.next().is_some() || (public_only && self.source_private(&declaration)) {
+            return None;
+        }
+        let name = match declaration {
+            SourceDeclaration::Function(items) | SourceDeclaration::Value(items) => &items[1],
+            SourceDeclaration::RecordFactory { name, .. } => name,
+        };
+        Some(name.without_metadata().span)
+    }
+
+    pub(super) fn source_declarations<'a>(
+        &'a self,
+        forms: &'a [Form],
+        local: &'a str,
+    ) -> impl Iterator<Item = SourceDeclaration<'a>> + 'a {
+        let named = self
             .functions
             .iter()
-            .chain(&self.literal_vars)
-            .filter_map(|&index| {
+            .map(|index| (index, true))
+            .chain(self.literal_vars.iter().map(|index| (index, false)))
+            .filter_map(move |(&index, function)| {
                 let Kind::List(items) = &forms[index].without_metadata().kind else {
                     return None;
                 };
                 let name = items.get(1)?;
-                (name.symbol() == Some(local)).then_some(items.as_slice())
+                (name.symbol() == Some(local)).then_some(if function {
+                    SourceDeclaration::Function(items)
+                } else {
+                    SourceDeclaration::Value(items)
+                })
             });
-        let items = matches.next()?;
-        if matches.next().is_some() || (public_only && self.private_var(items)) {
-            return None;
+        let positional = local.strip_prefix("->");
+        let named_map = local.strip_prefix("map->");
+        let factories = self.records.iter().filter_map(move |&index| {
+            let Kind::List(items) = &forms[index].without_metadata().kind else {
+                return None;
+            };
+            let name = &items[1];
+            let symbol = name.symbol()?;
+            let arity = if positional == Some(symbol) {
+                Arity::Fixed(items[2].vector()?.len())
+            } else if named_map == Some(symbol) {
+                Arity::Fixed(1)
+            } else {
+                return None;
+            };
+            Some(SourceDeclaration::RecordFactory { name, arity })
+        });
+        named.chain(factories)
+    }
+
+    pub(super) fn source_private(&self, declaration: &SourceDeclaration<'_>) -> bool {
+        match declaration {
+            SourceDeclaration::Function(items) | SourceDeclaration::Value(items) => {
+                self.private_var(items)
+            }
+            SourceDeclaration::RecordFactory { .. } => false,
         }
-        Some(items[1].without_metadata().span)
     }
 
     fn private_var(&self, items: &[Form]) -> bool {
@@ -138,6 +191,7 @@ impl Declarations {
     }
 
     pub(super) fn error(&mut self, code: &str, span: Span, message: impl Into<String>) {
+        self.opaque_var_surface = true;
         self.diagnostics.push(Diagnostic::new(code, span, message));
     }
 
@@ -215,6 +269,11 @@ impl Declarations {
                 "clojure.core/defn" | "clojure.core/defn-" => model.functions.push(index),
                 "clojure.spec.alpha/fdef" => model.fdefs.push(index),
                 qualified if known_unsupported_declaration(qualified, xs) => {
+                    match qualified {
+                        "clojure.core/defrecord" => model.records.push(index),
+                        "clojure.core/defmethod" => {}
+                        _ => model.opaque_var_surface = true,
+                    }
                     model.diagnostics.push(Diagnostic::analysis_gap(
                         "PNX9001",
                         xs[0].span,

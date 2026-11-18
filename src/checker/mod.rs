@@ -15,8 +15,8 @@ use env::Env;
 use exceptions::Throws;
 use model::{Contract, DeclaredValue, Function, VerifiedGuard};
 pub(crate) use model::{
-    Declarations, EncodeError, ExternCache, Globals, InterfaceKey, Model, SnapshotWriter,
-    SpecCache, SpecFingerprint, SpecSource,
+    Declarations, EncodeError, ExternCache, Globals, InterfaceKey, Model, ProjectCall,
+    SnapshotWriter, SpecCache, SpecFingerprint, SpecSource,
 };
 use recur::RecurTarget;
 
