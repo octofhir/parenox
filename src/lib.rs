@@ -13,6 +13,9 @@ pub use project::{ProjectReport, Session, Source};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Diagnostic {
+    /// Occurrence identity assigned in a check report, not a suppression rule code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub code: String,
     pub severity: &'static str,
     pub span: Span,
@@ -23,12 +26,42 @@ pub struct Diagnostic {
     pub expected: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<ContractOrigin>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<Suggestion>,
+}
+
+/// The contract used to check an argument or a result.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct ContractOrigin {
+    pub name: String,
+    pub kind: ContractKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractKind {
+    TSig,
+    SFdef,
+    Extern,
+    Builtin,
+}
+
+impl ContractOrigin {
+    fn builtin(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            kind: ContractKind::Builtin,
+            path: None,
+        }
+    }
 }
 
 /// A proposed edit, never applied automatically. Offsets refer to the report's source snapshot.
@@ -61,6 +94,7 @@ impl Diagnostic {
 
     fn new(code: &str, span: Span, message: impl Into<String>) -> Self {
         Self {
+            id: None,
             code: code.into(),
             severity: "error",
             span,
@@ -68,6 +102,7 @@ impl Diagnostic {
             headline: None,
             expected: None,
             actual: None,
+            contract: None,
             notes: Vec::new(),
             help: None,
             suggestions: Vec::new(),

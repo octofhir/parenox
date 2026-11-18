@@ -13,17 +13,18 @@ mod recur;
 
 use env::Env;
 use exceptions::Throws;
-use model::Function;
 pub(crate) use model::{
     Declarations, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
 };
+use model::{DeclaredValue, Function};
 use recur::RecurTarget;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, MAX_TUPLE_ITEMS, Type};
-use crate::{Diagnostic, Suggestion};
+use crate::types::{Arity, Compatibility, MAX_TUPLE_ITEMS, Type};
+use crate::{ContractOrigin, Diagnostic, Suggestion};
 
 impl Model {
     pub fn check_function(
@@ -33,7 +34,11 @@ impl Model {
         globals: &Globals,
     ) -> Vec<Diagnostic> {
         let mut checker = Checker::new(self, globals, source);
-        for signature in function.signatures.iter() {
+        let contract = function
+            .contract
+            .as_ref()
+            .expect("checked functions have contracts");
+        for signature in contract.signatures.iter() {
             let arity = &function.arities[&signature.arity()];
             let mut args: Vec<_> = signature.args.iter().cloned().map(Value::new).collect();
             if let Some(rest) = &signature.rest {
@@ -51,11 +56,12 @@ impl Model {
             }
             let result =
                 checker.function_body(&arity.params, &arity.body, args, &Env::new(), arity.span);
-            checker.expect(
+            checker.expect_contract(
                 &result,
                 &signature.ret,
                 arity.body.last().map_or(arity.span, |form| form.span),
                 &format!("Return value of {}", function.name),
+                Some(&contract.origin),
             );
         }
         checker.diagnostics
@@ -69,6 +75,7 @@ struct Value {
     // More precise static knowledge, e.g. a string literal or finite union of values.
     known: Type,
     notes: Vec<String>,
+    contract: Option<Arc<ContractOrigin>>,
 }
 
 impl Value {
@@ -77,6 +84,7 @@ impl Value {
             ty: known.inferred(),
             known,
             notes: Vec::new(),
+            contract: None,
         }
     }
 
@@ -99,12 +107,32 @@ impl Value {
                 self.notes.push(note);
             }
         }
-        Value::with_notes(self.known.join_values(other.known), self.notes)
+        let contract = if self.contract == other.contract {
+            self.contract
+        } else {
+            None
+        };
+        Self {
+            contract,
+            ..Self::with_notes(self.known.join_values(other.known), self.notes)
+        }
     }
 
     fn narrow(&mut self, known: Type) {
         self.ty = known.inferred();
         self.known = known;
+    }
+}
+
+impl From<DeclaredValue<'_>> for Value {
+    fn from(value: DeclaredValue<'_>) -> Self {
+        match value {
+            DeclaredValue::Literal(ty) => Self::new(ty.clone()),
+            DeclaredValue::Function(contract) => Self {
+                contract: Some(contract.origin.clone()),
+                ..Self::new(Type::Function(contract.signatures.clone()))
+            },
+        }
     }
 }
 
@@ -158,6 +186,7 @@ impl Checker<'_> {
                     diagnostic.span.end.offset,
                     diagnostic.code.clone(),
                     diagnostic.message.clone(),
+                    diagnostic.contract.clone(),
                 ))
             }));
     }
@@ -169,10 +198,20 @@ impl Checker<'_> {
     }
 
     fn expect(&mut self, actual: &Value, expected: &Type, span: Span, context: &str) {
-        if actual.ty.contains_unknown() || expected.contains_unknown() {
-            return; // The originating unsupported/unresolved form has its own diagnostic.
+        let compatibility = actual.known.compatibility(expected);
+        if compatibility == Compatibility::Unproven {
+            // Unknown types often result from an error already reported for this function or
+            // its declarations. If there is no local diagnostic, surface the unproven use.
+            if self.diagnostics.is_empty() && self.model.diagnostics.is_empty() {
+                self.error(
+                    "PNX9004",
+                    span,
+                    format!("{context}: cannot verify {} against {expected}", actual.ty),
+                );
+            }
+            return;
         }
-        if !actual.known.subtype_of(expected) {
+        if compatibility == Compatibility::Mismatch {
             let reported_type = if expected.requires_precise_type() {
                 &actual.known
             } else {
@@ -224,6 +263,23 @@ impl Checker<'_> {
                 });
             }
             self.diagnostics.push(diagnostic);
+        }
+    }
+
+    fn expect_contract(
+        &mut self,
+        actual: &Value,
+        expected: &Type,
+        span: Span,
+        context: &str,
+        contract: Option<&ContractOrigin>,
+    ) {
+        let start = self.diagnostics.len();
+        self.expect(actual, expected, span, context);
+        if let Some(contract) = contract
+            && let Some(diagnostic) = self.diagnostics.get_mut(start)
+        {
+            diagnostic.contract = Some(contract.clone());
         }
     }
 
@@ -279,7 +335,7 @@ impl Checker<'_> {
             Kind::Symbol(s) | Kind::AnonymousArgument(s) => {
                 if let Some(value) = env.get(s) {
                     value.clone()
-                } else if self.model.local_function(s).is_some_and(|f| f.inferred) {
+                } else if self.model.local_function(s).is_some_and(Function::inferred) {
                     self.error(
                         "PNX9002",
                         form.span,
@@ -289,7 +345,7 @@ impl Checker<'_> {
                     );
                     Value::new(Type::Unknown)
                 } else if let Some(value) = self.model.declared_value(s, self.globals) {
-                    Value::new(value.known())
+                    value.into()
                 } else {
                     let qualified = self.model.function_name(s);
                     let external = qualified.split_once('/').is_some_and(|(namespace, _)| {

@@ -55,6 +55,36 @@ const PROVIDER: &str = r#"(ns store)
 const EXTERNS: &str = "{db/title [string? :-> string?]}";
 
 #[test]
+fn closing_one_diagnostic_keeps_the_other_occurrence_id() {
+    let mut client = Client::start();
+    let source = r#"(ns app)
+        (defn first-label {:t/sig '[:-> string?]} [] 42)
+        (defn second-label {:t/sig '[:-> string?]} [] 23)"#;
+    let opened = client.result(json!({
+        "id": 1, "op": "open", "files": [{"path":"app.clj","source":source}]
+    }));
+    let diagnostics = opened["files"][0]["diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(diagnostics[0]["code"], diagnostics[1]["code"]);
+    assert_ne!(diagnostics[0]["id"], diagnostics[1]["id"]);
+    assert!(diagnostics[1]["id"].is_string());
+
+    let warm = client.result(json!({"id": 2, "op": "update"}));
+    assert_eq!(
+        warm["files"][0]["diagnostics"].as_array().unwrap(),
+        diagnostics
+    );
+    let fixed = client.result(json!({
+        "id": 3, "op": "update",
+        "changes": [{"path":"app.clj","source":source.replace("[] 42", "[] \"\"")}]
+    }));
+    assert_eq!(fixed["files"][0]["stats"]["reused_functions"], 1);
+    let remaining = fixed["files"][0]["diagnostics"].as_array().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["id"], diagnostics[1]["id"]);
+}
+
+#[test]
 fn tracks_edits_and_drops_removed_providers_and_externs() {
     let mut client = Client::start();
     let opened = client.result(json!({

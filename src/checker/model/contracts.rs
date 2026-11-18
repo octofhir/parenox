@@ -1,13 +1,14 @@
 //! Annotated signatures and function declarations.
 use std::collections::BTreeMap;
 
-use super::{Function, FunctionArity, Globals, Model, Signature, type_forms::read_type};
+use super::{Contract, Function, FunctionArity, Globals, Model, Signature, type_forms::read_type};
+use crate::ContractKind;
 use crate::checker::function_forms::{function_clauses, split_rest};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, Type};
 
 impl Model {
-    fn contract_type(&mut self, form: &Form, globals: &Globals) -> Type {
+    pub(super) fn contract_type(&mut self, form: &Form, globals: &Globals) -> Type {
         read_type(&self.names, form, &mut self.diagnostics, |key, _| {
             let ty = globals.specs.get(key);
             self.external_specs
@@ -17,7 +18,13 @@ impl Model {
         })
     }
 
-    pub(super) fn read_function(&mut self, xs: &[Form], span: Span, globals: &Globals) {
+    pub(super) fn read_function(
+        &mut self,
+        xs: &[Form],
+        span: Span,
+        globals: &Globals,
+        fdefs: &mut BTreeMap<String, &[Form]>,
+    ) {
         let Some(symbol) = xs.get(1).and_then(Form::symbol) else {
             self.error("PNX9001", span, "defn requires a function name");
             return;
@@ -25,6 +32,7 @@ impl Model {
         let Some(name) = self.definition_name(symbol, xs[1].span, "defn") else {
             return;
         };
+        let fdef = fdefs.remove(&name);
         if self.literals.contains_key(&name) {
             self.error("PNX2790", xs[1].span, format!("Duplicate var {name}"));
             return;
@@ -86,12 +94,12 @@ impl Model {
             default_private
         };
         let signature = attribute(":t/sig").or_else(|| xs[1].metadata(":t/sig"));
-        let inferred = signature.is_none();
+        let inferred = signature.is_none() && fdef.is_none();
         if inferred && !private {
             self.error(
                 "PNX9002",
                 span,
-                format!("Public function {name} needs a :t/sig annotation"),
+                format!("Public function {name} needs a :t/sig or s/fdef signature"),
             );
             return;
         }
@@ -123,13 +131,36 @@ impl Model {
             );
             return;
         }
-        let signatures = if let Some(signature) = signature {
+        let declared = if let Some(signature) = signature {
             if !matches!(signature.without_metadata().kind, Kind::Quote(_)) {
                 self.error("PNX9001", signature.span, ":t/sig must be quoted data");
             }
             let Some(signatures) = self.parse_signatures(signature, globals) else {
                 return;
             };
+            Some((signatures, signature.span, ContractKind::TSig))
+        } else {
+            None
+        };
+        let spec_signature = if let Some(fdef) = fdef {
+            let Some(signature) = self.parse_fdef(fdef, globals) else {
+                return;
+            };
+            if let Some((signatures, _, _)) = &declared
+                && signatures.as_slice() != std::slice::from_ref(&signature)
+            {
+                self.error(
+                    "PNX2790",
+                    fdef[1].span,
+                    format!("s/fdef and :t/sig disagree for {name}"),
+                );
+            }
+            Some((vec![signature], fdef[1].span, ContractKind::SFdef))
+        } else {
+            None
+        };
+        let contract = if let Some((signatures, signature_span, kind)) = declared.or(spec_signature)
+        {
             if !arities
                 .keys()
                 .copied()
@@ -137,28 +168,20 @@ impl Model {
             {
                 self.error(
                     "PNX2554",
-                    signature.span,
+                    signature_span,
                     "Signature arities must match the function's parameters",
                 );
                 return;
             }
-            signatures
+            Some(Contract::new(signatures, &name, kind, &self.path))
         } else {
-            arities
-                .keys()
-                .map(|arity| Signature {
-                    args: vec![Type::Unknown; arity.required()],
-                    rest: matches!(arity, Arity::Variadic(_)).then_some(Type::Unknown),
-                    ret: Type::Unknown,
-                })
-                .collect()
+            None
         };
         let function = Function {
             name: name.clone(),
             private,
-            inferred,
             arities,
-            signatures: signatures.into(),
+            contract,
             span,
         };
         self.names.refers.remove(symbol);
@@ -172,7 +195,10 @@ impl Model {
         form: &Form,
         globals: &Globals,
     ) -> Option<Vec<Signature>> {
-        let types = form.unquoted().vector();
+        let types = match &form.unquoted().without_metadata().kind {
+            Kind::Vector(items) | Kind::List(items) => Some(items.as_slice()),
+            _ => None,
+        };
         let Some(arms) =
             types.filter(|arms| !arms.is_empty() && arms.iter().all(|arm| arm.vector().is_some()))
         else {

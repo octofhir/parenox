@@ -1,5 +1,6 @@
 //! Map lookup, path updates and key presence.
 mod keys;
+mod merge;
 mod paths;
 use std::collections::BTreeMap;
 

@@ -133,6 +133,8 @@ It also declares a contract for the real library function
 `clojure.string/starts-with?` in [externs.edn](examples/clinic/externs.edn).
 Externs are trusted declarations for library functions. A matching project
 source declaration takes precedence, and source privacy applies to every caller.
+An extern for a name that Parenox already models reports `PNX2790`; it does not
+replace the built-in rule. An unmodeled name in the same namespace is allowed.
 
 ```sh
 ./target/release/parenox check examples/clinic \
@@ -275,6 +277,9 @@ and [clojurust](https://github.com/csm/clojurust) for future reader/expansion/ru
 boundaries. Parenox implements its own APIs; these projects are references rather
 than runtime or frontend dependencies.
 
+See [type checker research](docs/design/type-checker-research.md) for proposed
+next steps, including Crabjure's macro scopes and dependency resolution.
+
 ## Agent sessions
 
 ```sh
@@ -298,6 +303,18 @@ Responses have `id` and `result`. Results include `ok`, `complete`, diagnostics,
 and `stats`: elapsed microseconds, parsed/reused files and checked/reused functions.
 Project results contain a `files` array. Invalid JSON returns an error and the
 process continues.
+
+Each diagnostic in a check report has an `id` for that occurrence. Use it to
+match diagnostics between repeated checks of the same snapshot, including
+diagnostics with the same `code` and `span`. Treat the ID as opaque: it can
+change when a file is renamed or a diagnostic moves. Use `code` to identify
+the rule. The top-level response `id` still identifies the request.
+
+When a diagnostic checks a known function contract, text output names its
+source and JSON includes a `contract` object. It contains the qualified
+`name`, the `kind` (`t_sig`, `s_fdef`, `extern` or `builtin`) and, for
+file-backed contracts, the `path`. The primary diagnostic span still points
+to the call or return being checked.
 
 For editor sessions, open a tracked project once and send the changed files as
 full source strings in each update. This example checks one file, edits it, and
@@ -354,13 +371,34 @@ and measure reuse within that file.
 
 ## Current scope
 
-Types are read as data from `s/def` and quoted `:t/sig` metadata. Public functions
+Types are read from `s/def`, `s/fdef` and quoted `:t/sig` metadata. Public functions
 need signatures. Direct calls to single-arity private helpers (`defn-`, `^:private` or `{:private true}`)
 can omit them: the checker uses the actual argument types to analyze the body and
 infer its result. This is inference for each call, not a generalized function signature.
 
+Use `s/fdef` to check an existing single-arity function without adding metadata:
+
+```clojure
+(ns example.labels (:require [clojure.spec.alpha :as s]))
+
+(s/fdef label :args (s/cat :name string?) :ret string?)
+(defn label [name] (clojure.string/upper-case name))
+```
+
+Parenox checks the function body and its callers. The target must be a `defn`
+or `defn-` in the same namespace. The supported `:args` form is `s/cat` with
+fixed arguments and an optional final `(s/* T)` for a rest parameter. Both
+`:args` and `:ret` are required. Other options such as `:fn` and more general
+argument regexes report an analysis gap. If both signature sources are present,
+they must agree. Checking does not evaluate the spec or instrument the function.
+
+At calls and returns, an unknown type does not hide a mismatch in a different
+part of the value. If missing type information prevents checking the contract
+and there is no local diagnostic yet, Parenox reports `PNX9004` and marks the
+check incomplete.
+
 For a multi-arity definition, write one signature per clause in a
-quoted vector, for example `:t/sig '[[:-> string?] [string? :-> number?]]`.
+quoted vector or list, for example `:t/sig '[[:-> string?] [string? :-> number?]]`.
 Each body is checked against its signature. Calls select the signature for their
 argument count, including when the function is passed as a callback. Externs
 accept the same vector of signatures as EDN data. Run `just arities` for a
@@ -376,7 +414,9 @@ over a variadic clause at the same argument count. Inside the variadic body
 positions, including vector literals. It selects a signature for each exact
 shape and supports inline `fnil` wrappers. For an open vector or seq, it
 checks possible counts and element types against declared signatures and
-supported built-ins. Run `just spread` for examples.
+supported built-ins. Applying `merge` with an open spread reports an analysis
+gap because the result depends on how many maps are passed and which keys they
+overwrite. Run `just spread` for examples.
 
 Use `#(...)` in immediate calls and supported callbacks. `%` and `%1` name the
 first argument, `%2` and later positions set the required count, and `%&` holds
@@ -449,6 +489,11 @@ Known scalar literals let `=` resolve branches, including status comparisons
 on each iteration of that loop. Run `just guards`
 to see the result type when no fallback is supplied and a type error when
 `if-some` passes `false` into a numeric call.
+
+`merge` accepts maps and nil. Rightmost present values win, including explicit
+nil. An optional right-hand field can change the value type without removing a
+required left-hand field. An undeclared field in an open map can overwrite a
+known value; if its type remains unknown after the merge, Parenox reports a gap.
 
 `get-in`, `assoc-in`, and `update-in` accept vectors and sequences with
 known keyword or string positions, including computed paths such as

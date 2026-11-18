@@ -1,5 +1,6 @@
 //! Function resolution, call-site inference and built-in calls.
 mod apply;
+mod forms;
 mod indexing;
 mod inline;
 mod reduction;
@@ -13,10 +14,10 @@ use super::{
     Checker, Env, Value, exceptions::Throws, function_forms::pack_arguments, model::Function,
     nil_part,
 };
-use crate::Diagnostic;
-use crate::expand::Threading;
 use crate::reader::{Form, Span};
 use crate::types::{Arity, Signature, Type};
+use crate::{ContractOrigin, Diagnostic};
+use forms::CoreForm;
 use inline::{Fnil, InlineFunction};
 
 enum Callable<'form, 'model> {
@@ -162,7 +163,7 @@ impl<'model> Checker<'model> {
         }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
-            && let Some(function) = self.model.local_function(name).filter(|f| f.inferred)
+            && let Some(function) = self.model.local_function(name).filter(|f| f.inferred())
         {
             let args = self
                 .eval_args(&xs[1..], env, true)
@@ -175,67 +176,12 @@ impl<'model> Checker<'model> {
             && self.model.declared_value(name, self.globals).is_none()
         {
             let resolved = self.model.resolve(name);
-            if let Some(threading) = Threading::from_core_symbol(&resolved) {
-                return self.thread_form(xs, span, env, threading, &resolved, tail);
+            if let Some(form) = CoreForm::resolve(&resolved) {
+                return self.core_form(form, &resolved, xs, span, env, tail);
             }
-            match resolved.as_str() {
-                "clojure.core/as->" => return self.named_thread(xs, span, env, tail),
-                "clojure.core/let" => return self.let_form(xs, span, env, tail),
-                "clojure.core/loop" => return self.loop_form(xs, span, env, false),
-                "clojure.core/cond" => return self.cond_form(&xs[1..], span, env, tail),
-                "clojure.core/case" => return self.case_form(&xs[1..], span, env, tail),
-                "clojure.core/when" => {
-                    return self.if_form(xs, span, env, Conditional::When, tail);
-                }
-                "clojure.core/if-not" => {
-                    return self.if_form(xs, span, env, Conditional::IfNot, tail);
-                }
-                "clojure.core/when-not" => {
-                    return self.if_form(xs, span, env, Conditional::WhenNot, tail);
-                }
-                "clojure.core/if-let"
-                | "clojure.core/when-let"
-                | "clojure.core/if-some"
-                | "clojure.core/when-some"
-                | "clojure.core/when-first" => {
-                    return self.binding_conditional(xs, span, env, &resolved, tail);
-                }
-
-                "clojure.core/or" | "clojure.core/and" => {
-                    return self.short_circuit(xs, env, resolved.ends_with("/or"), tail);
-                }
-                "clojure.core/get" | "clojure.core/req!" => {
-                    return self.lookup_form(xs, span, env, &resolved);
-                }
-                "clojure.core/contains?" => return self.contains(xs, span, env),
-                "clojure.core/get-in" => return self.get_in(xs, span, env),
-                "clojure.core/assoc" => return self.assoc(xs, span, env),
-                "clojure.core/assoc-in" => return self.assoc_in(xs, span, env),
-                "clojure.core/fn" => {
-                    return self.unsupported(
-                        span,
-                        "fn is currently supported in direct calls and inline callbacks",
-                    );
-                }
-                "clojure.core/fnil" => {
-                    return self.unsupported(
-                        span,
-                        "fnil is currently supported in direct calls and inline callbacks",
-                    );
-                }
-                "clojure.core/update" | "clojure.core/update-in" => {
-                    return self.update(xs, span, env, &resolved);
-                }
-                "clojure.core/apply" => return self.apply_form(&xs[1..], span, env),
-                "clojure.core/reduce" => return self.reduce_form(&xs[1..], span, env),
-                "clojure.core/mapv" | "clojure.core/filterv" => {
-                    return self.vector_transform(xs, span, env, &resolved);
-                }
-                _ if is_builtin(&resolved) => {
-                    let args = self.typed_args(&xs[1..], env);
-                    return self.builtin(&resolved, &args, span);
-                }
-                _ => {}
+            if is_builtin(&resolved) {
+                let args = self.typed_args(&xs[1..], env);
+                return self.builtin(&resolved, &args, span);
             }
         }
         if let Some(kind) = self.prepare_inline(&xs[0], env) {
@@ -277,7 +223,7 @@ impl<'model> Checker<'model> {
                     .iter()
                     .find(|sig| sig.arity().accepts(args.len()))
                 else {
-                    self.error(
+                    let mut diagnostic = Diagnostic::new(
                         "PNX2554",
                         span,
                         format!(
@@ -286,6 +232,8 @@ impl<'model> Checker<'model> {
                             args.len()
                         ),
                     );
+                    diagnostic.contract = function.contract.as_deref().cloned();
+                    self.diagnostics.push(diagnostic);
                     return Value::new(Type::Unknown);
                 };
                 for (index, (actual, span)) in args.iter().enumerate() {
@@ -294,7 +242,13 @@ impl<'model> Checker<'model> {
                         .get(index)
                         .or(signature.rest.as_ref())
                         .unwrap();
-                    self.expect(actual, expected, *span, &format!("Argument {}", index + 1));
+                    self.expect_contract(
+                        actual,
+                        expected,
+                        *span,
+                        &format!("Argument {}", index + 1),
+                        function.contract.as_deref(),
+                    );
                 }
                 Value::new(signature.ret.clone())
             }
@@ -320,7 +274,10 @@ impl<'model> Checker<'model> {
                 }
             }
             Type::Union(parts) => parts.iter().fold(Value::new(Type::Never), |result, part| {
-                let alternative = Value::with_notes(part.clone(), function.notes.clone());
+                let alternative = Value {
+                    contract: function.contract.clone(),
+                    ..Value::with_notes(part.clone(), function.notes.clone())
+                };
                 result.join(self.call_value(&alternative, args, head, span))
             }),
             Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => {
@@ -363,7 +320,7 @@ impl<'model> Checker<'model> {
         if let Some(name) = callee.symbol()
             && !env.contains_key(name)
         {
-            if let Some(function) = self.model.local_function(name).filter(|f| f.inferred) {
+            if let Some(function) = self.model.local_function(name).filter(|f| f.inferred()) {
                 return prepare(Callable::Private(function));
             }
             if self.model.declared_value(name, self.globals).is_none() {
@@ -402,6 +359,23 @@ impl<'model> Checker<'model> {
     }
 
     fn builtin(&mut self, name: &str, args: &[(Value, Span)], span: Span) -> Value {
+        let start = self.diagnostics.len();
+        let value = self.check_builtin(name, args, span);
+        self.note_builtin_contract(start, name);
+        value
+    }
+
+    fn note_builtin_contract(&mut self, start: usize, name: &str) {
+        for diagnostic in &mut self.diagnostics[start..] {
+            if matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2554" | "PNX9004") {
+                diagnostic
+                    .contract
+                    .get_or_insert_with(|| ContractOrigin::builtin(name));
+            }
+        }
+    }
+
+    fn check_builtin(&mut self, name: &str, args: &[(Value, Span)], span: Span) -> Value {
         let arity_ok = builtin_arities(name)
             .iter()
             .any(|arity| arity.accepts(args.len()));
@@ -456,6 +430,7 @@ impl<'model> Checker<'model> {
             "clojure.core/list" => return sequences::list_value(args),
             "clojure.core/cons" => return self.cons(args),
             "clojure.core/conj" => return self.conj(args),
+            "clojure.core/merge" => return self.merge(args, span),
             "clojure.core/ex-info" => return self.ex_info(args),
             "clojure.core/ex-data" => return self.ex_data(&args[0].0),
             "clojure.core/seq" | "clojure.core/first" | "clojure.core/next"
@@ -556,7 +531,7 @@ impl<'model> Checker<'model> {
 fn builtin_arities(name: &str) -> &'static [Arity] {
     match name {
         "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj"
-        | "clojure.core/list" => &[Arity::Variadic(0)],
+        | "clojure.core/list" | "clojure.core/merge" => &[Arity::Variadic(0)],
         "clojure.core/-" | "clojure.core/=" => &[Arity::Variadic(1)],
         "clojure.core/nth" | "clojure.core/ex-info" => &[Arity::Fixed(2), Arity::Fixed(3)],
         "clojure.core/cons" => &[Arity::Fixed(2)],
@@ -640,6 +615,10 @@ fn predicate_result(actual: &Type, expected: &Type) -> Type {
     }
 }
 
+pub(super) fn is_modeled_call(name: &str) -> bool {
+    is_builtin(name) || CoreForm::resolve(name).is_some()
+}
+
 pub(super) fn is_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -665,6 +644,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/next"
             | "clojure.core/rest"
             | "clojure.core/conj"
+            | "clojure.core/merge"
             | "clojure.core/list"
             | "clojure.core/cons"
             | "clojure.core/reduced"

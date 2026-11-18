@@ -1,6 +1,8 @@
+mod compatibility;
 mod indexing;
 mod maps;
 
+pub(crate) use compatibility::Compatibility;
 pub use indexing::IndexedItem;
 pub use maps::{ExtraFields, Field, MapSlot, MapType};
 use std::collections::BTreeSet;
@@ -38,10 +40,7 @@ impl Arity {
     }
 
     pub fn bindings(self) -> usize {
-        match self {
-            Self::Fixed(count) => count,
-            Self::Variadic(count) => count + 1,
-        }
+        self.required() + usize::from(matches!(self, Self::Variadic(_)))
     }
 
     pub fn valid_set(arities: impl Iterator<Item = Self>) -> bool {
@@ -297,54 +296,6 @@ impl Type {
                 .collect::<Option<Vec<_>>>()
                 .map(Type::union),
             _ => None,
-        }
-    }
-
-    pub fn subtype_of(&self, expected: &Type) -> bool {
-        if self == &Type::Never || self == expected {
-            return true;
-        }
-        match (self, expected) {
-            (Type::Union(xs), e) => xs.iter().all(|t| t.subtype_of(e)),
-            (a, Type::Union(xs)) => xs.iter().any(|e| a.subtype_of(e)),
-            (Type::Integer(_), Type::Number)
-            | (Type::Str(_), Type::String)
-            | (Type::Char(_), Type::Character)
-            | (Type::Key(_), Type::Keyword)
-            | (Type::ExceptionInfo(_), Type::Throwable)
-            | (Type::Bool(_), Type::Boolean) => true,
-            (Type::MapEntry(a), Type::MapEntry(e)) => {
-                a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
-            }
-            (Type::MapEntry(items), Type::Vector(e)) => items.iter().all(|item| item.subtype_of(e)),
-            (Type::Tuple(items), Type::Vector(e)) => items.iter().all(|item| item.subtype_of(e)),
-            (Type::SeqTuple(items), Type::Seq(e)) => {
-                !items.is_empty() && items.iter().all(|item| item.subtype_of(e))
-            }
-            (Type::Tuple(a), Type::Tuple(e)) | (Type::SeqTuple(a), Type::SeqTuple(e)) => {
-                a.len() == e.len() && a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
-            }
-            (Type::MapEntry(a), Type::Tuple(e)) => {
-                e.len() == 2 && a.iter().zip(e.iter()).all(|(a, e)| a.subtype_of(e))
-            }
-            (Type::Vector(a), Type::Vector(e))
-            | (Type::Set(a), Type::Set(e))
-            | (Type::Seq(a), Type::Seq(e))
-            | (Type::Reduced(a), Type::Reduced(e))
-            | (Type::ExceptionInfo(a), Type::ExceptionInfo(e)) => a.subtype_of(e),
-            (Type::Function(actual), Type::Function(expected)) => expected.iter().all(|e| {
-                actual.iter().any(|a| {
-                    a.arity() == e.arity()
-                        && a.args.iter().zip(&e.args).all(|(a, e)| e.subtype_of(a))
-                        && a.rest
-                            .as_ref()
-                            .zip(e.rest.as_ref())
-                            .is_none_or(|(a, e)| e.subtype_of(a))
-                        && a.ret.subtype_of(&e.ret)
-                })
-            }),
-            (Type::Map(a), Type::Map(e)) => a.subtype_of(e),
-            _ => false,
         }
     }
 

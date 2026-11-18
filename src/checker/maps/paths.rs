@@ -266,6 +266,7 @@ impl Checker<'_> {
             }
         });
         let key_returns = target_returns && !matches!(path, Err(Type::Never));
+        let updater_diagnostics = self.diagnostics.len();
         let callable = self.inspect_path(key_returns, |checker| {
             checker.prepare_callable(updater, env)
         });
@@ -309,7 +310,9 @@ impl Checker<'_> {
             return value;
         }
         self.may_throw();
-        if unknown {
+        // Do not manufacture a map result when the updater failed to resolve or invoke.
+        if unknown || (value.known == Type::Unknown && self.diagnostics.len() > updater_diagnostics)
+        {
             return Value::new(Type::Unknown);
         }
         Value::new(self.assoc_paths(

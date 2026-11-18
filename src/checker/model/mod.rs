@@ -2,6 +2,7 @@
 mod contracts;
 mod declarations;
 mod externs;
+mod fdefs;
 mod imports;
 mod interfaces;
 mod require;
@@ -20,19 +21,43 @@ use interfaces::{Exports, LocalInterface, visible_value};
 pub(crate) use specs::{SpecCache, SpecFingerprint, SpecSource};
 use vars::LiteralVar;
 
-use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, Signature, Type};
+use crate::{ContractKind, ContractOrigin, Diagnostic};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Function {
     pub name: String,
     pub private: bool,
-    // Private definitions without a signature are analyzed through direct typed callers.
-    pub inferred: bool,
     pub arities: BTreeMap<Arity, FunctionArity>,
-    pub signatures: Arc<[Signature]>,
+    pub contract: Option<Contract>,
     pub span: Span,
+}
+
+impl Function {
+    // Private definitions without a signature are analyzed through direct typed callers.
+    pub fn inferred(&self) -> bool {
+        self.contract.is_none()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Contract {
+    pub signatures: Arc<[Signature]>,
+    pub origin: Arc<ContractOrigin>,
+}
+
+impl Contract {
+    fn new(signatures: Vec<Signature>, name: &str, kind: ContractKind, path: &str) -> Self {
+        Self {
+            signatures: signatures.into(),
+            origin: Arc::new(ContractOrigin {
+                name: name.into(),
+                kind,
+                path: Some(path.into()),
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -45,16 +70,7 @@ pub(crate) struct FunctionArity {
 #[derive(PartialEq, Eq)]
 pub(super) enum DeclaredValue<'a> {
     Literal(&'a Type),
-    Function(&'a Arc<[Signature]>),
-}
-
-impl DeclaredValue<'_> {
-    pub(super) fn known(self) -> Type {
-        match self {
-            Self::Literal(ty) => ty.clone(),
-            Self::Function(signatures) => Type::Function(signatures.clone()),
-        }
-    }
+    Function(&'a Contract),
 }
 
 #[derive(Default)]
@@ -95,6 +111,7 @@ impl Globals {
 #[derive(Default)]
 pub(crate) struct Model {
     names: Names,
+    path: String,
     externs: Option<Arc<Externs>>,
     literals: BTreeMap<String, LiteralVar>,
     exports: Arc<Exports>,
@@ -112,6 +129,7 @@ impl Model {
         declarations: &Declarations,
         forms: &[Form],
         source: &str,
+        path: &str,
         globals: &Globals,
     ) -> Self {
         let resolved;
@@ -132,6 +150,7 @@ impl Model {
         };
         let mut model = Self {
             names: declarations.names.clone(),
+            path: path.into(),
             diagnostics: declarations.diagnostics.clone(),
             external_refers: declarations
                 .all_refers
@@ -153,12 +172,20 @@ impl Model {
             };
             model.read_def(xs, form.span, source, globals);
         }
+        let mut fdefs = model.collect_fdefs(&declarations.fdefs, forms);
         for &index in &declarations.functions {
             let form = &forms[index];
             let Kind::List(xs) = &form.without_metadata().kind else {
                 unreachable!()
             };
-            model.read_function(xs, form.span, globals);
+            model.read_function(xs, form.span, globals, &mut fdefs);
+        }
+        for (name, parts) in fdefs {
+            model.error(
+                "PNX9001",
+                parts[1].span,
+                format!("s/fdef has no supported function definition for {name}"),
+            );
         }
         model.collect_helpers();
         model.freeze_interfaces(specs, declarations.dependencies.clone());
@@ -227,14 +254,15 @@ impl Model {
     }
 
     fn collect_helpers(&mut self) {
-        if !self.functions.values().any(|f| f.inferred) {
+        if !self.functions.values().any(Function::inferred) {
             return;
         }
         fn visit(forms: &[Form], model: &Model, names: &mut BTreeSet<String>) {
             for form in forms {
                 match &form.kind {
                     Kind::Symbol(name) => {
-                        if let Some(function) = model.local_function(name).filter(|f| f.inferred) {
+                        if let Some(function) = model.local_function(name).filter(|f| f.inferred())
+                        {
                             names.insert(function.name.clone());
                         }
                     }
@@ -287,13 +315,13 @@ impl Model {
         let reachable: BTreeSet<_> = self
             .functions
             .values()
-            .filter(|f| !f.inferred)
+            .filter(|f| !f.inferred())
             .flat_map(|f| self.helpers(f))
             .collect();
         let unused: Vec<_> = self
             .functions
             .values()
-            .filter(|f| f.inferred && !reachable.contains(f.name.as_str()))
+            .filter(|f| f.inferred() && !reachable.contains(f.name.as_str()))
             .map(|f| (f.span, f.name.clone()))
             .collect();
         for (span, name) in unused {
@@ -346,7 +374,7 @@ impl Model {
             return Some(DeclaredValue::Literal(&value.ty));
         }
         if let Some(function) = self.functions.get(&qualified) {
-            return (!function.inferred).then_some(DeclaredValue::Function(&function.signatures));
+            return function.contract.as_ref().map(DeclaredValue::Function);
         }
         globals
             .declared_value(&qualified)

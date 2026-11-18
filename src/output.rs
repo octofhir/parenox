@@ -6,7 +6,20 @@ use annotate_snippets::{AnnotationKind, Group, Level, Patch, Renderer, Snippet};
 
 use annotate_snippets::renderer::{AnsiColor, Effects, Style};
 
-use crate::{Diagnostic, ProjectReport, Report, Stats};
+use crate::{ContractKind, ContractOrigin, Diagnostic, ProjectReport, Report, Stats};
+
+fn contract_note(origin: &ContractOrigin) -> String {
+    let kind = match origin.kind {
+        ContractKind::TSig => ":t/sig",
+        ContractKind::SFdef => "s/fdef",
+        ContractKind::Extern => "extern declaration",
+        ContractKind::Builtin => "built-in rule",
+    };
+    match &origin.path {
+        Some(path) => format!("Contract for {}: {kind} in {path}", origin.name),
+        None => format!("Contract for {}: {kind}", origin.name),
+    }
+}
 
 fn renderer(color: bool) -> Renderer {
     if color {
@@ -38,6 +51,9 @@ pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: 
                     .fold(true)
                     .annotation(annotation),
             );
+        if let Some(contract) = &diagnostic.contract {
+            primary = primary.element(Level::NOTE.message(contract_note(contract)));
+        }
         for note in &diagnostic.notes {
             primary = primary.element(Level::NOTE.message(note));
         }
@@ -147,6 +163,9 @@ pub fn plain(report: &Report) -> String {
             diagnostic.message
         )
         .unwrap();
+        if let Some(contract) = &diagnostic.contract {
+            writeln!(output, "  note: {}", contract_note(contract)).unwrap();
+        }
         for note in &diagnostic.notes {
             writeln!(output, "  note: {note}").unwrap();
         }

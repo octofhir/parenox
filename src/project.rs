@@ -272,7 +272,7 @@ impl Session {
             globals.register_namespace(namespace);
         }
         for index in order {
-            let (_, cache, _) = &mut entries[index];
+            let (source, cache, _) = &mut entries[index];
             if let Some(declarations) = &cache.declarations {
                 if cache
                     .model
@@ -283,6 +283,7 @@ impl Session {
                         declarations,
                         &cache.forms,
                         &cache.source,
+                        source.path,
                         &globals,
                     ));
                 }
@@ -290,19 +291,20 @@ impl Session {
             }
         }
         if externs.is_some() {
-            let (_, cache, _) = &mut entries[count];
+            let (source, cache, _) = &mut entries[count];
             if cache.parse_error.is_none() {
                 if cache
                     .model
                     .as_mut()
                     .is_none_or(|model| !model.refresh_external_inputs(&globals))
                 {
-                    cache.model = Some(Model::externs(&cache.forms, &globals));
+                    cache.model = Some(Model::externs(&cache.forms, source.path, &globals));
                 }
                 cache.model.as_ref().unwrap().publish_externs(&mut globals);
             }
         }
         let mut totals = Stats::default();
+        let mut report_ordinals = BTreeMap::<&str, usize>::new();
         for (index, (source, mut cache, changed)) in entries.into_iter().enumerate() {
             let file_started = Instant::now();
             let report = &mut reports[index];
@@ -331,7 +333,7 @@ impl Session {
                             .flat_map(|function| function.diagnostics.iter().cloned()),
                     );
                 } else {
-                    for function in model.functions.values().filter(|f| !f.inferred) {
+                    for function in model.functions.values().filter(|f| !f.inferred()) {
                         let ranges = model.function_ranges(function);
                         if let Some(cached) =
                             cache.functions.get_mut(&function.name).filter(|cached| {
@@ -366,16 +368,20 @@ impl Session {
                             model
                                 .functions
                                 .get(name)
-                                .is_some_and(|function| !function.inferred)
+                                .is_some_and(|function| !function.inferred())
                         });
                     }
                     cache.checked_source = cache.source.clone();
                 }
                 cache.interface = Some(interface);
             }
-            report.diagnostics.sort_by(|a, b| {
-                (a.span.start.offset, &a.code).cmp(&(b.span.start.offset, &b.code))
-            });
+            if !report.diagnostics.is_empty() {
+                // A caller can supply duplicate paths in an invalid snapshot. Their
+                // reports must not share IDs even when the diagnostics are identical.
+                let ordinal = report_ordinals.entry(source.path).or_default();
+                identify_diagnostics(source.path, *ordinal, &mut report.diagnostics);
+                *ordinal += 1;
+            }
             report.ok = report.diagnostics.is_empty();
             report.complete = !report
                 .diagnostics
@@ -396,5 +402,30 @@ impl Session {
             files: reports,
             stats: totals,
         }
+    }
+}
+
+fn identify_diagnostics(path: &str, report: usize, diagnostics: &mut [Diagnostic]) {
+    let key = |diagnostic: &Diagnostic| (diagnostic.span.start.offset, diagnostic.span.end.offset);
+    diagnostics.sort_by(|a, b| {
+        let (start_a, end_a) = key(a);
+        let (start_b, end_b) = key(b);
+        (start_a, &a.code, end_a).cmp(&(start_b, &b.code, end_b))
+    });
+
+    // Assign IDs after merging cached and fresh diagnostics. Stable sorting keeps
+    // the original analysis order among diagnostics with identical spans and rules.
+    let mut previous = None;
+    let mut ordinal = 0;
+    for diagnostic in diagnostics {
+        let (start, end) = key(diagnostic);
+        let code = diagnostic.code.as_str();
+        let current = (start, end, code);
+        if previous != Some(current) {
+            previous = Some(current);
+            ordinal = 0;
+        }
+        diagnostic.id = Some(format!("{path}:{start}-{end}:{code}:{report}:{ordinal}"));
+        ordinal += 1;
     }
 }

@@ -155,7 +155,7 @@ impl Checker<'_> {
         self.diagnostics.extend(errors.into_iter().filter(|d| {
             !matches!(
                 d.code.as_str(),
-                "PNX2322" | "PNX2741" | "PNX2801" | "PNX2802"
+                "PNX2322" | "PNX2741" | "PNX2801" | "PNX2802" | "PNX9004"
             )
         }));
         value

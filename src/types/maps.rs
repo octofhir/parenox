@@ -1,7 +1,10 @@
 //! Map shapes and types for their additional entries.
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
-use super::Type;
+use super::{Compatibility, Type};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MapType {
@@ -41,22 +44,26 @@ impl ExtraFields {
         }
     }
 
-    fn accepts_type(&self, other: &Self) -> bool {
+    fn accepts_type(&self, other: &Self) -> Compatibility {
         match (self, other) {
-            (Self::Open, _) | (_, Self::Closed) => true,
-            (Self::Typed(expected), Self::Typed(actual)) => actual
-                .iter()
-                .zip(expected.iter())
-                .all(|(actual, expected)| actual.subtype_of(expected)),
-            _ => false,
+            (Self::Open, _) | (_, Self::Closed) => Compatibility::Proven,
+            (Self::Typed(expected), Self::Typed(actual)) => Compatibility::all(
+                actual
+                    .iter()
+                    .zip(expected.iter())
+                    .map(|(a, e)| a.compatibility(e)),
+            ),
+            _ => Compatibility::Mismatch,
         }
     }
 
-    fn accepts_field(&self, key: &Type, ty: &Type) -> bool {
+    fn accepts_field(&self, key: &Type, ty: &Type) -> Compatibility {
         match self {
-            Self::Open => true,
-            Self::Closed => false,
-            Self::Typed(types) => key.subtype_of(&types[0]) && ty.subtype_of(&types[1]),
+            Self::Open => Compatibility::Proven,
+            Self::Closed => Compatibility::Mismatch,
+            Self::Typed(types) => key
+                .compatibility(&types[0])
+                .and(|| ty.compatibility(&types[1])),
         }
     }
 }
@@ -112,6 +119,51 @@ impl MapType {
                 ExtraFields::Typed(_) => MapSlot::Absent,
             },
         }
+    }
+
+    pub(crate) fn merge(&self, right: &Self) -> Self {
+        let extra = match (&self.extra, &right.extra) {
+            (ExtraFields::Open, _) | (_, ExtraFields::Open) => ExtraFields::Open,
+            (ExtraFields::Closed, other) | (other, ExtraFields::Closed) => other.clone(),
+            (ExtraFields::Typed(a), ExtraFields::Typed(b)) => ExtraFields::Typed(Box::new([
+                Type::union([a[0].clone(), b[0].clone()]),
+                Type::union([a[1].clone(), b[1].clone()]),
+            ])),
+        };
+        let mut result = Self {
+            fields: BTreeMap::new(),
+            extra,
+        };
+        for key in self
+            .fields
+            .keys()
+            .chain(right.fields.keys())
+            .collect::<BTreeSet<_>>()
+        {
+            let slot = |slot| match slot {
+                MapSlot::Present(ty) => (ty.clone(), true),
+                MapSlot::Optional(ty) => (ty.clone(), false),
+                MapSlot::Absent => (Type::Never, false),
+                MapSlot::Undeclared => (Type::Unknown, false),
+            };
+            let (right_ty, required) = slot(right.slot(key));
+            let field = if required {
+                Field {
+                    ty: right_ty,
+                    required,
+                }
+            } else {
+                let (left_ty, required) = slot(self.slot(key));
+                let ty = if left_ty == Type::Unknown || right_ty == Type::Unknown {
+                    Type::Unknown
+                } else {
+                    Type::union([left_ty, right_ty])
+                };
+                Field { ty, required }
+            };
+            result.set_field(key.clone(), field);
+        }
+        result
     }
 
     pub fn set_field(&mut self, key: Type, field: Field) {
@@ -230,23 +282,37 @@ impl MapType {
             || matches!(&self.extra, ExtraFields::Typed(types) if types.iter().any(predicate))
     }
 
-    pub(super) fn subtype_of(&self, expected: &Self) -> bool {
-        expected.extra.accepts_type(&self.extra)
-            && expected
-                .fields
-                .iter()
-                .all(|(key, field)| match self.slot(key) {
-                    MapSlot::Present(actual) => actual.subtype_of(&field.ty),
-                    MapSlot::Optional(actual) => !field.required && actual.subtype_of(&field.ty),
-                    MapSlot::Absent => !field.required,
-                    MapSlot::Undeclared => false,
-                })
-            && (expected.extra.is_open()
-                || self.fields.iter().all(|(key, field)| {
-                    field.ty == Type::Never
-                        || expected.fields.contains_key(key)
-                        || expected.extra.accepts_field(key, &field.ty)
-                }))
+    pub(super) fn compatibility(&self, expected: &Self) -> Compatibility {
+        expected
+            .extra
+            .accepts_type(&self.extra)
+            .and(|| {
+                Compatibility::all(expected.fields.iter().map(
+                    |(key, field)| {
+                        match self.slot(key) {
+                            MapSlot::Present(actual) => actual.compatibility(&field.ty),
+                            MapSlot::Optional(actual) => Compatibility::from(!field.required)
+                                .and(|| actual.compatibility(&field.ty)),
+                            MapSlot::Absent => (!field.required).into(),
+                            MapSlot::Undeclared => Compatibility::Mismatch,
+                        }
+                    },
+                ))
+            })
+            .and(|| {
+                if expected.extra.is_open() {
+                    Compatibility::Proven
+                } else {
+                    Compatibility::all(
+                        self.fields
+                            .iter()
+                            .filter(|(key, field)| {
+                                field.ty != Type::Never && !expected.fields.contains_key(*key)
+                            })
+                            .map(|(key, field)| expected.extra.accepts_field(key, &field.ty)),
+                    )
+                }
+            })
     }
 
     pub(super) fn is_shape(&self) -> bool {

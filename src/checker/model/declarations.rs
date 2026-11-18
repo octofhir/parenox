@@ -74,6 +74,7 @@ pub(crate) struct Declarations {
     pub dependencies: Vec<String>,
     pub(super) all_refers: BTreeSet<String>,
     pub(super) specs: BTreeMap<String, SpecDeclaration>,
+    pub(super) fdefs: Vec<usize>,
     pub(super) functions: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
     pub(super) diagnostics: Vec<Diagnostic>,
@@ -159,6 +160,7 @@ impl Declarations {
                     }
                 }
                 "clojure.core/defn" | "clojure.core/defn-" => model.functions.push(index),
+                "clojure.spec.alpha/fdef" => model.fdefs.push(index),
                 _ => model.error(
                     "PNX9001",
                     form.span,

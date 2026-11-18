@@ -3,16 +3,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::{
-    DeclaredValue, Function, Globals, LiteralVar, Model, Names, Signature,
+    Contract, DeclaredValue, Function, Globals, LiteralVar, Model, Names,
     declarations::symbols_match,
 };
 use crate::types::Type;
 
-pub(super) type Signatures = BTreeMap<String, Arc<[Signature]>>;
+pub(super) type Contracts = BTreeMap<String, Contract>;
 
 #[derive(Default)]
 pub(super) struct Exports {
-    pub functions: Signatures,
+    pub functions: Contracts,
     pub literals: BTreeMap<String, Type>,
     private_vars: BTreeSet<String>,
 }
@@ -28,15 +28,15 @@ impl Exports {
 
 pub(super) fn visible_value<'a>(
     source: Option<&'a Exports>,
-    externs: impl FnOnce() -> Option<&'a Signatures>,
+    externs: impl FnOnce() -> Option<&'a Contracts>,
     name: &str,
 ) -> Option<DeclaredValue<'a>> {
     if let Some(source) = source {
         if let Some(ty) = source.literals.get(name) {
             return Some(DeclaredValue::Literal(ty));
         }
-        if let Some(signatures) = source.functions.get(name) {
-            return Some(DeclaredValue::Function(signatures));
+        if let Some(contract) = source.functions.get(name) {
+            return Some(DeclaredValue::Function(contract));
         }
         if source.private_vars.contains(name) {
             return None;
@@ -56,9 +56,8 @@ pub(super) struct LocalInterface {
 
 #[derive(PartialEq, Eq)]
 struct LocalFunction {
-    signatures: Arc<[Signature]>,
+    contract: Option<Contract>,
     private: bool,
-    inferred: bool,
 }
 
 pub(crate) struct InterfaceKey {
@@ -68,7 +67,7 @@ pub(crate) struct InterfaceKey {
 
 struct Dependency {
     source: Option<Arc<Exports>>,
-    externs: Option<Arc<Signatures>>,
+    externs: Option<Arc<Contracts>>,
     in_project: bool,
 }
 
@@ -195,17 +194,14 @@ impl Model {
         for f in self.functions.values() {
             if f.private {
                 exports.private_vars.insert(f.name.clone());
-            } else {
-                exports
-                    .functions
-                    .insert(f.name.clone(), f.signatures.clone());
+            } else if let Some(contract) = &f.contract {
+                exports.functions.insert(f.name.clone(), contract.clone());
             }
             functions.insert(
                 f.name.clone(),
                 LocalFunction {
-                    signatures: f.signatures.clone(),
+                    contract: f.contract.clone(),
                     private: f.private,
-                    inferred: f.inferred,
                 },
             );
         }

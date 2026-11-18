@@ -115,7 +115,19 @@ impl Checker<'_> {
                 Type::Function(signatures) => {
                     let arities: Vec<_> = signatures.iter().map(Signature::arity).collect();
                     self.check_spread_arities(&arities, minimum, spread.span);
-                    self.check_spread_signatures(signatures, prefix, minimum, &element, spread.span)
+                    let value = self.check_spread_signatures(
+                        signatures,
+                        prefix,
+                        minimum,
+                        &element,
+                        spread.span,
+                    );
+                    if let Some(contract) = &function.contract {
+                        for diagnostic in &mut self.diagnostics[start..] {
+                            diagnostic.contract = Some(contract.as_ref().clone());
+                        }
+                    }
+                    value
                 }
                 Type::Map(_) | Type::Key(_) | Type::Keyword => {
                     self.check_spread_arities(
@@ -148,9 +160,12 @@ impl Checker<'_> {
                     sequence
                 })
             }
-            Callable::Builtin(name) if name != "clojure.core/conj" => {
+            Callable::Builtin(name)
+                if !matches!(name.as_str(), "clojure.core/conj" | "clojure.core/merge") =>
+            {
                 let arities = builtin_arities(name);
                 self.check_spread_arities(arities, minimum, spread.span);
+                self.note_builtin_contract(start, name);
                 if let [Arity::Variadic(required)] = arities {
                     // These built-ins have the same result type for every accepted count.
                     let mut actual = prefix.to_vec();
