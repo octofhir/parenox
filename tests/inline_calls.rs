@@ -77,3 +77,29 @@ fn inline_overloads_check_the_selected_body_and_compile_all_clauses() {
         assert_eq!(report.diagnostics[0].code, code, "{expr}: {report:#?}");
     }
 }
+
+#[test]
+fn fnil_evaluates_its_callee_and_defaults_before_outer_arguments() {
+    for (result, form) in [
+        (
+            "#{:default}",
+            r#"(try
+                  ((fnil identity (throw (ex-info "default" {:stage :default})))
+                   (throw (ex-info "argument" {:stage :argument})))
+                  (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))"#,
+        ),
+        (
+            "#{:callee}",
+            r#"(try
+                  ((fnil (throw (ex-info "callee" {:stage :callee}))
+                         (throw (ex-info "default" {:stage :default}))) nil)
+                  (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))"#,
+        ),
+        ("number?", "(apply (fnil inc 0) [nil])"),
+        ("number?", "(apply (fnil (fnil + 1 2) nil 5) [nil nil])"),
+    ] {
+        let source = format!("(ns demo) (defn run {{:t/sig '[:-> {result}]}} [] {form})");
+        let report = Session::default().check("inline.clj", &source);
+        assert!(report.ok && report.complete, "{form}: {report:#?}");
+    }
+}

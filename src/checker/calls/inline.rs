@@ -4,25 +4,34 @@ use super::super::{
     function_forms::{MAX_FIXED_PARAMETERS, function_clauses, pack_arguments},
     nil_part,
 };
+use super::{Callable, call_returns};
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
 use crate::types::Type;
 
 #[derive(Clone, Copy)]
-pub(super) enum InlineCallable<'a> {
+pub(super) enum InlineFunction<'a> {
     Function(&'a [Form]),
     Literal(&'a AnonymousFunction),
-    Fnil(&'a [Form]),
 }
 
-impl Checker<'_> {
-    pub(super) fn inline_callable<'a>(
-        &self,
-        form: &'a Form,
+pub(super) struct Fnil<'form, 'model> {
+    target: Callable<'form, 'model>,
+    target_span: Span,
+    defaults: Vec<(Value, Span)>,
+    pub(super) returns: bool,
+}
+
+impl<'model> Checker<'model> {
+    pub(super) fn prepare_inline<'form>(
+        &mut self,
+        form: &'form Form,
         env: &Env,
-    ) -> Option<InlineCallable<'a>> {
+    ) -> Option<Callable<'form, 'model>> {
         let forms = match &form.without_metadata().kind {
             Kind::List(forms) => forms,
-            Kind::AnonymousFunction(function) => return Some(InlineCallable::Literal(function)),
+            Kind::AnonymousFunction(function) => {
+                return Some(Callable::Inline(InlineFunction::Literal(function)));
+            }
             _ => return None,
         };
         let (head, parts) = forms.split_first()?;
@@ -34,15 +43,15 @@ impl Checker<'_> {
             return None;
         }
         match self.model.resolve(name).as_str() {
-            "clojure.core/fn" => Some(InlineCallable::Function(parts)),
-            "clojure.core/fnil" => Some(InlineCallable::Fnil(parts)),
+            "clojure.core/fn" => Some(Callable::Inline(InlineFunction::Function(parts))),
+            "clojure.core/fnil" => Some(self.prepare_fnil(parts, form.span, env)),
             _ => None,
         }
     }
 
     pub(super) fn call_inline(
         &mut self,
-        callable: InlineCallable<'_>,
+        callable: InlineFunction<'_>,
         args: Vec<(Value, Span)>,
         constructor: Span,
         call: Span,
@@ -50,10 +59,10 @@ impl Checker<'_> {
         invoked: bool,
     ) -> Value {
         match callable {
-            InlineCallable::Function(parts) => {
+            InlineFunction::Function(parts) => {
                 self.call_inline_fn(parts, args, constructor, call, env, invoked)
             }
-            InlineCallable::Literal(function) => {
+            InlineFunction::Literal(function) => {
                 if function.required > MAX_FIXED_PARAMETERS {
                     self.error(
                         "PNX2554",
@@ -64,9 +73,6 @@ impl Checker<'_> {
                 }
                 let clauses = literal_clause(function, constructor);
                 self.call_inline_fn(&clauses, args, constructor, call, env, invoked)
-            }
-            InlineCallable::Fnil(parts) => {
-                self.call_fnil(parts, args, constructor, call, env, invoked)
             }
         }
     }
@@ -141,51 +147,73 @@ impl Checker<'_> {
         result
     }
 
-    fn call_fnil(
+    fn prepare_fnil<'form>(
         &mut self,
-        parts: &[Form],
+        parts: &'form [Form],
+        span: Span,
+        env: &Env,
+    ) -> Callable<'form, 'model> {
+        if !(2..=4).contains(&parts.len()) {
+            self.error(
+                "PNX2554",
+                span,
+                "fnil requires a function and one to three defaults",
+            );
+            return Callable::Value(Value::new(Type::Unknown));
+        }
+        let target = self.prepare_callable(&parts[0], env);
+        let target_returns = target.returns();
+        let defaults: Vec<_> = self.eval_args(&parts[1..], env, target_returns).collect();
+        let returns = target_returns && call_returns(&defaults);
+        Callable::Fnil(Box::new(Fnil {
+            target,
+            target_span: parts[0].span,
+            defaults,
+            returns,
+        }))
+    }
+
+    pub(super) fn call_fnil(
+        &mut self,
+        wrapper: &Fnil<'_, '_>,
         mut args: Vec<(Value, Span)>,
-        constructor: Span,
         call: Span,
         env: &Env,
         invoked: bool,
     ) -> Value {
-        self.may_throw();
-        if !(2..=4).contains(&parts.len()) {
-            self.error(
-                "PNX2554",
-                constructor,
-                "fnil requires a function and one to three defaults",
-            );
-            return Value::new(Type::Unknown);
-        }
-        let defaults = self.typed_args(&parts[1..], env);
         // The three-default version also has a two-argument overload.
-        if invoked && args.len() < defaults.len().min(2) {
+        let required = wrapper.defaults.len().min(2);
+        if invoked && args.len() < required {
             self.error(
                 "PNX2554",
                 call,
-                format!(
-                    "fnil wrapper expects at least {} arguments",
-                    defaults.len().min(2)
-                ),
+                format!("fnil wrapper expects at least {required} arguments"),
             );
             return Value::new(Type::Unknown);
         }
-        for ((arg, span), (default, default_span)) in args.iter_mut().zip(defaults) {
-            if nil_part(&arg.known) == Type::Never {
-                continue;
-            }
-            let non_nil = arg.known.without_nil();
-            if non_nil == Type::Never {
-                *arg = default;
-                *span = default_span;
-            } else {
-                arg.narrow(Type::union([non_nil, default.known]));
-                arg.notes.extend(default.notes);
+        if invoked {
+            for ((arg, span), (default, default_span)) in args.iter_mut().zip(&wrapper.defaults) {
+                if nil_part(&arg.known) == Type::Never {
+                    continue;
+                }
+                let non_nil = arg.known.without_nil();
+                if non_nil == Type::Never {
+                    *arg = default.clone();
+                    *span = *default_span;
+                } else {
+                    arg.narrow(Type::union([non_nil, default.known.clone()]));
+                    arg.notes.extend(default.notes.iter().cloned());
+                }
             }
         }
-        self.call_form(&parts[0], args, call, env, invoked)
+        self.call_prepared(
+            &wrapper.target,
+            args,
+            wrapper.target_span,
+            call,
+            env,
+            invoked,
+        )
     }
 }
 

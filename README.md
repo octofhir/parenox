@@ -339,7 +339,7 @@ over a variadic clause at the same argument count. Inside the variadic body
 
 `apply` checks positional arguments from nil, vectors and seqs whose positions
 are known. It checks every possible exact shape and picks a signature for each
-shape's argument count. Run `just spread` for examples.
+shape's argument count and supports inline `fnil` wrappers. Run `just spread` for examples.
 
 Use `#(...)` in immediate calls and supported callbacks. `%` and `%1` name the
 first argument, `%2` and later positions set the required count, and `%&` holds
@@ -442,7 +442,8 @@ arguments. An absent entry passes nil. The updater's result becomes the new
 field type. A dynamic key may overlap a field, so Parenox combines the
 old and new value types for that field. Supported updaters
 include built-in functions, functions with signatures, and directly named
-private helpers. Inline `fnil` replaces nil arguments and preserves false.
+private helpers. Inline `fnil` evaluates the target and defaults when it creates
+the wrapper. At invocation, it replaces nil arguments and preserves false.
 For example, `(update patient :visits (fnil inc 0))` works when visits is absent.
 Parenox supports one to three defaults when the wrapper is called immediately
 or passed directly as a supported callback. Storing the wrapper for later use

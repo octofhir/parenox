@@ -13,3 +13,6 @@
 
 (defn maybe-offset {:t/sig '[boolean? :-> number?]} [extra?]
   (apply variadic/adjust 4 (if extra? [3] nil)))
+
+(defn increment-default {:t/sig '[:-> number?]} []
+  (apply (fnil inc 0) [nil]))

@@ -657,3 +657,17 @@
              (some->> (throw (ex-info "seed" {:stage :seed})) (if true :body))
              (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
 (println "Clojure/JVM threading order: 7 assertions passed")
+
+(assert (= 1 (demo.apply/increment-default)))
+(assert (= :default
+           (try
+             ((fnil identity (throw (ex-info "default" {:stage :default})))
+              (throw (ex-info "argument" {:stage :argument})))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(assert (= :callee
+           (try
+             ((fnil (throw (ex-info "callee" {:stage :callee}))
+                    (throw (ex-info "default" {:stage :default}))) nil)
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
+(assert (= 6 (apply (fnil (fnil + 1 2) nil 5) [nil nil])))
+(println "Clojure/JVM fnil evaluation: 4 assertions passed")

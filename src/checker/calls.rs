@@ -10,10 +10,11 @@ use crate::Diagnostic;
 use crate::expand::Threading;
 use crate::reader::{Form, Span};
 use crate::types::{Arity, Signature, Type};
-use inline::InlineCallable;
+use inline::{Fnil, InlineFunction};
 
 enum Callable<'form, 'model> {
-    Inline(InlineCallable<'form>),
+    Inline(InlineFunction<'form>),
+    Fnil(Box<Fnil<'form, 'model>>),
     Private(&'model Function),
     Builtin(String),
     Value(Value),
@@ -21,7 +22,11 @@ enum Callable<'form, 'model> {
 
 impl Callable<'_, '_> {
     fn returns(&self) -> bool {
-        !matches!(self, Self::Value(value) if value.known == Type::Never)
+        match self {
+            Self::Value(value) => value.known != Type::Never,
+            Self::Fnil(wrapper) => wrapper.returns,
+            _ => true,
+        }
     }
 }
 
@@ -212,10 +217,10 @@ impl<'model> Checker<'model> {
                 _ => {}
             }
         }
-        if let Some(parts) = self.inline_callable(&xs[0], env) {
-            let args = self.typed_args(&xs[1..], env);
+        if let Some(callable) = self.prepare_inline(&xs[0], env) {
+            let args: Vec<_> = self.eval_args(&xs[1..], env, callable.returns()).collect();
             let invoked = call_returns(&args);
-            return self.call_inline(parts, args, xs[0].span, span, env, invoked);
+            return self.call_prepared(&callable, args, xs[0].span, span, env, invoked);
         }
         let function = self.infer(&xs[0], env);
         let args = self
@@ -307,8 +312,8 @@ impl<'model> Checker<'model> {
         callee: &'form Form,
         env: &Env,
     ) -> Callable<'form, 'model> {
-        if let Some(parts) = self.inline_callable(callee, env) {
-            return Callable::Inline(parts);
+        if let Some(callable) = self.prepare_inline(callee, env) {
+            return callable;
         }
         if let Some(name) = callee.symbol()
             && !env.contains_key(name)
@@ -335,8 +340,10 @@ impl<'model> Checker<'model> {
         env: &Env,
         invoked: bool,
     ) -> Value {
+        let invoked = invoked && callable.returns();
         match callable {
             Callable::Inline(parts) => self.call_inline(*parts, args, head, span, env, invoked),
+            Callable::Fnil(wrapper) => self.call_fnil(wrapper, args, span, env, invoked),
             _ if !invoked => Value::new(Type::Never),
             Callable::Private(function) => self.inferred_call(
                 function,

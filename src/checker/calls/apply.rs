@@ -1,8 +1,5 @@
 //! Calls whose final input supplies zero or more positional arguments.
-use super::{
-    Callable, Checker, Env, Value, call_returns, inline::InlineCallable, vectors::CollectionError,
-    vectors::element_type,
-};
+use super::{Checker, Env, Value, call_returns, vectors::CollectionError, vectors::element_type};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
@@ -18,12 +15,7 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         };
-        let mut callable = self.prepare_callable(callee, env);
-        if matches!(callable, Callable::Inline(InlineCallable::Fnil(_))) {
-            callable = Callable::Value(
-                self.unsupported(callee.span, "apply cannot check an inline fnil wrapper yet"),
-            );
-        }
+        let callable = self.prepare_callable(callee, env);
         let mut args: Vec<_> = self
             .eval_args(&forms[1..], env, callable.returns())
             .collect();
