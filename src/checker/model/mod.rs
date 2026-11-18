@@ -203,6 +203,25 @@ impl Model {
             };
             model.read_function(xs, form.span, globals, &mut fdefs, &mut guards);
         }
+        for (local, var) in &declarations.forward_vars {
+            let qualified = format!("{}/{local}", model.namespace());
+            if !model.literals.contains_key(&qualified) && !model.functions.contains_key(&qualified)
+            {
+                model.names.refers.remove(local);
+                model.literals.insert(
+                    qualified.clone(),
+                    LiteralVar {
+                        ty: Type::Unknown,
+                        private: var.private,
+                    },
+                );
+                model.diagnostics.push(Diagnostic::analysis_gap(
+                    "PNX9001",
+                    var.span,
+                    format!("Declared var {qualified} has no source definition"),
+                ));
+            }
+        }
         for (name, parts) in fdefs {
             model.error(
                 "PNX9001",

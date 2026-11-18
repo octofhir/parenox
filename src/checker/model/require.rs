@@ -50,32 +50,41 @@ const CLOJURE_TEST_PUBLIC_VARS: &[&str] = &[
 ];
 
 impl Declarations {
-    pub(super) fn read_libspec(&mut self, lib: &Form, globals: Option<&Globals>) {
-        if let Some(namespace) = lib.symbol() {
-            self.dependencies.push(namespace.to_owned());
-            return;
-        }
-        let Some([name, options @ ..]) = lib.vector() else {
+    pub(super) fn read_libspec(
+        &mut self,
+        lib: &Form,
+        globals: Option<&Globals>,
+        refer_by_default: bool,
+    ) {
+        let (name, options) = if let Some([name, options @ ..]) = lib.vector() {
+            (name, options)
+        } else {
+            (lib, &[][..])
+        };
+        let Some(namespace) = name.symbol() else {
             self.error(
                 "PNX9001",
-                lib.span,
-                "Expected a namespace or require vector",
+                name.span,
+                "Expected a namespace or libspec vector",
             );
             return;
         };
-        let Some(namespace) = name.symbol() else {
-            self.error("PNX9001", name.span, "Expected a required namespace");
+        let (clause, supported): (&str, &[_]) = if refer_by_default {
+            (
+                ":use",
+                &[":as", ":as-alias", ":refer", ":exclude", ":rename", ":only"],
+            )
+        } else {
+            (
+                ":require",
+                &[":as", ":as-alias", ":refer", ":exclude", ":rename"],
+            )
+        };
+        let Some(options) = self.options(options, lib.span, clause, supported) else {
             return;
         };
-        let Some(options) = self.options(
-            options,
-            lib.span,
-            ":require",
-            &[":as", ":as-alias", ":refer", ":exclude", ":rename"],
-        ) else {
-            return;
-        };
-        let alias_only = options.contains_key(":as-alias") && !options.contains_key(":as");
+        let alias_only =
+            !refer_by_default && options.contains_key(":as-alias") && !options.contains_key(":as");
         if !alias_only {
             self.dependencies.push(namespace.to_owned());
         }
@@ -94,9 +103,14 @@ impl Declarations {
                 }
             }
         }
-        let Some(refer) = options.get(":refer") else {
+        let refer = options
+            .get(":refer")
+            .or_else(|| options.get(":only"))
+            .copied();
+        if refer.is_none() && !refer_by_default {
             return;
-        };
+        }
+        let refer_span = refer.map_or(lib.span, |form| form.span);
         let excluded = options
             .get(":exclude")
             .map_or_else(Vec::new, |form| self.symbols(form, ":exclude"));
@@ -109,11 +123,11 @@ impl Declarations {
         } else {
             &[]
         };
-        let names: Vec<_> = if refer.keyword() == Some(":all") {
+        let names: Vec<_> = if refer.is_none_or(|refer| refer.keyword() == Some(":all")) {
             if alias_only {
                 self.error(
                     "PNX9001",
-                    refer.span,
+                    refer_span,
                     ":refer :all depends on whether an :as-alias namespace is loaded",
                 );
                 return;
@@ -124,7 +138,7 @@ impl Declarations {
             {
                 CLOJURE_TEST_PUBLIC_VARS
                     .iter()
-                    .map(|&name| (name, refer.span))
+                    .map(|&name| (name, refer_span))
                     .collect()
             } else {
                 let Some(globals) = globals else {
@@ -133,18 +147,23 @@ impl Declarations {
                 let Some(exports) = globals.exports.get(namespace) else {
                     self.error(
                         "PNX9001",
-                        refer.span,
-                        format!(":refer :all requires the source of namespace {namespace}"),
+                        refer_span,
+                        format!("Referring all vars requires the source of namespace {namespace}"),
                     );
                     return;
                 };
                 exports
                     .public_var_names()
-                    .map(|name| (name, refer.span))
+                    .map(|name| (name, refer_span))
                     .collect()
             }
         } else {
-            self.symbols(refer, ":refer")
+            let option = if options.contains_key(":refer") {
+                ":refer"
+            } else {
+                ":only"
+            };
+            self.symbols(refer.unwrap(), option)
                 .into_iter()
                 .map(|(name, form)| (name, form.span))
                 .collect()

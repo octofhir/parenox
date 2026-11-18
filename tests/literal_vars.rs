@@ -10,6 +10,54 @@ const APP: Source<'_> = Source {
 };
 
 #[test]
+fn forward_var_declarations_resolve_to_the_definition_when_available() {
+    let consumer = Source {
+        path: "consumer.cljc",
+        source: r#"(ns consumer (:require [provider :as p]))
+            (defn status {:t/sig '[:-> string?]} [] (p/label "ready"))"#,
+    };
+    let mut session = Session::default();
+    let provider = Source {
+        path: "provider.clj",
+        source: "(ns provider)\n(declare label)",
+    };
+    let before = session.check_project(&[consumer, provider], None);
+    assert!(!before.complete, "{before:#?}");
+    assert!(before.files[1].diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("Declared var provider/label")
+            && diagnostic.severity == "warning"
+    }));
+    let offset = consumer.source.find("p/label").unwrap();
+    let target = session.definition(consumer.path, offset).unwrap();
+    assert_eq!(target.path, provider.path);
+    assert_eq!(target.span.start.line, 2);
+
+    let defined = r#"(ns provider)
+       (declare label)
+       (defn label {:t/sig '[string? :-> string?]} [value] value)"#;
+    let after = session.check_project(
+        &[
+            consumer,
+            Source {
+                source: defined,
+                ..provider
+            },
+        ],
+        None,
+    );
+    assert!(after.ok && after.complete, "{after:#?}");
+    assert_eq!(
+        session
+            .definition(consumer.path, offset)
+            .unwrap()
+            .span
+            .start
+            .line,
+        3
+    );
+}
+
+#[test]
 fn literal_vars_preserve_typed_values_in_their_own_and_importing_namespaces() {
     let mut session = Session::default();
     let first = session.check_project(&[APP, CONFIG], None);

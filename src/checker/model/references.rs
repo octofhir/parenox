@@ -42,7 +42,11 @@ impl Declarations {
     pub(crate) fn project_call(&self, forms: &[Form], name: &str, actual: usize) -> ProjectCall {
         let mut declarations = self.source_declarations(forms, name);
         let Some(declaration) = declarations.next() else {
-            return ProjectCall::Missing;
+            return if self.forward_vars.contains_key(name) {
+                ProjectCall::Unknown
+            } else {
+                ProjectCall::Missing
+            };
         };
         if declarations.next().is_some() {
             return ProjectCall::Unknown;

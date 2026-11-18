@@ -28,6 +28,21 @@ fn resolves_clojure_test_refer_all_and_renamed_test_macros() {
     );
 }
 
+#[test]
+fn legacy_use_supports_bare_namespaces_and_renamed_explicit_referrals() {
+    let app = r#"(ns app-test
+      (:use clojure.test
+            [demo.all-refers.library :only (label) :rename {label caption}]))
+      (defn text {:t/sig '[:-> string?]} [] (caption))
+      (deftest output (is (= "ready" (text))))"#;
+    let report = check(&mut Session::default(), LIBRARY, app);
+    let [gap] = report.files[0].diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(gap.severity, "warning");
+    assert!(gap.message.contains("deftest"));
+}
+
 const LIBRARY: &str = include_str!("../examples/all_refers/library.clj");
 const APP: &str = include_str!("../examples/all_refers/app.clj");
 

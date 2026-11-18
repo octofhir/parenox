@@ -76,6 +76,11 @@ pub(super) struct SpecDeclaration {
     pub body: Form,
 }
 
+pub(super) struct DeclaredVar {
+    pub span: Span,
+    pub private: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct Declarations {
     pub(super) names: Names,
@@ -87,6 +92,7 @@ pub(crate) struct Declarations {
     pub(super) functions: Vec<usize>,
     pub(super) test_forms: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
+    pub(super) forward_vars: BTreeMap<String, DeclaredVar>,
     records: Vec<usize>,
     pub(super) opaque_var_surface: bool,
     pub(super) diagnostics: Vec<Diagnostic>,
@@ -116,7 +122,13 @@ impl Declarations {
         public_only: bool,
     ) -> Option<Span> {
         let mut matches = self.source_declarations(forms, local);
-        let declaration = matches.next()?;
+        let Some(declaration) = matches.next() else {
+            return self
+                .forward_vars
+                .get(local)
+                .filter(|var| !public_only || !var.private)
+                .map(|var| var.span);
+        };
         if matches.next().is_some() || (public_only && self.source_private(&declaration)) {
             return None;
         }
@@ -269,6 +281,7 @@ impl Declarations {
                     }
                 }
                 "clojure.core/defn" | "clojure.core/defn-" => model.functions.push(index),
+                "clojure.core/declare" => model.read_declare(&xs[1..]),
                 "clojure.spec.alpha/fdef" => model.fdefs.push(index),
                 qualified if known_unsupported_declaration(qualified, xs) => {
                     match qualified {
@@ -335,9 +348,9 @@ impl Declarations {
                 continue;
             };
             match items.first().and_then(Form::keyword) {
-                Some(":require") => {
+                Some(clause @ (":require" | ":use")) => {
                     for lib in &items[1..] {
-                        self.read_libspec(lib, globals);
+                        self.read_libspec(lib, globals, clause == ":use");
                     }
                 }
                 Some(":import") => {
@@ -356,6 +369,28 @@ impl Declarations {
                 ),
                 _ => self.error("PNX9001", clause.span, "Unsupported ns clause"),
             }
+        }
+    }
+
+    fn read_declare(&mut self, names: &[Form]) {
+        for name in names {
+            let Some(symbol) = name
+                .symbol()
+                .filter(|name| !name.contains('/') || *name == "/")
+            else {
+                self.error("PNX1001", name.span, "declare requires unqualified symbols");
+                continue;
+            };
+            let private = name.metadata(":private").is_some_and(|value| {
+                !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
+            });
+            self.forward_vars.insert(
+                symbol.into(),
+                DeclaredVar {
+                    span: name.without_metadata().span,
+                    private,
+                },
+            );
         }
     }
 }

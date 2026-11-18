@@ -319,6 +319,11 @@ The checker validates these tokens in discarded forms and inactive reader
 branches. Externs use ordinary EDN keywords, such as `:schema/name`.
 Run `just keyword-aliases` for examples.
 
+Namespace `:use` clauses share referral resolution with `:require`, including
+explicit `:only` names. A var introduced with `declare` can be followed to its
+definition when available. A declaration without a source definition has
+unknown type and reports incomplete coverage.
+
 `:refer-clojure` supports `:exclude`, `:only` and nonoverlapping `:rename`
 mappings. Qualified calls to `clojure.core` continue to resolve when an
 unqualified name is excluded.
