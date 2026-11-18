@@ -426,6 +426,11 @@ Open `.edn` files receive syntax diagnostics from the data reader. Tagged
 values are read as inert data. Clojure navigation is available for `.clj` and
 `.cljc` buffers.
 
+Saving a project manifest or an indexed extern file refreshes the workspace
+while preserving open buffers. The server logs configuration failures and keeps
+its last loaded snapshot. If startup configuration is invalid, open-file
+diagnostics remain available while you repair and save the manifest.
+
 ### RustRover and JetBrains IDEs
 
 1. Install [LSP4IJ](https://plugins.jetbrains.com/plugin/23257-lsp4ij) in the IDE.

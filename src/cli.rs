@@ -65,7 +65,7 @@ pub(crate) struct TestOptions {
     pub(crate) namespaces: Vec<String>,
 }
 
-#[derive(Args, Default)]
+#[derive(Args, Clone, Default)]
 pub(crate) struct ProjectOptions {
     /// Source files or directories; defaults to parenox.edn or deps.edn paths.
     #[arg(value_name = "PATH")]

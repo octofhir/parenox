@@ -17,7 +17,7 @@ use clap::{CommandFactory, Parser};
 use parenox::{Diagnostic, Report, Session, Source, output, reader};
 use serde_json::json;
 
-use cli::{CheckOptions, Cli, Color, Command, DefinitionOptions, Format, ProjectOptions};
+use cli::{CheckOptions, Cli, Color, Command, DefinitionOptions, Format};
 use config::ProjectConfig;
 use workspace::{DiskProject, FileSnapshot, read_source_roots};
 
@@ -313,62 +313,6 @@ impl CheckOptions {
         }
         Ok(config)
     }
-}
-
-impl ProjectOptions {
-    fn load(&self) -> Result<ProjectConfig, String> {
-        let settings = self.load_at(Path::new(""))?;
-        if settings.paths.is_empty() {
-            return Err(
-                "No source paths. Specify paths or configure :paths in parenox.edn or deps.edn"
-                    .into(),
-            );
-        }
-        Ok(settings)
-    }
-
-    fn load_at(&self, root: &Path) -> Result<ProjectConfig, String> {
-        let default = root.join(config::DEFAULT_PATH);
-        let config = self.config.as_ref().map(|path| root.join(path));
-        let mut settings = if let Some(path) = &config {
-            ProjectConfig::read(path)?
-        } else if self.paths.is_empty() && file_exists(&default)? {
-            ProjectConfig::read(&default)?
-        } else {
-            ProjectConfig::default()
-        };
-        if !self.paths.is_empty() {
-            settings.paths = self
-                .paths
-                .iter()
-                .map(|path| root.join(path).to_string_lossy().into_owned())
-                .collect();
-        } else {
-            let manifest = self
-                .deps
-                .as_ref()
-                .map(|path| root.join(path))
-                .unwrap_or_else(|| {
-                    config
-                        .as_deref()
-                        .and_then(Path::parent)
-                        .unwrap_or(root)
-                        .join("deps.edn")
-                });
-            if self.deps.is_some()
-                || !self.aliases.is_empty()
-                || (settings.paths.is_empty() && file_exists(&manifest)?)
-            {
-                settings.paths = config::deps_paths(&manifest, &self.aliases)?;
-            }
-        }
-        Ok(settings)
-    }
-}
-
-fn file_exists(path: &Path) -> Result<bool, String> {
-    path.try_exists()
-        .map_err(|err| format!("{}: {err}", path.display()))
 }
 
 fn bench(path: &str, iterations: usize) -> Result<u8, String> {

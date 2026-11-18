@@ -121,17 +121,12 @@ fn request(
             Ok(root) => root,
             Err(message) => return send_error(output, id, -32602, &message),
         };
-        match Workspace::load(&root, options) {
-            Ok(loaded) => {
-                *workspace = Some(loaded);
-            }
-            Err(message) => return send_error(output, id, -32603, &message),
-        }
+        *workspace = Some(Workspace::load(root, options));
         return result(
             output,
             id,
             json!({"capabilities": {
-            "positionEncoding":"utf-16", "textDocumentSync":{"openClose":true,"change":1},
+            "positionEncoding":"utf-16", "textDocumentSync":{"openClose":true,"change":1,"save":{"includeText":false}},
             "definitionProvider":true, "hoverProvider":true
         }, "serverInfo":{"name":"parenox", "version":env!("CARGO_PKG_VERSION")}}),
         );
@@ -164,6 +159,7 @@ fn notification(
     params: Value,
 ) -> io::Result<()> {
     match method {
+        "initialized" => workspace.initialized(output)?,
         "textDocument/didOpen" => {
             if let Ok(params) = serde_json::from_value(params) {
                 workspace.open(params, output)?;
@@ -177,6 +173,11 @@ fn notification(
         "textDocument/didClose" => {
             if let Ok(params) = serde_json::from_value(params) {
                 workspace.close(params, output)?;
+            }
+        }
+        "textDocument/didSave" => {
+            if let Ok(params) = serde_json::from_value(params) {
+                workspace.save(params, output)?;
             }
         }
         _ => {}

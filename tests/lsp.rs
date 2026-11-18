@@ -1,7 +1,7 @@
 use std::fs;
-use std::io::{BufRead, Cursor, Read, Write};
+use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use serde_json::{Value, json};
 
@@ -41,21 +41,48 @@ fn uri(path: &Path) -> String {
     }
 }
 
-fn transcript(messages: &[Value]) -> Vec<Value> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_parenox"))
+fn lsp_server() -> Child {
+    Command::new(env!("CARGO_BIN_EXE_parenox"))
         .args(["lsp", "--alias", "test"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
+        .unwrap()
+}
+
+fn send_message(input: &mut impl Write, message: &Value) {
+    let body = serde_json::to_vec(message).unwrap();
+    write!(input, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
+    input.write_all(&body).unwrap();
+}
+
+fn read_message(output: &mut impl BufRead) -> Option<Value> {
+    let mut header = String::new();
+    if output.read_line(&mut header).unwrap() == 0 {
+        return None;
+    }
+    let length = header
+        .strip_prefix("Content-Length: ")
+        .unwrap()
+        .trim()
+        .parse()
         .unwrap();
+    header.clear();
+    output.read_line(&mut header).unwrap();
+    assert_eq!(header, "\r\n");
+    let mut body = vec![0; length];
+    output.read_exact(&mut body).unwrap();
+    Some(serde_json::from_slice(&body).unwrap())
+}
+
+fn transcript(messages: &[Value]) -> Vec<Value> {
+    let mut child = lsp_server();
     let mut input = child.stdin.take().unwrap();
     let output = std::thread::scope(|scope| {
         scope.spawn(move || {
             for message in messages {
-                let body = serde_json::to_vec(message).unwrap();
-                write!(input, "Content-Length: {}\r\n\r\n", body.len()).unwrap();
-                input.write_all(&body).unwrap();
+                send_message(&mut input, message);
             }
         });
         child.wait_with_output().unwrap()
@@ -66,24 +93,7 @@ fn transcript(messages: &[Value]) -> Vec<Value> {
         String::from_utf8_lossy(&output.stderr)
     );
     let mut reader = Cursor::new(output.stdout);
-    let mut messages = Vec::new();
-    let mut header = String::new();
-    while reader.read_line(&mut header).unwrap() != 0 {
-        let length = header
-            .strip_prefix("Content-Length: ")
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        header.clear();
-        reader.read_line(&mut header).unwrap();
-        assert_eq!(header, "\r\n");
-        header.clear();
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).unwrap();
-        messages.push(serde_json::from_slice(&body).unwrap());
-    }
-    messages
+    std::iter::from_fn(|| read_message(&mut reader)).collect()
 }
 
 #[test]
@@ -201,6 +211,101 @@ fn edn_buffers_get_reader_diagnostics_and_clear_on_edit() {
     );
     assert_eq!(responses[2]["params"]["version"], 2);
     assert_eq!(responses[2]["params"]["diagnostics"], json!([]));
+}
+
+#[test]
+fn invalid_project_manifest_recovers_on_save_without_losing_overlays() {
+    let fixture = Fixture::new("manifest reload");
+    let manifest = fixture.0.join("deps.edn");
+    let valid_manifest = fs::read_to_string(&manifest).unwrap();
+    let broken_manifest = "{:paths [\"src\"}";
+    fs::write(&manifest, broken_manifest).unwrap();
+    let provider = fixture.0.join("src/shop.clj");
+    let caller = fixture.0.join("test/caller.cljc");
+    fs::write(
+        &provider,
+        "(ns shop) (defn title {:t/sig '[string? :-> string?]} [name] name)",
+    )
+    .unwrap();
+    let saved = "(ns shop-test (:require [shop :as p]))\n(defn label {:t/sig '[:-> string?]} [] (p/title \"Alice\"))";
+    fs::write(&caller, saved).unwrap();
+    let overlay = saved.replace("\"Alice\"", "42");
+
+    let mut child = lsp_server();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut request = |message| {
+        send_message(&mut input, &message);
+        read_message(&mut output).expect("language server produced no message")
+    };
+    assert_eq!(
+        request(
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "rootUri":uri(&fixture.0),"capabilities":{}
+            }})
+        )["result"]["capabilities"]["textDocumentSync"]["save"]["includeText"],
+        false
+    );
+    let log = request(json!({"jsonrpc":"2.0","method":"initialized","params":{}}));
+    assert_eq!(log["method"], "window/logMessage");
+    assert!(
+        log["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("deps.edn")
+    );
+    let open = |path: &Path, language, source| {
+        json!({
+            "jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+                "uri":uri(path),"languageId":language,"version":1,"text":source
+            }}
+        })
+    };
+    let broken = request(open(&manifest, "edn", broken_manifest));
+    assert_eq!(broken["params"]["diagnostics"][0]["code"], "PNX9000");
+    assert_eq!(
+        broken["params"]["diagnostics"][0]["range"],
+        json!({
+            "start":{"line":0,"character":14},"end":{"line":0,"character":15}
+        })
+    );
+    let missing = request(open(&caller, "clojure", &overlay));
+    assert_eq!(missing["params"]["diagnostics"][0]["code"], "PNX9003");
+
+    fs::write(&manifest, &valid_manifest).unwrap();
+    let fixed = request(
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":uri(&manifest),"version":2},"contentChanges":[{"text":valid_manifest}]
+        }}),
+    );
+    assert_eq!(fixed["params"]["diagnostics"], json!([]));
+    let save = || {
+        json!({
+            "jsonrpc":"2.0","method":"textDocument/didSave","params":{"textDocument":{"uri":uri(&manifest)}}
+        })
+    };
+    let reloaded = request(save());
+    assert_eq!(reloaded["params"]["uri"], uri(&caller));
+    assert_eq!(reloaded["params"]["diagnostics"][0]["code"], "PNX2322");
+    assert_eq!(fs::read_to_string(&caller).unwrap(), saved);
+
+    fs::write(&manifest, broken_manifest).unwrap();
+    assert_eq!(request(save())["method"], "window/logMessage");
+    let target = request(
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{
+            "textDocument":{"uri":uri(&caller)},
+            "position":{"line":1,"character":overlay.lines().nth(1).unwrap().find("p/title").unwrap()}
+        }}),
+    );
+    assert_eq!(target["result"]["uri"], uri(&provider));
+
+    assert_eq!(
+        request(json!({"jsonrpc":"2.0","id":3,"method":"shutdown"}))["result"],
+        Value::Null
+    );
+    send_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"}));
+    drop(input);
+    assert!(child.wait().unwrap().success());
 }
 
 #[test]

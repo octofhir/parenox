@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use parenox::{Diagnostic, Session, Source, output::contract_note, reader::validate_edn};
 use serde::Deserialize;
@@ -14,9 +14,12 @@ use crate::cli::ProjectOptions;
 use crate::workspace::{DiskProject, FileSnapshot, is_clojure_source};
 
 pub(super) struct Workspace {
+    root: PathBuf,
+    options: ProjectOptions,
     documents: BTreeMap<String, Document>,
     externs: Vec<FileSnapshot>,
     session: Session,
+    load_error: Option<String>,
 }
 
 struct Document {
@@ -70,7 +73,7 @@ struct DocumentUri {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct Close {
+pub(super) struct DocumentParams {
     text_document: DocumentUri,
 }
 
@@ -82,10 +85,30 @@ pub(super) struct TextQuery {
 }
 
 impl Workspace {
-    pub fn load(root: &Path, options: &ProjectOptions) -> Result<Self, String> {
-        let mut project = DiskProject::read(options.load_at(root)?)?;
+    pub fn load(root: PathBuf, options: &ProjectOptions) -> Self {
+        let mut workspace = Self {
+            root,
+            options: options.clone(),
+            documents: BTreeMap::new(),
+            externs: Vec::new(),
+            session: Session::default(),
+            load_error: None,
+        };
+        workspace.load_error = workspace.reload().err();
+        workspace
+    }
+
+    pub fn initialized(&mut self, output: &mut impl Write) -> io::Result<()> {
+        if let Some(message) = self.load_error.take() {
+            log_load_error(output, &message)?;
+        }
+        Ok(())
+    }
+
+    fn reload(&mut self) -> Result<(), String> {
+        let mut project = DiskProject::read(self.options.load_at(&self.root)?)?;
         project.externs.append(&mut project.dependency_externs);
-        let documents = project
+        let mut documents: BTreeMap<_, _> = project
             .files
             .into_iter()
             .map(|(path, source)| {
@@ -100,11 +123,22 @@ impl Workspace {
                 )
             })
             .collect();
-        Ok(Self {
-            documents,
-            externs: project.externs,
-            session: Session::default(),
-        })
+        for (path, mut document) in std::mem::take(&mut self.documents) {
+            if document.editor.is_some() {
+                document.indexed = documents.contains_key(&path);
+                documents.insert(path, document);
+            } else if !documents.contains_key(&path) {
+                self.session.forget_file(&path);
+            }
+        }
+        for externs in &self.externs {
+            if !project.externs.iter().any(|file| file.path == externs.path) {
+                self.session.forget_file(&externs.path);
+            }
+        }
+        self.documents = documents;
+        self.externs = project.externs;
+        Ok(())
     }
 
     pub fn open(&mut self, params: Open, output: &mut impl Write) -> io::Result<()> {
@@ -155,7 +189,35 @@ impl Workspace {
         self.check_document(&path, output)
     }
 
-    pub fn close(&mut self, params: Close, output: &mut impl Write) -> io::Result<()> {
+    pub fn save(&mut self, params: DocumentParams, output: &mut impl Write) -> io::Result<()> {
+        let Some(file) = file_path(&params.text_document.uri) else {
+            return Ok(());
+        };
+        let config = self
+            .options
+            .manifests(&self.root)
+            .iter()
+            .any(|manifest| normalize(manifest) == file);
+        let externs = self
+            .externs
+            .iter()
+            .any(|snapshot| normalize(Path::new(&snapshot.path)) == file);
+        let new_source = is_clojure_source(&file)
+            && self
+                .documents
+                .get(file.to_string_lossy().as_ref())
+                .is_some_and(|doc| !doc.indexed && doc.editor.is_some());
+        if config || externs || new_source {
+            match self.reload() {
+                Ok(()) => self.check(output),
+                Err(message) => log_load_error(output, &message),
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn close(&mut self, params: DocumentParams, output: &mut impl Write) -> io::Result<()> {
         let Some(path) = document_path(&params.text_document.uri) else {
             return Ok(());
         };
@@ -286,5 +348,16 @@ fn publish(output: &mut impl Write, params: Value) -> io::Result<()> {
     write_message(
         output,
         &json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":params}),
+    )
+}
+
+fn log_load_error(output: &mut impl Write, message: &str) -> io::Result<()> {
+    write_message(
+        output,
+        &json!({
+            "jsonrpc":"2.0",
+            "method":"window/logMessage",
+            "params":{"type":1,"message":format!("Could not load Parenox project ({message})")}
+        }),
     )
 }
