@@ -265,3 +265,8 @@ helper-effects format="pretty": build
 list-accumulators format="pretty": build
     @./target/release/parenox check examples/list_accumulators.clj --format {{quote(format)}}
     @./target/release/parenox check examples/list_accumulators_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check Clojure numeric syntax and show an invalid octal literal.
+numbers format="pretty": build
+    @./target/release/parenox check examples/numbers.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/numbers_bad.clj --format {{quote(format)}} || test "$?" -eq 1

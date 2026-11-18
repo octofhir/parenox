@@ -1,3 +1,5 @@
+mod numbers;
+
 use serde::Serialize;
 
 use crate::syntax::{Builder, SyntaxKind, SyntaxNode};
@@ -475,7 +477,10 @@ impl<'a> Reader<'a> {
                 return Err(self.error(start, format!("Reader syntax {c} is not supported yet")));
             }
             Some(_) => {
-                while self.peek().is_some_and(|c| !Self::token_boundary(c)) {
+                let numeric = numbers::starts_number(&self.source[start.offset..]);
+                while self.peek().is_some_and(|c| {
+                    !(Self::token_boundary(c) || numeric && matches!(c, '\'' | '#' | '%'))
+                }) {
                     self.bump();
                 }
                 let token = &self.source[start.offset..self.pos.offset];
@@ -498,16 +503,11 @@ impl<'a> Reader<'a> {
                         Kind::Keyword(s.to_string())
                     }
 
-                    s if s.chars().next().is_some_and(|c| c.is_ascii_digit())
-                        || s.strip_prefix(['+', '-']).is_some_and(|s| {
-                            s.chars().next().is_some_and(|c| c.is_ascii_digit())
-                        }) =>
-                    {
-                        if s.parse::<f64>().is_ok() {
-                            Kind::Number
-                        } else {
-                            return Err(self.error(start, "Unsupported numeric literal"));
+                    s if numeric => {
+                        if !numbers::valid_number(s) {
+                            return Err(self.error(start, "Invalid numeric literal"));
                         }
+                        Kind::Number
                     }
                     s => Kind::Symbol(s.to_string()),
                 }

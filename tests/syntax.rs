@@ -89,7 +89,7 @@ fn malformed_and_unsupported_reader_syntax_is_lossless_and_terminates() {
         "\"unfinished",
         "#?(:clj :x",
         r"\unknown",
-        "1/2",
+        "1/0",
     ] {
         let parsed = reader::parse(source);
         assert!(!parsed.errors.is_empty(), "{source:?}");

@@ -206,6 +206,9 @@ Valid top-level forms and reader errors are returned separately. Check the error
 `reader::read(source)` is the strict semantic path used by checking: it stops at
 the first reader error and does not construct a CST. CST capture is optional;
 ordinary checks keep using semantic forms and their existing caches.
+Clojure numeric tokens include octal, hexadecimal, radix integers, ratios,
+and the `N` and `M` suffixes. The checker tracks these as `Number` and reports
+invalid tokens at their source spans. Run `just numbers` for a checked example.
 
 The checker selects `:clj` branches in `.cljc` files. First matching feature wins;
 `:default` matches in order, an unmatched `#?` contributes no form, and `#?@`

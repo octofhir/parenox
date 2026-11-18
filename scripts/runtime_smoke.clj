@@ -988,3 +988,13 @@
            (try (when-first [item 42] item)
                 (catch IllegalArgumentException _ :invalid))))
 (println "Clojure/JVM when-first: 6 assertions passed")
+
+(load-file "examples/numbers.clj")
+(assert (== 29 (demo.numbers/invoice-total)))
+(assert (== 131 (demo.numbers/sample-id)))
+(assert (= '(1 3 (quote a) 4 %b) (read-string "(1#_2 3'a 4%b)")))
+(assert (number? (read-string "0xFFFFFFFFFFFFFFFFFFFF")))
+(assert (number? (read-string "08M")))
+(doseq [token ["08" "2r10N" "1/00" "1e10000000000M"]]
+  (assert (try (read-string token) false (catch RuntimeException _ true))))
+(println "Clojure/JVM numeric literals: 9 assertions passed")
