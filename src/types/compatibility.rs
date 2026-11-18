@@ -1,5 +1,10 @@
 //! Structural compatibility distinguishes a known mismatch from missing type information.
+mod explain;
+
+use std::borrow::Cow;
+
 use super::{Signature, Type};
+use crate::{ExternMismatch, ExternMismatchReason};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Compatibility {
@@ -133,4 +138,72 @@ fn signature(actual: &Signature, expected: &Signature) -> Compatibility {
                 .map_or(Compatibility::Proven, |(e, a)| e.compatibility(a))
         })
         .and(|| actual.ret.compatibility(&expected.ret))
+}
+
+/// Check the clause actually selected at every arity promised by an extern.
+/// Beyond the largest fixed prefix, both sides repeat the same rest types.
+pub(crate) fn extern_drift(
+    actual: &[Signature],
+    promised: &[Signature],
+) -> Option<(usize, Compatibility, ExternMismatch)> {
+    let boundary = actual
+        .iter()
+        .chain(promised)
+        .map(|sig| sig.args.len())
+        .max()?
+        + 1;
+    let mut unproven = None;
+    for count in 0..=boundary {
+        let Some(expected) = active_clause(promised, count) else {
+            continue;
+        };
+        let Some(active) = active_clause(actual, count) else {
+            return Some((
+                count,
+                Compatibility::Mismatch,
+                ExternMismatch::new(ExternMismatchReason::MissingArity),
+            ));
+        };
+        match signature(&active, &expected) {
+            outcome @ Compatibility::Mismatch => {
+                return Some((
+                    count,
+                    outcome,
+                    explain::signature_failure(&active, &expected, outcome, false),
+                ));
+            }
+            Compatibility::Unproven => {
+                unproven.get_or_insert(count);
+            }
+            Compatibility::Proven => {}
+        }
+    }
+    unproven.map(|count| {
+        let active = active_clause(actual, count).expect("unproven clause exists");
+        let expected = active_clause(promised, count).expect("promised clause exists");
+        let outcome = Compatibility::Unproven;
+        (
+            count,
+            outcome,
+            explain::signature_failure(&active, &expected, outcome, false),
+        )
+    })
+}
+
+fn active_clause(signatures: &[Signature], count: usize) -> Option<Cow<'_, Signature>> {
+    // Contracts store fixed clauses before the variadic fallback, like a call.
+    let signature = signatures.iter().find(|sig| sig.arity().accepts(count))?;
+    match &signature.rest {
+        None => Some(Cow::Borrowed(signature)),
+        Some(rest) => {
+            let mut args = signature.args.clone();
+            args.resize(count, rest.clone());
+            Some(Cow::Owned(Signature {
+                args,
+                rest: None,
+                ret: signature.ret.clone(),
+                parameters: None,
+            }))
+        }
+    }
 }

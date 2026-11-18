@@ -44,7 +44,7 @@ impl ExtraFields {
         }
     }
 
-    fn accepts_type(&self, other: &Self) -> Compatibility {
+    pub(super) fn accepts_type(&self, other: &Self) -> Compatibility {
         match (self, other) {
             (Self::Open, _) | (_, Self::Closed) => Compatibility::Proven,
             (Self::Typed(expected), Self::Typed(actual)) => Compatibility::all(
@@ -57,13 +57,26 @@ impl ExtraFields {
         }
     }
 
-    fn accepts_field(&self, key: &Type, ty: &Type) -> Compatibility {
+    pub(super) fn accepts_field(&self, key: &Type, ty: &Type) -> Compatibility {
         match self {
             Self::Open => Compatibility::Proven,
             Self::Closed => Compatibility::Mismatch,
             Self::Typed(types) => key
                 .compatibility(&types[0])
                 .and(|| ty.compatibility(&types[1])),
+        }
+    }
+}
+
+impl MapSlot<'_> {
+    pub(super) fn compatibility(&self, field: &Field) -> Compatibility {
+        match self {
+            Self::Present(actual) => actual.compatibility(&field.ty),
+            Self::Optional(actual) => {
+                Compatibility::from(!field.required).and(|| actual.compatibility(&field.ty))
+            }
+            Self::Absent => (!field.required).into(),
+            Self::Undeclared => Compatibility::Mismatch,
         }
     }
 }
@@ -289,32 +302,32 @@ impl MapType {
             .extra
             .accepts_type(&self.extra)
             .and(|| {
-                Compatibility::all(expected.fields.iter().map(
-                    |(key, field)| {
-                        match self.slot(key) {
-                            MapSlot::Present(actual) => actual.compatibility(&field.ty),
-                            MapSlot::Optional(actual) => Compatibility::from(!field.required)
-                                .and(|| actual.compatibility(&field.ty)),
-                            MapSlot::Absent => (!field.required).into(),
-                            MapSlot::Undeclared => Compatibility::Mismatch,
-                        }
-                    },
-                ))
+                Compatibility::all(
+                    expected
+                        .fields
+                        .iter()
+                        .map(|(key, field)| self.slot(key).compatibility(field)),
+                )
             })
             .and(|| {
                 if expected.extra.is_open() {
                     Compatibility::Proven
                 } else {
                     Compatibility::all(
-                        self.fields
-                            .iter()
-                            .filter(|(key, field)| {
-                                field.ty != Type::Never && !expected.fields.contains_key(*key)
-                            })
+                        self.unlisted_fields(expected)
                             .map(|(key, field)| expected.extra.accepts_field(key, &field.ty)),
                     )
                 }
             })
+    }
+
+    pub(super) fn unlisted_fields<'a>(
+        &'a self,
+        expected: &'a Self,
+    ) -> impl Iterator<Item = (&'a Type, &'a Field)> {
+        self.fields
+            .iter()
+            .filter(|(key, field)| field.ty != Type::Never && !expected.fields.contains_key(*key))
     }
 
     pub(super) fn is_shape(&self) -> bool {

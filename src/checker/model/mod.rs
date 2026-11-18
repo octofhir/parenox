@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 pub(crate) use declarations::Declarations;
 use declarations::Names;
-use externs::Externs;
+pub(crate) use externs::ExternCache;
 pub(super) use externs::MacroScope;
+use externs::{ExternFile, Externs};
 pub(super) use guards::VerifiedGuard;
 pub(crate) use interfaces::InterfaceKey;
 use interfaces::{Exports, LocalInterface, visible_value};
@@ -86,6 +87,7 @@ pub(crate) struct FunctionArity {
 #[derive(PartialEq, Eq)]
 pub(super) enum DeclaredValue<'a> {
     Literal(&'a Type),
+    ExternLiteral(&'a Type, &'a ContractOrigin),
     Function(&'a Contract),
     Macro(&'a MacroScope),
 }
@@ -129,7 +131,7 @@ impl Globals {
 pub(crate) struct Model {
     names: Names,
     path: String,
-    externs: Option<Arc<Externs>>,
+    externs: Option<Arc<ExternFile>>,
     literals: BTreeMap<String, LiteralVar>,
     exports: Arc<Exports>,
     local_interface: Arc<LocalInterface>,

@@ -1,0 +1,2 @@
+{vendor.labels/title [{:payload {:title :demo.versioned/label}} :-> string?]
+ vendor.labels/available? [:-> boolean?]}

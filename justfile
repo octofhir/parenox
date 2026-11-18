@@ -23,8 +23,8 @@ serve: build
     @./target/release/parenox serve
 
 # Fix clinic errors in memory, then measure warm checks and edits.
-agent-loop iterations="100" binary="target/release/parenox" extra_externs="0" shifted_functions="0" transport="snapshot" extra_consumers="0": build
-    cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations {{quote(iterations)}} --binary {{quote(binary)}} --extra-externs {{quote(extra_externs)}} --shifted-functions {{quote(shifted_functions)}} --project-transport {{quote(transport)}} --extra-consumers {{quote(extra_consumers)}}
+agent-loop iterations="100" binary="target/release/parenox" extra_externs="0" shifted_functions="0" transport="snapshot" extra_consumers="0" extra_extern_files="0": build
+    cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations {{quote(iterations)}} --binary {{quote(binary)}} --extra-externs {{quote(extra_externs)}} --shifted-functions {{quote(shifted_functions)}} --project-transport {{quote(transport)}} --extra-consumers {{quote(extra_consumers)}} --extra-extern-files {{quote(extra_extern_files)}}
 
 # Measure synthetic single-file sessions and fresh CLI processes.
 bench iterations="100" functions="1000": build
@@ -115,6 +115,39 @@ generic-zip format="pretty": build
 # Check a storage extern, generic map contracts and an HTTP response.
 map-boundary format="pretty": build
     @./target/release/parenox check examples/map_boundary/src --externs examples/map_boundary/externs.edn --format {{quote(format)}}
+
+# Check a namespace that loads declarations from two extern files.
+split-externs format="pretty": build
+    @./target/release/parenox check examples/split_externs/app.clj --externs examples/split_externs/queries.edn --externs examples/split_externs/formatting.edn --format {{quote(format)}}
+
+# Validate library promises against source, then show a mismatched input type.
+validate-externs format="pretty": build
+    @./target/release/parenox validate-externs --config examples/split_externs/parenox.edn --format {{quote(format)}}
+    @./target/release/parenox validate-externs --config examples/split_externs/parenox.edn --externs examples/split_externs/drift.edn --format {{quote(format)}} || test "$?" -eq 1
+
+# Export the checked public function contracts and literal values as standalone EDN.
+export-externs path="examples/showcase.clj": build
+    @./target/release/parenox export-externs {{quote(path)}}
+
+# Check a client with library constants from an exported EDN snapshot only.
+literal-externs format="pretty": build
+    @snapshot=$(mktemp); trap 'rm -f "$snapshot"' EXIT; ./target/release/parenox export-externs examples/literal_vars/config.clj > "$snapshot" && ./target/release/parenox check examples/literal_vars/app.clj --externs "$snapshot" --format {{quote(format)}}
+
+# Compare two library versions with independent named specs and show a breaking change.
+diff-externs format="plain": build
+    @./target/release/parenox diff-externs --before-config examples/extern_diff/before/parenox.edn --after-config examples/extern_diff/after/parenox.edn --format {{quote(format)}} || test "$?" -eq 1
+
+# Check the end-to-end batch processing showcase.
+showcase format="pretty": build
+    @./target/release/parenox check examples/showcase.clj --format {{quote(format)}}
+
+# Show deliberately broken changes to the showcase, with diagnostic locations.
+showcase-errors format="pretty" color="auto": build
+    @status=0; ./target/release/parenox check examples/showcase.clj examples/showcase_bad.clj --format {{quote(format)}} --color {{quote(color)}} || status=$?; test "$status" -eq 1
+
+# Run the same single-file example on the pinned Clojure JVM.
+showcase-run:
+    clojure -M -i examples/showcase.clj -e '(prn (demo.showcase/summarize-batch (demo.showcase/sample-batch)))'
 
 # Compare an ordinary let with a macro whose scope is known but effects are not.
 macro-scopes format="pretty": build

@@ -3,7 +3,7 @@ mod indexing;
 mod maps;
 mod parameters;
 
-pub(crate) use compatibility::Compatibility;
+pub(crate) use compatibility::{Compatibility, extern_drift};
 pub use indexing::IndexedItem;
 pub use maps::{ExtraFields, Field, MapSlot, MapType};
 pub(crate) use parameters::{

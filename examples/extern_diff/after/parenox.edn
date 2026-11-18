@@ -1,0 +1,1 @@
+{:paths ["schema.clj"] :externs ["api.edn"]}

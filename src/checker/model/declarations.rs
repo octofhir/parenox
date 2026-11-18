@@ -85,6 +85,10 @@ impl Declarations {
         &self.names.namespace
     }
 
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
     pub(super) fn error(&mut self, code: &str, span: Span, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::new(code, span, message));
     }

@@ -1,3 +1,5 @@
+mod extern_export;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -6,11 +8,11 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::checker::{
-    Declarations, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
+    Declarations, ExternCache, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
 };
 use crate::reader::{self, Form, Position, Span};
 use crate::suppressions::{MARKER, Suppressions};
-use crate::{Diagnostic, Report, Stats};
+use crate::{Diagnostic, ExternChangeKind, ExternDiff, ExternSnapshot, Report, Stats};
 
 #[derive(Clone, Copy)]
 pub struct Source<'a> {
@@ -25,6 +27,59 @@ pub struct ProjectReport {
     pub complete: bool,
     pub files: Vec<Report>,
     pub stats: Stats,
+}
+
+#[derive(Debug)]
+pub struct ExternExport {
+    pub report: ProjectReport,
+    /// Standalone EDN, present only after a successful and complete check.
+    pub edn: Option<String>,
+}
+
+/// Compares the new extern promises to the old ones with independent spec
+/// environments. An invalid snapshot never turns missing declarations into removals.
+pub fn compare_externs(before: ExternSnapshot<'_>, after: ExternSnapshot<'_>) -> ExternDiff {
+    let mut old = Session::default();
+    let mut new = Session::default();
+    let before = old.check_snapshot(
+        before.sources,
+        before.externs,
+        &[],
+        SnapshotMode::ExternSurface,
+    );
+    let after = new.check_snapshot(
+        after.sources,
+        after.externs,
+        &[],
+        SnapshotMode::ExternSurface,
+    );
+    let valid = before.ok && before.complete && after.ok && after.complete;
+    let changes = if valid {
+        new.externs.changes_from(&old.externs)
+    } else {
+        Vec::new()
+    };
+    let complete = valid
+        && !changes
+            .iter()
+            .any(|change| change.kind == ExternChangeKind::Unproven);
+    let compatible = complete
+        && !changes.iter().any(|change| {
+            matches!(
+                change.kind,
+                ExternChangeKind::Removed
+                    | ExternChangeKind::Breaking
+                    | ExternChangeKind::ValueChanged
+            )
+        });
+    ExternDiff {
+        version: 1,
+        compatible,
+        complete,
+        before,
+        after,
+        changes,
+    }
 }
 
 #[derive(Default)]
@@ -68,6 +123,13 @@ enum FileKind {
     #[default]
     Source,
     Externs,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotMode {
+    Check,
+    ValidateExterns,
+    ExternSurface,
 }
 
 impl FileCache {
@@ -149,6 +211,16 @@ impl FileCache {
             |form| form.span,
         )
     }
+
+    fn public_literals(&self) -> impl Iterator<Item = (&str, Span, Result<String, &'static str>)> {
+        self.model
+            .as_ref()
+            .zip(self.declarations.as_ref())
+            .into_iter()
+            .flat_map(|(model, declarations)| {
+                model.public_literals(declarations, &self.forms, &self.source)
+            })
+    }
 }
 
 /// In-memory source snapshots. No checked project code is executed.
@@ -156,6 +228,7 @@ impl FileCache {
 pub struct Session {
     files: BTreeMap<String, FileCache>,
     specs: SpecCache,
+    externs: ExternCache,
 }
 
 impl Session {
@@ -178,12 +251,66 @@ impl Session {
         sources: &[Source<'_>],
         externs: Option<Source<'_>>,
     ) -> ProjectReport {
+        self.check_project_with_externs(sources, externs.as_slice())
+    }
+
+    /// Checks a complete snapshot with any number of separate EDN extern files.
+    /// A qualified name declared in multiple extern files is not published.
+    pub fn check_project_with_externs(
+        &mut self,
+        sources: &[Source<'_>],
+        externs: &[Source<'_>],
+    ) -> ProjectReport {
+        self.check_snapshot(sources, externs, &[], SnapshotMode::Check)
+    }
+
+    /// Checks library source without trusting the supplied extern promises and
+    /// verifies each promise against a checked public source declaration.
+    /// Validation succeeds only when the resulting report is both ok and complete.
+    pub fn validate_externs(
+        &mut self,
+        sources: &[Source<'_>],
+        externs: &[Source<'_>],
+    ) -> ProjectReport {
+        self.validate_externs_with_dependencies(sources, externs, &[])
+    }
+
+    /// Validates the selected externs while trusting separate dependency externs.
+    /// If a qualified name occurs in both groups, neither declaration is used.
+    pub fn validate_externs_with_dependencies(
+        &mut self,
+        sources: &[Source<'_>],
+        externs: &[Source<'_>],
+        dependencies: &[Source<'_>],
+    ) -> ProjectReport {
+        self.check_snapshot(
+            sources,
+            externs,
+            dependencies,
+            SnapshotMode::ValidateExterns,
+        )
+    }
+
+    fn check_snapshot(
+        &mut self,
+        sources: &[Source<'_>],
+        externs: &[Source<'_>],
+        dependencies: &[Source<'_>],
+        mode: SnapshotMode,
+    ) -> ProjectReport {
         let started = Instant::now();
         let mut entries = Vec::new();
         let mut reports = Vec::new();
         let mut paths = BTreeSet::new();
         let count = sources.len();
-        for (index, source) in sources.iter().copied().chain(externs).enumerate() {
+        let checked_end = count + externs.len();
+        for (index, source) in sources
+            .iter()
+            .chain(externs)
+            .chain(dependencies)
+            .copied()
+            .enumerate()
+        {
             let kind = if index < count {
                 FileKind::Source
             } else {
@@ -280,50 +407,111 @@ impl Session {
         for namespace in namespaces.keys() {
             globals.register_namespace(namespace);
         }
-        for index in order {
-            let (source, cache, _) = &mut entries[index];
-            if let Some(declarations) = &cache.declarations {
-                if cache
-                    .model
-                    .as_mut()
-                    .is_none_or(|model| !model.refresh_external_inputs(&globals))
-                {
-                    cache.model = Some(Model::build(
-                        declarations,
-                        &cache.forms,
-                        &cache.source,
-                        source.path,
-                        &globals,
-                    ));
+        if mode != SnapshotMode::ExternSurface {
+            for index in order {
+                let (source, cache, _) = &mut entries[index];
+                if let Some(declarations) = &cache.declarations {
+                    if cache
+                        .model
+                        .as_mut()
+                        .is_none_or(|model| !model.refresh_external_inputs(&globals))
+                    {
+                        cache.model = Some(Model::build(
+                            declarations,
+                            &cache.forms,
+                            &cache.source,
+                            source.path,
+                            &globals,
+                        ));
+                    }
+                    cache.model.as_ref().unwrap().publish(&mut globals);
                 }
-                cache.model.as_ref().unwrap().publish(&mut globals);
             }
         }
-        if externs.is_some() {
-            let (source, cache, _) = &mut entries[count];
-            if cache.parse_error.is_none() {
-                if cache
+        for (source, cache, _) in &mut entries[count..] {
+            if cache.parse_error.is_none()
+                && cache
                     .model
                     .as_mut()
                     .is_none_or(|model| !model.refresh_external_inputs(&globals))
-                {
-                    cache.model = Some(Model::externs(&cache.forms, source.path, &globals));
-                }
-                cache.model.as_ref().unwrap().publish_externs(&mut globals);
+            {
+                cache.model = Some(Model::externs(
+                    &cache.forms,
+                    source.path,
+                    &cache.source,
+                    &globals,
+                ));
             }
+        }
+        self.externs.update(
+            entries[count..]
+                .iter()
+                .filter_map(|(_, cache, _)| cache.model.as_ref()?.extern_file()),
+        );
+        let source_literals =
+            if mode == SnapshotMode::ValidateExterns && self.externs.has_literals() {
+                entries[..count]
+                    .iter()
+                    .zip(&built)
+                    .filter(|(_, built)| **built)
+                    .flat_map(|((source, cache, _), _)| {
+                        cache
+                            .public_literals()
+                            .map(move |(name, _, value)| (name.to_owned(), (source.path, value)))
+                    })
+                    .collect()
+            } else {
+                BTreeMap::new()
+            };
+        if mode == SnapshotMode::Check {
+            self.externs.publish(&mut globals);
+        } else if mode == SnapshotMode::ValidateExterns && !dependencies.is_empty() {
+            let mut trusted_paths: BTreeSet<_> =
+                dependencies.iter().map(|file| file.path).collect();
+            // Even an invalid snapshot must not make a checked path trusted.
+            for file in externs {
+                trusted_paths.remove(file.path);
+            }
+            self.externs
+                .publish_dependencies(&trusted_paths, &mut globals);
         }
         let mut totals = Stats::default();
         let mut report_ordinals = BTreeMap::<&str, usize>::new();
         for (index, (source, mut cache, changed)) in entries.into_iter().enumerate() {
             let file_started = Instant::now();
             let report = &mut reports[index];
-            if (index >= count || built[index])
+            let specs_only = mode == SnapshotMode::ExternSurface && index < count;
+            if specs_only {
+                if let Some(declarations) = &cache.declarations {
+                    report
+                        .diagnostics
+                        .extend_from_slice(declarations.diagnostics());
+                }
+                if let Some(diagnostics) = self.specs.diagnostics.get(source.path) {
+                    report.diagnostics.extend_from_slice(diagnostics);
+                }
+            } else if (index >= count || built[index])
                 && let Some(model) = &cache.model
             {
                 if let Some(diagnostics) = self.specs.diagnostics.get(source.path) {
                     report.diagnostics.extend(diagnostics.iter().cloned());
                 }
                 report.diagnostics.extend(model.diagnostics.iter().cloned());
+                if index >= count {
+                    report
+                        .diagnostics
+                        .extend_from_slice(self.externs.diagnostics(source.path));
+                    if mode == SnapshotMode::ValidateExterns
+                        && index < checked_end
+                        && let Some(file) = model.extern_file()
+                    {
+                        report.diagnostics.extend(self.externs.validate_file(
+                            file,
+                            &globals,
+                            &source_literals,
+                        ));
+                    }
+                }
                 let interface = model.interface_key(&globals);
                 let changes = cache
                     .interface
@@ -389,21 +577,25 @@ impl Session {
                 }
                 cache.interface = Some(interface);
             }
-            report
-                .diagnostics
-                .extend(cache.suppressions.invalid.iter().cloned());
-            if !report.diagnostics.is_empty() || cache.suppressions.has_rules() {
+            if !specs_only {
+                report
+                    .diagnostics
+                    .extend(cache.suppressions.invalid.iter().cloned());
+            }
+            if !report.diagnostics.is_empty() || (!specs_only && cache.suppressions.has_rules()) {
                 // A caller can supply duplicate paths in an invalid snapshot. Their
                 // reports must not share IDs even when the diagnostics are identical.
                 let ordinal = report_ordinals.entry(source.path).or_default();
                 identify_diagnostics(source.path, *ordinal, &mut report.diagnostics);
-                let mut unused = cache.suppressions.apply(report);
-                if !unused.is_empty() {
-                    // Only this step emits PNX9007; these IDs cannot collide
-                    // with IDs assigned before filtering.
-                    identify_diagnostics(source.path, *ordinal, &mut unused);
-                    report.diagnostics.append(&mut unused);
-                    report.diagnostics.sort_by(diagnostic_order);
+                if !specs_only {
+                    let mut unused = cache.suppressions.apply(report);
+                    if !unused.is_empty() {
+                        // Only this step emits PNX9007; these IDs cannot collide
+                        // with IDs assigned before filtering.
+                        identify_diagnostics(source.path, *ordinal, &mut unused);
+                        report.diagnostics.append(&mut unused);
+                        report.diagnostics.sort_by(diagnostic_order);
+                    }
                 }
                 *ordinal += 1;
             }

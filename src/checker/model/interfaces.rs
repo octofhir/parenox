@@ -46,6 +46,9 @@ pub(super) fn visible_value<'a>(
     Some(match externs()?.get(name)? {
         ExternalDeclaration::Function(contract) => DeclaredValue::Function(contract),
         ExternalDeclaration::Macro(scope) => DeclaredValue::Macro(scope),
+        ExternalDeclaration::Literal(literal) => {
+            DeclaredValue::ExternLiteral(&literal.ty, &literal.origin)
+        }
     })
 }
 

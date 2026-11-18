@@ -1033,3 +1033,16 @@
 (assert (= "Today" (demo.generic-zip/label-or-empty {:daily " Today "})))
 (assert (= "" (demo.generic-zip/label-or-empty {:weekly "Later"})))
 (println "Clojure/JVM generic zip and nullable results: 5 assertions passed")
+
+(load-file "examples/showcase.clj")
+(let [batch (demo.showcase/sample-batch)]
+  (assert (= {:status 200 :body {:title "SHIFT A" :score 14
+                                 :rows [{:text "Meter reading" :score 14}
+                                        {:text "CHECK" :score 0}]}}
+             (demo.showcase/summarize-batch batch)))
+  (assert (= {:status 422 :body {:title "Tenant is required" :score 0 :rows []}}
+             (demo.showcase/summarize-batch (update batch :labels dissoc :tenant))))
+  (assert (= "North hub" (get-in (demo.showcase/summarize-batch (assoc batch :custom-title? false)) [:body :title])))
+  (assert (= "North hub" (get-in (demo.showcase/summarize-batch (assoc-in batch [:labels :title] nil)) [:body :title])))
+  (assert (= 1 (count (get-in (demo.showcase/summarize-batch (assoc batch :weights [2])) [:body :rows])))))
+(println "Clojure/JVM showcase: 5 assertions passed")

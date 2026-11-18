@@ -66,6 +66,14 @@ just contextual-callbacks # check fn and #() against a callback contract
 just generic-callbacks    # infer callback input and result types
 just generic-zip          # infer two independent inputs and a callback result
 just map-boundary         # check a storage extern through to an HTTP response
+just split-externs        # load two declaration files for one namespace
+just validate-externs     # check library promises from config, then show drift
+just export-externs       # write the showcase's public contracts as EDN
+just literal-externs      # check a client against exported constants
+just diff-externs         # compare two versions of a library contract
+just showcase             # check one end-to-end Clojure example
+just showcase-errors      # show six deliberately broken changes
+just showcase-run         # run the same example on JVM
 just macro-scopes    # resolve macro bindings and show the analysis limit
 just paths           # nested map lookup and update with source diagnostics
 just presence        # presence guards for optional fields
@@ -167,6 +175,127 @@ Externs are trusted declarations for library functions. A matching project
 source declaration takes precedence, and source privacy applies to every caller.
 An extern for a name that Parenox already models reports `PNX2790`; it does not
 replace the built-in rule. An unmodeled name in the same namespace is allowed.
+
+Repeat `--externs` to load separate EDN files. Two files can declare different
+names in the same namespace. If they declare the same qualified name, both
+locations report `PNX2790` and neither extern is used. Each contract keeps its
+own declaration path in diagnostics. Run `just split-externs` for an example.
+
+### Project configuration
+
+Put a `parenox.edn` file beside the project:
+
+```edn
+{:paths ["src"]
+ :externs ["externs/api.edn"]
+ :dependency-externs ["externs/dependencies.edn"]}
+```
+
+Run `parenox check` from that directory, or pass `--config path/to/parenox.edn`
+from anywhere. Relative paths in the config resolve from the config directory.
+Explicit source paths, `--externs` or `--dependency-externs` replace the matching
+configured list; they don't append to it. If you pass source paths without
+`--config`, Parenox doesn't load the default file. All three keys are optional;
+unknown or repeated keys and non-string paths are errors. The config is read
+as data. `serve` still uses the in-memory snapshots sent by the client.
+
+### Validating library externs
+
+Use `parenox validate-externs --config parenox.edn` to check a library against
+the externs it ships. It checks the source bodies and verifies that the public
+functions accept the calls promised in `:externs` and return compatible types.
+For variadic signatures, it checks both the fixed clauses selected at the
+promised argument counts and the variadic tail.
+Literal externs must match the public source initializer.
+
+The selected externs do not fill in missing source definitions. Separate
+`:dependency-externs` (or `--dependency-externs`) are trusted while checking
+source bodies, but are not themselves validated. Ordinary `check` trusts
+both sets. A duplicate across the sets is still an error; neither declaration
+is used.
+
+A known mismatch reports `PNX2322` at the EDN declaration and names the source
+file. For a signature mismatch, a note points to the rejected argument,
+result, or nested field. If there is no matching checked public definition,
+or compatibility cannot be proven, Parenox reports `PNX9011`. Macro scope verification and general
+generic subtyping are not supported. Validation succeeds only if the whole
+report is both `ok` and `complete`, so a suppressed source error does not
+certify a library. Run `just validate-externs` for passing and failing examples.
+
+### Exporting public contracts
+
+Save a checked library's public function contracts and literal `def` values.
+Clients can then check against the snapshot without the library's source or specs:
+
+```sh
+just export-externs > /tmp/showcase.edn
+target/release/parenox check examples/showcase_client.clj --externs /tmp/showcase.edn
+```
+
+`export-externs` accepts source paths or `--config` like `check`. It trusts any
+supplied externs as dependencies but doesn't copy them into the snapshot. The
+output sorts declarations by qualified name and inlines named specs. It preserves
+arities, callbacks, type parameters and map shapes. It doesn't export private
+vars, macro scopes or the narrowing behavior of `:t/guard`.
+
+EDN goes to stdout only after a complete source check and a second check of the
+generated snapshot in isolation. Parenox compares the reloaded signatures and
+literal values with the originals. Errors, suppressions and unreadable output
+prevent export (exit `1`); diagnostics go to stderr in the requested `--format`.
+The resulting file works with `check`, `validate-externs` and `diff-externs`.
+
+### Literal externs
+
+Use `{:value ...}` for a public literal `def`:
+
+```edn
+{demo.config/default-plan {:value {:limit 4 :mode :demo.config/online}}}
+```
+
+The checker reads the value as inert EDN. A list is data, not a call.
+Maps, vectors, sets, lists and scalars retain the same type precision as in
+source; map keys must be keywords or strings. Export resolves auto-keywords
+and preserves numeric spelling, but not metadata. It describes the
+initializer, not later changes to a Var's root. Run `just literal-externs`
+to check a client using exported constants instead of library source.
+
+### Comparing releases
+
+`diff-externs` compares the new promises to the old ones without checking
+implementation bodies. Repeat `--before` and `--after` for standalone EDN files:
+
+```sh
+parenox diff-externs --before previous/api.edn --after current/api.edn --json
+```
+
+If an extern names a project spec, use `--before-config` and `--after-config`
+to resolve each release's `:paths` and `:externs` separately. Dependency externs
+are not part of the comparison. Explicit EDN flags replace that side's
+configured extern list. An empty EDN map represents an empty surface.
+
+Besides function and macro changes, the report lists changed literals as
+`value_changed`. A changed value is incompatible even if its type is the
+same. Map and set entry order doesn't count; different numeric spellings
+are compared conservatively as a change.
+
+For signature failures, the report shows both declaration locations, a call
+argument count, and one failed requirement. For example:
+
+```text
+argument 1 → field :payload → field :title: expected Keyword, got String
+```
+
+JSON puts this explanation in `detail` with a `reason` and a structured `path`.
+Argument numbers start at one; collection indices start at zero. The expected
+type is the one the value needs to fit: the new input for a call, the old
+output for a return. Callback inputs reverse direction again. Unproven
+generic compatibility is reported as such, not as a specific type mismatch.
+
+Invalid input reports its diagnostics
+instead of guessing which promises were removed. Exit status is `0` only if
+every old promise is still covered, `1` for breaking or incomplete comparisons,
+and `2` for usage or I/O errors. Run `just diff-externs` for an example where
+the extern text is unchanged but a referenced spec breaks compatibility.
 
 ### External macro scopes
 
@@ -344,12 +473,15 @@ One request and one flushed response per line. A single-file request:
 {"id":1,"path":"demo.clj","source":"(defn f {:t/sig '[:-> number?]} [] 1)"}
 ```
 
-A project request contains a **complete snapshot** of its files, plus an optional
-extern file. The `source` values are full file contents, not patches:
+A project request contains a **complete snapshot** of its files, plus optional
+extern files. The `source` values are full file contents, not patches:
 
 ```json
-{"id":2,"files":[{"path":"a.clj","source":"(ns a)"},{"path":"b.clj","source":"(ns b (:require [a :as a]))"}],"externs":{"path":"externs.edn","source":"{}"}}
+{"id":2,"files":[{"path":"a.clj","source":"(ns a)"}],"externs":[{"path":"store.edn","source":"{}"},{"path":"http.edn","source":"{}"}]}
 ```
+
+The previous single extern object still works. Rust callers can use
+`Session::check_project_with_externs` with a slice of extern snapshots.
 
 Responses have `id` and `result`. Results include `ok`, `complete`, diagnostics,
 and `stats`: elapsed microseconds, parsed/reused files and checked/reused functions.
@@ -363,9 +495,10 @@ change when a file is renamed or a diagnostic moves. Use `code` to identify
 the rule. The top-level response `id` still identifies the request.
 
 When a diagnostic checks a known function contract, text output names its
-source and JSON includes a `contract` object. Scope diagnostics can also carry
-their declaration. The object contains the qualified `name`, the `kind`
-(`t_sig`, `s_fdef`, `extern`, `builtin` or `macro_scope`) and, for
+source and JSON includes a `contract` object. Scope diagnostics and literal
+extern validation can also carry their declaration. The object contains the
+qualified `name`, the `kind` (`t_sig`, `s_fdef`, `extern`, `extern_literal`,
+`builtin` or `macro_scope`) and, for
 file-backed contracts, the `path`. The primary diagnostic span still points
 to the call or return being checked.
 
@@ -381,15 +514,18 @@ then removes it:
 
 `open` replaces the tracked project. `update` accepts optional `changes` to add
 or replace files and `remove` with paths to remove. An empty update checks the
-current project. Omit `externs` in an update to keep the current externs, pass
-a snapshot to replace them, or pass `null` to remove them. Each operation returns
-a full project report ordered by source path, followed by the extern report if
-present. Invalid operations leave the tracked project intact. A valid edit is
+current project. Omit `externs` in an update to keep the current set. An array
+replaces the full set; a single object replaces it with one file. Use `null`
+or `[]` to clear it. Each operation returns a full project report ordered by
+source path, followed by the extern reports in the supplied order. Invalid
+operations leave the tracked project intact. A valid edit is
 saved even when it produces diagnostics. Single-file and complete-snapshot
 requests work independently of the tracked project.
 
 - Unchanged sources reuse their parsed forms and declaration models.
 - Unchanged externs reuse their declarations until a referenced spec changes.
+- An extern edit rechecks callers of the changed declarations, not all callers
+  in the same namespace.
 - Annotated body edits recheck that function while preserving callers' cached results.
 - Edits to unannotated private helpers invalidate their transitive callers in the same file.
 - Public contract changes recheck functions that reference the changed var,
@@ -418,11 +554,45 @@ whose ranges move as the agent edits the first function in their file.
 Run `just agent-loop 1000 target/release/parenox 512 0 delta` to measure the
 same edit sequence through tracked updates.
 
+Run `just agent-loop 1000 target/release/parenox 512 0 delta 0 8` to split the
+512 synthetic contracts across eight extern files and keep the clinic contract
+in its own file. The final edit changes one unused extern and verifies that
+only that file is parsed, with no new function checks.
+
 Run `just agent-loop 1000 target/release/parenox 0 0 snapshot 128` to add 128
 consumer functions and alternate edits to an unused export in their provider.
 The final signature edit changes the export those consumers actually call.
 Set the fourth argument to `128` as well to add 128 functions to the edited file
 and measure reuse within that file.
+
+## Showcase: batch processing
+
+[examples/showcase.clj](examples/showcase.clj) is a single Clojure file that
+turns a batch of meter readings and notes into a typed response. Run
+`just showcase` to check it and `just showcase-run` to print its response on JVM.
+
+- `event-row` uses an exhaustive `case` to select the right type of `:value`.
+- `zip-results` infers two input types and the result of its named callback.
+- `find-label` returns a nullable value. Parenox checks `use-title?` before
+  trusting it to narrow the title to `String`.
+- Typed exception data supplies the error response; a generic envelope keeps
+  the normal response's body type. Private helpers get types from their callers.
+
+Run `just showcase-errors` to check
+[examples/showcase_bad.clj](examples/showcase_bad.clj) against the original
+contracts. It shows six diagnostics without editing either file:
+
+| Regression | What Parenox shows |
+|---|---|
+| A branch for `:note` was dropped | The missing tag in `case` |
+| An enabled flag is mistaken for proof that a title exists | The unproved guard, then the nullable call with a reviewable fallback suggestion |
+| The two input vectors are swapped | The inferred callback signature and the contract it violates in the other file |
+| The response score is formatted as text | `String` in the `:score` field where the API promises `Number` |
+| The error handler puts an internal code in the title | `Number` in the `:title` field, traced through `ex-info` and `catch` |
+
+Use `just showcase-errors plain` for compact output or `just showcase-errors json`
+for spans, contract origins, and suggestions as data. `just showcase` checks
+the unchanged implementation completely without suppressions.
 
 ## Current scope
 
@@ -623,7 +793,12 @@ that evidence. It does not recursively specialize generic callback arguments.
 
 A literal map type in `:t/sig` or an EDN extern is closed: every declared key
 is required and additional keys are rejected. Use `s/keys` for an open shape
-with named specs and optional fields. A parameter can describe a direct value
+with named specs and optional fields, or inline the fields in a contract:
+`(t/map {:req {:id string?} :opt {:label string?} :extra :open})`. The fields in
+`:opt` may be absent, but a present `nil` still needs a nilable type. Omit
+`:extra` or use `:extra :closed` to reject unlisted keys.
+
+A parameter can describe a direct value
 in a literal map type or the value type in `(s/map-of key-spec a)`. When a
 literal map type has several fields with the same parameter, Parenox infers
 from the first such field in key order and checks the other fields against it.
@@ -909,7 +1084,7 @@ inferred helper work is included in the check of their callers.
 | Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
 | Data operations | Keyword calls, string and keyword lookups and updates, ordered vector paths, indexed reads, positional and nested map destructuring and checked keys |
 | Functions | Fixed and variadic arities, forward calls, bare requires, namespace aliases, `:as-alias`, explicit `:refer` with `:exclude` and `:rename`, private-var boundaries, direct private-helper inference |
-| Libraries | A small built-in rule table and one optional EDN map of external signatures |
+| Libraries | Built-in rules and EDN extern files; checked public signatures and literal values can be exported as EDN |
 | Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |
 
 Clojure distinctions are preserved: a set in expression position is a `Set<T>`;
@@ -978,7 +1153,7 @@ Limitations include user macros, Java interop, generics, lazy sequence functions
 recursive specs, full numeric
 tower semantics and some reader forms. Numeric expressions use `Number`,
 with decimal integer literals retaining their value for indexed reads.
-Externs currently declare qualified function signatures; they do not load JARs or
+Externs describe qualified functions, literal vars and supported macro scopes; they do not load JARs or
 resolve Maven/Git dependencies. There is no runtime, interpreter or VM yet.
 
 Any error gives `ok=false`. `PNX9xxx` also gives `complete=false`: some analysis

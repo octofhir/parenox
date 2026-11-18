@@ -16,6 +16,105 @@ fn check_has_machine_readable_output_and_meaningful_exit_codes() {
 }
 
 #[test]
+fn repeated_extern_flags_load_every_file() {
+    let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .args([
+            "check",
+            "examples/split_externs/app.clj",
+            "--json",
+            "--externs",
+            "examples/split_externs/queries.edn",
+            "--externs",
+            "examples/split_externs/formatting.edn",
+        ])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{report}");
+    assert_eq!(report["files"].as_array().unwrap().len(), 3, "{report}");
+}
+
+#[test]
+fn extern_diff_reads_explicit_file_lists_and_configuration_snapshots() {
+    let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .args([
+            "diff-externs",
+            "--before-config",
+            "examples/extern_diff/before/parenox.edn",
+            "--after-config",
+            "examples/extern_diff/after/parenox.edn",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["compatible"], false);
+    assert_eq!(report["complete"], true);
+    let changes = report["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 3);
+    let title = &changes[2];
+    assert_eq!(title["name"], "vendor.labels/title");
+    assert_eq!(title["kind"], "breaking");
+    assert_eq!(
+        title["detail"],
+        serde_json::json!({
+            "path": [
+                {"kind": "argument", "index": 1},
+                {"kind": "field", "key": ":payload"},
+                {"kind": "field", "key": ":title"}
+            ],
+            "reason": "type_mismatch",
+            "expected": "Keyword",
+            "actual": "String"
+        })
+    );
+    assert_eq!(title["before"]["span"]["start"]["line"], 1);
+    assert_eq!(
+        title["after"]["origin"]["path"],
+        "examples/extern_diff/after/api.edn"
+    );
+    let plain = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .args([
+            "diff-externs",
+            "--before-config",
+            "examples/extern_diff/before/parenox.edn",
+            "--after-config",
+            "examples/extern_diff/after/parenox.edn",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(plain.status.code(), Some(1));
+    let text = String::from_utf8(plain.stdout).unwrap();
+    assert!(
+        text.contains("argument 1 → field :payload → field :title: expected Keyword, got String"),
+        "{text}"
+    );
+
+    let queries = "examples/split_externs/queries.edn";
+    let formatting = "examples/split_externs/formatting.edn";
+    let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .args([
+            "diff-externs",
+            "--before",
+            queries,
+            "--before",
+            formatting,
+            "--after",
+            formatting,
+            "--after",
+            queries,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "Extern diff: compatible (0 changes)\n"
+    );
+}
+
+#[test]
 fn serve_flushes_responses_before_eof_and_survives_invalid_requests() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_parenox"))
         .arg("serve")
@@ -195,6 +294,30 @@ fn invalid_or_conflicting_output_options_are_usage_errors() {
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
     }
+}
+
+#[test]
+fn subcommands_have_help_and_validate_benchmark_arguments() {
+    let cli = || Command::new(env!("CARGO_BIN_EXE_parenox"));
+    let help = cli().args(["export-externs", "--help"]).output().unwrap();
+    assert!(help.status.success() && help.stderr.is_empty());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--dependency-externs") && help.contains("EDN to stdout"));
+
+    let invalid = cli()
+        .args(["bench", "--iterations=0", "examples/good.clj"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+
+    let valid = cli()
+        .args(["bench", "--iterations=1", "examples/good.clj"])
+        .output()
+        .unwrap();
+    assert!(valid.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&valid.stdout).unwrap();
+    assert_eq!(result["iterations"], 1);
 }
 
 #[test]

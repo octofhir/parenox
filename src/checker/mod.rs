@@ -15,7 +15,7 @@ use env::Env;
 use exceptions::Throws;
 use model::{Contract, DeclaredValue, Function, VerifiedGuard};
 pub(crate) use model::{
-    Declarations, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
+    Declarations, ExternCache, Globals, InterfaceKey, Model, SpecCache, SpecFingerprint, SpecSource,
 };
 use recur::RecurTarget;
 
@@ -357,6 +357,12 @@ impl Checker<'_> {
                 } else if let Some(value) = self.model.declared_value(s, self.globals) {
                     match value {
                         DeclaredValue::Literal(ty) => Value::new(ty.clone()),
+                        DeclaredValue::ExternLiteral(ty, origin) => Value::with_notes(
+                            ty.clone(),
+                            origin.path.iter().map(|path| {
+                                format!("Literal {} is declared in {path}.", origin.name)
+                            }).collect(),
+                        ),
                         DeclaredValue::Function(contract) => Value::from_contract(contract),
                         DeclaredValue::Macro(scope) => self.macro_gap(
                             scope, form.span, format!("Macro {} is not a function value", scope.origin().name)
@@ -372,7 +378,7 @@ impl Checker<'_> {
                         if external { "PNX9003" } else { "PNX2304" },
                         form.span,
                         if external {
-                            format!("No declared signature for external value {s}")
+                            format!("No declaration for external value {s}")
                         } else {
                             format!("Unresolved or private value {s}")
                         },

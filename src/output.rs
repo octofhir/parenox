@@ -13,6 +13,7 @@ fn contract_note(origin: &ContractOrigin) -> String {
         ContractKind::TSig => ":t/sig",
         ContractKind::SFdef => "s/fdef",
         ContractKind::Extern => "extern declaration",
+        ContractKind::ExternLiteral => "extern literal value",
         ContractKind::Builtin => "built-in rule",
         ContractKind::MacroScope => "macro scope declaration",
     };

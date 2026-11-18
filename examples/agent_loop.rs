@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::Instant;
 
+use clap::{Parser, ValueEnum};
 use serde_json::{Value, json};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -76,9 +77,8 @@ fn summarize(mut samples: Vec<f64>) -> Value {
     })
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ProjectTransport {
-    #[default]
     Snapshot,
     Delta,
 }
@@ -124,6 +124,7 @@ struct ClinicOptions<'a> {
     project: &'a str,
     iterations: usize,
     extra_externs: usize,
+    extra_extern_files: usize,
     shifted_functions: usize,
     extra_consumers: usize,
     transport: ProjectTransport,
@@ -134,6 +135,7 @@ fn clinic(agent: &mut Agent, root: &Path, options: ClinicOptions<'_>) -> Result<
         project,
         iterations,
         extra_externs,
+        extra_extern_files,
         shifted_functions,
         extra_consumers,
         transport,
@@ -163,24 +165,28 @@ fn clinic(agent: &mut Agent, root: &Path, options: ClinicOptions<'_>) -> Result<
         })
         .collect::<Result<_>>()?;
     let extern_path = Path::new(project).join("externs.edn");
-    let mut externs = fs::read_to_string(root.join(&extern_path))?;
-    if extra_externs > 0 {
-        let original = externs
-            .trim_end()
-            .strip_suffix('}')
-            .ok_or("Expected an extern EDN map")?;
-        externs.truncate(original.len());
-        for index in 0..extra_externs {
-            writeln!(
-                externs,
-                " bench.library/operation-{index} [(clojure.spec.alpha/nilable :clinic.model/patient) :-> string?]"
-            )?;
+    let externs = fs::read_to_string(root.join(&extern_path))?;
+    let externs = if extra_extern_files == 0 {
+        let mut merged = externs;
+        if extra_externs > 0 {
+            let original = merged
+                .trim_end()
+                .strip_suffix('}')
+                .ok_or("Expected an extern EDN map")?;
+            merged.truncate(original.len());
+            generate_externs(std::slice::from_mut(&mut merged), extra_externs)?;
         }
-        externs.push('}');
-    }
-    let mut payload = json!({"files": files, "externs": {
-        "path": extern_path, "source": externs,
-    }});
+        json!({"path": extern_path, "source": merged})
+    } else {
+        let mut parts = vec!["{\n".to_owned(); extra_extern_files];
+        generate_externs(&mut parts, extra_externs)?;
+        let mut snapshots = vec![json!({"path": extern_path, "source": externs})];
+        snapshots.extend(parts.into_iter().enumerate().map(|(index, source)| {
+            json!({"path": format!("{project}/bench-externs-{index}.edn"), "source": source})
+        }));
+        json!(snapshots)
+    };
+    let mut payload = json!({"files": files, "externs": externs});
     let (initial, first_us) = transport.open(agent, &mut payload)?;
     let errors: Vec<_> = initial["files"]
         .as_array()
@@ -292,6 +298,7 @@ fn clinic(agent: &mut Agent, root: &Path, options: ClinicOptions<'_>) -> Result<
         "scenario": "clinic: 4 namespaces + 1 declared library contract",
         "transport": transport.name(),
         "extra_externs": extra_externs,
+        "extra_extern_files": extra_extern_files,
         "shifted_functions": shifted_functions,
         "extra_consumers": extra_consumers,
         "iterations": iterations, "initial_errors": errors,
@@ -308,7 +315,43 @@ fn clinic(agent: &mut Agent, root: &Path, options: ClinicOptions<'_>) -> Result<
     };
     report[format!("{edit}_round_trip")] = summarize(edit_times);
     report[edit] = edited["stats"].take();
+    if extra_extern_files > 0 {
+        let source = &mut payload["externs"][1]["source"];
+        *source = json!(
+            source
+                .as_str()
+                .unwrap()
+                .replacen(":-> string?", ":-> number?", 1)
+        );
+        let (updated, elapsed) = match transport {
+            ProjectTransport::Snapshot => agent.send(&mut payload)?,
+            ProjectTransport::Delta => {
+                agent.send(&mut json!({"op": "update", "externs": payload["externs"]}))?
+            }
+        };
+        assert_eq!(updated["stats"]["parsed_files"], 1, "{updated}");
+        assert_eq!(updated["stats"]["checked_functions"], 0, "{updated}");
+        assert_eq!(
+            updated["stats"]["reused_functions"], total_functions,
+            "{updated}"
+        );
+        report["unused_extern_edit"] = json!({"round_trip_us": elapsed, "stats": updated["stats"]});
+    }
     Ok(report)
+}
+
+fn generate_externs(parts: &mut [String], count: usize) -> Result<()> {
+    for index in 0..count {
+        let target = index % parts.len();
+        writeln!(
+            parts[target],
+            " bench.library/operation-{index} [(clojure.spec.alpha/nilable :clinic.model/patient) :-> string?]"
+        )?;
+    }
+    for part in parts {
+        part.push('}');
+    }
+    Ok(())
 }
 
 fn synthetic(
@@ -405,42 +448,47 @@ fn synthetic(
     }))
 }
 
+#[derive(Parser)]
+#[command(about = "Measure end-to-end Parenox edit and check scenarios")]
+struct Options {
+    #[arg(long, default_value = "target/release/parenox")]
+    binary: PathBuf,
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long, default_value_t = 100)]
+    iterations: usize,
+    #[arg(long, default_value_t = 1000)]
+    functions: usize,
+    #[arg(long, default_value_t = 0)]
+    extra_externs: usize,
+    #[arg(long, default_value_t = 0)]
+    extra_extern_files: usize,
+    #[arg(long, default_value_t = 0)]
+    shifted_functions: usize,
+    #[arg(long, default_value_t = 0)]
+    extra_consumers: usize,
+    #[arg(long, value_enum, default_value_t = ProjectTransport::Snapshot)]
+    project_transport: ProjectTransport,
+}
+
 fn main() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut binary = PathBuf::from("target/release/parenox");
-    let mut project = None;
-    let mut iterations = 100;
-    let mut functions = 1000;
-    let mut extra_externs = 0;
-    let mut shifted_functions = 0;
-    let mut extra_consumers = 0;
-    let mut project_transport = ProjectTransport::default();
-    let mut args = std::env::args().skip(1);
-    while let Some(flag) = args.next() {
-        let value = args
-            .next()
-            .ok_or_else(|| format!("Missing value for {flag}"))?;
-        match flag.as_str() {
-            "--binary" => binary = value.into(),
-            "--project" => project = Some(value),
-            "--iterations" => iterations = value.parse::<usize>()?,
-            "--functions" => functions = value.parse::<usize>()?,
-            "--extra-externs" => extra_externs = value.parse::<usize>()?,
-            "--shifted-functions" => shifted_functions = value.parse::<usize>()?,
-            "--extra-consumers" => extra_consumers = value.parse::<usize>()?,
-            "--project-transport" => {
-                project_transport = match value.as_str() {
-                    "snapshot" => ProjectTransport::Snapshot,
-                    "delta" => ProjectTransport::Delta,
-                    _ => return Err("Project transport must be snapshot or delta".into()),
-                }
-            }
-
-            _ => return Err(format!("Unknown option {flag}").into()),
-        }
-    }
+    let Options {
+        binary,
+        project,
+        iterations,
+        functions,
+        extra_externs,
+        extra_extern_files,
+        shifted_functions,
+        extra_consumers,
+        project_transport,
+    } = Options::parse();
     if iterations == 0 || functions == 0 {
         return Err("Iterations and functions must be positive".into());
+    }
+    if extra_extern_files > extra_externs {
+        return Err("Extra extern files cannot exceed extra declarations".into());
     }
     if (extra_externs != 0
         || shifted_functions != 0
@@ -459,6 +507,7 @@ fn main() -> Result<()> {
                 project: &project,
                 iterations,
                 extra_externs,
+                extra_extern_files,
                 shifted_functions,
                 extra_consumers,
                 transport: project_transport,

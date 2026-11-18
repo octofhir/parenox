@@ -6,7 +6,13 @@ Parenox checks Clojure source without loading namespaces or running project code
 
 | Area | What this means for Parenox |
 |---|---|
-| Contracts and externs | Parenox reads `s/def`, `:t/sig`, single-arity `s/fdef` and one EDN file with trusted library signatures. Externs cannot replace a modeled built-in. Versioned sidecars are not yet supported. |
+| Contracts and externs | Parenox reads `s/def`, `:t/sig`, single-arity `s/fdef` and explicitly selected EDN files with trusted library declarations. Cross-file extern conflicts are reported at both declarations without picking a winner. Externs cannot replace a modeled built-in. |
+| Project configuration | `parenox.edn` selects source paths, library externs and separately trusted dependency externs. Relative paths resolve from the config file; JSON Lines clients still supply in-memory snapshots. |
+| Library contract validation | Compare selected promises to public source contracts and check source bodies without trusting those promises. Check fixed and variadic dispatch, and report incompatible or unproved promises at their EDN location. |
+| Contract change reports | Compare old and new extern snapshots with independent spec environments. Check whether every old call is still covered without analyzing implementation bodies. Report invalid inputs instead of inferring removals from them. |
+| Compatibility explanations | Report a rejected arity, argument, result or nested field. Follow the failed comparison only after it has been classified, so ordinary checking does not build diagnostic paths. |
+| Exported contracts | Export checked public function signatures and literal vars as standalone EDN. Reload the generated snapshot without source specs and refuse incomplete, unreadable or lossy exports. |
+| Literal externs | Keep exact EDN data separate from its inferred type. Compare initializer values in release reports without executing code. |
 | Nil, maps and guards | `get` distinguishes explicit nil from absence. Truthiness and `some?` disagree on false. Right-biased `merge` preserves required keys when an optional field can overwrite their value. |
 | Tagged unions | Literal tests on a map selector narrow its owner. Local aliases keep that relation until rebinding, and finite map tags support exhaustiveness checks in `case`. |
 | Checked predicates | `:t/guard` verifies true and false implications independently for a restricted Boolean expression. A body edit that changes the proven contract invalidates that predicate's callers. |
@@ -46,6 +52,6 @@ Do not compare Crabjure's cold lint benchmarks against Parenox's warm type-check
 
 ## What to implement next
 
-1. **External contract files.** Accept multiple explicitly selected EDN files. Preserve the origin of each declaration, reject duplicate qualified names, and only recheck callers that depend on a changed declaration.
+1. **Bound large export expansions.** Measure nested and shared specs, then limit expansion work before allocating oversized standalone snapshots.
 
 Keep JVM contracts, recursive types, general rows, and latent effect summaries as separate slices. Do not add runtime instrumentation or project macro execution to make a static check pass.

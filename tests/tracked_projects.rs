@@ -296,3 +296,36 @@ fn repeated_file_edits_rebase_reused_checks_and_drop_deleted_results() {
     assert_eq!(warm["ok"], true, "{warm}");
     assert_eq!(warm["stats"]["reused_functions"], 2);
 }
+
+#[test]
+fn tracks_extern_arrays_and_rejects_duplicate_paths_atomically() {
+    let mut client = Client::start();
+    let app = json!({"path": "app.clj", "source": CONSUMER});
+    let store = json!({"path": "store.clj", "source": PROVIDER});
+    let labels = json!({"path": "labels.edn", "source": EXTERNS});
+    let counts = json!({"path": "counts.edn", "source": "{db/count [:-> number?]}"});
+    let opened = client.result(json!({
+        "id": 1, "op": "open", "files": [app, store], "externs": [labels, counts]
+    }));
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(opened["files"].as_array().unwrap().len(), 4);
+    let invalid = client.send(json!({
+        "id": 2, "op": "update", "remove": ["store.clj"], "externs": [labels, labels]
+    }));
+    assert_eq!(invalid["error"]["code"], "invalid_request");
+    let warm = client.result(json!({"id": 3, "op": "update"}));
+    assert_eq!(warm["ok"], true, "{warm}");
+    assert_eq!(warm["files"].as_array().unwrap().len(), 4);
+    assert_eq!(warm["stats"]["parsed_files"], 0);
+
+    let shortened = client.result(json!({"id": 4, "op": "update", "externs": [counts]}));
+    assert_eq!(shortened["files"].as_array().unwrap().len(), 3);
+    assert_eq!(shortened["stats"]["parsed_files"], 0);
+    assert_eq!(shortened["files"][0]["diagnostics"][0]["code"], "PNX9003");
+    let cleared = client.result(json!({"id": 5, "op": "update", "externs": []}));
+    assert_eq!(cleared["files"].as_array().unwrap().len(), 2);
+
+    let snapshot =
+        client.result(json!({"id": 6, "files": [app, store], "externs": [labels, counts]}));
+    assert_eq!(snapshot["ok"], true, "{snapshot}");
+}

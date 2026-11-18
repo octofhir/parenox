@@ -1,36 +1,23 @@
+mod cli;
+mod config;
+mod extern_diff_cli;
 mod serve;
 
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use clap::{CommandFactory, Parser};
 use parenox::{Diagnostic, Session, Source, output, reader};
 use serde_json::json;
 
+use cli::{CheckOptions, Cli, Color, Command, Format};
+use config::ProjectConfig;
 use serve::Snapshot;
-
-const HELP: &str = "Parenox — experimental source-only Clojure checker
-
-Usage:
-  parenox check <file.clj>... [--format pretty|plain|json] [--color auto|always|never] [--externs file.edn]
-  parenox syntax <file.clj>
-  parenox serve
-  parenox bench <file.clj> [--iterations N]
-
-serve reads one JSON object per line: {\"id\":1,\"path\":\"demo.clj\",\"source\":\"...\"}.
-Project requests: {\"id\":1,\"files\":[{\"path\":\"a.clj\",\"source\":\"...\"}],\"externs\":{\"path\":\"externs.edn\",\"source\":\"...\"}}.
-Tracked project requests use op \"open\" and \"update\" (see README).
-Directories are checked recursively as one project; externs contain function contracts and macro scopes.
-check exits 0 on success, 1 on diagnostics, 2 on I/O or usage errors.
-Default format: pretty (stderr). plain and json use stdout; --json aliases --format json.
-Color defaults to auto. NO_COLOR disables auto styling; CLICOLOR_FORCE can force it.
-Without CLICOLOR_FORCE, auto requires a terminal and honors TERM=dumb.
-Positions use 1-based Unicode scalar columns and 0-based UTF-8 byte offsets.
-";
 
 fn main() -> ExitCode {
     match run() {
@@ -43,24 +30,23 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<u8, String> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("check") => check(&args[1..]),
-        Some("serve") if args.len() == 1 => serve::run(),
-        Some("syntax") => syntax(&args[1..]),
-        Some("bench") => bench(&args[1..]),
-        Some("--help" | "-h") | None => {
-            print!("{HELP}");
+    match Cli::parse().command {
+        Some(Command::Check(options)) => check(options, false),
+        Some(Command::ValidateExterns(options)) => check(options, true),
+        Some(Command::ExportExterns(options)) => export_externs(options),
+        Some(Command::DiffExterns(options)) => extern_diff_cli::run(options),
+        Some(Command::Serve) => serve::run(),
+        Some(Command::Syntax { path }) => syntax(&path),
+        Some(Command::Bench { path, iterations }) => bench(&path, iterations as usize),
+        None => {
+            Cli::command().print_help().map_err(|err| err.to_string())?;
+            println!();
             Ok(0)
         }
-        _ => Err(HELP.into()),
     }
 }
 
-fn syntax(args: &[String]) -> Result<u8, String> {
-    let [path] = args else {
-        return Err(HELP.into());
-    };
+fn syntax(path: &str) -> Result<u8, String> {
     let source = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
     let parsed = reader::parse(&source);
     print!("{:#?}", parsed.syntax());
@@ -72,32 +58,26 @@ fn syntax(args: &[String]) -> Result<u8, String> {
     Ok(u8::from(!diagnostics.is_empty()))
 }
 
-fn check(args: &[String]) -> Result<u8, String> {
-    let options = CheckOptions::parse(args)?;
+fn check(mut options: CheckOptions, validate_externs: bool) -> Result<u8, String> {
+    options.load_config()?;
     if options.paths.is_empty() {
-        return Err(HELP.into());
+        return Err("Specify a source path or configure :paths in parenox.edn".into());
+    }
+    if validate_externs && options.externs.is_empty() {
+        return Err("validate-externs requires at least one --externs file".into());
     }
     let files = read_sources(&options.paths)?;
-    let color = options.format == Format::Pretty && options.color.enabled();
-    let externs = options
-        .externs
-        .as_ref()
-        .map(|path| {
-            fs::read_to_string(path)
-                .map(|source| Snapshot {
-                    path: path.clone(),
-                    source,
-                })
-                .map_err(|error| format!("{path}: {error}"))
-        })
-        .transpose()?;
-    if files.len() == 1 && externs.is_none() {
+    let format = options.format();
+    let color = format == Format::Pretty && options.color.enabled();
+    let externs = read_externs(&options.externs)?;
+    let dependencies = read_externs(&options.dependency_externs)?;
+    if files.len() == 1 && externs.is_empty() && dependencies.is_empty() {
         let (path, source) = files.first_key_value().unwrap();
-        if options.format == Format::Pretty {
+        if format == Format::Pretty {
             eprint!("{}", output::checking(&format!("`{path}`"), color));
         }
         let report = Session::default().check(path, source);
-        match options.format {
+        match format {
             Format::Json => println!(
                 "{}",
                 serde_json::to_string(&report).map_err(|e| e.to_string())?
@@ -112,39 +92,50 @@ fn check(args: &[String]) -> Result<u8, String> {
         .map(|(path, source)| Source { path, source })
         .collect();
     let target = format!(
-        "project ({} source file{})",
+        "{} ({} source file{})",
+        if validate_externs {
+            "extern validation"
+        } else {
+            "project"
+        },
         files.len(),
         if files.len() == 1 { "" } else { "s" }
     );
-    if options.format == Format::Pretty {
+    if format == Format::Pretty {
         eprint!("{}", output::checking(&target, color));
     }
-    let result =
-        Session::default().check_project(&sources, externs.as_ref().map(Snapshot::as_source));
-    if options.format == Format::Json {
+    let extern_sources: Vec<_> = externs
+        .iter()
+        .chain(&dependencies)
+        .map(Snapshot::as_source)
+        .collect();
+    let mut session = Session::default();
+    let result = if validate_externs {
+        let (checked, trusted) = extern_sources.split_at(externs.len());
+        session.validate_externs_with_dependencies(&sources, checked, trusted)
+    } else {
+        session.check_project_with_externs(&sources, &extern_sources)
+    };
+    if format == Format::Json {
         println!(
             "{}",
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         );
     } else {
-        for report in &result.files {
-            let source = files
-                .get(&report.path)
-                .map(String::as_str)
-                .or_else(|| {
-                    externs
-                        .as_ref()
-                        .filter(|s| s.path == report.path)
-                        .map(|s| s.source.as_str())
-                })
-                .unwrap();
-            match options.format {
-                Format::Pretty => eprint!("{}", output::file_diagnostics(report, source, color)),
+        for (report, source) in result
+            .files
+            .iter()
+            .zip(sources.iter().chain(&extern_sources))
+        {
+            match format {
+                Format::Pretty => {
+                    eprint!("{}", output::file_diagnostics(report, source.source, color))
+                }
                 Format::Plain => print!("{}", output::plain(report)),
                 Format::Json => unreachable!(),
             }
         }
-        if options.format == Format::Pretty {
+        if format == Format::Pretty {
             eprint!("{}", output::project_summary(&result, &target, color));
         } else {
             println!(
@@ -156,7 +147,70 @@ fn check(args: &[String]) -> Result<u8, String> {
             );
         }
     }
-    Ok(u8::from(!result.ok))
+    Ok(u8::from(
+        !result.ok || (validate_externs && !result.complete),
+    ))
+}
+
+fn export_externs(mut options: CheckOptions) -> Result<u8, String> {
+    options.load_config()?;
+    if options.paths.is_empty() {
+        return Err("Specify a source path or configure :paths in parenox.edn".into());
+    }
+    let files = read_sources(&options.paths)?;
+    let sources: Vec<_> = files
+        .iter()
+        .map(|(path, source)| Source { path, source })
+        .collect();
+    options.externs.append(&mut options.dependency_externs);
+    let dependencies = read_externs(&options.externs)?;
+    let externs: Vec<_> = dependencies.iter().map(Snapshot::as_source).collect();
+    let export = Session::default().export_externs(&sources, &externs);
+    if let Some(edn) = export.edn {
+        print!("{edn}");
+        return Ok(0);
+    }
+
+    let format = options.format();
+    let color = format == Format::Pretty && options.color.enabled();
+    match format {
+        Format::Json => eprintln!(
+            "{}",
+            serde_json::to_string(&export.report).map_err(|err| err.to_string())?
+        ),
+        Format::Plain | Format::Pretty => {
+            for (file, source) in export
+                .report
+                .files
+                .iter()
+                .zip(sources.iter().chain(&externs))
+            {
+                match format {
+                    Format::Pretty => {
+                        eprint!("{}", output::file_diagnostics(file, source.source, color))
+                    }
+                    Format::Plain => eprint!("{}", output::plain(file)),
+                    Format::Json => unreachable!(),
+                }
+            }
+            eprintln!("No externs exported: the check did not pass completely.");
+        }
+    }
+    Ok(1)
+}
+
+fn read_externs(paths: &[String]) -> Result<Vec<Snapshot>, String> {
+    paths
+        .iter()
+        .map(|path| {
+            fs::read_to_string(path)
+                .map(|source| Snapshot {
+                    path: path.clone(),
+                    source,
+                })
+                .map_err(|error| format!("{path}: {error}"))
+        })
+        .collect()
 }
 
 fn read_sources(paths: &[String]) -> Result<BTreeMap<String, String>, String> {
@@ -194,22 +248,6 @@ fn read_sources(paths: &[String]) -> Result<BTreeMap<String, String>, String> {
     Ok(files)
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Format {
-    #[default]
-    Pretty,
-    Plain,
-    Json,
-}
-
-#[derive(Clone, Copy, Default)]
-enum Color {
-    #[default]
-    Auto,
-    Always,
-    Never,
-}
-
 impl Color {
     fn enabled(self) -> bool {
         match self {
@@ -226,102 +264,37 @@ impl Color {
     }
 }
 
-#[derive(Default)]
-struct CheckOptions {
-    paths: Vec<String>,
-    format: Format,
-    color: Color,
-    externs: Option<String>,
-}
-
 impl CheckOptions {
-    fn parse(args: &[String]) -> Result<Self, String> {
-        let mut options = Self::default();
-        let mut explicit_format = None;
-        let mut args = args.iter();
-        while let Some(arg) = args.next() {
-            if arg == "--" {
-                options.paths.extend(args.cloned());
-                break;
+    fn load_config(&mut self) -> Result<(), String> {
+        let path = if let Some(path) = &self.config {
+            Path::new(path)
+        } else if self.paths.is_empty() {
+            let path = Path::new(config::DEFAULT_PATH);
+            if !path
+                .try_exists()
+                .map_err(|err| format!("{}: {err}", path.display()))?
+            {
+                return Ok(());
             }
-            if arg == "--externs" {
-                options.externs =
-                    Some(args.next().ok_or("--externs requires a file path")?.clone());
-                continue;
-            }
-            let format_value = if arg == "--json" {
-                Some("json")
-            } else if arg == "--format" {
-                Some(
-                    args.next()
-                        .ok_or("--format requires pretty, plain or json")?
-                        .as_str(),
-                )
-            } else {
-                arg.strip_prefix("--format=")
-            };
-            if let Some(value) = format_value {
-                let format = match value {
-                    "pretty" => Format::Pretty,
-                    "plain" => Format::Plain,
-                    "json" => Format::Json,
-                    _ => {
-                        return Err(format!(
-                            "Unknown output format {value:?}; expected pretty, plain or json"
-                        ));
-                    }
-                };
-                if explicit_format.is_some_and(|previous| previous != format) {
-                    return Err("Conflicting output formats; choose pretty, plain or json".into());
-                }
-                options.format = format;
-                explicit_format = Some(format);
-                continue;
-            }
-            let color_value = if arg == "--color" {
-                Some(
-                    args.next()
-                        .ok_or("--color requires auto, always or never")?
-                        .as_str(),
-                )
-            } else {
-                arg.strip_prefix("--color=")
-            };
-            if let Some(value) = color_value {
-                options.color = match value {
-                    "auto" => Color::Auto,
-                    "always" => Color::Always,
-                    "never" => Color::Never,
-                    _ => {
-                        return Err(format!(
-                            "Unknown color mode {value:?}; expected auto, always or never"
-                        ));
-                    }
-                };
-            } else if arg.starts_with('-') {
-                return Err(format!("Unknown option {arg:?}\n\n{HELP}"));
-            } else {
-                options.paths.push(arg.clone());
-            }
+            path
+        } else {
+            return Ok(());
+        };
+        let config = ProjectConfig::read(path)?;
+        if self.paths.is_empty() {
+            self.paths = config.paths;
         }
-        Ok(options)
+        if self.externs.is_empty() {
+            self.externs = config.externs;
+        }
+        if self.dependency_externs.is_empty() {
+            self.dependency_externs = config.dependency_externs;
+        }
+        Ok(())
     }
 }
 
-fn bench(args: &[String]) -> Result<u8, String> {
-    let (path, iterations) = match args {
-        [path] => (path, 1000),
-        [path, flag, count] if flag == "--iterations" => (
-            path,
-            count
-                .parse::<usize>()
-                .map_err(|_| "Invalid iteration count")?,
-        ),
-        _ => return Err(HELP.into()),
-    };
-    if iterations == 0 || iterations > 1_000_000 {
-        return Err("Iterations must be between 1 and 1000000".into());
-    }
+fn bench(path: &str, iterations: usize) -> Result<u8, String> {
     let source = fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let mut session = Session::default();
     let started = Instant::now();

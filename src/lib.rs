@@ -1,5 +1,6 @@
 mod checker;
 pub mod expand;
+mod extern_diff;
 pub mod output;
 mod project;
 pub mod reader;
@@ -10,7 +11,11 @@ mod types;
 use reader::Span;
 use serde::Serialize;
 
-pub use project::{ProjectReport, Session, Source};
+pub use extern_diff::{
+    ExternChange, ExternChangeKind, ExternDefinition, ExternDiff, ExternMismatch,
+    ExternMismatchReason, ExternPathStep, ExternSnapshot,
+};
+pub use project::{ExternExport, ProjectReport, Session, Source, compare_externs};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Diagnostic {
@@ -52,6 +57,7 @@ pub enum ContractKind {
     TSig,
     SFdef,
     Extern,
+    ExternLiteral,
     Builtin,
     MacroScope,
 }

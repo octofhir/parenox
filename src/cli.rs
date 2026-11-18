@@ -1,0 +1,81 @@
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use crate::extern_diff_cli::DiffOptions;
+
+#[derive(Parser)]
+#[command(about = "Experimental source-only Clojure checker", version)]
+pub(crate) struct Cli {
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum Command {
+    /// Check Clojure files or a configured project.
+    Check(CheckOptions),
+    /// Check library bodies and validate the extern promises they ship.
+    ValidateExterns(CheckOptions),
+    /// Write checked public signatures and literal values as EDN to stdout.
+    ExportExterns(CheckOptions),
+    /// Compare the public extern promises of two releases.
+    DiffExterns(DiffOptions),
+    /// Print the lossless syntax tree of a source file.
+    Syntax {
+        #[arg(value_name = "FILE")]
+        path: String,
+    },
+    /// Check in-memory source snapshots over the JSON Lines protocol.
+    Serve,
+    /// Measure repeated checks of a single source file.
+    Bench {
+        #[arg(value_name = "FILE")]
+        path: String,
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
+        iterations: u32,
+    },
+}
+
+#[derive(Args)]
+pub(crate) struct CheckOptions {
+    /// Clojure files or directories; defaults to paths from parenox.edn.
+    #[arg(value_name = "PATH")]
+    pub(crate) paths: Vec<String>,
+    /// Read project paths and externs from this EDN configuration.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) config: Option<String>,
+    /// Diagnostic format (stderr for pretty and for all export diagnostics).
+    #[arg(long, value_enum, default_value_t = Format::Pretty)]
+    format: Format,
+    /// Shorthand for --format json.
+    #[arg(long, conflicts_with = "format")]
+    json: bool,
+    /// Control ANSI color in pretty diagnostics.
+    #[arg(long, value_enum, default_value_t = Color::Auto)]
+    pub(crate) color: Color,
+    /// Load an extern declaration file; repeat to load multiple files.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) externs: Vec<String>,
+    /// Load trusted dependencies separately from the externs being validated.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) dependency_externs: Vec<String>,
+}
+
+impl CheckOptions {
+    pub(crate) fn format(&self) -> Format {
+        if self.json { Format::Json } else { self.format }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum Format {
+    Pretty,
+    Plain,
+    Json,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum Color {
+    Auto,
+    Always,
+    Never,
+}

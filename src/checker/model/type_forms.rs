@@ -62,8 +62,12 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
         })
     }
 
-    fn map_shape(&mut self, forms: &[Form]) -> Type {
-        let mut fields = BTreeMap::new();
+    fn map_fields(
+        &mut self,
+        forms: &[Form],
+        fields: &mut BTreeMap<Type, Field>,
+        required: bool,
+    ) -> Option<()> {
         for [key, ty] in forms.as_chunks::<2>().0 {
             let name = match &key.without_metadata().kind {
                 Kind::Keyword(key) => Type::Key(self.names.key(key)),
@@ -74,7 +78,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                         key.span,
                         "A literal map type requires literal keyword or string keys",
                     );
-                    return Type::Unknown;
+                    return None;
                 }
             };
             if fields
@@ -82,19 +86,58 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                     name,
                     Field {
                         ty: self.parse(ty),
-                        required: true,
+                        required,
                     },
                 )
                 .is_some()
             {
                 self.error("PNX9001", key.span, "Duplicate key in a literal map type");
-                return Type::Unknown;
+                return None;
             }
         }
-        Type::Map(MapType {
-            fields,
-            extra: ExtraFields::Closed,
-        })
+        Some(())
+    }
+
+    fn map_shape(&mut self, form: &Form, args: &[Form]) -> Option<MapType> {
+        if let [options] = args
+            && let Some(options) = options.map()
+        {
+            let mut map = MapType {
+                fields: BTreeMap::new(),
+                extra: ExtraFields::Closed,
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            for [key, value] in options.as_chunks::<2>().0 {
+                let option = key.keyword();
+                if !seen.insert(option) {
+                    self.error("PNX9001", key.span, "Duplicate t/map option");
+                    return None;
+                }
+                match (option, value.map(), value.keyword()) {
+                    (Some(":req" | ":opt"), Some(fields), _) => {
+                        self.map_fields(fields, &mut map.fields, option == Some(":req"))?;
+                    }
+                    (Some(":extra"), _, Some(":open")) => map.extra = ExtraFields::Open,
+                    (Some(":extra"), _, Some(":closed")) => {}
+                    _ => {
+                        self.error(
+                            "PNX9001",
+                            key.span,
+                            "t/map expects :req and :opt field maps and :extra :open or :closed",
+                        );
+                        return None;
+                    }
+                }
+            }
+            Some(map)
+        } else {
+            self.error(
+                "PNX9001",
+                form.span,
+                "Expected (t/map {:req {...} :opt {...} :extra :open})",
+            );
+            None
+        }
     }
 
     fn parse(&mut self, form: &Form) -> Type {
@@ -124,7 +167,16 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                 }
             },
             Kind::Keyword(key) => self.spec(&self.names.key(key), form.span),
-            Kind::Map(forms) if self.literal_shapes => self.map_shape(forms),
+            Kind::Map(forms) if self.literal_shapes => {
+                let mut fields = BTreeMap::new();
+                self.map_fields(forms, &mut fields, true)
+                    .map_or(Type::Unknown, |()| {
+                        Type::Map(MapType {
+                            fields,
+                            extra: ExtraFields::Closed,
+                        })
+                    })
+            }
             Kind::Set(xs) => {
                 let mut types = Vec::new();
                 for x in xs {
@@ -147,6 +199,11 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                     .first()
                     .and_then(Form::symbol)
                     .map(|s| self.names.resolve(s));
+                if self.literal_shapes && xs.first().and_then(Form::symbol) == Some("t/map") {
+                    return self
+                        .map_shape(form, &xs[1..])
+                        .map_or(Type::Unknown, Type::Map);
+                }
                 match op.as_deref() {
                     Some("clojure.spec.alpha/fspec") => self
                         .function_spec(&xs[1..], form.span, "s/fspec")
