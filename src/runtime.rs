@@ -11,28 +11,49 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parenox::reader::{self, Form};
 
 use crate::cli::{TestFormat, TestOptions};
-use report::TestReport;
+use report::{Phase, RunError, TestReport};
 
 const RUNNER: &str = include_str!("runtime/clojure_test.clj");
 const RUNNER_ALIAS: &str = "parenox/test-runner";
 const RUNNER_DEPS: &str = "{:aliases {:parenox/test-runner {:main-opts []}}}";
 
 pub(super) fn run_tests(options: TestOptions) -> Result<u8, String> {
-    let project = options
-        .project
-        .canonicalize()
-        .map_err(|error| format!("{}: {error}", options.project.display()))?;
+    let format = options.format;
+    let report = execute_tests(options).unwrap_or_else(TestReport::incomplete);
+    if format == TestFormat::Json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    }
+    if let Some(error) = report.run_error {
+        return Err(error.to_string());
+    }
+    Ok(u8::from(!report.ok))
+}
+
+fn execute_tests(options: TestOptions) -> Result<TestReport, RunError> {
+    let project = options.project.canonicalize().map_err(|error| {
+        RunError::new(
+            Phase::Project,
+            format!("{}: {error}", options.project.display()),
+        )
+    })?;
     if !project.join("deps.edn").is_file() {
-        return Err(format!(
-            "{}: expected a deps.edn project",
-            project.display()
+        return Err(RunError::new(
+            Phase::Project,
+            format!("{}: expected a deps.edn project", project.display()),
         ));
     }
-    let aliases = cli_aliases(&options.aliases)?;
+    let aliases =
+        cli_aliases(&options.aliases).map_err(|error| RunError::new(Phase::Selection, error))?;
     let (mode, selectors) = if options.vars.is_empty() {
         for name in &options.namespaces {
             if !namespace_symbol(name) {
-                return Err(format!("Expected a Clojure namespace, got {name:?}"));
+                return Err(RunError::new(
+                    Phase::Selection,
+                    format!("Expected a Clojure namespace, got {name:?}"),
+                ));
             }
         }
         ("namespaces", options.namespaces)
@@ -45,8 +66,9 @@ pub(super) fn run_tests(options: TestOptions) -> Result<u8, String> {
                     && single_form(name).is_some_and(|form| form.symbol() == Some(name))
             });
             if !qualified {
-                return Err(format!(
-                    "Expected a qualified Clojure test var, got {name:?}"
+                return Err(RunError::new(
+                    Phase::Selection,
+                    format!("Expected a qualified Clojure test var, got {name:?}"),
                 ));
             }
         }
@@ -56,16 +78,18 @@ pub(super) fn run_tests(options: TestOptions) -> Result<u8, String> {
     let executable =
         if options.clojure.is_relative() && options.clojure.parent() != Some(Path::new("")) {
             env::current_dir()
-                .map_err(|error| error.to_string())?
+                .map_err(|error| RunError::new(Phase::Launch, error.to_string()))?
                 .join(options.clojure)
         } else {
             options.clojure
         };
-    let run =
-        RunDirectory::create().map_err(|error| format!("create test run directory: {error}"))?;
+    let run = RunDirectory::create().map_err(|error| {
+        RunError::new(Phase::Launch, format!("create test run directory: {error}"))
+    })?;
     let script = run.0.join("clojure_test.clj");
     let result = run.0.join("result");
-    fs::write(&script, RUNNER).map_err(|error| format!("write test runner: {error}"))?;
+    fs::write(&script, RUNNER)
+        .map_err(|error| RunError::new(Phase::Launch, format!("write test runner: {error}")))?;
     let mut command = Command::new(&executable);
     command
         .current_dir(&project)
@@ -77,36 +101,48 @@ pub(super) fn run_tests(options: TestOptions) -> Result<u8, String> {
     if options.format == TestFormat::Json {
         command.stdout(Stdio::piped());
     }
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("could not start {}: {error}", executable.display()))?;
+    let mut child = command.spawn().map_err(|error| {
+        RunError::new(
+            Phase::Launch,
+            format!("could not start {}: {error}", executable.display()),
+        )
+    })?;
     // Drain the runtime log before waiting so a large test log can keep flowing.
     let log = child
         .stdout
         .take()
         .map(|mut stdout| io::copy(&mut stdout, &mut io::stderr().lock()))
         .transpose();
-    let status = child
-        .wait()
-        .map_err(|error| format!("wait for Clojure CLI: {error}"))?;
-    log.map_err(|error| format!("forward Clojure test output: {error}"))?;
+    let status = child.wait().map_err(|error| {
+        RunError::new(Phase::Execution, format!("wait for Clojure CLI: {error}"))
+    })?;
+    log.map_err(|error| {
+        RunError::new(
+            Phase::Execution,
+            format!("forward Clojure test output: {error}"),
+        )
+    })?;
     if !status.success() {
-        return Err(format!("Clojure test run did not complete ({status})"));
+        return Err(RunError::new(
+            Phase::Execution,
+            format!("Clojure test run did not complete ({status})"),
+        ));
     }
-    let result = fs::read_to_string(result)
-        .map_err(|error| format!("Clojure exited without a test result ({error})"))?;
+    let result = fs::read_to_string(result).map_err(|error| {
+        RunError::new(
+            Phase::Report,
+            format!("Clojure exited without a test result ({error})"),
+        )
+    })?;
     let report = TestReport::read(&result)
-        .ok_or_else(|| "Clojure returned an invalid test report".to_owned())?;
-    if report.tests == 0 {
-        return Err("no clojure.test vars ran for the requested selection".into());
+        .ok_or_else(|| RunError::new(Phase::Report, "Clojure returned an invalid test report"))?;
+    if report.tests == 0 && report.run_error.is_none() {
+        return Err(RunError::new(
+            Phase::Execution,
+            "no clojure.test vars ran for the requested selection",
+        ));
     }
-    if options.format == TestFormat::Json {
-        println!(
-            "{}",
-            serde_json::to_string(&report).map_err(|error| error.to_string())?
-        );
-    }
-    Ok(u8::from(!report.ok))
+    Ok(report)
 }
 
 fn cli_aliases(aliases: &[String]) -> Result<String, String> {

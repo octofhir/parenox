@@ -50,10 +50,13 @@ fn reports_a_missing_clojure_executable_as_a_launch_error() {
     let missing = fixture.0.join("missing-clojure");
     let output = fixture.run(
         &["demo.routing-test"],
-        &["--clojure", missing.to_str().unwrap()],
+        &["--clojure", missing.to_str().unwrap(), "--format", "json"],
     );
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("could not start"));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["run_error"]["phase"], "launch");
 }
 
 #[test]
@@ -163,8 +166,28 @@ fn project_jvm_pass_failure_and_load_error() {
 
     let output = fixture.run(&["demo.does-not-exist"], &["--format", "json"]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Clojure test run did not complete"));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["run_error"]["phase"], "load");
+    assert!(result["run_error"]["path"].is_null());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Could not locate"));
+
+    let bad_source = SOURCE.replace(":clj :jvm", ":clj (missing-function)");
+    fs::write(fixture.0.join(SOURCE_PATH), bad_source).unwrap();
+    let output = fixture.run(&["demo.routing-test"], &["--format", "json"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let failure = &result["run_error"];
+    assert_eq!(failure["phase"], "load");
+    let path = std::path::Path::new(failure["path"].as_str().unwrap());
+    assert!(path.ends_with(SOURCE_PATH), "{failure}");
+    assert_eq!(failure["line"], 13);
+    assert!(failure["column"].as_u64().is_some_and(|column| column > 0));
+    assert!(
+        failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing-function")
+    );
 
     fs::write(
         fixture.0.join("test/demo/focused_test.clj"),
@@ -195,7 +218,12 @@ fn project_jvm_pass_failure_and_load_error() {
     assert_eq!(result["findings"][0]["test"], "demo.focused-test/fails");
     assert_eq!(result["findings"][0]["line"], 20);
 
-    let output = fixture.run(&["--var", "demo.focused-test/no-test"], &[]);
+    let output = fixture.run(
+        &["--var", "demo.focused-test/no-test"],
+        &["--format", "json"],
+    );
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("Expected a clojure.test var"));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["run_error"]["phase"], "selection");
 }

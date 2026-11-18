@@ -1,15 +1,17 @@
 (ns parenox.runtime.clojure-test
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.test :as t]))
+            [clojure.test :as t])
+  (:import (clojure.lang Compiler$CompilerException)))
 
 (defn- local-file [source]
   (let [file (io/file source)]
-    (if (and (.isAbsolute file) (.isFile file))
-      file
-      (when-let [resource (io/resource source)]
+    (if (.isAbsolute file)
+      (when (.isFile file) file)
+      (if-let [resource (io/resource source)]
         (when (= "file" (.getProtocol resource))
-          (io/file resource))))))
+          (io/file resource))
+        (when (.isFile file) file)))))
 
 (defn- position [root resolved line]
   (let [path (.toPath (.getCanonicalFile resolved))]
@@ -67,8 +69,8 @@
       (throw (ex-info (str "Expected a clojure.test var: " name) {:test name})))
     v))
 
-(defn- run-vars [namespaces names]
-  (let [by-ns (group-by (comp ns-name :ns meta) (mapv test-var names))]
+(defn- run-vars [namespaces vars]
+  (let [by-ns (group-by (comp ns-name :ns meta) vars)]
     (binding [t/*report-counters* (ref t/*initial-report-counters*)]
       (doseq [name namespaces
               :let [ns (the-ns name)]]
@@ -79,16 +81,46 @@
         (t/do-report summary)
         summary))))
 
+(defn- compiler-location [root cause]
+  (let [{:clojure.error/keys [source line column]} (ex-data cause)
+        [source line] (if (and source line)
+                        [source line]
+                        (when (instance? Compiler$CompilerException cause)
+                          [(.-source ^Compiler$CompilerException cause)
+                           (.-line ^Compiler$CompilerException cause)]))]
+    (when (and (string? source) (pos-int? line))
+      (when-let [file (local-file source)]
+        (conj (position root file line) (when (pos-int? column) column))))))
+
+(defn- incomplete [phase ^Throwable error]
+  (let [root (.toPath (.getCanonicalFile (io/file ".")))
+        causes (take 64 (take-while some? (iterate #(.getCause ^Throwable %) error)))
+        [file line column] (or (some #(compiler-location root %) causes)
+                               (when (= phase :execution) (error-location root error)))
+        message (or (.getMessage ^Throwable (last causes))
+                    (.getMessage error)
+                    (.getName (class error)))]
+    (.printStackTrace error)
+    [:run-error phase message (some-> file str) line column]))
+
 (let [[result mode & names] *command-line-args*
       names (distinct (map symbol names))
       vars? (= mode "vars")
-      namespaces (if vars? (distinct (map (comp symbol namespace) names)) names)]
-  (apply require namespaces)
-  (let [findings (atom [])
-        {:keys [test pass fail error]} (binding [t/report (reporter t/report findings)]
-                                        (if vars?
-                                          (run-vars namespaces names)
-                                          (apply t/run-tests namespaces)))]
-    (binding [*print-length* nil *print-level* nil *print-readably* true]
-      (spit result (pr-str [test (+ pass fail error) fail error @findings])))
-    (shutdown-agents)))
+      namespaces (if vars? (distinct (map (comp symbol namespace) names)) names)
+      phase (volatile! :load)
+      summary (try
+                (apply require namespaces)
+                (vreset! phase :selection)
+                (let [vars (when vars? (mapv test-var names))
+                      findings (atom [])]
+                  (vreset! phase :execution)
+                  (let [{:keys [test pass fail error]}
+                        (binding [t/report (reporter t/report findings)]
+                          (if vars?
+                            (run-vars namespaces vars)
+                            (apply t/run-tests namespaces)))]
+                    [test (+ pass fail error) fail error @findings]))
+                (catch Throwable error (incomplete @phase error)))]
+  (binding [*print-length* nil *print-level* nil *print-readably* true]
+    (spit result (pr-str summary)))
+  (shutdown-agents))

@@ -90,10 +90,11 @@ run did not complete, a requested test var was unavailable, or no test vars ran.
 Run `just jvm-test-smoke` to exercise
 the command on the pinned Clojure/JVM version.
 
-With `--format json`, stdout contains one report for a completed test run,
-including test and assertion counts, failures, errors, and source locations
-where available. Runtime logs go to stderr. The exit status has the same
-meaning in both formats.
+With `--format json`, stdout contains one report. Completed runs include
+test and assertion counts, failures, errors, and source locations where
+available. An incomplete run includes a `run_error` with its phase,
+message, and any available source path, line and column. Runtime logs go to
+stderr. The exit status has the same meaning in both formats.
 
 For a library release, keep the public snapshot from the previous version
 and run the following commands in CI:
