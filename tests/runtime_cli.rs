@@ -60,11 +60,63 @@ fn reports_a_missing_clojure_executable_as_a_launch_error() {
 #[ignore = "requires the Clojure CLI and JVM"]
 fn project_jvm_pass_failure_and_load_error() {
     let fixture = Fixture::new("project");
+    let run_ci = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_parenox"))
+            .current_dir(&fixture.0)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let checked = run_ci(&[
+        "check",
+        "--alias",
+        "test",
+        "--allow-incomplete",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(checked.status.code(), Some(0), "{checked:?}");
+    let report: Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["complete"], false);
+
+    let before = run_ci(&["export-externs"]);
+    assert!(before.status.success(), "{before:?}");
+    fs::write(fixture.0.join("before.edn"), before.stdout).unwrap();
+    let narrowed = SOURCE.replace(":opt {:route", ":req {:route");
+    fs::write(fixture.0.join(SOURCE_PATH), narrowed).unwrap();
+    let after = run_ci(&["export-externs"]);
+    assert!(after.status.success(), "{after:?}");
+    fs::write(fixture.0.join("after.edn"), after.stdout).unwrap();
+    let diff = run_ci(&[
+        "diff-externs",
+        "--before",
+        "before.edn",
+        "--after",
+        "after.edn",
+        "--json",
+    ]);
+    assert_eq!(diff.status.code(), Some(1), "{diff:?}");
+    let changes: Value = serde_json::from_slice(&diff.stdout).unwrap();
+    assert_eq!(changes["compatible"], false);
+    assert_eq!(changes["complete"], true);
+    let change = &changes["changes"][0];
+    assert_eq!(change["name"], "demo.routing/status");
+    assert_eq!(change["detail"]["reason"], "optional_field");
+    assert_eq!(
+        change["detail"]["path"][1],
+        json!({"kind":"field","key":":route"})
+    );
+    fs::write(fixture.0.join(SOURCE_PATH), SOURCE).unwrap();
+
     let output = fixture.run("demo.routing-test", &[]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("2 tests containing 3 assertions"));
 
-    let edited = SOURCE.replace(":found :missing", ":found :found");
+    let edited = SOURCE.replace(
+        "(if (some? (:route request)) :found :missing)",
+        "(if (some? (:route request)) :found :found)",
+    );
     fs::write(fixture.0.join(SOURCE_PATH), edited).unwrap();
     let output = fixture.run("demo.routing-test", &["--format", "json"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -94,7 +146,7 @@ fn project_jvm_pass_failure_and_load_error() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains(&format!(
-            "{SOURCE_PATH}:4: error in demo.routing-test/route-status"
+            "{SOURCE_PATH}:8: error in demo.routing-test/route-status"
         )),
         "{stdout}"
     );

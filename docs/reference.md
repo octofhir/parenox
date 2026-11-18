@@ -85,6 +85,22 @@ including test and assertion counts, failures, errors, and source locations
 where available. Runtime logs go to stderr. The exit status has the same
 meaning in both formats.
 
+For a library release, keep the public snapshot from the previous version
+and run the following commands in CI:
+
+```sh
+parenox check --alias test --allow-incomplete --format json > check.json
+parenox test --alias test --format json my-app.routes-test > tests.json
+parenox export-externs > current-api.edn
+parenox diff-externs --before previous-api.edn --after current-api.edn --json > api-diff.json
+```
+
+`export-externs` requires a complete check of the selected source roots.
+Use release source roots for that step and include test roots for the check
+and test steps. The JVM smoke fixture also tests a change from an optional
+route key to a required one. The compatibility gate rejects it and reports
+the path to `:route` in the first argument.
+
 ## A project-sized example
 
 The [clinic example](../examples/clinic) has four namespaces:
