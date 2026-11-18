@@ -5,7 +5,7 @@ pub use navigation::{Definition, VarInfo};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -96,6 +96,7 @@ struct FileCache {
     parse_error: Option<Diagnostic>,
     suppressions: Suppressions,
     declarations: Option<Declarations>,
+    known_var_surface: OnceLock<bool>,
     navigation_prefix: Option<Box<NavigationPrefix>>,
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
@@ -157,6 +158,7 @@ impl FileCache {
         self.parse_error = None;
         self.suppressions = Suppressions::default();
         self.declarations = None;
+        self.known_var_surface.take();
         self.navigation_prefix = None;
         let conditionals = if kind == FileKind::Source && path.ends_with(".cljc") {
             reader::Conditionals::Select(":clj")
@@ -380,12 +382,14 @@ impl Session {
             entries.push((source, cache, parsed));
         }
         let mut namespaces = BTreeMap::new();
+        let mut ambiguous = BTreeSet::new();
         for (index, (_, cache, _)) in entries[..count].iter().enumerate() {
             if let Some(declarations) = &cache.declarations
                 && namespaces
                     .insert(declarations.namespace().to_owned(), index)
                     .is_some()
             {
+                ambiguous.insert(declarations.namespace().to_owned());
                 reports[index].diagnostics.push(Diagnostic::new(
                     "PNX2790",
                     cache.start_span(),
@@ -511,6 +515,35 @@ impl Session {
             }
             self.externs
                 .publish_dependencies(&trusted_paths, &mut globals);
+        }
+        if mode == SnapshotMode::Check {
+            for (index, (_, file, _)) in entries[..count].iter().enumerate() {
+                if let (Some(declarations), Some(model)) = (&file.declarations, &file.model) {
+                    reports[index]
+                        .diagnostics
+                        .extend(declarations.check_untyped_references(
+                            &file.forms,
+                            model,
+                            |namespace, local| {
+                                let Some(&index) = namespaces.get(namespace) else {
+                                    return false;
+                                };
+                                let (_, provider, _) = &entries[index];
+                                built[index]
+                                    && provider.snapshot == self.snapshot
+                                    && !ambiguous.contains(namespace)
+                                    && provider.declarations.as_ref().is_some_and(|declarations| {
+                                        declarations
+                                            .source_var(&provider.forms, local, true)
+                                            .is_none()
+                                            && *provider.known_var_surface.get_or_init(|| {
+                                                declarations.has_known_var_surface(&provider.forms)
+                                            })
+                                    })
+                            },
+                        ));
+                }
+            }
         }
         let mut totals = Stats::default();
         let mut report_ordinals = BTreeMap::<&str, usize>::new();

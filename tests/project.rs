@@ -3,6 +3,56 @@ use std::collections::BTreeMap;
 
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
+#[test]
+fn checks_aliased_calls_in_unannotated_bodies_when_source_exports_are_known() {
+    let app = r#"(ns app (:require [dep :as d]))
+      (defn f [x] (let [a x]
+        [(if a (d/titl a) (d/title a))
+         '(d/quoted) (opaque (d/macro-data))]))"#;
+    let base = "(ns dep) (defn title [x] x)";
+    let mut session = Session::default();
+    let mut check = |provider| {
+        session.check_project(
+            &[
+                Source {
+                    path: "app.clj",
+                    source: app,
+                },
+                Source {
+                    path: "dep.clj",
+                    source: provider,
+                },
+            ],
+            None,
+        )
+    };
+    let broken = check(base);
+    assert!(!broken.complete);
+    let unresolved: Vec<_> = broken.files[0]
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "PNX2304")
+        .collect();
+    assert_eq!(unresolved.len(), 1, "{:?}", broken.files[0].diagnostics);
+    let span = unresolved[0].span;
+    assert_eq!(&app[span.start.offset..span.end.offset], "d/titl");
+
+    for provider in [
+        "(ns dep) (defn title [x] x) (defn titl [x] x)",
+        "(ns dep) (defn title [x] x) (def generated (intern *ns* 'titl identity))",
+        "(ns dep) (defn title [x] x) (make-defs)",
+        "(ns dep) (defn title [x] x",
+    ] {
+        let report = check(provider);
+        assert!(
+            !report.files[0]
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "PNX2304")
+        );
+    }
+}
+
 fn clinic() -> BTreeMap<&'static str, String> {
     [
         (
