@@ -707,3 +707,10 @@
                             (throw (ex-info "extra" {:stage :extra})))
              (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))))
 (println "Clojure/JVM update argument evaluation: 5 assertions passed")
+
+(assert (= 4 (demo.apply/total-offset 4 [])))
+(assert (= 10 (demo.apply/total-offset 4 [1 2 3])))
+(assert (= 780 (demo.apply/total-offset 0 (vec (range 40)))))
+(assert (= :wrong-count (try (apply inc (next [1 2 3]))
+                             (catch clojure.lang.ArityException _ :wrong-count))))
+(println "Clojure/JVM open argument spreads: 4 assertions passed")

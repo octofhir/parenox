@@ -360,13 +360,9 @@ impl<'model> Checker<'model> {
     }
 
     fn builtin(&mut self, name: &str, args: &[(Value, Span)], span: Span) -> Value {
-        let arity_ok = match name {
-            "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj" => true,
-            "clojure.core/-" | "clojure.core/=" => !args.is_empty(),
-            "clojure.core/nth" => (2..=3).contains(&args.len()),
-            "clojure.core/ex-info" => (2..=3).contains(&args.len()),
-            _ => args.len() == 1,
-        };
+        let arity_ok = builtin_arities(name)
+            .iter()
+            .any(|arity| arity.accepts(args.len()));
         if self.throws.is_some()
             && (!arity_ok
                 || (!matches!(
@@ -489,6 +485,17 @@ impl<'model> Checker<'model> {
             }),
         };
         Value::new(ty)
+    }
+}
+
+fn builtin_arities(name: &str) -> &'static [Arity] {
+    match name {
+        "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj" => {
+            &[Arity::Variadic(0)]
+        }
+        "clojure.core/-" | "clojure.core/=" => &[Arity::Variadic(1)],
+        "clojure.core/nth" | "clojure.core/ex-info" => &[Arity::Fixed(2), Arity::Fixed(3)],
+        _ => &[Arity::Fixed(1)],
     }
 }
 

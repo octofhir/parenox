@@ -16,3 +16,6 @@
 
 (defn inline-offset {:t/sig '[:-> number?]} []
   ((fn [base & [delta]] (+ base delta)) 4 3))
+
+(defn add-deltas {:t/sig '[number? & number? :-> number?]} [base & deltas]
+  (apply + base deltas))

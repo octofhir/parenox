@@ -1,5 +1,6 @@
 (ns demo.apply
-  (:require [demo.arities.provider :as provider]
+  (:require [clojure.spec.alpha :as s]
+            [demo.arities.provider :as provider]
             [demo.variadic :as variadic]))
 
 (defn fallback {:t/sig '[:-> string?]} []
@@ -16,3 +17,8 @@
 
 (defn increment-default {:t/sig '[:-> number?]} []
   (apply (fnil inc 0) [nil]))
+
+(defn total-offset
+  {:t/sig '[number? (s/coll-of number? :kind vector?) :-> number?]}
+  [base deltas]
+  (apply variadic/add-deltas base deltas))

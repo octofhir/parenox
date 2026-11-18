@@ -337,9 +337,11 @@ as a seq, or nil when there are none. An exact fixed clause takes precedence
 over a variadic clause at the same argument count. Inside the variadic body
 `recur` takes one argument for the rest binding. Run `just variadic` for examples.
 
-`apply` checks positional arguments from nil, vectors and seqs whose positions
-are known. It checks every possible exact shape and picks a signature for each
-shape's argument count and supports inline `fnil` wrappers. Run `just spread` for examples.
+`apply` checks positional arguments from nil and collections with known
+positions, including vector literals. It selects a signature for each exact
+shape and supports inline `fnil` wrappers. For an open vector or seq, it
+checks possible counts and element types against declared signatures and
+supported built-ins. Run `just spread` for examples.
 
 Use `#(...)` in immediate calls and supported callbacks. `%` and `%1` name the
 first argument, `%2` and later positions set the required count, and `%&` holds
@@ -453,11 +455,11 @@ Inline `(fn [params] ...)` works in immediate calls and as a supported callback.
 Its parameters take their types from the call, supported map destructuring
 works in the parameter vector, and the body can access outer locals.
 Diagnostics inside the body point at its original expressions and include
-the call location. Anonymous functions can define several fixed arities. An
-inline call checks the selected body with its argument types and checks compiler
-constraints across the other bodies.
-Local storage of the function itself, named functions, multiple arities,
-rest parameters and preconditions or postconditions report analysis gaps.
+the call location. Anonymous functions can define several fixed arities and
+one variadic clause. An inline call checks the selected body with its argument
+types and checks compiler constraints across the other bodies.
+Local storage of the function itself, named functions, and preconditions or
+postconditions report analysis gaps.
 Run `just updates` to see both an implicit old-value error and a body error.
 
 `mapv` takes one callback argument from each input collection and returns a
