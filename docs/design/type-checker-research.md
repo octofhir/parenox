@@ -56,8 +56,50 @@ Parenox checks Clojure source without loading namespaces or running project code
 - **Binding identity.** Its [lexical HIR](https://github.com/ribelo/crabjure/blob/a1a1f3224d77f9e5d89de4ababf1aa2445e5ade1/crates/crabjure-hir/README.md) links source nodes to explicit scopes. For stable-path refinements in Parenox, add binding identity to the current environment first. That is enough to distinguish two shadowed names without replacing Rowan or adding a new full AST.
 - **Resolution and dependency caches.** Its [resolver](https://github.com/ribelo/crabjure/blob/a1a1f3224d77f9e5d89de4ababf1aa2445e5ade1/crates/crabjure-resolver/src/lib.rs) records where names resolved and loads dependency information lazily. Reuse Parenox's namespace interfaces and record that origin when we add versioned externs. Consider lazy library indexes only if measurements show a need.
 
-Do not compare Crabjure's cold lint benchmarks against Parenox's warm type-check timings. Use the same corpus, separate cold and warm runs, and report coverage alongside speed. Keep Parenox's one crate and source-only default; JNI reflection, clj-kondo config compatibility and a new reader are not prerequisites.
+Compare equivalent workloads on the same corpus and report coverage alongside speed. Measure cold lint runs and warm type-check runs against their corresponding baselines.
 
-## What to implement next
+## Tooling roadmap through December 2026
 
-Keep JVM contracts, recursive types, general rows, and latent effect summaries as separate slices. Do not add runtime instrumentation or project macro execution to make a static check pass.
+Parenox should offer one native installation for everyday Clojure work. A developer opens an existing `deps.edn` project, gets diagnostics and navigation in the editor, runs tests on the project's runtime, and checks the same contracts in CI. The type checker adds depth to this workflow with map and nil analysis, explainable diagnostics, and public API compatibility checks.
+
+### Shared project analysis
+
+- Extend the existing `Session` to serve the CLI, agent protocol and LSP from the same project inputs. Resolve source roots, aliases, namespace interfaces and contract origins once per relevant revision. Use the same resolution facts for diagnostics and navigation, including when a local shadows a var.
+- Keep one reader for forms and source spans. Capture the lossless CST for editor and formatting operations that need it. Keep name resolution, expansion and execution outside the reader. Retain the source and analysis needed by active clients and measure the cost before adding a persistent index.
+- Start with local `deps.edn` source roots and explicit aliases. Accept a classpath resolved by the Clojure CLI for dependency interfaces. Index the relevant dependencies on demand and invalidate their consumers when an interface changes. Report missing dependency information as incomplete analysis. [Clojure CLI classpath reference](https://clojure.org/reference/clojure_cli#_classpath)
+- Keep static analysis source-only. Execution commands take an explicit runtime and project configuration. Use the project's Clojure/JVM for the first test or REPL integration. Evaluate native execution by invoking a pinned `cljrs` binary for a portable `.cljc` fixture. Check reader conditionals, dependency loading and test output before claiming native support for a project. [nREPL operations](https://nrepl.org/nrepl/ops.html), [clojurust at `793ad97e`](https://github.com/csm/clojurust/blob/793ad97e57cc797878a09c66771d651cfab1ee9b/README.md)
+
+Crabjure informs lexical binding identity, declarative macro scopes and lazy dependency indexing. Clojure LSP sets the editor workflow to match. Clojure/JVM, pinned in `deps.edn`, is the semantic reference. clojurust is an actively developed native execution option with its own `:cljrs` reader branch, dependencies, REPL and test runner. [Crabjure](https://github.com/ribelo/crabjure/blob/a1a1f3224d77f9e5d89de4ababf1aa2445e5ade1/README.md), [Clojure LSP features](https://clojure-lsp.io/features/), [clojurust commit, November 17](https://github.com/csm/clojurust/commit/793ad97e57cc797878a09c66771d651cfab1ee9b)
+
+### Crate boundaries and dependency budget
+
+- Keep the `parenox` package as the public library and binary entry point. Use modules for boundaries that currently share the same consumers. A new workspace crate should enforce a dependency direction that matters to a real consumer or show a measurable build benefit.
+- The first candidate is `parenox-frontend`, owning source locations, forms, the reader and optional Rowan capture. Evaluation or editor consumers can use it on its own once they need a separate build. Keep project sessions and checking in `parenox` until they have a concrete independent consumer. Try LSP over the existing session and JSON stack first. Explicit runtime invocations can start as process adapters using the standard library.
+- For each new external dependency, record the needed capability, reuse options and the minimal Cargo features. Compare `cargo tree --locked -e normal,build` before and after. Measure clean and representative incremental builds on the same toolchain and machine, and record default release binary size. Measure the default CLI build as well as any opt-in integration. Include transitive features in the review because workspace feature unification can pull optional code back into a build.
+
+Local baseline for `34ed757` on macOS arm64 with Rust 1.100.0. A locked, offline release build took 30.17 s with an empty target directory and an existing Cargo package cache. The immediate rebuild without source edits took 0.05 s. The binary was 4,309,056 bytes. Cargo reported 27 distinct dependency packages in the normal and build graph, excluding Parenox itself.
+
+### Release slices
+
+| Target | Deliverable | Acceptance scenario |
+|---|---|---|
+| November 25 | Project context and benchmark baseline | Open a Clojure CLI project with a source alias and a local dependency. CLI and session resolve the same namespaces. Record cold process time, peak RSS and the clinic edit round trip. |
+| December 8 | First editor workflow | Open that project through a stdio LSP adapter. Get diagnostics, hover with the type and contract origin, and go to a definition across namespaces. An unsaved edit refreshes the affected diagnostics. An incomplete form keeps navigation available for unaffected code. |
+| December 20 | CI and JVM test workflow | Check the same project in CI and compare its public EDN contracts with a prior release. Map a failure from one explicitly invoked project test to its source. Audit the reader, macro and standard-library gaps found on the pilot projects. |
+| December 31 | Tooling preview | Verify the editor and CI workflow on two pinned public projects. Run one portable fixture on JVM Clojure and clojurust and record the supported operations and any divergence. Publish the resource and correctness results with the preview. |
+
+The first implementation slice is `deps.edn` source-root and alias support wired through the existing session, with one cross-namespace definition query that works on ordinary unannotated code. Then expose that query and the existing diagnostics through LSP. Regex literals, string declarations and JVM member checks enter the release backlog where they unblock a pilot. Formatting, completion and rename are follow-up consumers of the same source and resolution data.
+
+### First pilot project
+
+Use [lambdaisland/uri at `e439c2ca`](https://github.com/lambdaisland/uri/tree/e439c2ca068849df620e1c9275466cb1e8171aaa). It has a small source tree, a `deps.edn` test alias, `.cljc` reader conditionals, a URI record and a JVM-specific namespace for encoding operations. Keep the pinned checkout in a temporary test workspace. Parenox's Cargo dependency graph stays independent of the pilot. [Project configuration](https://github.com/lambdaisland/uri/blob/e439c2ca068849df620e1c9275466cb1e8171aaa/deps.edn), [Upstream tests](https://github.com/lambdaisland/uri/blob/e439c2ca068849df620e1c9275466cb1e8171aaa/test/lambdaisland/uri_test.cljc)
+
+1. Open the project with the `:test` alias and resolve `normalize/percent-decode` from `lambdaisland.uri` to its definition in `lambdaisland.uri.normalize`.
+2. Misspell that var in an unsaved editor buffer, verify the diagnostic and its disappearance after a correction, and compare the result with a clean CLI check of the same text.
+3. Run the upstream JVM test suite. Change one expectation in a temporary copy and verify that the failure points to the correct test and source line.
+
+### Performance and correctness
+
+- Run `just agent-loop` for regressions in the existing incremental path. Verify that warm diagnostics and definition targets match a clean session after source, alias and dependency changes. Check that CLI and editor diagnostics agree on the same revision and that stale editor results are discarded.
+- Measure end-to-end cold startup, peak and idle RSS, idle CPU, release binary size and p95 editor latency on fixed inputs. Include an unsaved edit with a diagnostic, hover, navigation and their protocol overhead. Measure explicit runtime invocations with their child processes included. Compare the equivalent editor and CI workflows on the same hardware and report diagnostic accuracy and unsupported features alongside performance.
+- Use one analysis process per workspace and block on incoming requests while idle. Keep warm edits within 50 ms p95 on the pinned pilot projects as an initial target. Set a peak RSS budget once the two project baselines are recorded and preserve the clinic baseline with each added feature.
