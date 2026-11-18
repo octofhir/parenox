@@ -21,6 +21,13 @@ unless `NO_COLOR` is set. `TERM=dumb` disables terminal auto-detection.
 Exit codes: **0** no unsuppressed diagnostics, **1** diagnostics, **2** usage or I/O failure.
 Suggested edits require review and are never applied automatically.
 
+Use `parenox check --allow-incomplete` when adopting contracts gradually in an
+existing project. Unavailable function contracts and some known unsupported
+constructs are coverage warnings in both the CLI and editor. With this option,
+a report with only warnings exits **0** and has `ok: true, complete: false`.
+Definite errors and gaps reported at error severity still exit **1**. The
+default check, extern validation, and export require their usual strict results.
+
 ## Targeted suppressions
 
 Put a comment before the form whose finding you want to suppress:

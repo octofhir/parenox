@@ -59,11 +59,7 @@ impl Model {
         };
         let initializer = match &xs[2..] {
             [] => {
-                self.error(
-                    "PNX9001",
-                    name_form.span,
-                    "An unbound def has no inferred value",
-                );
+                self.unsupported_var(name_form.span, "An unbound def has no inferred value");
                 None
             }
             [value] => Some(value),
@@ -84,11 +80,7 @@ impl Model {
             !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
         });
         let ty = if dynamic {
-            self.error(
-                "PNX9001",
-                name_form.span,
-                "Dynamic vars are not supported yet",
-            );
+            self.unsupported_var(name_form.span, "Dynamic vars are not supported yet");
             Type::Unknown
         } else if let Some(value) = initializer {
             if literal(value) {
@@ -97,8 +89,7 @@ impl Model {
                 self.diagnostics.extend(checker.diagnostics);
                 result
             } else {
-                self.error(
-                    "PNX9001",
+                self.unsupported_var(
                     value.span,
                     "def analysis currently requires a literal initializer",
                 );
@@ -115,6 +106,11 @@ impl Model {
         {
             self.error("PNX2790", name_form.span, format!("Duplicate var {name}"));
         }
+    }
+
+    fn unsupported_var(&mut self, span: Span, message: &str) {
+        self.diagnostics
+            .push(crate::Diagnostic::analysis_gap("PNX9001", span, message));
     }
 }
 

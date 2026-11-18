@@ -106,7 +106,10 @@ impl Diagnostic {
         Self {
             id: None,
             code: code.into(),
-            severity: "error",
+            severity: match code {
+                "PNX9002" | "PNX9009" => "warning",
+                _ => "error",
+            },
             span,
             message: message.into(),
             headline: None,
@@ -117,6 +120,12 @@ impl Diagnostic {
             help: None,
             suggestions: Vec::new(),
         }
+    }
+
+    fn analysis_gap(code: &str, span: Span, message: impl Into<String>) -> Self {
+        let mut diagnostic = Self::new(code, span, message);
+        diagnostic.severity = "warning";
+        diagnostic
     }
 }
 

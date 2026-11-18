@@ -14,7 +14,13 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Check Clojure files or a configured project.
-    Check(CheckOptions),
+    Check {
+        #[command(flatten)]
+        options: CheckOptions,
+        /// Accept analysis-coverage warnings and report incomplete checks.
+        #[arg(long)]
+        allow_incomplete: bool,
+    },
     /// Run clojure.test namespaces on the project's JVM.
     Test(TestOptions),
     /// Find the definition of a qualified source var.

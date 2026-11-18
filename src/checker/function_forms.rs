@@ -124,11 +124,11 @@ fn function_clause(forms: &[Form], span: Span) -> Result<Clause<'_>, Box<Diagnos
     if let Some(rest) = rest
         && rest.map().is_some()
     {
-        return Err(error(
+        return Err(Box::new(Diagnostic::analysis_gap(
             "PNX9001",
             rest.span,
             "Map destructuring of variadic arguments is not supported yet",
-        ));
+        )));
     }
     for param in params.iter().chain(rest) {
         match &param.without_metadata().kind {
@@ -169,11 +169,11 @@ fn function_clause(forms: &[Form], span: Span) -> Result<Clause<'_>, Box<Diagnos
         (span, body)
     };
     if let Some(span) = condition_span {
-        return Err(error(
+        return Err(Box::new(Diagnostic::analysis_gap(
             "PNX9001",
             span,
             "Function preconditions and postconditions are not supported yet",
-        ));
+        )));
     }
     Ok(Clause {
         params,

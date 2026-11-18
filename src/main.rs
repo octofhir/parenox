@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{CommandFactory, Parser};
-use parenox::{Diagnostic, Session, Source, output, reader};
+use parenox::{Diagnostic, Report, Session, Source, output, reader};
 use serde_json::json;
 
 use cli::{CheckOptions, Cli, Color, Command, DefinitionOptions, Format, ProjectOptions};
@@ -33,10 +33,20 @@ fn main() -> ExitCode {
 
 fn run() -> Result<u8, String> {
     match Cli::parse().command {
-        Some(Command::Check(options)) => check(options, false),
+        Some(Command::Check {
+            options,
+            allow_incomplete,
+        }) => check(
+            options,
+            if allow_incomplete {
+                CheckMode::AllowIncomplete
+            } else {
+                CheckMode::Strict
+            },
+        ),
         Some(Command::Test(options)) => runtime::run_tests(options),
         Some(Command::Definition(options)) => definition(options),
-        Some(Command::ValidateExterns(options)) => check(options, true),
+        Some(Command::ValidateExterns(options)) => check(options, CheckMode::ValidateExterns),
         Some(Command::ExportExterns(options)) => export_externs(options),
         Some(Command::DiffExterns(options)) => extern_diff_cli::run(options),
         Some(Command::Serve) => serve::run(),
@@ -97,7 +107,26 @@ fn definition(options: DefinitionOptions) -> Result<u8, String> {
     Ok(u8::from(target.is_none()))
 }
 
-fn check(mut options: CheckOptions, validate_externs: bool) -> Result<u8, String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckMode {
+    Strict,
+    AllowIncomplete,
+    ValidateExterns,
+}
+
+impl CheckMode {
+    fn apply(self, report: &mut Report) {
+        if self == Self::AllowIncomplete {
+            report.ok = report
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.severity == "warning");
+        }
+    }
+}
+
+fn check(mut options: CheckOptions, mode: CheckMode) -> Result<u8, String> {
+    let validate_externs = mode == CheckMode::ValidateExterns;
     options.load_config()?;
     if validate_externs && options.externs.is_empty() {
         return Err("validate-externs requires at least one --externs file".into());
@@ -112,7 +141,8 @@ fn check(mut options: CheckOptions, validate_externs: bool) -> Result<u8, String
         if format == Format::Pretty {
             eprint!("{}", output::checking(&format!("`{path}`"), color));
         }
-        let report = Session::default().check(path, source);
+        let mut report = Session::default().check(path, source);
+        mode.apply(&mut report);
         match format {
             Format::Json => println!(
                 "{}",
@@ -146,12 +176,18 @@ fn check(mut options: CheckOptions, validate_externs: bool) -> Result<u8, String
         .map(Snapshot::as_source)
         .collect();
     let mut session = Session::default();
-    let result = if validate_externs {
+    let mut result = if validate_externs {
         let (checked, trusted) = extern_sources.split_at(externs.len());
         session.validate_externs_with_dependencies(&sources, checked, trusted)
     } else {
         session.check_project_with_externs(&sources, &extern_sources)
     };
+    if mode == CheckMode::AllowIncomplete {
+        for report in &mut result.files {
+            mode.apply(report);
+        }
+        result.ok = result.files.iter().all(|report| report.ok);
+    }
     if format == Format::Json {
         println!(
             "{}",
@@ -175,11 +211,16 @@ fn check(mut options: CheckOptions, validate_externs: bool) -> Result<u8, String
             eprint!("{}", output::project_summary(&result, &target, color));
         } else {
             println!(
-                "Project: {} source files, {} checked, {} reused, {:.3} ms",
+                "Project: {} source files, {} checked, {} reused, {:.3} ms{}",
                 files.len(),
                 result.stats.checked_functions,
                 result.stats.reused_functions,
-                result.stats.elapsed_us as f64 / 1000.0
+                result.stats.elapsed_us as f64 / 1000.0,
+                if result.complete {
+                    ""
+                } else {
+                    " (analysis incomplete)"
+                },
             );
         }
     }

@@ -316,6 +316,10 @@ fn change_call(root: &Path, caller: &Path, provider: &Path, call_line: usize, ta
         assert_eq!(lsp["code"], cli["code"]);
         assert_eq!(lsp["message"], cli["message"]);
         assert_eq!(
+            lsp["severity"],
+            if cli["severity"] == "warning" { 2 } else { 1 }
+        );
+        assert_eq!(
             lsp["range"]["start"]["line"],
             cli["span"]["start"]["line"].as_u64().unwrap() - 1
         );

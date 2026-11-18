@@ -44,15 +44,17 @@ pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: 
         if let (Some(expected), Some(actual)) = (&diagnostic.expected, &diagnostic.actual) {
             annotation = annotation.label(format!("expected `{expected}`, found `{actual}`"));
         }
-        let mut primary = Level::ERROR
-            .primary_title(title)
-            .id(&diagnostic.code)
-            .element(
-                Snippet::source(source)
-                    .path(path)
-                    .fold(true)
-                    .annotation(annotation),
-            );
+        let level = if diagnostic.severity == "warning" {
+            Level::WARNING
+        } else {
+            Level::ERROR
+        };
+        let mut primary = level.primary_title(title).id(&diagnostic.code).element(
+            Snippet::source(source)
+                .path(path)
+                .fold(true)
+                .annotation(annotation),
+        );
         if let Some(contract) = &diagnostic.contract {
             primary = primary.element(Level::NOTE.message(contract_note(contract)));
         }
@@ -115,20 +117,41 @@ pub fn checking(target: &str, color: bool) -> String {
     status("Checking", format_args!("{target}"), color)
 }
 
-fn summary(
+fn summary<'a>(
     target: &str,
-    count: usize,
-    suppressed: usize,
+    files: impl IntoIterator<Item = &'a Report>,
+    ok: bool,
     complete: bool,
     stats: &Stats,
     color: bool,
 ) -> String {
-    if count == 0 {
-        let result = if suppressed == 0 {
+    let mut errors = 0;
+    let mut warnings = 0;
+    let mut suppressed = 0;
+    for file in files {
+        suppressed += file.suppressed.len();
+        for diagnostic in &file.diagnostics {
+            if diagnostic.severity == "warning" {
+                warnings += 1;
+            } else {
+                errors += 1;
+            }
+        }
+    }
+    if ok {
+        let mut result = if suppressed == 0 {
             "no type errors".into()
         } else {
             format!("no unsuppressed type errors; {suppressed} suppressed")
         };
+        if warnings > 0 {
+            write!(
+                result,
+                ", analysis incomplete ({warnings} coverage warning{})",
+                if warnings == 1 { "" } else { "s" }
+            )
+            .unwrap();
+        }
         return status(
             "Finished",
             format_args!(
@@ -152,10 +175,17 @@ fn summary(
         let note = Group::with_title(Level::NOTE.secondary_title(message));
         writeln!(output, "{}", renderer.render(&[note])).unwrap();
     }
-    let message = format!(
-        "could not check {target} due to {count} previous error{}",
-        if count == 1 { "" } else { "s" }
-    );
+    let message = if errors == 0 {
+        format!(
+            "could not fully check {target} due to {warnings} coverage warning{}",
+            if warnings == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "could not check {target} due to {errors} previous error{}",
+            if errors == 1 { "" } else { "s" }
+        )
+    };
     writeln!(
         output,
         "{}",
@@ -169,8 +199,8 @@ pub fn pretty(report: &Report, source: &str, color: bool) -> String {
     let mut output = file_diagnostics(report, source, color);
     output.push_str(&summary(
         &format!("`{}`", report.path),
-        report.diagnostics.len(),
-        report.suppressed.len(),
+        [report],
+        report.ok,
         report.complete,
         &report.stats,
         color,
@@ -181,8 +211,8 @@ pub fn pretty(report: &Report, source: &str, color: bool) -> String {
 pub fn project_summary(report: &ProjectReport, target: &str, color: bool) -> String {
     summary(
         target,
-        report.files.iter().map(|file| file.diagnostics.len()).sum(),
-        report.files.iter().map(|file| file.suppressed.len()).sum(),
+        &report.files,
+        report.ok,
         report.complete,
         &report.stats,
         color,
@@ -194,10 +224,15 @@ pub fn plain(report: &Report) -> String {
     for diagnostic in &report.diagnostics {
         writeln!(
             output,
-            "{}:{}:{}: {} {}",
+            "{}:{}:{}: {}{} {}",
             report.path,
             diagnostic.span.start.line,
             diagnostic.span.start.column,
+            if diagnostic.severity == "warning" {
+                "warning "
+            } else {
+                ""
+            },
             diagnostic.code,
             diagnostic.message
         )

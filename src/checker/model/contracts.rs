@@ -126,6 +126,13 @@ impl Model {
             }
         });
         let inferred = signature.is_none() && fdef.is_none();
+        let clauses = match function_clauses(arms, span) {
+            Ok(clauses) => clauses,
+            Err(diagnostic) => {
+                self.diagnostics.push(*diagnostic);
+                return;
+            }
+        };
         if inferred && !private {
             self.error(
                 "PNX9002",
@@ -134,13 +141,6 @@ impl Model {
             );
             return;
         }
-        let clauses = match function_clauses(arms, span) {
-            Ok(clauses) => clauses,
-            Err(diagnostic) => {
-                self.diagnostics.push(*diagnostic);
-                return;
-            }
-        };
         let arities: BTreeMap<_, _> = clauses
             .into_iter()
             .map(|(count, clause)| {

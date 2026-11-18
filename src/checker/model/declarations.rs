@@ -195,7 +195,8 @@ impl Declarations {
                 }
                 _ => {}
             }
-            match model.names.resolve(op).as_str() {
+            let resolved = model.names.resolve(op);
+            match resolved.as_str() {
                 "clojure.core/ns" => {}
                 "clojure.spec.alpha/def" if xs.len() == 3 => {
                     if let Some(key) = xs[1].keyword() {
@@ -213,6 +214,13 @@ impl Declarations {
                 }
                 "clojure.core/defn" | "clojure.core/defn-" => model.functions.push(index),
                 "clojure.spec.alpha/fdef" => model.fdefs.push(index),
+                qualified if known_unsupported_declaration(qualified, xs) => {
+                    model.diagnostics.push(Diagnostic::analysis_gap(
+                        "PNX9001",
+                        xs[0].span,
+                        format!("Analysis for {op} declarations is unavailable"),
+                    ));
+                }
                 _ => model.error(
                     "PNX9001",
                     form.span,
@@ -280,6 +288,19 @@ impl Declarations {
                 _ => self.error("PNX9001", clause.span, "Unsupported ns clause"),
             }
         }
+    }
+}
+
+fn known_unsupported_declaration(qualified: &str, items: &[Form]) -> bool {
+    if items.get(1).and_then(Form::symbol).is_none() {
+        return false;
+    }
+    match qualified {
+        "clojure.core/defrecord" => items.get(2).and_then(Form::vector).is_some(),
+        "clojure.core/defmethod" => items.len() >= 4,
+        "clojure.test/deftest" => true,
+        "clojure.test.check.clojure-test/defspec" => items.len() >= 3,
+        _ => false,
     }
 }
 

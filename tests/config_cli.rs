@@ -49,6 +49,68 @@ fn conventional_config_is_loaded_without_positional_paths() {
 }
 
 #[test]
+fn incomplete_analysis_is_opt_in_and_keeps_definite_errors() {
+    let dir = TestDir::new("coverage");
+    fs::create_dir(dir.0.join("src")).unwrap();
+    fs::write(dir.0.join("deps.edn"), "{:paths [\"src\"]}").unwrap();
+    fs::write(
+        dir.0.join("src/catalog.clj"),
+        "(ns catalog) (defrecord Item [name]) (defn item [name] (->Item name))",
+    )
+    .unwrap();
+    let caller = dir.0.join("src/shop.clj");
+    let run = |extra: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+            .current_dir(&dir.0)
+            .args(["check", "--json"])
+            .args(extra)
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        )
+    };
+    fs::write(
+        &caller,
+        "(ns shop (:require [catalog :as c])) (defn fetch [] (c/item \"one\"))",
+    )
+    .unwrap();
+    let (strict, strict_report) = run(&[]);
+    let (partial, partial_report) = run(&["--allow-incomplete"]);
+    assert_eq!(strict, Some(1));
+    assert_eq!(strict_report["ok"], false);
+    assert_eq!(partial, Some(0));
+    assert_eq!(partial_report["ok"], true);
+    assert_eq!(partial_report["complete"], false);
+    for file in partial_report["files"].as_array().unwrap() {
+        assert_eq!(file["complete"], false);
+        assert!(
+            file["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|d| d["severity"] == "warning")
+        );
+    }
+
+    for (form, code) in [
+        ("(defn fetch 42)", "PNX1001"),
+        ("(defn fetch [] (c/item", "PNX9000"),
+        ("(defn fetch {:t/sig '[:-> string?]} [] 42)", "PNX2322"),
+        ("(definitely-not-a-known-macro fetch)", "PNX9001"),
+    ] {
+        fs::write(&caller, format!("(ns shop) {form}")).unwrap();
+        let (status, report) = run(&["--allow-incomplete"]);
+        assert_eq!(status, Some(1), "{report}");
+        assert_eq!(report["ok"], false);
+        let error = &report["files"][1]["diagnostics"][0];
+        assert_eq!(error["code"], code, "{report}");
+        assert_eq!(error["severity"], "error");
+    }
+}
+
+#[test]
 fn deps_edn_aliases_compose_project_source_roots() {
     let dir = TestDir::new("deps-paths");
     fs::write(
