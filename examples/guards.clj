@@ -43,3 +43,14 @@
   [name]
   (when-not (nil? name)
     (str/upper-case name)))
+
+(defn first-flag {:t/sig '[:-> #{:ran}]} []
+  (when-first [active? [false true]]
+    (if active? :unexpected :ran)))
+
+(defn next-status {:t/sig '[:-> #{:pending}]} []
+  (loop [statuses ["skip" :pending]]
+    (when-first [status statuses]
+      (if (string? status)
+        (recur (next statuses))
+        status))))

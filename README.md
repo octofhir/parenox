@@ -439,7 +439,9 @@ Their guards narrow values in the selected branch and preserve tail position.
 `if-let` and `when-let` bind truthy values. `if-some` and `when-some` also bind
 `false`. Each initializer is checked once. The successful branch can use the
 narrowed value through a local symbol or a supported map destructuring pattern.
-The fallback runs in the outer scope and defaults to nil. Run `just guards`
+The fallback runs in the outer scope and defaults to nil.
+`when-first` enters its body for a nonempty input and binds the first element,
+including nil or false. Its final expression can recur to the enclosing loop. Run `just guards`
 to see the result type when no fallback is supplied and a type error when
 `if-some` passes `false` into a numeric call.
 

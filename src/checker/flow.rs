@@ -480,7 +480,11 @@ impl Checker<'_> {
         }
 
         let mut input = self.infer(init, env);
-        let non_nil = name.ends_with("-some");
+        let first = name == "clojure.core/when-first";
+        if first {
+            input = self.sequence_call("clojure.core/seq", &input, init.span);
+        }
+        let non_nil = first || name.ends_with("-some");
         let (matched, skipped) = if non_nil {
             (input.known.without_nil(), nil_part(&input.known))
         } else {
@@ -488,8 +492,12 @@ impl Checker<'_> {
         };
         let yes_reachable = matched != Type::Never;
         let no_reachable = skipped != Type::Never;
-        let narrow = |truth, ty, scope: &mut Env| {
-            if non_nil {
+        let narrow = |truth: bool, ty, scope: &mut Env| {
+            if first {
+                if let Some(value) = init.symbol().and_then(|symbol| scope.get_mut(symbol)) {
+                    value.narrow(narrow_emptiness(&value.known, !truth));
+                }
+            } else if non_nil {
                 if let Some(value) = init.symbol().and_then(|symbol| scope.get_mut(symbol)) {
                     value.narrow(ty);
                 }
@@ -509,6 +517,9 @@ impl Checker<'_> {
 
         input.narrow(matched);
         let yes = self.check_path(yes_reachable, |checker| {
+            if first {
+                input = checker.sequence_call("clojure.core/first", &input, init.span);
+            }
             checker.bind(pattern, input, &mut yes_env);
             checker.body(if when { &xs[2..] } else { &xs[2..3] }, &yes_env, tail)
         });

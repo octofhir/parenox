@@ -978,3 +978,13 @@
 (assert (= :target (get-in :target (list) :fallback)))
 (assert (nil? (get-in {:status nil} (list :status) :missing)))
 (println "Clojure/JVM sequential paths: 5 assertions passed")
+
+(assert (= :ran (demo.guards/first-flag)))
+(assert (= :pending (demo.guards/next-status)))
+(assert (= [nil :ran] (when-first [item [nil :next]] [item :ran])))
+(assert (nil? (when-first [item []] item)))
+(assert (= 5 (when-first [[_ value] {:cost 5}] value)))
+(assert (= :invalid
+           (try (when-first [item 42] item)
+                (catch IllegalArgumentException _ :invalid))))
+(println "Clojure/JVM when-first: 6 assertions passed")

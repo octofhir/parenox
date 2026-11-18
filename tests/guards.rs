@@ -129,3 +129,45 @@ fn negated_conditionals_invert_guards_and_preserve_branch_tail_position() {
         );
     }
 }
+
+#[test]
+fn when_first_binds_the_first_value_even_when_it_is_nil_or_false() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+      (defn nil-item {:t/sig '[:-> #{:ran}]} []
+        (when-first [item [nil :next]] (if (nil? item) :ran :unexpected)))
+      (defn false-item {:t/sig '[:-> #{:ran}]} []
+        (when-first [item [false :next]] (if item :unexpected :ran)))
+      (defn empty-input {:t/sig '[:-> nil?]} []
+        (when-first [item []] (inc "unreachable")))
+      (defn entry {:t/sig '[:-> number?]} []
+        (when-first [[_ value] {:cost 5}] (inc value)))
+      (defn tail-recur {:t/sig '[:-> #{:next}]} []
+        (loop [xs ["skip" :next]]
+          (when-first [x xs] (if (string? x) (recur (next xs)) x))))
+      (defn never-throws {:t/sig '[:-> #{:done}]} []
+        (try (when-first [item [:done]] item)
+             (catch ExceptionInfo _ :unexpected)))"#;
+    let report = Session::default().check("when_first.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn when_first_reports_invalid_syntax_inputs_and_unresolved_skipped_forms() {
+    for (expression, code) in [
+        ("(when-first [x] x)", "PNX1001"),
+        ("(when-first [x 42] (inc \"unreachable\"))", "PNX2322"),
+        ("(when-first [x nil] unresolved)", "PNX2304"),
+        (
+            "(loop [xs [1]] (inc (when-first [x xs] (recur []))))",
+            "PNX1001",
+        ),
+    ] {
+        let expected = if code == "PNX2304" { "nil?" } else { "number?" };
+        let source = format!("(defn f {{:t/sig '[:-> {expected}]}} [] {expression})");
+        let report = Session::default().check("when_first.clj", &source);
+        let [diagnostic] = &report.diagnostics[..] else {
+            panic!("{expression}: {report:#?}");
+        };
+        assert_eq!(diagnostic.code, code);
+    }
+}

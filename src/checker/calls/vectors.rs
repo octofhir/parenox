@@ -1,6 +1,9 @@
 //! Contextual calls over collections that produce eager Clojure vectors.
 use super::super::{Checker, Env, Value, flow::narrow_by_type, nil_part};
-use super::{call_returns, narrow_emptiness, predicate_type, sequences::collection_emptiness};
+use super::{
+    call_returns, narrow_emptiness, predicate_type,
+    sequences::{collection_emptiness, iteration_may_throw},
+};
 use crate::reader::{Form, Span};
 use crate::types::Type;
 
@@ -115,14 +118,6 @@ impl Checker<'_> {
                 None => element,
             },
         }
-    }
-}
-
-fn iteration_may_throw(ty: &Type) -> bool {
-    match ty {
-        Type::Seq(_) | Type::Unknown => true,
-        Type::Union(parts) => parts.iter().any(iteration_may_throw),
-        _ => false,
     }
 }
 

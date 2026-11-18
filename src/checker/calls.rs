@@ -196,7 +196,8 @@ impl<'model> Checker<'model> {
                 "clojure.core/if-let"
                 | "clojure.core/when-let"
                 | "clojure.core/if-some"
-                | "clojure.core/when-some" => {
+                | "clojure.core/when-some"
+                | "clojure.core/when-first" => {
                     return self.binding_conditional(xs, span, env, &resolved, tail);
                 }
 
@@ -413,6 +414,10 @@ impl<'model> Checker<'model> {
                         | "clojure.core/identity"
                         | "clojure.core/list"
                         | "clojure.core/cons"
+                        | "clojure.core/seq"
+                        | "clojure.core/first"
+                        | "clojure.core/next"
+                        | "clojure.core/rest"
                         | "clojure.core/reduced"
                         | "clojure.core/reduced?"
                         | "clojure.core/unreduced"
@@ -454,7 +459,7 @@ impl<'model> Checker<'model> {
             "clojure.core/ex-data" => return self.ex_data(&args[0].0),
             "clojure.core/seq" | "clojure.core/first" | "clojure.core/next"
             | "clojure.core/rest" => {
-                return self.sequence_call(name, &args[0]);
+                return self.sequence_call(name, &args[0].0, args[0].1);
             }
             "clojure.core/+" | "clojure.core/-" | "clojure.core/*" | "clojure.core/inc"
             | "clojure.core/dec" => {

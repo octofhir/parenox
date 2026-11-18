@@ -146,7 +146,15 @@ impl Checker<'_> {
         Value::with_notes(result, value.notes.clone())
     }
 
-    pub(super) fn sequence_call(&mut self, name: &str, (value, span): &(Value, Span)) -> Value {
+    pub(in crate::checker) fn sequence_call(
+        &mut self,
+        name: &str,
+        value: &Value,
+        span: Span,
+    ) -> Value {
+        if iteration_may_throw(&value.known) {
+            self.may_throw();
+        }
         let operation = match name {
             "clojure.core/seq" => ReadSequence::Start,
             "clojure.core/first" => ReadSequence::Head,
@@ -154,7 +162,7 @@ impl Checker<'_> {
             "clojure.core/rest" => ReadSequence::Rest,
             _ => unreachable!(),
         };
-        let result = self.read_sequence(operation, &value.known, name, *span);
+        let result = self.read_sequence(operation, &value.known, name, span);
         Value::with_notes(result, value.notes.clone())
     }
 
@@ -191,13 +199,14 @@ impl Checker<'_> {
                     .map(|part| self.read_sequence(op, part, name, span)),
             ),
             actual => {
+                self.illegal_argument();
                 self.diagnostics.push(Diagnostic::type_mismatch(
                     span,
                     name,
                     "Seqable or Nil".into(),
                     actual.inferred().to_string(),
                 ));
-                Type::Unknown
+                Type::Never
             }
         }
     }
@@ -245,6 +254,14 @@ fn conj_seq(previous: &[Type], items: &[Type]) -> Type {
         Type::SeqTuple(prepended.collect())
     } else {
         Type::Seq(Box::new(Type::union(prepended)))
+    }
+}
+
+pub(super) fn iteration_may_throw(ty: &Type) -> bool {
+    match ty {
+        Type::Seq(_) | Type::Unknown => true,
+        Type::Union(parts) => parts.iter().any(iteration_may_throw),
+        _ => false,
     }
 }
 
