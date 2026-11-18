@@ -133,3 +133,67 @@ fn a_newly_available_var_replaces_a_cached_unknown_result() {
     assert_eq!(known.files[0].stats.checked_functions, 1);
     assert_eq!(known.files[0].stats.reused_functions, 1);
 }
+
+#[test]
+fn local_var_changes_preserve_independent_function_checks() {
+    let source = r#"(ns demo)
+(def unused :cold)
+(defn label {:t/sig '[number? :-> string?]} [n] (str n))
+(defn uses-label {:t/sig '[:-> string?]} [] (label 1))
+(defn independent {:t/sig '[:-> number?]} [] (inc 7))"#;
+    let mut session = Session::default();
+    assert!(session.check("edit.clj", source).ok);
+    let edited = source.replace(":cold", ":hot");
+    let unused = session.check("edit.clj", &edited);
+    assert_eq!(unused.stats.checked_functions, 0, "{unused:#?}");
+    assert_eq!(unused.stats.reused_functions, 3);
+
+    let contract = edited
+        .replace("number? :-> string?", "number? :-> number?")
+        .replace("(str n)", "n");
+    let changed = session.check("edit.clj", &contract);
+    assert_eq!(changed.stats.checked_functions, 2, "{changed:#?}");
+    assert_eq!(changed.stats.reused_functions, 1);
+    assert_eq!(changed.diagnostics[0].actual.as_deref(), Some("Number"));
+
+    assert!(session.check("edit.clj", &edited).ok);
+    let shadowed = format!("{edited}\n(defn inc {{:t/sig '[number? :-> string?]}} [n] (str n))");
+    let shadowed = session.check("edit.clj", &shadowed);
+    assert_eq!(shadowed.stats.reused_functions, 2, "{shadowed:#?}");
+    assert_eq!(shadowed.diagnostics[0].actual.as_deref(), Some("String"));
+}
+
+#[test]
+fn a_changed_spec_contract_rechecks_its_root_with_unchanged_source() {
+    let app = parenox::Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [lib :as lib]))
+(defn normalize {:t/sig '[::lib/value :-> number?]} [n] (inc n))
+(defn independent {:t/sig '[:-> string?]} [] "constant")"#,
+    };
+    let provider = r#"(ns lib (:require [clojure.spec.alpha :as s]))
+(s/def ::value number?)"#;
+    let check = |session: &mut Session, source| {
+        session.check_project(
+            &[
+                app,
+                parenox::Source {
+                    path: "lib.clj",
+                    source,
+                },
+            ],
+            None,
+        )
+    };
+    let mut session = Session::default();
+    assert!(check(&mut session, provider).ok);
+    let changed = check(&mut session, &provider.replace("number?", "string?"));
+    assert_eq!(changed.stats.parsed_files, 1, "{changed:#?}");
+    assert_eq!(changed.files[0].stats.checked_functions, 1);
+    assert_eq!(changed.files[0].stats.reused_functions, 1);
+    assert_eq!(changed.files[0].diagnostics[0].code, "PNX2322");
+    assert_eq!(
+        changed.files[0].diagnostics[0].actual.as_deref(),
+        Some("String")
+    );
+}

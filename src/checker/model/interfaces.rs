@@ -51,12 +51,11 @@ pub(super) struct LocalInterface {
     dependencies: Vec<String>,
     specs: Arc<BTreeMap<String, Type>>,
     literals: BTreeMap<String, LiteralVar>,
-    functions: Vec<LocalFunction>,
+    functions: BTreeMap<String, LocalFunction>,
 }
 
 #[derive(PartialEq, Eq)]
 struct LocalFunction {
-    name: String,
     signatures: Arc<[Signature]>,
     private: bool,
     inferred: bool,
@@ -93,14 +92,19 @@ impl Dependency {
 }
 
 pub(crate) struct InterfaceChanges<'a> {
-    same_local: bool,
+    compatible_scope: bool,
+    local: Option<(&'a LocalInterface, &'a LocalInterface)>,
     namespaces: BTreeMap<&'a str, (&'a Dependency, &'a Dependency)>,
 }
 
 impl InterfaceKey {
     pub fn changes<'a>(&'a self, before: &'a Self) -> InterfaceChanges<'a> {
         let same_local = self.local == before.local;
-        let namespaces = if same_local {
+        let compatible_scope = same_local
+            || (self.local.names == before.local.names
+                && self.local.dependencies == before.local.dependencies
+                && self.local.specs == before.local.specs);
+        let namespaces = if compatible_scope {
             std::iter::once(self.local.names.namespace.as_str())
                 .chain(self.local.dependencies.iter().map(String::as_str))
                 .zip(self.dependencies.iter().zip(&before.dependencies))
@@ -110,7 +114,8 @@ impl InterfaceKey {
             BTreeMap::new()
         };
         InterfaceChanges {
-            same_local,
+            compatible_scope,
+            local: (compatible_scope && !same_local).then_some((&self.local, &before.local)),
             namespaces,
         }
     }
@@ -118,14 +123,18 @@ impl InterfaceKey {
 
 impl InterfaceChanges<'_> {
     pub fn is_unchanged(&self) -> bool {
-        self.same_local && self.namespaces.is_empty()
+        self.compatible_scope && self.local.is_none() && self.namespaces.is_empty()
     }
 
     pub fn allows_reuse(&self, model: &Model, function: &Function) -> bool {
-        if !self.same_local {
+        if !self.compatible_scope
+            || self.local.is_some_and(|(current, old)| {
+                current.functions.get(&function.name) != old.functions.get(&function.name)
+            })
+        {
             return false;
         }
-        if self.namespaces.is_empty() {
+        if self.is_unchanged() {
             return true;
         }
         let names = &model.names;
@@ -156,8 +165,18 @@ impl InterfaceChanges<'_> {
     }
 
     fn identical_var(&self, namespace: &str, local: &str) -> bool {
-        self.namespaces.get(namespace).is_none_or(|(current, old)| {
-            let qualified = format!("{namespace}/{local}");
+        let external = self.namespaces.get(namespace);
+        let local_vars = self
+            .local
+            .filter(|(current, _)| current.names.namespace == namespace);
+        if external.is_none() && local_vars.is_none() {
+            return true;
+        }
+        let qualified = format!("{namespace}/{local}");
+        local_vars.is_none_or(|(current, old)| {
+            current.functions.get(&qualified) == old.functions.get(&qualified)
+                && current.literals.get(&qualified) == old.literals.get(&qualified)
+        }) && external.is_none_or(|(current, old)| {
             current.in_project == old.in_project
                 && current.value(&qualified) == old.value(&qualified)
         })
@@ -172,7 +191,7 @@ impl Model {
     ) {
         let specs = Arc::new(specs);
         let mut exports = Exports::default();
-        let mut functions = Vec::with_capacity(self.functions.len());
+        let mut functions = BTreeMap::new();
         for f in self.functions.values() {
             if f.private {
                 exports.private_vars.insert(f.name.clone());
@@ -181,12 +200,14 @@ impl Model {
                     .functions
                     .insert(f.name.clone(), f.signatures.clone());
             }
-            functions.push(LocalFunction {
-                name: f.name.clone(),
-                signatures: f.signatures.clone(),
-                private: f.private,
-                inferred: f.inferred,
-            });
+            functions.insert(
+                f.name.clone(),
+                LocalFunction {
+                    signatures: f.signatures.clone(),
+                    private: f.private,
+                    inferred: f.inferred,
+                },
+            );
         }
         for (name, value) in &self.literals {
             if value.private {

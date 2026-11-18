@@ -306,7 +306,8 @@ requests work independently of the tracked project.
 - Edits to unannotated private helpers invalidate their transitive callers in the same file.
 - Public contract changes recheck functions that reference the changed var,
   including references reached through inferred private helpers.
-- Local declaration changes can invalidate all checked functions in their file.
+- Local var changes recheck their consumers in the same file. Changes to
+  namespace resolution or local spec declarations can still recheck that file.
 - Removed files and externs disappear from the current environment immediately.
 - Unchanged functions with successful checks can be reused after their source ranges move.
   Functions with diagnostics are rechecked if their own ranges or a helper's ranges move.
@@ -328,6 +329,8 @@ same edit sequence through tracked updates.
 Run `just agent-loop 1000 target/release/parenox 0 0 snapshot 128` to add 128
 consumer functions and alternate edits to an unused export in their provider.
 The final signature edit changes the export those consumers actually call.
+Set the fourth argument to `128` as well to add 128 functions to the edited file
+and measure reuse within that file.
 
 ## Current scope
 

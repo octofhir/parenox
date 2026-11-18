@@ -252,12 +252,13 @@ fn clinic(agent: &mut Agent, root: &Path, options: ClinicOptions<'_>) -> Result<
         let (report, elapsed) = transport.check(agent, &mut payload, &[service])?;
         assert_eq!(report["ok"], true, "{report}");
         let checks = report["stats"]["checked_functions"].as_u64().unwrap() as usize;
-        let maximum = if extra_consumers == 0 {
-            1 + shifted_functions
+        let expected_checks = if extra_consumers == 0 {
+            1..=1 + shifted_functions
         } else {
-            2 + shifted_functions + extra_consumers
+            0..=2 + shifted_functions + extra_consumers
         };
-        assert!((1..=maximum).contains(&checks), "{report}");
+        assert!(expected_checks.contains(&checks), "{report}");
+        assert_eq!(report["stats"]["parsed_files"], 1, "{report}");
         assert_eq!(
             report["stats"]["reused_functions"],
             total_functions - checks,
