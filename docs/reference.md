@@ -389,6 +389,11 @@ constructors. Checking a tagged expression currently reports unsupported analysi
 instead of guessing a type from its payload. This is shared Clojure/EDN syntax
 support, not a strict or complete EDN validator.
 
+In Clojure source, the reader preserves `@value` and `#'name` in the CST and
+provides the JVM reader forms `(clojure.core/deref value)` and `(var name)` to
+analysis. Var objects and dereferenced value types are reported as coverage gaps
+when encountered in a checked function.
+
 Design references include [clojure-reader](https://github.com/Grinkers/clojure-reader)
 for data reading, [Crabjure](https://github.com/ribelo/crabjure) for static analysis,
 and [clojurust](https://github.com/csm/clojurust) for future reader/expansion/runtime

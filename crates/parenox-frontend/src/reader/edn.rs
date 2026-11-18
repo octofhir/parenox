@@ -16,7 +16,7 @@ impl Reader<'_> {
             self.source
                 .as_bytes()
                 .get(self.pos.offset..self.pos.offset.saturating_add(2)),
-            Some([b'#', b'(' | b'"' | b':' | b'#' | b'^'])
+            Some([b'#', b'(' | b'"' | b':' | b'#' | b'^' | b'\''])
         )
     }
 

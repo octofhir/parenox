@@ -42,6 +42,10 @@ pub enum SyntaxKind {
     AnonymousFunction,
     OpenAnonymousFunction,
     Regex,
+    Deref,
+    VarQuote,
+    DerefMark,
+    VarQuoteMark,
     ErrorToken,
 }
 
@@ -56,6 +60,8 @@ impl SyntaxKind {
                 | Self::Map
                 | Self::Set
                 | Self::Quote
+                | Self::Deref
+                | Self::VarQuote
                 | Self::Discard
                 | Self::Metadata
                 | Self::Tagged

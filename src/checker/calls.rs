@@ -162,6 +162,15 @@ impl<'model> Checker<'model> {
             Some("if") => return self.if_form(xs, span, env, Conditional::If, tail),
             Some("do") => return self.body(&xs[1..], env, tail),
             Some("quote") => return self.quote_form(&xs[1..], span),
+            Some("var") => {
+                if let [target] = &xs[1..]
+                    && target.symbol().is_some()
+                {
+                    return self.reference_type_unknown(span, "Var object types are not supported");
+                }
+                self.error("PNX1001", span, "var requires one symbol");
+                return Value::new(Type::Unknown);
+            }
             Some("throw") => return self.throw_form(&xs[1..], span, env),
             Some("try") => return self.try_form(&xs[1..], env, tail),
             _ => {}
@@ -185,6 +194,9 @@ impl<'model> Checker<'model> {
                 }
                 None => {
                     let resolved = self.model.resolve(name);
+                    if resolved == "clojure.core/deref" {
+                        return self.deref_call(&xs[1..], span, env);
+                    }
                     if let Some(form) = CoreForm::resolve(&resolved) {
                         return self.core_form(form, &resolved, xs, span, env, tail);
                     }
@@ -208,6 +220,34 @@ impl<'model> Checker<'model> {
         let function = self.infer(&xs[0], env);
         let args = self.call_args(&function, &xs[1..], span, env);
         self.call_value(&function, &args, xs[0].span, span)
+    }
+
+    fn deref_call(&mut self, args: &[Form], span: Span, env: &Env) -> Value {
+        let returns = self
+            .eval_args(args, env, true)
+            .last()
+            .is_none_or(|(value, _)| value.known != Type::Never);
+        let actual = args.len();
+        if !matches!(actual, 1 | 3) {
+            self.error(
+                "PNX2554",
+                span,
+                format!("deref expects 1 or 3 arguments, got {actual}"),
+            );
+            if returns {
+                self.may_throw();
+            }
+        } else if returns {
+            return self.reference_type_unknown(span, "Dereferenced value types are not supported");
+        }
+        Value::new(if returns { Type::Unknown } else { Type::Never })
+    }
+
+    fn reference_type_unknown(&mut self, span: Span, message: &str) -> Value {
+        self.may_throw();
+        self.diagnostics
+            .push(Diagnostic::analysis_gap("PNX9001", span, message));
+        Value::new(Type::Unknown)
     }
 
     fn call_args(

@@ -3,6 +3,41 @@ use parenox::syntax::SyntaxKind;
 use parenox::{Session, Source};
 
 #[test]
+fn references_report_type_coverage_without_a_reader_error() {
+    let source = r#"
+        (ns refs)
+        (def state (atom 42))
+        (defn read-state {:t/sig '[:-> number?]} [] @state)
+        (defn var-object {:t/sig '[:-> symbol?]} [] #'read-state)
+        (defn invalid-var {:t/sig '[:-> symbol?]} [] #'nil)
+    "#;
+    let report = Session::default().check("refs.clj", source);
+    assert!(!report.complete);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let span = diagnostic.span;
+            (
+                diagnostic.code.as_str(),
+                diagnostic.severity,
+                &source[span.start.offset..span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX9001", "warning", "(atom 42)"),
+            ("PNX9001", "warning", "@state"),
+            ("PNX9001", "warning", "#'read-state"),
+            ("PNX1001", "error", "#'nil"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn metadata_shorthands_and_stacked_precedence_share_the_lossless_reader() {
     for (source, key) in [
         ("^:private item", ":private"),

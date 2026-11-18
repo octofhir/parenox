@@ -480,13 +480,16 @@ impl<'a> Reader<'a> {
                 self.form_inner()
             };
             if let Some(tree) = &mut self.tree {
-                let conditional = self.source[start.offset..].starts_with("#?");
+                let spelling = &self.source[start.offset..self.pos.offset];
+                let conditional = spelling.starts_with("#?");
                 let kind = result.as_ref().map_or(SyntaxKind::Error, |item| {
                     if conditional {
                         SyntaxKind::Conditional
                     } else {
                         match item {
                             Item::Form(form) => match form.kind {
+                                Kind::List(_) if spelling.starts_with('@') => SyntaxKind::Deref,
+                                Kind::List(_) if spelling.starts_with("#'") => SyntaxKind::VarQuote,
                                 Kind::List(_) => SyntaxKind::List,
                                 Kind::AnonymousFunction(_) => SyntaxKind::AnonymousFunction,
                                 Kind::Vector(_) => SyntaxKind::Vector,
@@ -550,6 +553,13 @@ impl<'a> Reader<'a> {
                 self.token(SyntaxKind::QuoteMark, start);
                 Kind::Quote(Box::new(self.without_comments(Self::form)?))
             }
+            Some('@') if !self.edn => {
+                return self.prefix_call(start, SyntaxKind::DerefMark, "clojure.core/deref");
+            }
+            Some('#') if self.peek() == Some('\'') && !self.edn => {
+                self.bump();
+                return self.prefix_call(start, SyntaxKind::VarQuoteMark, "var");
+            }
             Some('#') if self.peek() == Some('(') => self.anonymous_function(start)?,
             Some('#') if self.peek() == Some('"') => {
                 self.bump();
@@ -589,56 +599,79 @@ impl<'a> Reader<'a> {
             Some(c @ ('#' | '`' | '~' | '@')) => {
                 return Err(self.error(start, format!("Reader syntax {c} is not supported yet")));
             }
-            Some(_) => {
-                let numeric = numbers::starts_number(&self.source[start.offset..]);
-                while self.peek().is_some_and(|c| {
-                    !(Self::token_boundary(c) || numeric && matches!(c, '\'' | '#' | '%'))
-                }) {
-                    self.bump();
-                }
-                let token = &self.source[start.offset..self.pos.offset];
-                match token {
-                    arg if self.arguments.is_some() && arg.starts_with('%') => {
-                        self.anonymous_argument(arg, start)?
-                    }
-                    "nil" => Kind::Nil,
-                    "true" => Kind::Bool(true),
-                    "false" => Kind::Bool(false),
-                    s if s.starts_with(':') => {
-                        if self.edn && s.starts_with("::") {
-                            return Err(
-                                self.error(start, "Auto-resolved keywords are unavailable in EDN")
-                            );
-                        }
-                        if s.starts_with("::")
-                            && let Some(spans) = &mut self.auto_keywords
-                        {
-                            spans.push(Span {
-                                start,
-                                end: self.pos,
-                            });
-                        }
-                        Kind::Keyword(s.to_string())
-                    }
-
-                    s if numeric => {
-                        if !numbers::valid_number(s) {
-                            return Err(self.error(start, "Invalid numeric literal"));
-                        }
-                        Kind::Number
-                    }
-                    s => Kind::Symbol(s.to_string()),
-                }
-            }
+            Some(_) => return self.atom(start),
             None => return Err(self.error(start, "Unexpected end of input")),
         };
-        Ok(Item::Form(Form {
+        Ok(self.form_item(start, kind))
+    }
+
+    fn form_item(&self, start: Position, kind: Kind) -> Item {
+        Item::Form(Form {
             kind,
             span: Span {
                 start,
                 end: self.pos,
             },
-        }))
+        })
+    }
+
+    fn atom(&mut self, start: Position) -> Result<Item, ReadError> {
+        let numeric = numbers::starts_number(&self.source[start.offset..]);
+        while self
+            .peek()
+            .is_some_and(|c| !(Self::token_boundary(c) || numeric && matches!(c, '\'' | '#' | '%')))
+        {
+            self.bump();
+        }
+        let token = &self.source[start.offset..self.pos.offset];
+        let kind = match token {
+            arg if self.arguments.is_some() && arg.starts_with('%') => {
+                self.anonymous_argument(arg, start)?
+            }
+            "nil" => Kind::Nil,
+            "true" => Kind::Bool(true),
+            "false" => Kind::Bool(false),
+            s if s.starts_with(':') => {
+                if self.edn && s.starts_with("::") {
+                    return Err(self.error(start, "Auto-resolved keywords are unavailable in EDN"));
+                }
+                if s.starts_with("::")
+                    && let Some(spans) = &mut self.auto_keywords
+                {
+                    spans.push(Span {
+                        start,
+                        end: self.pos,
+                    });
+                }
+                Kind::Keyword(s.to_string())
+            }
+            s if numeric => {
+                if !numbers::valid_number(s) {
+                    return Err(self.error(start, "Invalid numeric literal"));
+                }
+                Kind::Number
+            }
+            s => Kind::Symbol(s.to_string()),
+        };
+        Ok(self.form_item(start, kind))
+    }
+
+    fn prefix_call(
+        &mut self,
+        start: Position,
+        syntax: SyntaxKind,
+        operator: &str,
+    ) -> Result<Item, ReadError> {
+        self.token(syntax, start);
+        let head = Form {
+            kind: Kind::Symbol(operator.into()),
+            span: Span {
+                start,
+                end: self.pos,
+            },
+        };
+        let operand = self.without_comments(Self::form)?;
+        Ok(self.form_item(start, Kind::List(vec![head, operand])))
     }
 
     fn anonymous_function(&mut self, start: Position) -> Result<Kind, ReadError> {

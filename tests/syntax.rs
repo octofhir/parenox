@@ -117,12 +117,49 @@ fn regex_literals_preserve_pattern_escapes_instead_of_decoding_strings() {
 }
 
 #[test]
+fn deref_and_var_quote_keep_source_and_expand_to_jvm_reader_forms() {
+    let source = "@ #_ignored app/state\n#' ; reference\n app/read-state";
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_lossless(source, &parsed);
+    let syntax = parsed.syntax();
+    let nodes: Vec<_> = syntax.children().map(|node| node.kind()).collect();
+    assert_eq!(nodes, [SyntaxKind::Deref, SyntaxKind::VarQuote]);
+    for (form, (operator, operand, spelling)) in reader::read(source).unwrap().iter().zip([
+        ("clojure.core/deref", "app/state", "@"),
+        ("var", "app/read-state", "#'"),
+    ]) {
+        let Kind::List(items) = &form.kind else {
+            panic!("{form:?}");
+        };
+        let [head, argument] = items.as_slice() else {
+            panic!("{items:?}");
+        };
+        assert_eq!(head.symbol(), Some(operator));
+        assert_eq!(argument.symbol(), Some(operand));
+        assert_eq!(
+            &source[head.span.start.offset..head.span.end.offset],
+            spelling
+        );
+        assert_eq!(
+            &source[argument.span.start.offset..argument.span.end.offset],
+            operand
+        );
+    }
+    for unsupported in ["@x", "#'x"] {
+        assert!(reader::validate_edn(unsupported).is_err());
+    }
+}
+
+#[test]
 fn malformed_and_unsupported_reader_syntax_is_lossless_and_terminates() {
     for source in [
         "#_",
         "#_ #_",
         "' #_",
         "'",
+        "@",
+        "#'",
         "{1}",
         "\"\\q\"",
         "\"unfinished",
