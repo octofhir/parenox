@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod extern_diff_cli;
 mod lsp;
+mod runtime;
 mod serve;
 
 use std::collections::BTreeMap;
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
 fn run() -> Result<u8, String> {
     match Cli::parse().command {
         Some(Command::Check(options)) => check(options, false),
+        Some(Command::Test(options)) => runtime::run_tests(options),
         Some(Command::Definition(options)) => definition(options),
         Some(Command::ValidateExterns(options)) => check(options, true),
         Some(Command::ExportExterns(options)) => export_externs(options),

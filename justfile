@@ -61,6 +61,10 @@ runtime-smoke:
 uri-editor-smoke project:
     PARENOX_URI_PILOT={{quote(project)}} cargo test --locked --release --test lsp uri_pilot_editor_workflow -- --ignored
 
+# Exercise passing, failing and unloadable tests on Clojure/JVM (optional).
+jvm-test-smoke:
+    cargo test --locked --test runtime_cli project_jvm_pass_failure_and_load_error -- --ignored
+
 # Check private inference, then show the deliberate nil error and call chain.
 inference: build
     @./target/release/parenox check examples/inferred.clj

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::extern_diff_cli::DiffOptions;
@@ -13,6 +15,8 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Check Clojure files or a configured project.
     Check(CheckOptions),
+    /// Run clojure.test namespaces on the project's JVM.
+    Test(TestOptions),
     /// Find the definition of a qualified source var.
     Definition(DefinitionOptions),
     /// Check library bodies and validate the extern promises they ship.
@@ -37,6 +41,22 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
         iterations: u32,
     },
+}
+
+#[derive(Args)]
+pub(crate) struct TestOptions {
+    /// Project directory containing deps.edn.
+    #[arg(long, value_name = "DIR", default_value = ".")]
+    pub(crate) project: PathBuf,
+    /// Select a Clojure CLI alias. Repeat to combine aliases in order.
+    #[arg(long = "alias", value_name = "NAME")]
+    pub(crate) aliases: Vec<String>,
+    /// Clojure CLI executable.
+    #[arg(long, value_name = "EXECUTABLE", default_value = "clojure")]
+    pub(crate) clojure: PathBuf,
+    /// Namespaces to require and run with clojure.test.
+    #[arg(value_name = "NAMESPACE", required = true)]
+    pub(crate) namespaces: Vec<String>,
 }
 
 #[derive(Args)]

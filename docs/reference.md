@@ -46,6 +46,31 @@ Invalid directives report `PNX9006`. A directive that matches no finding
 reports `PNX9007` when no other reader, resolution, or analysis error prevented
 checking.
 
+## JVM tests
+
+From a `deps.edn` project, name the test namespaces to run:
+
+```sh
+parenox test --alias test my-app.routes-test my-app.storage-test
+```
+
+Parenox launches the standard Clojure CLI from the project directory. It uses
+the project's dependencies and the selected aliases' classpath and JVM options.
+The command runs the named namespaces with `clojure.test`, including their
+fixtures and namespace hooks. It supplies its own main entry point. Use
+`--project DIR` to select a project or `--clojure EXECUTABLE` to select a CLI.
+Run it after saving the changes you want the JVM to load.
+
+Test output includes the regular `clojure.test` report. When the assertion's JVM
+location resolves to a local test file, Parenox adds a `path:line` line with the
+qualified test var. Macros can report the location of the expanded assertion's
+source expression. Unmapped locations retain the runtime's report.
+
+Use the same command in CI. Exit status **0** means the requested tests passed.
+**1** means an assertion failed or a test reported an error. **2** means the
+run did not complete or no test vars ran. Run `just jvm-test-smoke` to exercise
+the command on the pinned Clojure/JVM version.
+
 ## A project-sized example
 
 The [clinic example](../examples/clinic) has four namespaces:

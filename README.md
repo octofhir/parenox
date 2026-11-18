@@ -27,6 +27,10 @@ Point the binary at your source, or run `parenox check` from a project with
 paths from `deps.edn`. CI can use `--format json` for machine-readable diagnostics.
 [CLI and project configuration](docs/reference.md#a-project-sized-example)
 
+Run project tests with `parenox test --alias test my-app.routes-test`. It uses
+the standard Clojure CLI and reports local assertion locations and a CI exit
+status. [JVM test reference](docs/reference.md#jvm-tests)
+
 Try the included clinic project to see a diagnostic with its contract source:
 
 ```sh
