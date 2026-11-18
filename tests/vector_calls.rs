@@ -204,3 +204,33 @@ fn vector_calls_evaluate_the_callback_expression_then_their_collection_arguments
     assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
     assert_eq!(report.diagnostics[0].code, "PNX2304");
 }
+
+#[test]
+fn guaranteed_callbacks_can_terminate_vector_pipelines() {
+    for operation in ["mapv", "filterv"] {
+        let body = format!(
+            r#"(ns demo)
+              (defn f {{:t/sig '[:-> #{{:row}}]}} []
+                (try
+                  ({operation} (fn [_] (throw (ex-info "failed" {{:stage :row}}))) [:only])
+                  (catch ExceptionInfo e (:stage (ex-data e)))))"#
+        );
+        let report = Session::default().check("vectors.clj", &body);
+        assert!(report.ok && report.complete, "{operation}: {report:#?}");
+    }
+}
+
+#[test]
+fn empty_collections_still_return_and_open_collections_can_be_empty() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+      (defn available {:t/sig '[(s/coll-of number? :kind vector?) :-> (s/coll-of number? :kind vector?)]}
+        [xs] (filterv (fn [_] (throw (ex-info "rejected" {}))) xs))
+      (defn no-exception {:t/sig '[:-> (s/coll-of number? :kind vector?)]} []
+        (try (mapv identity [1 2])
+             (catch ExceptionInfo _ :unexpected)))
+      (defn shortest-empty {:t/sig '[:-> (s/coll-of number? :kind vector?)]} []
+        (try (mapv (fn [_ _] (throw (ex-info "unused" {}))) [1 2] [])
+             (catch ExceptionInfo _ :unexpected)))"#;
+    let report = Session::default().check("vectors.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}

@@ -32,3 +32,14 @@
   (try
     (filterv some? (throw (ex-info "Collection unavailable" {:stage :collection})))
     (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))
+
+(defn rejected-row {:t/sig '[:-> #{:row}]} []
+  (try
+    (mapv (fn [_] (throw (ex-info "Invalid row" {:stage :row}))) [:only])
+    (catch ExceptionInfo e (:stage (ex-data e)))))
+
+(defn filtered-empty
+  {:t/sig '[:-> (s/coll-of number? :kind vector?)]} []
+  (try
+    (filterv (fn [_] (throw (ex-info "Unexpected row" {:stage :row}))) [])
+    (catch ExceptionInfo _ :unexpected)))

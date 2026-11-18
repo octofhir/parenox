@@ -1,6 +1,6 @@
 //! Contextual calls over collections that produce eager Clojure vectors.
 use super::super::{Checker, Env, Value, flow::narrow_by_type, nil_part};
-use super::{call_returns, narrow_emptiness, predicate_type};
+use super::{call_returns, narrow_emptiness, predicate_type, sequences::collection_emptiness};
 use crate::reader::{Form, Span};
 use crate::types::Type;
 
@@ -37,7 +37,9 @@ impl Checker<'_> {
             self.call_prepared(&callable, Vec::new(), span, env, false);
             return Value::new(Type::Never);
         }
-        self.may_throw();
+        let nonempty = inputs
+            .iter()
+            .all(|(value, _)| collection_emptiness(&value.known) == Some(Type::Bool(false)));
         let args: Vec<_> = inputs
             .into_iter()
             .map(|(input, span)| (self.collection_element(input, span, name), span))
@@ -57,6 +59,9 @@ impl Checker<'_> {
                 );
             }
         }
+        if invoked && nonempty && result.known == Type::Never {
+            return result;
+        }
         let element = match filtered {
             _ if !invoked => Type::Never,
             Some(_) if result.known.truthy() == Type::Never => Type::Never,
@@ -67,6 +72,9 @@ impl Checker<'_> {
     }
 
     fn collection_element(&mut self, collection: Value, span: Span, name: &str) -> Value {
+        if iteration_may_throw(&collection.known) {
+            self.may_throw();
+        }
         match element_type(collection.known) {
             Ok(element) => Value::with_notes(element, collection.notes),
             Err(CollectionError::OpenMap) => self.unsupported(
@@ -74,6 +82,7 @@ impl Checker<'_> {
                 format!("{name} cannot infer entry types for an open map"),
             ),
             Err(CollectionError::NotSeqable) => {
+                self.illegal_argument();
                 self.error(
                     "PNX2322",
                     span,
@@ -106,6 +115,14 @@ impl Checker<'_> {
                 None => element,
             },
         }
+    }
+}
+
+fn iteration_may_throw(ty: &Type) -> bool {
+    match ty {
+        Type::Seq(_) | Type::Unknown => true,
+        Type::Union(parts) => parts.iter().any(iteration_may_throw),
+        _ => false,
     }
 }
 

@@ -961,3 +961,12 @@
            (try (demo.reductions-bad/bad-line-item)
                 (catch ClassCastException _ :wrong-value))))
 (println "Clojure/JVM direct collection reductions: 8 assertions passed")
+
+(assert (= :row (demo.vectors/rejected-row)))
+(assert (= [] (demo.vectors/filtered-empty)))
+(assert (= :row
+           (try (filterv (fn [_] (throw (ex-info "Invalid row" {:stage :row}))) [:only])
+                (catch ExceptionInfo e (:stage (ex-data e))))))
+(assert (= []
+           (mapv (fn [_ _] (throw (ex-info "Unused" {}))) [1 2] [])))
+(println "Clojure/JVM vector callback exits: 4 assertions passed")

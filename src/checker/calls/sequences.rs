@@ -248,7 +248,7 @@ fn conj_seq(previous: &[Type], items: &[Type]) -> Type {
     }
 }
 
-fn collection_emptiness(ty: &Type) -> Option<Type> {
+pub(super) fn collection_emptiness(ty: &Type) -> Option<Type> {
     Some(match ty {
         Type::Nil => Type::Bool(true),
         Type::Never => Type::Never,

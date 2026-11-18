@@ -513,8 +513,10 @@ narrow the retained type. `some?` removes nil and keeps false.
 Both support vectors, sets, strings (as characters), closed maps,
 `s/map-of` dictionaries, and nil (as empty). User-defined predicates retain the
 input element type unless the callback is known to always return a falsey
-value. Run `just vectors pretty always` for a patient-label pipeline and
-two callback diagnostics.
+value. On a guaranteed nonempty input, a callback that throws prevents the
+pipeline from returning. Empty inputs skip callback invocation. Run
+`just vectors pretty always` for a patient-label pipeline, recovery from a
+rejected row, and callback diagnostics.
 
 Maps and keywords work in function position and as inline callbacks, for
 example `(mapv :active patients)`. Lookup defaults apply to missing entries
