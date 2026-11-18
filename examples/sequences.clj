@@ -21,3 +21,9 @@
     (if-let [items (seq remaining)]
       (recur (rest items) (+ total (first items)))
       total)))
+
+(defn sum-with-empty-guard {:t/sig '[::amounts :-> number?]} [amounts]
+  (loop [items (seq amounts) total 0]
+    (if-not (empty? items)
+      (recur (next items) (+ total (first items)))
+      total)))

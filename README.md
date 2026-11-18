@@ -602,7 +602,10 @@ strings, keywords and known decimal integers in the i32 range.
 
 `seq`, `first`, `next` and `rest` model traversal of vectors and inferred
 sequences. An exhausted `rest` returns a truthy empty list. Use `seq` to
-detect exhaustion and refine the remaining elements. Guarding
+detect exhaustion and refine the remaining elements. The `empty?` and
+`not-empty` guards narrow known empty and nonempty alternatives. Empty
+collections, empty strings and nil satisfy `empty?`; a collection holding nil or
+false still has an element. Guarding
 the result of `seq` or `next` establishes that a first item exists. That item
 can still be nil. A seq made from a fixed vector retains its positions for
 `first`, `next`, `nth` and positional destructuring.

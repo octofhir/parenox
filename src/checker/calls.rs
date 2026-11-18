@@ -6,6 +6,8 @@ mod reduction;
 mod sequences;
 mod vectors;
 
+pub(super) use sequences::narrow_emptiness;
+
 use super::flow::Conditional;
 use super::{Checker, Env, Value, function_forms::pack_arguments, model::Function, nil_part};
 use crate::Diagnostic;
@@ -415,6 +417,9 @@ impl<'model> Checker<'model> {
             | "clojure.core/ensure-reduced" => {
                 return reduction::reduced_operation(name, &args[0].0);
             }
+            "clojure.core/empty?" | "clojure.core/not-empty" => {
+                return self.emptiness_call(name, &args[0]);
+            }
             "clojure.core/nth" => return self.nth(args),
             "clojure.core/conj" => return self.conj(args),
             "clojure.core/ex-info" => return self.ex_info(args),
@@ -568,6 +573,8 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/key"
             | "clojure.core/val"
             | "clojure.core/count"
+            | "clojure.core/empty?"
+            | "clojure.core/not-empty"
             | "clojure.core/nth"
             | "clojure.core/seq"
             | "clojure.core/first"

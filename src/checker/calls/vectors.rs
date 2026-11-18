@@ -1,6 +1,6 @@
 //! Contextual calls over collections that produce eager Clojure vectors.
 use super::super::{Checker, Env, Value, flow::narrow_by_type, nil_part};
-use super::{call_returns, predicate_type};
+use super::{call_returns, narrow_emptiness, predicate_type};
 use crate::reader::{Form, Span};
 use crate::types::Type;
 
@@ -98,6 +98,8 @@ impl Checker<'_> {
         match name.as_str() {
             "clojure.core/some?" => element.without_nil(),
             "clojure.core/nil?" => nil_part(&element),
+            "clojure.core/empty?" => narrow_emptiness(&element, true),
+            "clojure.core/not-empty" => narrow_emptiness(&element, false),
             "clojure.core/identity" => element.truthy(),
             _ => match predicate_type(&name) {
                 Some(wanted) => narrow_by_type(&element, &wanted, true),

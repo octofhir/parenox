@@ -84,3 +84,58 @@ fn rest_returns_a_truthy_empty_list_and_keeps_remaining_positions() {
     let report = check("(nth (rest nil) 0)", "number?");
     assert_eq!(report.diagnostics[0].code, "PNX2801", "{report:#?}");
 }
+
+#[test]
+fn emptiness_distinguishes_nil_empty_and_present_false_values() {
+    for (expression, contract) in [
+        ("(empty? nil)", "#{true}"),
+        ("(empty? (rest [1]))", "#{true}"),
+        ("(empty? {})", "#{true}"),
+        ("(empty? #{})", "#{true}"),
+        ("(empty? \"\")", "#{true}"),
+        ("(empty? [nil])", "#{false}"),
+        ("(empty? {:x false})", "#{false}"),
+        ("(not-empty \"\")", "nil?"),
+        ("(not-empty \"Ada\")", "#{\"Ada\"}"),
+        (
+            "(not-empty [nil])",
+            "(clojure.spec.alpha/coll-of nil? :kind vector?)",
+        ),
+        (
+            "(filterv not-empty [\"\" \"Ada\"])",
+            "(clojure.spec.alpha/coll-of #{\"Ada\"} :kind vector?)",
+        ),
+    ] {
+        let report = check(expression, contract);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    for expression in ["(empty? false)", "(not-empty 0)"] {
+        let report = check(expression, "boolean?");
+        assert_eq!(report.diagnostics[0].code, "PNX2322", "{report:#?}");
+    }
+}
+
+#[test]
+fn emptiness_guards_refine_sequence_state_and_open_empty_shapes() {
+    let report = Session::default().check(
+        "sequences.clj",
+        r#"(ns demo (:require [clojure.spec.alpha :as s]))
+           (defn sum-values
+             {:t/sig '[(s/coll-of number? :kind vector?) :-> number?]}
+             [values]
+             (loop [items (seq values) total 0]
+               (if-not (empty? items)
+                 (recur (next items) (+ total (first items)))
+                 total)))
+           (defn empty-first
+             {:t/sig '[(s/coll-of number? :kind vector?) :-> nil?]}
+             [values]
+             (when (empty? values) (first values)))
+           (defn fallback
+             {:t/sig '[(s/keys) :-> string?]} [configuration]
+             (if (empty? configuration)
+               (:unexpected configuration "missing")
+               "configured"))"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}

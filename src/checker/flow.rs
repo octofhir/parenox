@@ -1,5 +1,5 @@
 //! Control flow, type narrowing and core threading forms.
-use super::calls::{is_builtin, predicate_type};
+use super::calls::{is_builtin, narrow_emptiness, predicate_type};
 use super::{Checker, Env, Value, nil_part};
 use crate::expand::{self, Threading};
 use crate::reader::{Form, Kind, Span};
@@ -604,6 +604,11 @@ impl Checker<'_> {
             return;
         };
         let positive = match op.as_str() {
+            "clojure.core/empty?" | "clojure.core/not-empty" => {
+                let empty = truth == (op == "clojure.core/empty?");
+                value.narrow(narrow_emptiness(&value.known, empty));
+                return;
+            }
             "clojure.core/nil?" => Some(Type::Nil),
             "clojure.core/some?" => {
                 value.narrow(if truth {

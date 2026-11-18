@@ -1,8 +1,10 @@
 //! Vector and sequence traversal and accumulation.
+use std::collections::BTreeMap;
+
 use super::super::{Checker, Value};
 use crate::Diagnostic;
 use crate::reader::Span;
-use crate::types::{MAX_TUPLE_ITEMS, Type};
+use crate::types::{ExtraFields, MAX_TUPLE_ITEMS, MapType, Type};
 
 #[derive(Clone, Copy)]
 enum ReadSequence {
@@ -104,6 +106,28 @@ impl Checker<'_> {
         }
     }
 
+    pub(super) fn emptiness_call(&mut self, name: &str, (value, span): &(Value, Span)) -> Value {
+        let Some(empty) = collection_emptiness(&value.known) else {
+            self.diagnostics.push(Diagnostic::type_mismatch(
+                *span,
+                name,
+                "Seqable or Nil".into(),
+                value.ty.to_string(),
+            ));
+            return Value::new(Type::Unknown);
+        };
+        if name == "clojure.core/empty?" {
+            return Value::with_notes(empty, value.notes.clone());
+        }
+        let nonempty = narrow_emptiness(&value.known, false);
+        let result = if empty == Type::Bool(false) {
+            nonempty
+        } else {
+            nonempty.nilable()
+        };
+        Value::with_notes(result, value.notes.clone())
+    }
+
     pub(super) fn sequence_call(&mut self, name: &str, (value, span): &(Value, Span)) -> Value {
         let operation = match name {
             "clojure.core/seq" => ReadSequence::Start,
@@ -156,5 +180,53 @@ fn conj_seq(previous: &[Type], items: &[Type]) -> Type {
         Type::SeqTuple(prepended.collect())
     } else {
         Type::Seq(Box::new(Type::union(prepended)))
+    }
+}
+
+fn collection_emptiness(ty: &Type) -> Option<Type> {
+    Some(match ty {
+        Type::Nil => Type::Bool(true),
+        Type::Never => Type::Never,
+        Type::Unknown => Type::Boolean,
+        Type::Tuple(items) | Type::SeqTuple(items) => Type::Bool(items.is_empty()),
+        Type::Seq(_) | Type::MapEntry(_) => Type::Bool(false),
+        Type::Vector(element) | Type::Set(element) if **element == Type::Never => Type::Bool(true),
+        Type::Vector(_) | Type::Set(_) | Type::String => Type::Boolean,
+        Type::Str(text) => Type::Bool(text.is_empty()),
+        Type::Map(map) => {
+            if map.fields.values().any(|field| field.required) {
+                Type::Bool(false)
+            } else if map.fields.is_empty() && matches!(map.extra, ExtraFields::Closed) {
+                Type::Bool(true)
+            } else {
+                Type::Boolean
+            }
+        }
+        Type::Union(parts) => Type::union(
+            parts
+                .iter()
+                .map(collection_emptiness)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    })
+}
+
+pub(in crate::checker) fn narrow_emptiness(ty: &Type, empty: bool) -> Type {
+    if let Type::Union(parts) = ty {
+        return Type::union(parts.iter().map(|part| narrow_emptiness(part, empty)));
+    }
+    if collection_emptiness(ty) == Some(Type::Bool(!empty)) {
+        return Type::Never;
+    }
+    match (ty, empty) {
+        (Type::Vector(_), true) => Type::Tuple(Box::new([])),
+        (Type::Set(_), true) => Type::Set(Box::new(Type::Never)),
+        (Type::String, true) => Type::Str(String::new()),
+        (Type::Map(_), true) => Type::Map(MapType {
+            fields: BTreeMap::new(),
+            extra: ExtraFields::Closed,
+        }),
+        _ => ty.clone(),
     }
 }
