@@ -949,3 +949,15 @@
 (assert (= '("Eve" "Ada") (demo.list-accumulators/copy-names ["Eve" "Ada"])))
 (assert (empty? (demo.list-accumulators/copy-names [])))
 (println "Clojure/JVM list accumulators: 8 assertions passed")
+
+(assert (= 7 (demo.reductions/sum-line-items)))
+(assert (= 3 (demo.reductions/total-utf16-units)))
+(assert (= 10 (demo.reductions/sum-distinct)))
+(assert (= 7 (demo.reductions/singleton-price)))
+(assert (= :seed (reduce 42 :seed {})))
+(assert (= :seed (reduce 42 :seed #{})))
+(assert (= \a (reduce 42 "a")))
+(assert (= :wrong-value
+           (try (demo.reductions-bad/bad-line-item)
+                (catch ClassCastException _ :wrong-value))))
+(println "Clojure/JVM direct collection reductions: 8 assertions passed")

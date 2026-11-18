@@ -37,7 +37,7 @@ fn finite_reductions_use_empty_and_singleton_arities_and_preserve_order() {
 fn reduction_errors_point_to_real_elements_and_explain_the_accumulator_step() {
     let source = include_str!("../examples/reductions_bad.clj");
     let report = Session::default().check("reduce_bad.clj", source);
-    let [element, state] = report.diagnostics.as_slice() else {
+    let [element, state, entry] = report.diagnostics.as_slice() else {
         panic!("{report:#?}");
     };
     assert_eq!(element.code, "PNX2322");
@@ -53,6 +53,12 @@ fn reduction_errors_point_to_real_elements_and_explain_the_accumulator_step() {
             .iter()
             .any(|note| note.contains("reduction step 2"))
     );
+    assert_eq!(entry.code, "PNX2322");
+    assert_eq!(
+        &source[entry.span.start.offset..entry.span.end.offset],
+        "(val entry)"
+    );
+    assert_eq!(entry.actual.as_deref(), Some("String"));
 }
 
 #[test]
@@ -171,4 +177,27 @@ fn mixed_reduced_and_continuing_steps_join_terminal_values_without_reusing_wrapp
                   0 values))"#;
     let report = Session::default().check("reduce.clj", source);
     assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn direct_reductions_use_map_entries_set_elements_and_utf16_units() {
+    for (expression, expected) in [
+        ("(reduce 42 :seed {})", "#{:seed}"),
+        ("(reduce 42 :seed #{})", "#{:seed}"),
+        ("(reduce 42 :seed \"\")", "#{:seed}"),
+        ("(reduce 42 \"a\")", "char?"),
+        ("(val (reduce 42 {:rate 5}))", "number?"),
+        (
+            "(reduce (fn [state entry] (+ state (val entry))) 0 {:tax 1 :price 5})",
+            "number?",
+        ),
+        (
+            "(reduce (fn [state item] (if (char? item) :char false)) :start \"😀\")",
+            "#{:char}",
+        ),
+        ("(reduce + 0 #{1 2})", "number?"),
+    ] {
+        let report = check(expression, expected);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
 }

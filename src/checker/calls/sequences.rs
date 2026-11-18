@@ -59,8 +59,7 @@ impl Checker<'_> {
     pub(super) fn cons(&mut self, args: &[(Value, Span)]) -> Value {
         let (item, _) = &args[0];
         let (tail, span) = &args[1];
-        let sequence =
-            self.read_sequence(ReadSequence::Start, &tail.known, "clojure.core/cons", *span);
+        let sequence = self.seq_type(&tail.known, "clojure.core/cons", *span);
         if sequence.contains_unknown() {
             self.may_throw();
         }
@@ -157,6 +156,10 @@ impl Checker<'_> {
         };
         let result = self.read_sequence(operation, &value.known, name, *span);
         Value::with_notes(result, value.notes.clone())
+    }
+
+    pub(super) fn seq_type(&mut self, ty: &Type, name: &str, span: Span) -> Type {
+        self.read_sequence(ReadSequence::Start, ty, name, span)
     }
 
     fn read_sequence(&mut self, op: ReadSequence, ty: &Type, name: &str, span: Span) -> Type {

@@ -38,3 +38,20 @@
               (+ total value)))
           0
           [2 3 "stop" false]))
+
+(defn sum-line-items {:t/sig '[:-> number?]} []
+  (reduce (fn [total entry] (+ total (val entry)))
+          0
+          {:base 5 :tax 2}))
+
+(defn total-utf16-units {:t/sig '[:-> number?]} []
+  (reduce (fn [total unit]
+            (if (char? unit) (inc total) total))
+          0
+          "A😀"))
+
+(defn sum-distinct {:t/sig '[:-> number?]} []
+  (reduce + 0 #{2 3 5}))
+
+(defn singleton-price {:t/sig '[:-> number?]} []
+  (val (reduce nil {:price 7})))

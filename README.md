@@ -526,7 +526,10 @@ Use `(s/coll-of element-spec :kind seq?)` for an ordered sequence that may be
 empty. An empty list is truthy, while `(seq (list))` yields nil. Run
 `just list-accumulators` for reversal with `loop` and a non-seqable tail diagnostic.
 
-`reduce` checks vectors and sequences with known positions in order. Without
+`reduce` checks known positions in order and supports vectors, sequences, maps,
+sets, and strings. Maps supply entries, sets supply their element type, and
+strings supply UTF-16 characters. Map and set inference allows any iteration
+order. Without
 an initial value it invokes the reducer with zero arguments on empty input and
 uses the first item as the accumulator on nonempty input. With an initial value,
 an empty input returns that value. Reducer diagnostics identify the failing

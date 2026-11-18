@@ -1,4 +1,6 @@
-//! Ordered and bounded abstract reduction of sequences.
+//! Ordered and bounded abstract reduction of modeled collections.
+use std::borrow::Cow;
+
 use super::super::recur::{bounded_state, widen_growing_collections};
 use super::{
     Callable, Checker, Env, PreparedCallable, Value, vectors::CollectionError,
@@ -44,6 +46,7 @@ impl Checker<'_> {
             Type::Union(shapes) => shapes.as_slice(),
             shape => std::slice::from_ref(shape),
         };
+        let shapes = self.reduce_shapes(shapes, source.span);
         if shapes.len() > MAX_REDUCE_ALTERNATIVES {
             return self.unsupported(
                 source.span,
@@ -52,10 +55,8 @@ impl Checker<'_> {
         }
         let mut result = Value::new(Type::Never);
         let start = self.diagnostics.len();
-        for shape in shapes {
-            let casts_reducer = matches!(shape, Type::Tuple(_) | Type::Vector(_))
-                || matches!(shape, Type::SeqTuple(items) if !items.is_empty());
-            if casts_reducer
+        for (shape, casts_reducer) in &shapes {
+            if *casts_reducer
                 && let Callable::Value(function) = &callable.kind
                 && !reducer_argument(&function.known)
             {
@@ -67,6 +68,7 @@ impl Checker<'_> {
                 self.may_throw();
                 return Value::new(Type::Unknown);
             }
+            let shape = shape.as_ref();
             let items = match shape {
                 Type::Nil => &[][..],
                 Type::Vector(element) if **element == Type::Never => &[][..],
@@ -115,6 +117,30 @@ impl Checker<'_> {
         }
         self.dedup_diagnostics(start);
         result
+    }
+
+    fn reduce_shapes<'a>(&mut self, shapes: &'a [Type], span: Span) -> Vec<(Cow<'a, Type>, bool)> {
+        let mut alternatives = Vec::with_capacity(shapes.len());
+        for shape in shapes {
+            if matches!(
+                shape,
+                Type::Map(_) | Type::Set(_) | Type::String | Type::Str(_)
+            ) {
+                // The JVM's sequence fallback casts the reducer only when it
+                // invokes it. Keep the original collection's behavior.
+                let sequence = self.seq_type(shape, "reduce", span);
+                if let Type::Union(parts) = sequence {
+                    alternatives.extend(parts.into_iter().map(|part| (Cow::Owned(part), false)));
+                } else {
+                    alternatives.push((Cow::Owned(sequence), false));
+                }
+            } else {
+                let casts_reducer = matches!(shape, Type::Tuple(_) | Type::Vector(_))
+                    || matches!(shape, Type::SeqTuple(items) if !items.is_empty());
+                alternatives.push((Cow::Borrowed(shape), casts_reducer));
+            }
+        }
+        alternatives
     }
 
     fn reduce_exact(
