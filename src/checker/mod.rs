@@ -115,7 +115,7 @@ struct Checker<'a> {
     diagnostics: Vec<Diagnostic>,
     active_helpers: Vec<String>,
     thread_depth: usize,
-    specializations: BTreeMap<(String, Vec<Value>), (Value, Vec<Diagnostic>)>,
+    specializations: BTreeMap<(String, Vec<Value>), calls::Specialization>,
     recur_target: Option<RecurTarget>,
     recur_checks: usize,
     reduction_steps: usize,

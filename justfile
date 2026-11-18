@@ -255,3 +255,8 @@ imports format="pretty": build
 lookup-order format="pretty": build
     @./target/release/parenox check examples/lookup_order.clj --format {{quote(format)}}
     @./target/release/parenox check examples/lookup_order_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check exception data and eager argument failures through private helpers.
+helper-effects format="pretty": build
+    @./target/release/parenox check examples/helper_effects.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/helper_effects_bad.clj --format {{quote(format)}} || test "$?" -eq 1

@@ -9,7 +9,10 @@ mod vectors;
 pub(super) use sequences::narrow_emptiness;
 
 use super::flow::Conditional;
-use super::{Checker, Env, Value, function_forms::pack_arguments, model::Function, nil_part};
+use super::{
+    Checker, Env, Value, exceptions::Throws, function_forms::pack_arguments, model::Function,
+    nil_part,
+};
 use crate::Diagnostic;
 use crate::expand::Threading;
 use crate::reader::{Form, Span};
@@ -45,11 +48,15 @@ impl PreparedCallable<'_, '_> {
     }
 }
 
+pub(super) struct Specialization {
+    value: Value,
+    diagnostics: Vec<Diagnostic>,
+    throws: Option<Throws>,
+}
+
 impl<'model> Checker<'model> {
     fn inferred_call(&mut self, function: &Function, args: Vec<Value>, span: Span) -> Value {
-        if self.throws.is_some() && args.iter().all(|arg| arg.known != Type::Never) {
-            self.may_throw();
-        }
+        let returns = args.iter().all(|arg| arg.known != Type::Never);
         let Some((&arity, clause)) = function
             .arities
             .iter()
@@ -65,9 +72,17 @@ impl<'model> Checker<'model> {
                     args.len()
                 ),
             );
-            return Value::new(Type::Unknown);
+            if returns {
+                self.may_throw();
+                return Value::new(Type::Unknown);
+            }
+            return Value::new(Type::Never);
         };
+        if !returns {
+            return Value::new(Type::Never);
+        }
         if self.active_helpers.contains(&function.name) {
+            self.may_throw();
             self.error(
                 "PNX9002",
                 span,
@@ -80,18 +95,29 @@ impl<'model> Checker<'model> {
         }
         let key = (function.name.clone(), args);
         let start = self.diagnostics.len();
-        let result = if let Some((value, diagnostics)) = self.specializations.get(&key) {
-            self.diagnostics.extend(diagnostics.iter().cloned());
-            value.clone()
+        let tracking = self.throws.is_some();
+        let result = if let Some(cached) = self
+            .specializations
+            .get(&key)
+            .filter(|cached| !tracking || cached.throws.is_some())
+        {
+            self.diagnostics.extend(cached.diagnostics.iter().cloned());
+            if let Some((enclosing, throws)) = self.throws.as_mut().zip(cached.throws.as_ref()) {
+                enclosing.extend(throws.clone());
+            }
+            cached.value.clone()
         } else {
             if self.active_helpers.len() >= 32
-                || self.specializations.len() + self.active_helpers.len() >= 256
+                || (self.specializations.len() + self.active_helpers.len() >= 256
+                    && !self.specializations.contains_key(&key))
             {
+                self.may_throw();
                 self.error("PNX9002", span,
                     "Private inference limit reached (32 nested calls or 256 specializations); add :t/sig annotations");
                 return Value::new(Type::Unknown);
             }
             self.active_helpers.push(function.name.clone());
+            let enclosing = std::mem::replace(&mut self.throws, tracking.then(Throws::default));
             let result = self.function_body(
                 &clause.params,
                 &clause.body,
@@ -100,8 +126,18 @@ impl<'model> Checker<'model> {
                 clause.span,
             );
             self.active_helpers.pop();
-            self.specializations
-                .insert(key, (result.clone(), self.diagnostics[start..].to_vec()));
+            let throws = std::mem::replace(&mut self.throws, enclosing);
+            if let Some((enclosing, throws)) = self.throws.as_mut().zip(throws.as_ref()) {
+                enclosing.extend(throws.clone());
+            }
+            self.specializations.insert(
+                key,
+                Specialization {
+                    value: result.clone(),
+                    diagnostics: self.diagnostics[start..].to_vec(),
+                    throws,
+                },
+            );
             result
         };
         for diagnostic in &mut self.diagnostics[start..] {

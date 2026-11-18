@@ -393,6 +393,8 @@ Map destructuring of rest arguments reports an analysis gap.
 Run `just inference` for passing and failing patient-label examples. Errors point
 to the helper body and include notes showing its call chain. Repeated calls with
 the same inputs reuse inferred results within the checked entry function.
+An inferred helper also carries known exception data to the caller's handler.
+Run `just helper-effects` to check this through a private request helper.
 
 Core threading macros `->`, `->>`, `some->` and `some->>` are supported. The checker
 resolves names before selecting a rule, so local and project functions can shadow

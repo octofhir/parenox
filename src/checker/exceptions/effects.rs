@@ -4,7 +4,7 @@ use super::{ExtraFields, map};
 use crate::checker::Checker;
 use crate::types::Type;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(in crate::checker) struct Throws {
     unknown: bool,
     known: Vec<(ExceptionClass, Type)>,
@@ -51,7 +51,7 @@ impl Throws {
         self.unknown || !self.known.is_empty()
     }
 
-    pub(super) fn extend(&mut self, other: Self) {
+    pub(in crate::checker) fn extend(&mut self, other: Self) {
         if other.unknown {
             self.unknown();
         } else {

@@ -927,3 +927,11 @@
            (try (assoc-in {:request 7} [:request :status] :ready)
                 (catch ClassCastException _ :wrong-parent))))
 (println "Clojure/JVM map write evaluation order: 4 assertions passed")
+
+(load-file "examples/helper_effects.clj")
+(assert (= :missing (demo.helper-effects/request-stage)))
+(assert (= :ready (demo.helper-effects/request-status)))
+(assert (= :param (demo.helper-effects/rejected-argument)))
+(load-file "examples/helper_effects_bad.clj")
+(assert (= :missing (demo.helper-effects-bad/request-stage)))
+(println "Clojure/JVM private helper effects: 4 assertions passed")
