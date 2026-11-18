@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use parenox::{Session, Source, output::contract_note};
+use parenox::{Diagnostic, Session, Source, output::contract_note, reader::validate_edn};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -110,7 +110,7 @@ impl Workspace {
 
     pub fn open(&mut self, params: Open, output: &mut impl Write) -> io::Result<()> {
         let OpenDocument { uri, version, text } = params.text_document;
-        let Some(path) = source_path(&uri) else {
+        let Some(path) = document_path(&uri) else {
             return Ok(());
         };
         let indexed = self
@@ -118,7 +118,7 @@ impl Workspace {
             .get(&path)
             .is_some_and(|document| document.indexed);
         self.documents.insert(
-            path,
+            path.clone(),
             Document {
                 source: text,
                 indexed,
@@ -129,12 +129,12 @@ impl Workspace {
                 }),
             },
         );
-        self.check(output)
+        self.check_document(&path, output)
     }
 
     pub fn change(&mut self, params: Change, output: &mut impl Write) -> io::Result<()> {
         let VersionedUri { uri, version } = params.text_document;
-        let Some(path) = source_path(&uri) else {
+        let Some(path) = document_path(&uri) else {
             return Ok(());
         };
         let Some(document) = self.documents.get_mut(&path) else {
@@ -153,11 +153,11 @@ impl Workspace {
         document.source = change.text;
         editor.version = version;
         editor.published = None;
-        self.check(output)
+        self.check_document(&path, output)
     }
 
     pub fn close(&mut self, params: Close, output: &mut impl Write) -> io::Result<()> {
-        let Some(path) = source_path(&params.text_document.uri) else {
+        let Some(path) = document_path(&params.text_document.uri) else {
             return Ok(());
         };
         let Some(document) = self.documents.get_mut(&path) else {
@@ -175,7 +175,11 @@ impl Workspace {
             self.session.forget_file(&path);
         }
         publish(output, json!({"uri":editor.uri, "diagnostics":[]}))?;
-        self.check(output)
+        if is_edn(Path::new(&path)) {
+            Ok(())
+        } else {
+            self.check(output)
+        }
     }
 
     pub fn definition(&self, params: TextQuery) -> Option<Value> {
@@ -204,16 +208,30 @@ impl Workspace {
     }
 
     fn query_offset(&self, params: TextQuery) -> Option<(String, usize)> {
-        let path = source_path(&params.text_document.uri)?;
+        let path = document_path(&params.text_document.uri)?;
+        if !is_clojure_source(Path::new(&path)) {
+            return None;
+        }
         let document = self.documents.get(&path)?;
         let offset = Lines::new(&document.source).offset(params.position)?;
         Some((path, offset))
+    }
+
+    fn check_document(&mut self, path: &str, output: &mut impl Write) -> io::Result<()> {
+        if is_edn(Path::new(path)) {
+            let document = self.documents.get_mut(path).unwrap();
+            let diagnostic = validate_edn(&document.source).err().map(Diagnostic::from);
+            document.publish(diagnostic.as_slice(), output)
+        } else {
+            self.check(output)
+        }
     }
 
     fn check(&mut self, output: &mut impl Write) -> io::Result<()> {
         let sources: Vec<_> = self
             .documents
             .iter()
+            .filter(|(path, _)| is_clojure_source(Path::new(path)))
             .map(|(path, doc)| Source {
                 path,
                 source: &doc.source,
@@ -222,37 +240,47 @@ impl Workspace {
         let externs: Vec<_> = self.externs.iter().map(Snapshot::as_source).collect();
         let report = self.session.check_project_with_externs(&sources, &externs);
         for file in report.files {
-            let Some(document) = self.documents.get_mut(&file.path) else {
-                continue;
-            };
-            let Some(editor) = &mut document.editor else {
-                continue;
-            };
-            let diagnostics = if file.diagnostics.is_empty() {
-                Vec::new()
-            } else {
-                let lines = Lines::new(&document.source);
-                file.diagnostics.into_iter().filter_map(|diagnostic| {
-                    let range = lines.range(diagnostic.span)?;
-                    let severity = if diagnostic.severity == "warning" { 2 } else { 1 };
-                    Some(json!({"range":range,"severity":severity,"source":"parenox","code":diagnostic.code,"message":diagnostic.message}))
-                }).collect()
-            };
-            if editor.published.as_ref() != Some(&diagnostics) {
-                publish(
-                    output,
-                    json!({"uri":editor.uri,"version":editor.version,"diagnostics":diagnostics}),
-                )?;
-                editor.published = Some(diagnostics);
+            if let Some(document) = self.documents.get_mut(&file.path) {
+                document.publish(&file.diagnostics, output)?;
             }
         }
         Ok(())
     }
 }
 
-fn source_path(uri: &str) -> Option<String> {
+impl Document {
+    fn publish(&mut self, diagnostics: &[Diagnostic], output: &mut impl Write) -> io::Result<()> {
+        let Some(editor) = &mut self.editor else {
+            return Ok(());
+        };
+        let rendered = if diagnostics.is_empty() {
+            Vec::new()
+        } else {
+            let lines = Lines::new(&self.source);
+            diagnostics.iter().filter_map(|diagnostic| {
+                let range = lines.range(diagnostic.span)?;
+                let severity = if diagnostic.severity == "warning" { 2 } else { 1 };
+                Some(json!({"range":range,"severity":severity,"source":"parenox","code":diagnostic.code,"message":diagnostic.message}))
+            }).collect()
+        };
+        if editor.published.as_ref() != Some(&rendered) {
+            publish(
+                output,
+                json!({"uri":editor.uri,"version":editor.version,"diagnostics":rendered}),
+            )?;
+            editor.published = Some(rendered);
+        }
+        Ok(())
+    }
+}
+
+fn is_edn(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "edn")
+}
+
+fn document_path(uri: &str) -> Option<String> {
     let path = file_path(uri)?;
-    is_clojure_source(&path).then(|| path.to_string_lossy().into_owned())
+    (is_clojure_source(&path) || is_edn(&path)).then(|| path.to_string_lossy().into_owned())
 }
 
 fn publish(output: &mut impl Write, params: Value) -> io::Result<()> {

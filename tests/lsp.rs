@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 struct Fixture(PathBuf);
 
 impl Fixture {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("parenox lsp {}", std::process::id()));
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("parenox lsp {name} {}", std::process::id()));
         fs::create_dir(&path).unwrap();
         fs::create_dir(path.join("src")).unwrap();
         fs::create_dir(path.join("test")).unwrap();
@@ -86,7 +86,7 @@ fn transcript(messages: &[Value]) -> Vec<Value> {
 
 #[test]
 fn editor_uses_aliases_overlays_and_utf16_ranges() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new("source");
     let provider = fixture.0.join("src/shop store.clj");
     let caller = fixture.0.join("test/caller.cljc");
     let external = fixture.0.join("test/unsaved.clj");
@@ -173,4 +173,30 @@ fn editor_uses_aliases_overlays_and_utf16_ranges() {
     }
     assert_eq!(messages[13]["id"], 5);
     assert!(messages[13]["result"].is_null());
+}
+
+#[test]
+fn edn_buffers_get_reader_diagnostics_and_clear_on_edit() {
+    let fixture = Fixture::new("edn");
+    let document = uri(&fixture.0.join("options.edn"));
+    let responses = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0),"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"languageId":"edn","version":1,"text":"{:match #\"x\"}"
+        }}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":2},
+            "contentChanges":[{"text":"#:config{:match #vendor/tag [\"x\" ##Inf]}"}]
+        }}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    assert_eq!(responses.len(), 4, "{responses:?}");
+    assert_eq!(responses[1]["params"]["diagnostics"][0]["code"], "PNX9000");
+    assert_eq!(
+        responses[1]["params"]["diagnostics"][0]["range"]["start"],
+        json!({"line":0,"character":8})
+    );
+    assert_eq!(responses[2]["params"]["version"], 2);
+    assert_eq!(responses[2]["params"]["diagnostics"], json!([]));
 }

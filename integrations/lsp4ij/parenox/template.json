@@ -1,0 +1,18 @@
+{
+  "id": "parenox",
+  "name": "Parenox",
+  "programArgs": {
+    "default": "\"$USER_HOME$/.cargo/bin/parenox\" lsp",
+    "windows": "\"$USER_HOME$/.cargo/bin/parenox.exe\" lsp"
+  },
+  "fileTypeMappings": [
+    {
+      "fileType": { "patterns": ["*.clj", "*.cljc"] },
+      "languageId": "clojure"
+    },
+    {
+      "fileType": { "patterns": ["*.edn"] },
+      "languageId": "edn"
+    }
+  ]
+}
