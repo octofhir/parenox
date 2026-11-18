@@ -236,6 +236,7 @@ impl SnapshotWriter {
             Type::Boolean => "clojure.core/boolean?",
             Type::Number => "clojure.core/number?",
             Type::String => "clojure.core/string?",
+            Type::Pattern => "java.util.regex.Pattern",
             Type::Character => "clojure.core/char?",
             Type::Keyword => "clojure.core/keyword?",
             Type::Symbol => "clojure.core/symbol?",

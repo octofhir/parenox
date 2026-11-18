@@ -130,6 +130,7 @@ pub enum Type {
     Number,
     Integer(i32),
     String,
+    Pattern,
     Character,
     Char(char),
     Str(String),
@@ -369,6 +370,7 @@ impl fmt::Display for Type {
             Type::Number => write!(f, "Number"),
             Type::Integer(index) => write!(f, "{index}"),
             Type::String => write!(f, "String"),
+            Type::Pattern => write!(f, "Pattern"),
             Type::Character => write!(f, "Character"),
             Type::Char(c) => match c {
                 '\n' => write!(f, "\\newline"),

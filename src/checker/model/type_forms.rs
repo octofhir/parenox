@@ -149,6 +149,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             return Type::Parameter(parameter.clone());
         }
         match &form.without_metadata().kind {
+            Kind::Symbol(s) if s == "java.util.regex.Pattern" => Type::Pattern,
             Kind::Symbol(s) => match self.names.resolve(s).as_str() {
                 "clojure.core/string?" => Type::String,
                 "clojure.core/char?" => Type::Character,

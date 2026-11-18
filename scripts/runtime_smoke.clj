@@ -1147,3 +1147,10 @@
   (assert (= "North hub" (get-in (demo.showcase/summarize-batch (assoc-in batch [:labels :title] nil)) [:body :title])))
   (assert (= 1 (count (get-in (demo.showcase/summarize-batch (assoc batch :weights [2])) [:body :rows])))))
 (println "Clojure/JVM showcase: 5 assertions passed")
+
+(load-file "examples/regex_split.cljc")
+(assert (= ["a" "b"] (demo.query-string/fields "a=b" #"=")))
+(assert (nil? (demo.query-string/field-value "a")))
+(assert (= "" (demo.query-string/field-value "a=")))
+(assert (= "b=c" (demo.query-string/field-value "a=b=c")))
+(println "Clojure/JVM regex split: 4 assertions passed")

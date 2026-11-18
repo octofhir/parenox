@@ -338,7 +338,7 @@ impl Checker<'_> {
                 Value::new(ty)
             }
             Kind::String(s) => Value::new(Type::Str(s.clone())),
-            Kind::Regex => self.unsupported(form.span, "Regex literal types are not supported"),
+            Kind::Regex => Value::new(Type::Pattern),
             Kind::Character(c) => Value::new(Type::Char(*c)),
             Kind::Metadata(_, target) => self.infer_position(target, env, tail),
             Kind::Conditional { .. } => self.unsupported(form.span, "Reader conditional must be selected before type analysis"),

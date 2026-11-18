@@ -577,6 +577,38 @@ impl<'model> Checker<'model> {
                 self.expect(&args[0].0, &Type::String, args[0].1, name);
                 Type::String
             }
+            "clojure.core/re-pattern" => {
+                self.expect(
+                    &args[0].0,
+                    &Type::union([Type::String, Type::Pattern]),
+                    args[0].1,
+                    name,
+                );
+                Type::Pattern
+            }
+            "clojure.string/split" => {
+                self.expect(
+                    &args[0].0,
+                    &Type::String,
+                    args[0].1,
+                    "Argument 1 of clojure.string/split",
+                );
+                self.expect(
+                    &args[1].0,
+                    &Type::Pattern,
+                    args[1].1,
+                    "Argument 2 of clojure.string/split",
+                );
+                if let Some((limit, span)) = args.get(2) {
+                    self.expect(
+                        limit,
+                        &Type::Number,
+                        *span,
+                        "Argument 3 of clojure.string/split",
+                    );
+                }
+                Type::Vector(Box::new(Type::String))
+            }
             "clojure.core/str" => Type::String,
             "clojure.core/identity" => return args[0].0.clone(),
             "clojure.core/key" | "clojure.core/val" => {
@@ -665,7 +697,9 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj"
         | "clojure.core/list" | "clojure.core/merge" => &[Arity::Variadic(0)],
         "clojure.core/-" | "clojure.core/=" | "clojure.core/dissoc" => &[Arity::Variadic(1)],
-        "clojure.core/nth" | "clojure.core/ex-info" => &[Arity::Fixed(2), Arity::Fixed(3)],
+        "clojure.core/nth" | "clojure.core/ex-info" | "clojure.string/split" => {
+            &[Arity::Fixed(2), Arity::Fixed(3)]
+        }
         "clojure.core/cons"
         | "clojure.core/find"
         | "clojure.core/select-keys"
@@ -798,9 +832,11 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/ensure-reduced"
             | "clojure.core/ex-info"
             | "clojure.core/ex-data"
+            | "clojure.core/re-pattern"
             | "clojure.string/upper-case"
             | "clojure.string/lower-case"
             | "clojure.string/trim"
+            | "clojure.string/split"
     ) || predicate_type(name).is_some()
 }
 

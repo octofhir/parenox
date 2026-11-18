@@ -425,6 +425,12 @@ Repeated simple values in set literals report a reader error at the repeated
 element. This check compares decoded strings and characters, symbols, keywords,
 booleans, nil, and identical numeric spellings.
 
+Regex literals and `re-pattern` produce a JVM `java.util.regex.Pattern`,
+which can appear in a contract. `clojure.string/split` returns a vector
+of strings. Its length is unknown to the checker, so destructuring a
+second field preserves the possibility of nil. Java regex validation is
+performed by the JVM. [Regex split example](../examples/regex_split.cljc)
+
 Design references include [clojure-reader](https://github.com/Grinkers/clojure-reader)
 for data reading, [Crabjure](https://github.com/ribelo/crabjure) for static analysis,
 and [clojurust](https://github.com/csm/clojurust) for future reader/expansion/runtime
