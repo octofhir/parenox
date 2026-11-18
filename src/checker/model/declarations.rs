@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Globals;
 use super::contracts::function_parts;
+use super::require::ExplicitReferral;
 use crate::Diagnostic;
 use crate::checker::function_forms::function_clauses;
 use crate::reader::{Form, Kind, ReadError, Span};
@@ -87,6 +88,7 @@ pub(crate) struct Declarations {
     namespace_end: Option<usize>,
     pub dependencies: Vec<String>,
     pub(super) all_refers: BTreeSet<String>,
+    pub(super) referrals: Vec<ExplicitReferral>,
     pub(super) specs: BTreeMap<String, SpecDeclaration>,
     pub(super) fdefs: Vec<usize>,
     pub(super) functions: Vec<usize>,
@@ -137,6 +139,15 @@ impl Declarations {
             SourceDeclaration::RecordFactory { name, .. } => name,
         };
         Some(name.without_metadata().span)
+    }
+
+    pub(crate) fn missing_public_var(&self, forms: &[Form], local: &str) -> bool {
+        let mut definitions = self.source_declarations(forms, local).peekable();
+        if definitions.peek().is_some() {
+            definitions.all(|var| self.source_private(&var))
+        } else {
+            self.forward_vars.get(local).is_none_or(|var| var.private)
+        }
     }
 
     pub(super) fn source_declarations<'a>(

@@ -518,30 +518,39 @@ impl Session {
                 .publish_dependencies(&trusted_paths, &mut globals);
         }
         if mode == SnapshotMode::Check {
+            let known_provider = |namespace: &str| {
+                let &index = namespaces.get(namespace)?;
+                let (_, file, _) = &entries[index];
+                let declarations = file.declarations.as_ref()?;
+                (built[index]
+                    && file.snapshot == self.snapshot
+                    && !ambiguous.contains(namespace)
+                    && *file
+                        .known_var_surface
+                        .get_or_init(|| declarations.has_known_var_surface(&file.forms)))
+                .then_some((file, declarations))
+            };
             for (index, (_, file, _)) in entries[..count].iter().enumerate() {
                 if let (Some(declarations), Some(model)) = (&file.declarations, &file.model) {
+                    reports[index]
+                        .diagnostics
+                        .extend(declarations.check_referrals(|namespace, local| {
+                            known_provider(namespace).is_some_and(|(provider, declarations)| {
+                                declarations.missing_public_var(&provider.forms, local)
+                            })
+                        }));
                     reports[index]
                         .diagnostics
                         .extend(declarations.check_untyped_references(
                             &file.forms,
                             model,
                             |namespace, local, actual| {
-                                let Some(&index) = namespaces.get(namespace) else {
-                                    return ProjectCall::Unknown;
-                                };
-                                let (_, provider, _) = &entries[index];
-                                let declarations = provider.declarations.as_ref().unwrap();
-                                if built[index]
-                                    && provider.snapshot == self.snapshot
-                                    && !ambiguous.contains(namespace)
-                                    && *provider.known_var_surface.get_or_init(|| {
-                                        declarations.has_known_var_surface(&provider.forms)
-                                    })
-                                {
-                                    declarations.project_call(&provider.forms, local, actual)
-                                } else {
-                                    ProjectCall::Unknown
-                                }
+                                known_provider(namespace).map_or(
+                                    ProjectCall::Unknown,
+                                    |(provider, declarations)| {
+                                        declarations.project_call(&provider.forms, local, actual)
+                                    },
+                                )
                             },
                         ));
                 }

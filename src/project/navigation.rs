@@ -69,8 +69,9 @@ impl Session {
             return None;
         }
         let (declarations, forms) = file.navigation_source()?;
-        let name = symbol_at(forms, offset)?;
-        let (namespace, local) = declarations.qualified_reference(name)?;
+        let (namespace, local) = declarations
+            .referral_at(offset)
+            .or_else(|| declarations.qualified_reference(symbol_at(forms, offset)?))?;
         let mut providers = self.files.iter().filter_map(|(path, candidate)| {
             if candidate.snapshot != self.snapshot {
                 return None;

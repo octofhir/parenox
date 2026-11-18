@@ -494,6 +494,9 @@ loads one workspace using the same `parenox.edn` and `deps.edn` settings as
 
 The server publishes Parenox diagnostics for open `.clj` and `.cljc` files and
 supports go-to-definition for qualified source vars, including namespace aliases.
+Named referrals in `:require`, `:use` and their renamings also link to source
+declarations. Parenox reports missing or private referral targets when it can
+determine the providing namespace's public vars.
 Hover on those references shows the checked function signature when available
 and its contract source. Unsaved buffers participate in checks and navigation.
 Completed top-level forms before a reader error remain available for navigation.

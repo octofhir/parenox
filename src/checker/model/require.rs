@@ -2,6 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Declarations, Globals};
+use crate::Diagnostic;
 use crate::checker::calls::is_builtin;
 use crate::reader::{Form, Kind, Span};
 
@@ -49,7 +50,41 @@ const CLOJURE_TEST_PUBLIC_VARS: &[&str] = &[
     "with-test-out",
 ];
 
+pub(super) struct ExplicitReferral {
+    qualified: String,
+    source: Span,
+    renaming: Option<[Span; 2]>,
+}
+
 impl Declarations {
+    pub(crate) fn referral_at(&self, offset: usize) -> Option<(&str, &str)> {
+        let referral = self.referrals.iter().find(|referral| {
+            std::iter::once(&referral.source)
+                .chain(referral.renaming.as_slice().iter().flatten())
+                .any(|span| (span.start.offset..span.end.offset).contains(&offset))
+        })?;
+        referral.qualified.split_once('/')
+    }
+
+    pub(crate) fn check_referrals(
+        &self,
+        mut missing: impl FnMut(&str, &str) -> bool,
+    ) -> Vec<Diagnostic> {
+        self.referrals
+            .iter()
+            .filter_map(|referral| {
+                let (namespace, local) = referral.qualified.split_once('/')?;
+                missing(namespace, local).then(|| {
+                    Diagnostic::new(
+                        "PNX2304",
+                        referral.source,
+                        format!("Unresolved or private project var {}", referral.qualified),
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn read_libspec(
         &mut self,
         lib: &Form,
@@ -123,7 +158,8 @@ impl Declarations {
         } else {
             &[]
         };
-        let names: Vec<_> = if refer.is_none_or(|refer| refer.keyword() == Some(":all")) {
+        let refer_all = refer.is_none_or(|refer| refer.keyword() == Some(":all"));
+        let names: Vec<_> = if refer_all {
             if alias_only {
                 self.error(
                     "PNX9001",
@@ -165,18 +201,17 @@ impl Declarations {
             };
             self.symbols(refer.unwrap(), option)
                 .into_iter()
-                .map(|(name, form)| (name, form.span))
+                .map(|(name, form)| (name, form.without_metadata().span))
                 .collect()
         };
         for (name, source) in names {
             if excluded.iter().any(|(excluded, _)| *excluded == name) {
                 continue;
             }
-            let renamed = renames
+            let renaming = renames
                 .iter()
-                .rev()
-                .find(|[from, _]| from.symbol() == Some(name))
-                .map(|[_, to]| to);
+                .rfind(|[from, _]| from.symbol() == Some(name));
+            let renamed = renaming.map(|[_, to]| to);
             let span = renamed.map_or(source, |form| form.span);
             let alias = renamed.map_or(Some(name), unqualified);
             let Some(alias) = alias.filter(|name| !name.contains('/') || *name == "/") else {
@@ -207,6 +242,14 @@ impl Declarations {
                     format!("{alias} already refers to {previous}"),
                 );
                 continue;
+            }
+            if !refer_all && !alias_only {
+                self.referrals.push(ExplicitReferral {
+                    qualified: qualified.clone(),
+                    source,
+                    renaming: renaming
+                        .map(|pair| pair.each_ref().map(|form| form.without_metadata().span)),
+                });
             }
             self.names.refers.insert(alias.to_owned(), qualified);
         }

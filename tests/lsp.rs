@@ -415,11 +415,49 @@ fn uri_pilot_editor_workflow() {
         134,
         82,
     );
+    uri_explicit_referral(&root);
     let checkout = Fixture::new("uri disk edits");
     copy_sources(&root, &checkout.0, Path::new("src"));
     copy_sources(&root, &checkout.0, Path::new("test"));
     fs::copy(root.join("deps.edn"), checkout.0.join("deps.edn")).unwrap();
     uri_closed_provider_edit(&checkout.0);
+}
+
+fn uri_explicit_referral(root: &Path) {
+    let caller = root.join("src/lambdaisland/uri/normalize.cljc");
+    let provider = root.join("src/lambdaisland/uri/platform.clj");
+    let source = fs::read_to_string(&caller).unwrap();
+    let line = source.lines().nth(4).unwrap();
+    let column = line.find("hex->byte").unwrap();
+    let edited = source.replacen("hex->byte", "hex->byet", 1);
+    let document = uri(&caller);
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(root),"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
+        }}),
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{
+            "textDocument":{"uri":document},"position":{"line":4,"character":column}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":2},"contentChanges":[{"text":edited}]
+        }}),
+        json!({"jsonrpc":"2.0","id":3,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    assert_eq!(messages[2]["result"]["uri"], uri(&provider));
+    assert_eq!(messages[2]["result"]["range"]["start"]["line"], 8);
+    assert!(
+        messages[3]["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| {
+                diagnostic["code"] == "PNX2304"
+                    && diagnostic["range"]["start"] == json!({"line":4,"character":column})
+            })
+    );
+    assert_eq!(fs::read_to_string(caller).unwrap(), source);
 }
 
 fn uri_closed_provider_edit(root: &Path) {

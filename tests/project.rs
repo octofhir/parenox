@@ -4,6 +4,56 @@ use std::collections::BTreeMap;
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
 #[test]
+fn explicit_referrals_check_public_names_and_navigate_through_renames() {
+    let consumer = Source {
+        path: "caller.cljc",
+        source: "(ns caller (:require [provider :refer [label hidden typo] :rename {label title}]
+                                     [external :refer [provided]]))",
+    };
+    let provider = Source {
+        path: "provider.clj",
+        source: "(ns provider)\n(defn label {:t/sig '[:-> string?]} [] \"ready\")
+                                (defn- hidden [] \"hidden\")",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[consumer, provider], None);
+    let diagnostics = &report.files[0].diagnostics;
+    assert_eq!(diagnostics.len(), 2, "{report:#?}");
+    for (diagnostic, name) in diagnostics.iter().zip(["hidden", "typo"]) {
+        assert_eq!(diagnostic.code, "PNX2304");
+        assert_eq!(
+            &consumer.source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+            name
+        );
+    }
+    for offset in [
+        consumer.source.find("label").unwrap(),
+        consumer.source.rfind("label").unwrap(),
+        consumer.source.find("title").unwrap(),
+    ] {
+        let target = session.definition(consumer.path, offset).unwrap();
+        assert_eq!(target.path, provider.path);
+        assert_eq!(target.span.start.line, 2);
+        assert_eq!(
+            session.var_at(consumer.path, offset).unwrap().name,
+            "provider/label"
+        );
+    }
+    assert!(
+        session
+            .definition(consumer.path, consumer.source.find("hidden").unwrap())
+            .is_none()
+    );
+
+    let dynamic = Source {
+        source: "(ns provider) (intern *ns* 'typo 42)",
+        ..provider
+    };
+    let partial = session.check_project(&[consumer, dynamic], None);
+    assert!(partial.files[0].diagnostics.is_empty(), "{partial:#?}");
+}
+
+#[test]
 fn checks_aliased_calls_in_unannotated_bodies_when_source_exports_are_known() {
     let app = r#"(ns app (:require [dep :as d]))
       (defn f [x] (let [a x]
