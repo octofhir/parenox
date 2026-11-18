@@ -141,6 +141,51 @@ fn checks_source_arities_and_record_factories_without_contracts() {
     );
 }
 
+#[test]
+fn checks_project_calls_in_standard_test_assertions() {
+    let source = r#"
+        (ns shop-test (:require [clojure.test :refer :all] [catalog :as catalog]))
+        (deftest validates-item
+          (testing "look up an item"
+            (is (= "Ada" (catalog/label "Ada")))
+            (is (nil? (catalog/lable "Ada")))
+            (is (= nil (catalog/label)))
+            (is (custom-assertion (catalog/quoted-data)))
+            '(is (= nil (catalog/quoted-data)))))
+    "#;
+    let report = Session::default().check_project(
+        &[
+            Source {
+                path: "shop_test.clj",
+                source,
+            },
+            Source {
+                path: "catalog.clj",
+                source: "(ns catalog) (defn label [name] name)",
+            },
+        ],
+        None,
+    );
+    assert!(!report.complete);
+    let found: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .map(|diagnostic| {
+            let span = diagnostic.span;
+            (
+                diagnostic.code.as_str(),
+                &source[span.start.offset..span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [("PNX2304", "catalog/lable"), ("PNX2554", "catalog/label")],
+        "{report:#?}"
+    );
+}
+
 fn clinic() -> BTreeMap<&'static str, String> {
     [
         (

@@ -84,6 +84,7 @@ pub(crate) struct Declarations {
     pub(super) specs: BTreeMap<String, SpecDeclaration>,
     pub(super) fdefs: Vec<usize>,
     pub(super) functions: Vec<usize>,
+    pub(super) test_forms: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
     records: Vec<usize>,
     pub(super) opaque_var_surface: bool,
@@ -272,13 +273,21 @@ impl Declarations {
                     match qualified {
                         "clojure.core/defrecord" => model.records.push(index),
                         "clojure.core/defmethod" => {}
+                        "clojure.test/deftest" | "clojure.test/deftest-" => {
+                            model.test_forms.push(index);
+                            model.opaque_var_surface = true;
+                        }
                         _ => model.opaque_var_surface = true,
                     }
-                    model.diagnostics.push(Diagnostic::analysis_gap(
-                        "PNX9001",
-                        xs[0].span,
-                        format!("Analysis for {op} declarations is unavailable"),
-                    ));
+                    let message =
+                        if matches!(qualified, "clojure.test/deftest" | "clojure.test/deftest-") {
+                            format!("Type checking for {op} declarations is unavailable")
+                        } else {
+                            format!("Analysis for {op} declarations is unavailable")
+                        };
+                    model
+                        .diagnostics
+                        .push(Diagnostic::analysis_gap("PNX9001", xs[0].span, message));
                 }
                 _ => model.error(
                     "PNX9001",

@@ -93,21 +93,30 @@ impl Declarations {
             .filter(|diagnostic| diagnostic.code == "PNX9002")
             .map(|diagnostic| diagnostic.span.start.offset)
             .collect();
-        if unchecked.is_empty() {
+        if unchecked.is_empty() && self.test_forms.is_empty() {
             return Vec::new();
         }
+        let top_level_names = forms.iter().filter_map(|form| {
+            let Kind::List(items) = &form.without_metadata().kind else {
+                return None;
+            };
+            items.get(1).and_then(Form::symbol)
+        });
+        let shadowed_let = top_level_names.clone().any(|name| name == "let");
+        let test_names = if self.test_forms.is_empty() {
+            BTreeSet::new()
+        } else {
+            top_level_names.collect()
+        };
         let core_let = self.all_refers.is_empty()
             && model.names.resolve_parts("let").0 == "clojure.core"
-            && !forms.iter().any(|form| {
-                let Kind::List(items) = &form.without_metadata().kind else {
-                    return false;
-                };
-                items.get(1).and_then(Form::symbol) == Some("let")
-            });
+            && !shadowed_let;
         let mut diagnostics = Vec::new();
         let mut visit = References {
             names: self,
             core_let,
+            test_names: &test_names,
+            inside_test: false,
             resolve: &mut resolve,
             diagnostics: &mut diagnostics,
         };
@@ -123,6 +132,12 @@ impl Declarations {
                 }
             }
         }
+        visit.inside_test = true;
+        for &index in &self.test_forms {
+            if let Kind::List(items) = &forms[index].without_metadata().kind {
+                visit.forms(&items[2..]);
+            }
+        }
         diagnostics
     }
 }
@@ -130,6 +145,8 @@ impl Declarations {
 struct References<'a, F> {
     names: &'a Declarations,
     core_let: bool,
+    test_names: &'a BTreeSet<&'a str>,
+    inside_test: bool,
     resolve: &'a mut F,
     diagnostics: &'a mut Vec<Diagnostic>,
 }
@@ -151,6 +168,9 @@ impl<F: FnMut(&str, &str, usize) -> ProjectCall> References<'_, F> {
             return;
         };
         let Some(symbol) = head.symbol() else { return };
+        if self.inside_test && self.test_macro(symbol, args) {
+            return;
+        }
         match symbol {
             "if" | "do" => self.forms(args),
             "let*" | "clojure.core/let" => self.bindings(args),
@@ -186,6 +206,36 @@ impl<F: FnMut(&str, &str, usize) -> ProjectCall> References<'_, F> {
                 }
             }
         }
+    }
+
+    fn test_macro(&mut self, symbol: &str, args: &[Form]) -> bool {
+        if !symbol.contains('/') && self.test_names.contains(symbol) {
+            return false;
+        }
+        match self.names.names.resolve_parts(symbol) {
+            ("clojure.test", "testing") => self.forms(args),
+            ("clojure.test", "is") => {
+                if let Some(assertion) = args.first() {
+                    if let Kind::List(items) = &assertion.without_metadata().kind {
+                        if let Some((head, values)) = items.split_first()
+                            && let Some(name) = head.symbol()
+                            && (name.contains('/') || !self.test_names.contains(name))
+                            && matches!(
+                                self.names.names.resolve_parts(name),
+                                ("clojure.core", "=" | "nil?" | "some?" | "true?" | "false?")
+                            )
+                        {
+                            self.forms(values);
+                        }
+                        // Other assertion forms can have user-defined expansion.
+                    } else {
+                        self.forms(std::slice::from_ref(assertion));
+                    }
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn bindings(&mut self, args: &[Form]) {
