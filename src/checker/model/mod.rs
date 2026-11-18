@@ -2,6 +2,7 @@
 mod contracts;
 mod declarations;
 mod externs;
+mod imports;
 mod interfaces;
 mod require;
 mod specs;
@@ -174,6 +175,13 @@ impl Model {
 
     pub(super) fn resolve(&self, name: &str) -> String {
         self.names.resolve(name)
+    }
+
+    pub(super) fn class_name<'a>(&'a self, symbol: &'a str) -> &'a str {
+        self.names
+            .imports
+            .get(symbol)
+            .map_or(symbol, String::as_str)
     }
 
     pub(super) fn key(&self, key: &str) -> String {

@@ -20,6 +20,14 @@ impl Model {
             );
             return None;
         }
+        if let Some(class) = self.names.imports.get(symbol) {
+            self.error(
+                "PNX2790",
+                span,
+                format!("{symbol} already refers to class {class}"),
+            );
+            return None;
+        }
         if let Some(referred) = self.names.refers.get(symbol)
             && !referred.starts_with("clojure.core/")
         {

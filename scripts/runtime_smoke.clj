@@ -889,3 +889,15 @@
              (demo.quoted-bad/invalid-number)
              (catch ClassCastException _ :not-a-number))))
 (println "Clojure/JVM quoted literal data: 6 assertions passed")
+
+(load-file "examples/imports.clj")
+(assert (= :request (demo.imports/request-stage)))
+(assert (= java.io.FileNotFoundException (ns-resolve 'demo.imports 'FileNotFoundException)))
+(assert (= java.lang.ArithmeticException (ns-resolve 'demo.imports 'ArithmeticException)))
+(assert (= :collision
+           (try
+             (load-file "examples/imports_bad.clj")
+             (catch clojure.lang.Compiler$CompilerException e
+               (when (clojure.string/includes? (ex-message (ex-cause e)) "Date already refers")
+                 :collision)))))
+(println "Clojure/JVM class imports: 4 assertions passed")

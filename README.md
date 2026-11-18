@@ -173,6 +173,11 @@ and public literal vars. Changes to the set of exports refresh the referral
 mapping. Externs describe selected contracts, so use an explicit referral list
 for extern-only namespaces. Run `just all-refers` for examples.
 
+`:import` resolves short class names in `catch` for modeled JVM exception
+classes, including the `IOException` hierarchy. It accepts qualified names
+and package groups with lists or vectors. Custom exception classes report
+an analysis gap when used in `catch`. Run `just imports` for examples.
+
 `def` supports literal maps, vectors, sets and scalar values. Their inferred
 types are available to importing namespaces, subject to `^:private`. Changes
 to exported values invalidate their consumers. Dynamic vars, unbound vars and

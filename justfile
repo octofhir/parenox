@@ -245,3 +245,8 @@ keyword-aliases format="pretty": build
 quoted format="pretty": build
     @./target/release/parenox check examples/quoted.clj --format {{quote(format)}}
     @./target/release/parenox check examples/quoted_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check imported exception classes and a class name collision.
+imports format="pretty": build
+    @./target/release/parenox check examples/imports.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/imports_bad.clj --format {{quote(format)}} || test "$?" -eq 1

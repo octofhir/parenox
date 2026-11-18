@@ -17,12 +17,19 @@ pub(super) enum ExceptionClass {
     ArithmeticException,
     IndexOutOfBoundsException,
     ExceptionInfo,
+    IOException,
+    FileNotFoundException,
 }
 
 impl ExceptionClass {
     fn resolve(name: &str) -> Option<Self> {
         if matches!(name, "ExceptionInfo" | "clojure.lang.ExceptionInfo") {
             return Some(Self::ExceptionInfo);
+        }
+        match name {
+            "java.io.IOException" => return Some(Self::IOException),
+            "java.io.FileNotFoundException" => return Some(Self::FileNotFoundException),
+            _ => {}
         }
         match name.strip_prefix("java.lang.").unwrap_or(name) {
             "Throwable" => Some(Self::Throwable),
@@ -43,7 +50,8 @@ impl ExceptionClass {
         match self {
             Self::Throwable => None,
             Self::Error | Self::Exception => Some(Self::Throwable),
-            Self::RuntimeException => Some(Self::Exception),
+            Self::RuntimeException | Self::IOException => Some(Self::Exception),
+            Self::FileNotFoundException => Some(Self::IOException),
             _ => Some(Self::RuntimeException),
         }
     }
@@ -139,9 +147,10 @@ impl Checker<'_> {
             );
             return None;
         };
-        let resolved = ExceptionClass::resolve(name);
+        let qualified = self.model.class_name(name);
+        let resolved = ExceptionClass::resolve(qualified);
         if resolved.is_none() {
-            match name.strip_prefix("java.lang.").unwrap_or(name) {
+            match qualified.strip_prefix("java.lang.").unwrap_or(qualified) {
                 "Object" | "String" | "Number" | "Boolean" | "Character" | "Long" | "Integer" => {
                     self.error(
                         "PNX1001",

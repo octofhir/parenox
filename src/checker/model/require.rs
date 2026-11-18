@@ -116,6 +116,14 @@ impl Declarations {
                 continue;
             };
             let qualified = format!("{namespace}/{name}");
+            if let Some(class) = self.names.imports.get(alias) {
+                self.error(
+                    "PNX2790",
+                    span,
+                    format!("{alias} already refers to class {class}"),
+                );
+                continue;
+            }
             if let Some(previous) = self.names.refers.get(alias)
                 && previous != &qualified
                 && !previous.starts_with("clojure.core/")

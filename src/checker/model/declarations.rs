@@ -10,6 +10,7 @@ pub(super) struct Names {
     pub(super) namespace: String,
     pub(super) refers: BTreeMap<String, String>,
     pub(super) aliases: BTreeMap<String, String>,
+    pub(super) imports: BTreeMap<String, String>,
     pub(super) core_only: Option<BTreeSet<String>>,
     pub(super) core_hidden: BTreeSet<String>,
 }
@@ -206,6 +207,11 @@ impl Declarations {
                 Some(":require") => {
                     for lib in &items[1..] {
                         self.read_libspec(lib, globals);
+                    }
+                }
+                Some(":import") => {
+                    for form in &items[1..] {
+                        self.read_import(form);
                     }
                 }
                 Some(":refer-clojure") if !has_core_clause => {
