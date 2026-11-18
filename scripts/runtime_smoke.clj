@@ -406,6 +406,19 @@
 (assert (= {} (group-by 42 nil)))
 (println "Clojure/JVM grouping: 4 assertions passed")
 
+(load-file "examples/merge_with.clj")
+(assert (= {:cpu 5 :disk 8}
+           (demo.merge-with/sum-quotas {:cpu 2} {:cpu 3 :disk 8})))
+(assert (= {:id "p-1" :label "first / second" :private false}
+           (demo.merge-with/join-labels {:id "p-1" :label "first" :private false}
+                                       {:label "second"})))
+(assert (= {:id "p-1" :label "first"}
+           (demo.merge-with/join-labels {:id "p-1" :label "first"} {})))
+(assert (nil? (merge-with 42 nil nil)))
+(assert (= {:a nil :b false} (merge-with 42 {:a nil} {:b false})))
+(assert (= {:a [[nil false] 1]} (merge-with vector {:a nil} {:a false} {:a 1})))
+(println "Clojure/JVM merge callbacks: 6 assertions passed")
+
 (load-file "examples/dynamic_paths.clj")
 (load-file "examples/dynamic_paths_bad.clj")
 (assert (= 140 (demo.dynamic-paths/quote-price {"SKU-17" {:retail 140}} "SKU-17" :retail 100)))

@@ -21,6 +21,7 @@ Parenox checks Clojure source without loading namespaces or running project code
 | Map value transforms | `update-vals` checks the updater against declared field and dictionary value types. Successful returns preserve key types and track fields that may be absent. |
 | Map construction | `zipmap` checks matching positions and rightmost duplicate keys. `update-keys` preserves values and rejects overlapping destination keys when uniqueness cannot be proven. |
 | Grouping | `group-by` checks the key callback and preserves known order within each group. Dynamic groups use a dictionary of vectors and share the map callback budget. |
+| Merge callbacks | `merge-with` invokes the callback only for possible overlaps, passes values left to right and keeps one-sided outcomes for optional conflicts. |
 | Tagged unions | Literal tests on a map selector narrow its owner. Local aliases keep that relation until rebinding, and finite map tags support exhaustiveness checks in `case`. |
 | Checked predicates | `:t/guard` verifies true and false implications independently for a restricted Boolean expression. A body edit that changes the proven contract invalidates that predicate's callers. |
 | Contextual callbacks | Fixed-arity `s/fspec` supplies parameter and result types to inline callbacks passed in direct calls. Checking the body does not execute it or add its throws to argument evaluation. |

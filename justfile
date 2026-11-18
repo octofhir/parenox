@@ -212,6 +212,10 @@ map-builders format="pretty": build
 group-by format="pretty": build
     @./target/release/parenox check examples/group_by.clj --format {{quote(format)}}
 
+# Check typed map conflicts and optional fields during merges.
+merge-with format="pretty": build
+    @./target/release/parenox check examples/merge_with.clj --format {{quote(format)}}
+
 # Check nested operations using computed keys and show two deliberate errors.
 dynamic-paths format="pretty" color="auto": build
     @./target/release/parenox check examples/dynamic_paths.clj --format {{quote(format)}} --color {{quote(color)}}

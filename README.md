@@ -88,6 +88,7 @@ just reduce-kv       # typed reductions over map entries and vector indices
 just update-vals     # transform map values while retaining key types and presence
 just map-builders    # build a map with zipmap and rename keys with update-keys
 just group-by        # group typed items without losing known positions
+just merge-with      # combine values only for overlapping map keys
 just dynamic-paths pretty always  # nested maps with dynamic path segments
 just ordered-paths pretty always  # saved vector paths and positional contracts
 just indices pretty always  # indexed reads and out-of-bounds diagnostics
@@ -928,6 +929,13 @@ to see the result type when no fallback is supplied and a type error when
 nil. An optional right-hand field can change the value type without removing a
 required left-hand field. An undeclared field in an open map can overwrite a
 known value; if its type remains unknown after the merge, Parenox reports a gap.
+
+`merge-with` checks direct calls on maps and nil. On a conflict the callback
+receives the accumulated value and the next map's value in that order. An
+optional conflict keeps the possible one-sided results, and a present nil or
+false is a value. An overlap with an undeclared value in an open map reports an
+analysis gap. The callback shares the map callback budget with `group-by`,
+`update-keys` and `update-vals`. Run `just merge-with` for examples.
 
 `select-keys` derives a closed result shape from a map or nil and a
 collection of statically known keyword or string choices. It preserves field
