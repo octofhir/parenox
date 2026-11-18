@@ -2,6 +2,7 @@
 mod apply;
 mod indexing;
 mod inline;
+mod reduction;
 mod sequences;
 mod vectors;
 
@@ -193,6 +194,7 @@ impl<'model> Checker<'model> {
                     return self.update(xs, span, env, &resolved);
                 }
                 "clojure.core/apply" => return self.apply_form(&xs[1..], span, env),
+                "clojure.core/reduce" => return self.reduce_form(&xs[1..], span, env),
                 "clojure.core/mapv" | "clojure.core/filterv" => {
                     return self.vector_transform(xs, span, env, &resolved);
                 }

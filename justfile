@@ -230,3 +230,8 @@ all-refers format="pretty": build
 callables format="pretty": build
     @./target/release/parenox check examples/callables.clj --format {{quote(format)}}
     @./target/release/parenox check examples/callables_bad.clj --format {{quote(format)}} || test "$?" -eq 1
+
+# Check reduction arities and accumulator transitions.
+reductions format="pretty": build
+    @./target/release/parenox check examples/reductions.clj --format {{quote(format)}}
+    @./target/release/parenox check examples/reductions_bad.clj --format {{quote(format)}} || test "$?" -eq 1

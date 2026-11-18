@@ -791,3 +791,20 @@
 (assert (= :not-integer (try ([1] 0.0)
                               (catch IllegalArgumentException _ :not-integer))))
 (println "Clojure/JVM vector invocation: 6 assertions passed")
+
+(load-file "examples/reductions.clj")
+(load-file "examples/reductions_bad.clj")
+(assert (= 6 (demo.reductions/sum-values)))
+(assert (= 6 (demo.reductions/total-in-map)))
+(assert (= "last" (demo.reductions/pick-collected)))
+(assert (= "a-b-c" (demo.reductions/append-labels)))
+(assert (= 0 (demo.reductions/empty-count)))
+(assert (= "single" (reduce (fn [x y] (+ x y)) ["single"])))
+(assert (= "fallback" (reduce 7 "fallback" ())))
+(assert (= :bad-reducer (try (reduce 7 0 [])
+                             (catch ClassCastException _ :bad-reducer))))
+(doseq [run [demo.reductions-bad/bad-element demo.reductions-bad/bad-transition]]
+  (assert (= :not-a-number
+             (try (run)
+                  (catch ClassCastException _ :not-a-number)))))
+(println "Clojure/JVM ordered reductions: 10 assertions passed")

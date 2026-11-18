@@ -495,6 +495,13 @@ example `(mapv :active patients)`. Lookup defaults apply to missing entries
 and preserve explicit nil and false. Vectors and map entries accept one integer
 index and report known out-of-bounds calls. Run `just callables` for examples.
 
+`reduce` checks vectors and sequences with known positions in order. Without
+an initial value it invokes the reducer with zero arguments on empty input and
+uses the first item as the accumulator on nonempty input. With an initial value,
+an empty input returns that value. Reducer diagnostics identify the failing
+step and point at literal elements when possible. Run `just reductions` for
+examples.
+
 A closed map supplies a `MapEntry<K, V>` for each present field. Use `key`,
 `val`, or fixed positional bindings such as `(fn [[k v :as entry]] ...)`.
 Optional fields contribute entries only when present, and a present nil remains
