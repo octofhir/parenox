@@ -970,3 +970,11 @@
 (assert (= []
            (mapv (fn [_ _] (throw (ex-info "Unused" {}))) [1 2] [])))
 (println "Clojure/JVM vector callback exits: 4 assertions passed")
+
+(assert (= 140 (demo.ordered-paths/computed-quote {"SKU-17" {:retail 140}} "SKU-17")))
+(assert (= {"SKU-17" {:retail 141}}
+           (demo.ordered-paths/adjust-stored-path {} "SKU-17" 140)))
+(assert (= :target (get-in :target nil :fallback)))
+(assert (= :target (get-in :target (list) :fallback)))
+(assert (nil? (get-in {:status nil} (list :status) :missing)))
+(println "Clojure/JVM sequential paths: 5 assertions passed")

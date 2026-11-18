@@ -79,3 +79,52 @@ fn binds_literal_and_unknown_length_vectors_with_clojure_nil_semantics() {
         Some("Nil | Number")
     );
 }
+
+#[test]
+fn list_paths_keep_order_through_lookup_and_writes() {
+    for (expression, expected) in [
+        (
+            "(get-in {:orders {:status :new}} '(:orders :status))",
+            "#{:new}",
+        ),
+        ("(get-in :target nil :fallback)", "#{:target}"),
+        ("(get-in :target (list) :fallback)", "#{:target}"),
+        ("(get-in {:status nil} (list :status) :missing)", "nil?"),
+        (
+            "(get-in (assoc-in {} (list :a :b) :saved) '(:a :b))",
+            "#{:saved}",
+        ),
+        (
+            "(get-in (update-in {:a {:b 1}} (cons :a '(:b)) inc) '( :a :b))",
+            "number?",
+        ),
+    ] {
+        let report = check(&format!(
+            "(defn f {{:t/sig '[:-> {expected}]}} [] {expression})"
+        ));
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn list_paths_preserve_write_limits_and_unresolved_lengths() {
+    for expression in ["(assoc-in {} (list) :saved)", "(update-in {} nil identity)"] {
+        let report = check(&format!(
+            "(defn f {{:t/sig '[:-> (s/keys)]}} [] {expression})"
+        ));
+        let [diagnostic] = &report.diagnostics[..] else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(diagnostic.code, "PNX9001");
+        assert!(diagnostic.message.contains("1 to 32 keys"));
+    }
+    let report = check(
+        "(defn f {:t/sig '[(s/coll-of keyword? :kind seq?) :-> number?]} [p]
+           (get-in {:k 1} p 0))",
+    );
+    let [diagnostic] = &report.diagnostics[..] else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX9001");
+    assert!(diagnostic.message.contains("known positions"));
+}

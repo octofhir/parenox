@@ -76,14 +76,15 @@ impl Checker<'_> {
         writing: bool,
     ) -> Result<KeyPath, Type> {
         let items: Box<[Type]> = match ty {
-            Type::Tuple(items) => items,
+            Type::Tuple(items) | Type::SeqTuple(items) => items,
             Type::MapEntry(items) => items,
+            Type::Nil => Box::new([]),
             Type::Vector(element) if *element == Type::Never => Box::new([]),
             Type::Unknown | Type::Never => return Err(ty),
             _ => {
                 self.unsupported(
                     span,
-                    format!("{name} requires a vector path with known positions"),
+                    format!("{name} requires a sequential path with known positions"),
                 );
                 return Err(Type::Unknown);
             }

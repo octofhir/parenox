@@ -443,12 +443,12 @@ The fallback runs in the outer scope and defaults to nil. Run `just guards`
 to see the result type when no fallback is supplied and a type error when
 `if-some` passes `false` into a numeric call.
 
-`get-in`, `assoc-in`, and `update-in` accept vector paths with keyword or
-string keys, including computed segments such as `[sku tier]`. A path can
-be passed through a local or a function contract when its positions are
-known. A conditional path is checked for each complete alternative.
-A missing path uses the `get-in` fallback and a present terminal nil or
-false is preserved. Writes create missing or nil intermediate maps, preserve
+`get-in`, `assoc-in`, and `update-in` accept vectors and sequences with
+known keyword or string positions, including computed paths such as
+`(list sku tier)`. Paths can pass through locals or typed arguments.
+Each complete conditional path is checked separately. An empty or nil read
+path returns the input. A missing key uses the `get-in` fallback and a
+present terminal nil or false is preserved. Writes create missing or nil intermediate maps, preserve
 sibling fields, and report scalar parents. Write paths support 1 to 32 keys.
 Read paths also accept known decimal integer indices in the i32 range.
 Unknown-length paths and numeric write keys report an analysis gap.

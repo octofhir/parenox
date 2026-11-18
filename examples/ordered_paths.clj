@@ -29,3 +29,16 @@
   {:t/sig '[(s/tuple string? number?) :-> string?]}
   [[sku price]]
   (str sku ": " price))
+
+(defn computed-quote
+  {:t/sig '[::catalog string? :-> number?]}
+  [catalog sku]
+  (get-in catalog (list sku :retail) 0))
+
+(defn adjust-stored-path
+  {:t/sig '[::catalog string? number? :-> ::catalog]}
+  [catalog sku price]
+  (let [route (cons sku '(:retail))]
+    (-> catalog
+        (assoc-in route price)
+        (update-in route (fnil inc 0)))))
