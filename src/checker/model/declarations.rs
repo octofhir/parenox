@@ -20,7 +20,7 @@ impl Names {
         format!("{namespace}/{local}")
     }
 
-    fn resolve_parts<'a>(&'a self, name: &'a str) -> (&'a str, &'a str) {
+    pub(super) fn resolve_parts<'a>(&'a self, name: &'a str) -> (&'a str, &'a str) {
         if let Some((prefix, local)) = name
             .split_once('/')
             .filter(|(prefix, _)| !prefix.is_empty())
@@ -114,31 +114,11 @@ impl Declarations {
             }
         }
         let mut dependencies: BTreeSet<_> = model.dependencies.iter().map(String::as_str).collect();
-        fn visit<'a>(form: &'a Form, names: &'a Names, dependencies: &mut BTreeSet<&'a str>) {
-            match &form.kind {
-                Kind::Symbol(name) => {
-                    dependencies.insert(names.resolve_parts(name).0);
-                }
-                Kind::List(xs) | Kind::Vector(xs) | Kind::Map(xs) | Kind::Set(xs) => {
-                    for x in xs {
-                        visit(x, names, dependencies);
-                    }
-                }
-                Kind::AnonymousFunction(function) => {
-                    for form in &function.body {
-                        visit(form, names, dependencies);
-                    }
-                }
-                Kind::Quote(x) => visit(x, names, dependencies),
-                Kind::Metadata(metadata, target) => {
-                    visit(metadata, names, dependencies);
-                    visit(target, names, dependencies);
-                }
-                _ => {}
-            }
-        }
         for form in forms {
-            visit(form, &model.names, &mut dependencies);
+            symbols_match(form, &mut |name| {
+                dependencies.insert(model.names.resolve_parts(name).0);
+                true
+            });
         }
         dependencies.remove(model.names.namespace.as_str());
         model.dependencies = dependencies.into_iter().map(str::to_owned).collect();
@@ -220,5 +200,22 @@ impl Declarations {
                 _ => self.error("PNX9001", clause.span, "Unsupported ns clause"),
             }
         }
+    }
+}
+
+pub(super) fn symbols_match<'a>(form: &'a Form, test: &mut impl FnMut(&'a str) -> bool) -> bool {
+    match &form.kind {
+        Kind::Symbol(name) => test(name),
+        Kind::List(forms) | Kind::Vector(forms) | Kind::Map(forms) | Kind::Set(forms) => {
+            forms.iter().all(|form| symbols_match(form, test))
+        }
+        Kind::AnonymousFunction(function) => {
+            function.body.iter().all(|form| symbols_match(form, test))
+        }
+        Kind::Quote(inner) => symbols_match(inner, test),
+        Kind::Metadata(metadata, target) => {
+            symbols_match(metadata, test) && symbols_match(target, test)
+        }
+        _ => true,
     }
 }

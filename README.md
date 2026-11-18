@@ -304,8 +304,9 @@ requests work independently of the tracked project.
 - Unchanged externs reuse their declarations until a referenced spec changes.
 - Annotated body edits recheck that function while preserving callers' cached results.
 - Edits to unannotated private helpers invalidate their transitive callers in the same file.
-- Public contract changes invalidate dependent namespaces.
-- Dependency invalidation is conservative at namespace granularity.
+- Public contract changes recheck functions that reference the changed var,
+  including references reached through inferred private helpers.
+- Local declaration changes can invalidate all checked functions in their file.
 - Removed files and externs disappear from the current environment immediately.
 - Unchanged functions with successful checks can be reused after their source ranges move.
   Functions with diagnostics are rechecked if their own ranges or a helper's ranges move.
@@ -323,6 +324,10 @@ whose ranges move as the agent edits the first function in their file.
 
 Run `just agent-loop 1000 target/release/parenox 512 0 delta` to measure the
 same edit sequence through tracked updates.
+
+Run `just agent-loop 1000 target/release/parenox 0 0 snapshot 128` to add 128
+consumer functions and alternate edits to an unused export in their provider.
+The final signature edit changes the export those consumers actually call.
 
 ## Current scope
 

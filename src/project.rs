@@ -295,8 +295,15 @@ impl Session {
                 }
                 report.diagnostics.extend(model.diagnostics.iter().cloned());
                 let interface = model.interface_key(&globals);
-                let same_interface = cache.interface.as_ref() == Some(&interface);
-                if !changed && same_interface {
+                let changes = cache
+                    .interface
+                    .as_ref()
+                    .map(|previous| interface.changes(previous));
+                if !changed
+                    && changes
+                        .as_ref()
+                        .is_some_and(|changes| changes.is_unchanged())
+                {
                     report.stats.reused_functions = cache.functions.len();
                     report.diagnostics.extend(
                         cache
@@ -310,7 +317,10 @@ impl Session {
                         let ranges = model.function_ranges(function);
                         let diagnostics = if let Some(cached) =
                             previous.get(&function.name).filter(|cached| {
-                                same_interface && cached.reusable(source.source, &ranges)
+                                cached.reusable(source.source, &ranges)
+                                    && changes.as_ref().is_some_and(|changes| {
+                                        changes.allows_reuse(model, function)
+                                    })
                             }) {
                             report.stats.reused_functions += 1;
                             cached.diagnostics.clone()

@@ -15,7 +15,7 @@ pub(crate) use declarations::Declarations;
 use declarations::Names;
 use externs::Externs;
 pub(crate) use interfaces::InterfaceKey;
-use interfaces::{Exports, LocalInterface};
+use interfaces::{Exports, LocalInterface, visible_value};
 pub(crate) use specs::{SpecCache, SpecFingerprint, SpecSource};
 use vars::LiteralVar;
 
@@ -41,6 +41,7 @@ pub(crate) struct FunctionArity {
     pub span: Span,
 }
 
+#[derive(PartialEq, Eq)]
 pub(super) enum DeclaredValue<'a> {
     Literal(&'a Type),
     Function(&'a Arc<[Signature]>),
@@ -77,22 +78,16 @@ impl Globals {
 
     fn declared_value(&self, name: &str) -> Option<DeclaredValue<'_>> {
         let (namespace, _) = name.split_once('/')?;
-        if let Some(source) = self.exports.get(namespace) {
-            if let Some(ty) = source.literals.get(name) {
-                return Some(DeclaredValue::Literal(ty));
-            }
-            if let Some(signatures) = source.functions.get(name) {
-                return Some(DeclaredValue::Function(signatures));
-            }
-            if source.private_vars.contains(name) {
-                return None;
-            }
-        }
-        self.externs
-            .as_ref()
-            .and_then(|table| table.namespaces.get(namespace))
-            .and_then(|functions| functions.get(name))
-            .map(DeclaredValue::Function)
+        visible_value(
+            self.exports.get(namespace).map(Arc::as_ref),
+            || {
+                self.externs
+                    .as_ref()
+                    .and_then(|table| table.namespaces.get(namespace))
+                    .map(Arc::as_ref)
+            },
+            name,
+        )
     }
 }
 
