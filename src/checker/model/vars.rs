@@ -98,13 +98,26 @@ impl Model {
         } else {
             Type::Unknown
         };
+        self.insert_literal(symbol, name, ty, private, name_form.span);
+    }
+
+    pub(super) fn read_unchecked_var(&mut self, xs: &[Form], private: bool) {
+        let op = xs[0].symbol().unwrap();
+        let name_form = &xs[1];
+        let symbol = name_form.symbol().unwrap();
+        if let Some(name) = self.definition_name(symbol, name_form.span, op) {
+            self.insert_literal(symbol, name, Type::Unknown, private, name_form.span);
+        }
+    }
+
+    fn insert_literal(&mut self, symbol: &str, name: String, ty: Type, private: bool, span: Span) {
         self.names.refers.remove(symbol);
         if self
             .literals
             .insert(name.clone(), LiteralVar { ty, private })
             .is_some()
         {
-            self.error("PNX2790", name_form.span, format!("Duplicate var {name}"));
+            self.error("PNX2790", span, format!("Duplicate var {name}"));
         }
     }
 

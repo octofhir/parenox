@@ -4,6 +4,40 @@ use std::collections::BTreeMap;
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
 #[test]
+fn navigates_unchecked_named_jvm_vars_and_respects_metadata() {
+    let provider = Source {
+        path: "provider.clj",
+        source: "(ns provider)\n(declare render)\n(defmulti render \"Text\" type)\n(defonce state (atom {}))\n(defmulti hidden {:private true} type)",
+    };
+    let caller = Source {
+        path: "caller.cljc",
+        source: "(ns caller (:require [provider :as p]))\n(defn f [] [p/render p/state p/hidden])",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[caller, provider], None);
+    assert!(!report.complete, "{report:#?}");
+    assert!(
+        report.files.iter().all(|file| file
+            .diagnostics
+            .iter()
+            .all(|diagnostic| { diagnostic.severity == "warning" })),
+        "{report:#?}"
+    );
+    for (name, line) in [("p/render", 3), ("p/state", 4)] {
+        let target = session
+            .definition(caller.path, caller.source.find(name).unwrap())
+            .unwrap();
+        assert_eq!(target.path, provider.path);
+        assert_eq!(target.span.start.line, line);
+    }
+    assert!(
+        session
+            .definition(caller.path, caller.source.find("p/hidden").unwrap())
+            .is_none()
+    );
+}
+
+#[test]
 fn explicit_referrals_check_public_names_and_navigate_through_renames() {
     let consumer = Source {
         path: "caller.cljc",

@@ -194,6 +194,12 @@ impl Model {
             };
             model.read_def(xs, form.span, source, globals);
         }
+        for &index in &declarations.unchecked_vars {
+            let Kind::List(xs) = &forms[index].without_metadata().kind else {
+                unreachable!()
+            };
+            model.read_unchecked_var(xs, declarations.private_var(xs));
+        }
         let mut fdefs = model.collect_fdefs(&declarations.fdefs, forms);
         let mut guards = BTreeMap::new();
         for &index in &declarations.functions {

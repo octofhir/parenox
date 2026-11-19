@@ -75,13 +75,19 @@ fn jvm_declaration_gaps_allow_checking_a_typed_function_in_the_same_namespace() 
     let report = Session::default().check("jvm_forms.clj", source);
     assert!(!report.complete, "{report:#?}");
     assert_eq!(report.stats.checked_functions, 1);
-    assert_eq!(report.diagnostics.len(), 6, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 11, "{report:#?}");
     assert!(
         report
             .diagnostics
             .iter()
             .all(|diagnostic| { diagnostic.code == "PNX9001" && diagnostic.severity == "warning" }),
         "{report:#?}"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|diagnostic| { !diagnostic.message.contains("has no source definition") })
     );
 
     let malformed = source.replace("TextBox [^String value]", "TextBox :missing-fields");

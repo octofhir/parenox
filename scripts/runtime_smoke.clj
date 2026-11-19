@@ -85,7 +85,9 @@
   (assert (= "text" (.text ^demo.jvm_forms.TextSource box)))
   (assert (= :ready (demo.jvm-forms/ready box))))
 (assert (= "Untitled" (demo.jvm-forms/display-name {:name nil})))
-(println "Clojure/JVM declarations: 3 assertions passed")
+(assert (= "1:Hello" (demo.jvm-forms/render "Hello")))
+(assert (= :absent (demo.jvm-forms/ready nil)))
+(println "Clojure/JVM declarations: 5 assertions passed")
 
 (require '[clojure.spec.alpha :as s])
 (let [label (s/with-gen string? #(throw (Exception. "generator ran")))

@@ -460,9 +460,12 @@ analysis. Var objects and dereferenced value types are reported as coverage gaps
 when encountered in a checked function.
 Syntax quote, unquote and unquote splicing retain their source structure.
 Macro expansion and type checking of syntax quote results remain coverage gaps.
-Namespaces with `definterface`, `deftype`, `defprotocol` and `extend` can be
-checked for supported declarations. The JVM declarations themselves report
-incomplete coverage. [JVM declarations example](../examples/jvm_forms.clj)
+Namespaces with `definterface`, `deftype`, `defprotocol`, `extend-type`,
+`extend-protocol` and `extend` can be checked for supported declarations.
+These JVM forms and recognized compiler flag assignments report incomplete
+coverage. `defmulti` and `defonce` provide source navigation to the declared
+var while their values and dispatch behavior remain unchecked.
+[JVM declarations example](../examples/jvm_forms.clj)
 
 Repeated simple values in set literals and repeated map keys report a reader
 error at the repeated form. This check compares decoded strings and characters, symbols, keywords,

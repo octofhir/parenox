@@ -44,6 +44,7 @@ impl Model {
             .functions
             .iter()
             .chain(&declarations.literal_vars)
+            .chain(&declarations.unchecked_vars)
             .filter_map(|&index| match &forms[index].without_metadata().kind {
                 Kind::List(parts) => parts.get(1).and_then(Form::symbol),
                 _ => None,

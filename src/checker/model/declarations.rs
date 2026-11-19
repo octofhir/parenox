@@ -96,6 +96,7 @@ pub(crate) struct Declarations {
     pub(super) functions: Vec<usize>,
     pub(super) test_forms: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
+    pub(super) unchecked_vars: Vec<usize>,
     pub(super) forward_vars: BTreeMap<String, DeclaredVar>,
     records: Vec<usize>,
     pub(super) opaque_var_surface: bool,
@@ -162,6 +163,7 @@ impl Declarations {
             .iter()
             .map(|index| (index, true))
             .chain(self.literal_vars.iter().map(|index| (index, false)))
+            .chain(self.unchecked_vars.iter().map(|index| (index, false)))
             .filter_map(move |(&index, function)| {
                 let Kind::List(items) = &forms[index].without_metadata().kind else {
                     return None;
@@ -202,18 +204,32 @@ impl Declarations {
         }
     }
 
-    fn private_var(&self, items: &[Form]) -> bool {
+    pub(super) fn private_var(&self, items: &[Form]) -> bool {
         let private =
             |form: &Form| !matches!(form.without_metadata().kind, Kind::Nil | Kind::Bool(false));
         let op = items[0].symbol().unwrap();
         if op == "def" {
             return items[1].metadata(":private").is_some_and(private);
         }
+        let (namespace, name) = self.names.resolve_parts(op);
+        if (namespace, name) == ("clojure.core", "defmulti") {
+            return multimethod_parts(&items[2..])
+                .0
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .find_map(|[key, value]| (key.keyword() == Some(":private")).then_some(value))
+                .or_else(|| items[1].metadata(":private"))
+                .is_some_and(private);
+        }
+        if (namespace, name) == ("clojure.core", "defonce") {
+            return items[1].metadata(":private").is_some_and(private);
+        }
         let mut attrs = function_parts(&items[2..]).1;
         if let Some([_, value]) = attrs.find(|[key, _]| key.keyword() == Some(":private")) {
             return private(value);
         }
-        self.names.resolve(op) == "clojure.core/defn-"
+        (namespace, name) == ("clojure.core", "defn-")
             || items[1].metadata(":private").is_some_and(private)
     }
 
@@ -274,10 +290,7 @@ impl Declarations {
                     model.literal_vars.push(index);
                     continue;
                 }
-                "set!"
-                    if matches!(xs.as_slice(), [_, target, value]
-                    if target.symbol() == Some("*warn-on-reflection*") && matches!(value.kind, Kind::Bool(_))) =>
-                {
+                "set!" if compiler_flag_assignment(xs, &model.names) => {
                     model.diagnostics.push(Diagnostic::analysis_gap(
                         "PNX9001",
                         xs[0].span,
@@ -311,6 +324,10 @@ impl Declarations {
                     match qualified {
                         "clojure.core/defrecord" => model.records.push(index),
                         "clojure.core/defmethod" => {}
+                        "clojure.core/defonce" | "clojure.core/defmulti" => {
+                            model.unchecked_vars.push(index);
+                            model.opaque_var_surface = true;
+                        }
                         "clojure.test/deftest" | "clojure.test/deftest-" => {
                             model.test_forms.push(index);
                             model.opaque_var_surface = true;
@@ -408,6 +425,18 @@ fn known_unsupported_declaration(qualified: &str, items: &[Form]) -> bool {
     if qualified == "clojure.core/extend" {
         return items.len() >= 2 && items.len().is_multiple_of(2);
     }
+    if matches!(
+        qualified,
+        "clojure.core/extend-type" | "clojure.core/extend-protocol"
+    ) {
+        let Some((target, specs)) = items[1..].split_first() else {
+            return false;
+        };
+        let extend_type = qualified == "clojure.core/extend-type";
+        return (target.symbol().is_some()
+            || (extend_type && matches!(target.without_metadata().kind, Kind::Nil)))
+            && extension_specs(specs, !extend_type);
+    }
     let Some(name) = items.get(1).and_then(Form::symbol) else {
         return false;
     };
@@ -420,12 +449,75 @@ fn known_unsupported_declaration(qualified: &str, items: &[Form]) -> bool {
                 if matches!(xs.as_slice(), [name, params] if name.symbol().is_some() && params.vector().is_some()))
         }),
         "clojure.core/defprotocol" => !name.contains('/'),
+        "clojure.core/defonce" => unqualified(name) && items.len() == 3,
+        "clojure.core/defmulti" => {
+            let (_, clauses) = multimethod_parts(&items[2..]);
+            unqualified(name)
+                && clauses.split_first().is_some_and(|(_, options)| {
+                    let (pairs, remainder) = options.as_chunks::<2>();
+                    remainder.is_empty()
+                        && pairs.iter().all(|[key, _]| {
+                            matches!(key.keyword(), Some(":default" | ":hierarchy"))
+                        })
+                })
+        }
         "clojure.core/defmacro" => !function_clauses(function_parts(&items[2..]).0, items[1].span)
             .is_err_and(|diagnostic| diagnostic.severity == "error"),
         "clojure.core/defmethod" => items.len() >= 4,
         "clojure.test/deftest" | "clojure.test/deftest-" => true,
         "clojure.test.check.clojure-test/defspec" => items.len() >= 3,
         _ => false,
+    }
+}
+
+fn compiler_flag_assignment(items: &[Form], names: &Names) -> bool {
+    let [_, target, value] = items else {
+        return false;
+    };
+    let Some(symbol) = target.symbol() else {
+        return false;
+    };
+    let boolean = matches!(value.without_metadata().kind, Kind::Bool(_));
+    match names.resolve_parts(symbol) {
+        ("clojure.core", "*warn-on-reflection*") => boolean,
+        ("clojure.core", "*unchecked-math*") => {
+            boolean || value.keyword() == Some(":warn-on-boxed")
+        }
+        _ => false,
+    }
+}
+
+fn extension_specs(specs: &[Form], allow_nil: bool) -> bool {
+    let mut in_group = false;
+    for spec in specs {
+        if spec.symbol().is_some()
+            || (allow_nil && matches!(spec.without_metadata().kind, Kind::Nil))
+        {
+            in_group = true;
+        } else if !in_group
+            || !matches!(&spec.without_metadata().kind, Kind::List(parts)
+            if matches!(parts.split_first(), Some((name, clauses)) if name.symbol().is_some()
+                && !function_clauses(clauses, spec.span).is_err_and(|diagnostic| diagnostic.severity == "error")))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn unqualified(name: &str) -> bool {
+    !name.contains('/') || name == "/"
+}
+
+fn multimethod_parts(tail: &[Form]) -> (&[Form], &[Form]) {
+    let tail = if tail.first().is_some_and(Form::is_string) {
+        &tail[1..]
+    } else {
+        tail
+    };
+    match tail.split_first() {
+        Some((first, rest)) if first.map().is_some() => (first.map().unwrap(), rest),
+        _ => (&[], tail),
     }
 }
 
