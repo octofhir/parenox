@@ -522,7 +522,10 @@ impl<'model> Checker<'model> {
 
     fn note_builtin_contract(&mut self, start: usize, name: &str) {
         for diagnostic in &mut self.diagnostics[start..] {
-            if matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2554" | "PNX9004") {
+            if matches!(
+                diagnostic.code.as_str(),
+                "PNX2322" | "PNX2554" | "PNX2801" | "PNX9004"
+            ) {
                 diagnostic
                     .contract
                     .get_or_insert_with(|| ContractOrigin::builtin(name));

@@ -23,10 +23,11 @@ impl Declarations {
         globals: &Globals,
         source: &str,
     ) -> Vec<Diagnostic> {
-        if !self
+        let string_namespace = self
             .dependencies
             .iter()
-            .any(|name| name == "clojure.string")
+            .any(|name| name == "clojure.string");
+        if (!string_namespace && !source.contains("subs"))
             || !self.all_refers.is_empty()
             || ["clojure.core", "clojure.string"]
                 .iter()
@@ -42,6 +43,8 @@ impl Declarations {
         let operators: Vec<_> = STRING_OPERATORS
             .iter()
             .copied()
+            .filter(|_| string_namespace)
+            .chain(["subs"])
             .chain(model.names.refers.iter().filter_map(|(local, target)| {
                 partial_string_operator(target).then_some(local.as_str())
             }))
@@ -66,7 +69,7 @@ impl Declarations {
                 checker.function_body(&params, clause.body, args, &Env::new(), clause.span);
             }
             diagnostics.extend(checker.diagnostics.into_iter().filter(|diagnostic| {
-                diagnostic.code == "PNX2322"
+                matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
                     && diagnostic
                         .contract
                         .as_ref()
@@ -126,6 +129,8 @@ impl Checker<'_> {
 }
 
 fn partial_string_operator(name: &str) -> bool {
-    name.strip_prefix("clojure.string/")
-        .is_some_and(|operator| STRING_OPERATORS.contains(&operator))
+    name == "clojure.core/subs"
+        || name
+            .strip_prefix("clojure.string/")
+            .is_some_and(|operator| STRING_OPERATORS.contains(&operator))
 }

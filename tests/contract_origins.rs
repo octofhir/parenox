@@ -123,7 +123,7 @@ fn externs_cannot_override_modeled_functions_or_macros() {
             (defn fail {:t/sig '[:-> number?]} [] (inc \"not a number\"))
             (defn lookup {:t/sig '[:-> number?]} [] (get {:id 1} :id))
             (defn thread {:t/sig '[:-> number?]} [] (-> 1 inc))
-            (defn unmodeled {:t/sig '[:-> string?]} [] (subs \"abc\" 1))",
+            (defn unmodeled {:t/sig '[:-> string?]} [] (name :abc))",
     };
     let externs = Source {
         path: "externs.edn",
@@ -131,7 +131,7 @@ fn externs_cannot_override_modeled_functions_or_macros() {
                   clojure.core/get [number? :-> string?]
                   clojure.core/-> [number? :-> string?]
                   clojure.string/upper-case [number? :-> number?]
-                  clojure.core/subs [string? number? :-> string?]}",
+                  clojure.core/name [keyword? :-> string?]}",
     };
     let report = Session::default().check_project(&[app], Some(externs));
     assert_eq!(report.files[0].diagnostics.len(), 1, "{report:#?}");

@@ -5,6 +5,75 @@ use crate::reader::{Form, Kind};
 use crate::types::MAX_TUPLE_ITEMS;
 
 impl Checker<'_> {
+    pub(super) fn substring(&mut self, forms: &[Form], span: Span, env: &Env) -> Value {
+        const NAME: &str = "clojure.core/subs";
+        let args = self.typed_args(forms, env);
+        let diagnostic_start = self.diagnostics.len();
+        if !(2..=3).contains(&args.len()) {
+            self.error(
+                "PNX2554",
+                span,
+                "subs requires a string, start and optional end",
+            );
+            self.note_builtin_contract(diagnostic_start, NAME);
+            return Value::new(Type::Unknown);
+        }
+        if !call_returns(&args) {
+            return Value::new(Type::Never);
+        }
+        let value = self.substring_value(&args);
+        self.note_builtin_contract(diagnostic_start, NAME);
+        value
+    }
+
+    fn substring_value(&mut self, args: &[(Value, Span)]) -> Value {
+        self.may_throw();
+        self.expect(&args[0].0, &Type::String, args[0].1, "subs text");
+        for (value, span) in &args[1..] {
+            self.expect(value, &Type::Number, *span, "subs index");
+        }
+        let text = match &args[0].0.known {
+            Type::Str(text) => Some(text),
+            _ => None,
+        };
+        let length = text.map(|text| text.encode_utf16().count());
+        let mut invalid = false;
+        for (value, span) in &args[1..] {
+            if let Type::Integer(index) = value.known
+                && (index < 0 || length.is_some_and(|len| index as usize > len))
+            {
+                self.error(
+                    "PNX2801",
+                    *span,
+                    format!("Substring index {index} is out of bounds"),
+                );
+                invalid = true;
+            }
+        }
+        if invalid {
+            return Value::new(Type::Never);
+        }
+        let start = known_index(&args[1].0);
+        let end = args.get(2).map_or(length, |(value, _)| known_index(value));
+        if let (Some(start), Some(end)) = (start, end) {
+            if end < start {
+                self.error(
+                    "PNX2801",
+                    args.last().unwrap().1,
+                    format!("Substring end {end} precedes start {start}"),
+                );
+                return Value::new(Type::Never);
+            }
+            if let Some(text) = text {
+                let units: Vec<_> = text.encode_utf16().skip(start).take(end - start).collect();
+                if let Ok(slice) = String::from_utf16(&units) {
+                    return Value::new(Type::Str(slice));
+                }
+            }
+        }
+        Value::new(Type::String)
+    }
+
     pub(super) fn regex_match(
         &mut self,
         forms: &[Form],
@@ -137,6 +206,13 @@ impl Checker<'_> {
             }
         }
         Type::String
+    }
+}
+
+fn known_index(value: &Value) -> Option<usize> {
+    match value.known {
+        Type::Integer(index) => usize::try_from(index).ok(),
+        _ => None,
     }
 }
 

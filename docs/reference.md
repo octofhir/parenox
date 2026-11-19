@@ -507,6 +507,9 @@ value, including a stable lookup of an optional map field.
 
 The checked JVM string members are `length` and `charAt`, with the usual
 dot-method spellings. String length and offsets count UTF-16 code units.
+`subs` uses the same UTF-16 offsets. Known bounds can identify an invalid
+index or a reversed range. A literal slice retains its exact value when the
+slice is valid Unicode.
 Analysis checks nil receivers and numeric index arguments. Bounds are enforced
 by the JVM. [String member example](../examples/jvm_strings.cljc)
 

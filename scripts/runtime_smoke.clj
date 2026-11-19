@@ -1194,6 +1194,12 @@
 (assert (= ["a" "a" nil] (re-matches #"(a)(b)?" "a")))
 (assert (= "a" (re-find (re-matcher #"a" "ab"))))
 (println "Clojure/JVM regex matching: 4 assertions passed")
+
+(assert (= "a" (subs "😀a" 2)))
+(assert (= "😀" (subs "😀a" 0 2)))
+(assert (Character/isHighSurrogate (.charAt (subs "😀a" 0 1) 0)))
+(assert (try (subs "😀" 3) false (catch StringIndexOutOfBoundsException _ true)))
+(println "Clojure/JVM substring bounds: 4 assertions passed")
 (assert (= "" (demo.query-string/normalized-value {})))
 (assert (= "" (demo.query-string/normalized-value {:value nil})))
 (assert (= "" (demo.query-string/normalized-value {:value " \t"})))

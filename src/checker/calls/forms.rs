@@ -30,6 +30,7 @@ pub(super) enum CoreForm {
     ReduceKv,
     VectorTransform,
     RegexMatch,
+    Substring,
 }
 
 impl CoreForm {
@@ -64,6 +65,7 @@ impl CoreForm {
             "reduce-kv" => Self::ReduceKv,
             "mapv" | "filterv" => Self::VectorTransform,
             "re-find" | "re-matches" => Self::RegexMatch,
+            "subs" => Self::Substring,
             _ => return Threading::from_core_symbol(name).map(Self::Thread),
         })
     }
@@ -110,6 +112,7 @@ impl Checker<'_> {
             CoreForm::ReduceKv => self.reduce_kv_form(&xs[1..], span, env),
             CoreForm::VectorTransform => self.vector_transform(xs, span, env, name),
             CoreForm::RegexMatch => self.regex_match(&xs[1..], span, env, name),
+            CoreForm::Substring => self.substring(&xs[1..], span, env),
         }
     }
 }
