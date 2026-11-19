@@ -55,7 +55,7 @@ impl Checker<'_> {
                                 (Type::Unknown, false)
                             }
                         };
-                        Some((key.clone(), Field { ty, required }))
+                        Some((key.clone(), Field::new(ty, required)))
                     })
                     .collect(),
             ),

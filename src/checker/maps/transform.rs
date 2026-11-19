@@ -186,10 +186,9 @@ impl Checker<'_> {
                 )).known;
             }
             for key in choices {
-                fields.entry(key.clone()).or_insert_with(|| Field {
-                    ty: value.clone(),
-                    required: false,
-                });
+                fields
+                    .entry(key.clone())
+                    .or_insert_with(|| Field::new(value.clone(), false));
             }
         }
         let mut sources: BTreeMap<Type, (Type, Field)> = BTreeMap::new();

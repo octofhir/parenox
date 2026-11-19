@@ -83,13 +83,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                 }
             };
             if fields
-                .insert(
-                    name,
-                    Field {
-                        ty: self.parse(ty),
-                        required,
-                    },
-                )
+                .insert(name, Field::new(self.parse(ty), required))
                 .is_some()
             {
                 self.error("PNX9001", key.span, "Duplicate key in a literal map type");
@@ -260,18 +254,26 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                                         key.span,
                                         "s/keys needs qualified spec keys",
                                     );
+                                    continue;
                                 }
-                                let ty = self.spec(&qualified, key.span);
+                                let required = directive.starts_with(":req");
+                                let field = match (self.lookup)(&qualified, key.span) {
+                                    Some(ty) => Field::new(ty, required),
+                                    None => {
+                                        self.diagnostics.push(Diagnostic::analysis_gap(
+                                            "PNX9001",
+                                            key.span,
+                                            format!("No value spec for {qualified}; s/keys checks presence only"),
+                                        ));
+                                        Field::presence_only(required)
+                                    }
+                                };
                                 let field_key = if directive.ends_with("-un") {
                                     format!(":{}", qualified.rsplit('/').next().unwrap())
                                 } else {
                                     qualified
                                 };
-                                let required = directive.starts_with(":req");
-                                if fields
-                                    .insert(Type::Key(field_key.clone()), Field { ty, required })
-                                    .is_some()
-                                {
+                                if fields.insert(Type::Key(field_key.clone()), field).is_some() {
                                     self.error(
                                         "PNX9001",
                                         key.span,

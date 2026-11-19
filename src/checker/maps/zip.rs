@@ -116,13 +116,7 @@ fn zipped_map(keys: ZipInput<'_>, values: ZipInput<'_>) -> Option<MapType> {
         } else {
             // A later pair may be absent, so an earlier value can survive.
             let optional = MapType {
-                fields: BTreeMap::from([(
-                    key.clone(),
-                    Field {
-                        ty: value.clone(),
-                        required: false,
-                    },
-                )]),
+                fields: BTreeMap::from([(key.clone(), Field::new(value.clone(), false))]),
                 extra: ExtraFields::Closed,
             };
             map = map.merge(&optional);

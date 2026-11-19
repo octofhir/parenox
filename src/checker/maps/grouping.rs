@@ -155,7 +155,7 @@ fn group_fields(groups: BTreeMap<Type, Type>) -> Type {
     Type::Map(MapType {
         fields: groups
             .into_iter()
-            .map(|(key, ty)| (key, Field { ty, required: true }))
+            .map(|(key, ty)| (key, Field::new(ty, true)))
             .collect(),
         extra: ExtraFields::Closed,
     })

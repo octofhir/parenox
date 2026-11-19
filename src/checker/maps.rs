@@ -51,13 +51,7 @@ impl Checker<'_> {
             returns &= value.known != Type::Never;
             if let Some(key) = self.literal_map_key(&pair[0]) {
                 if fields
-                    .insert(
-                        key.clone(),
-                        Field {
-                            ty: value.known,
-                            required: true,
-                        },
-                    )
+                    .insert(key.clone(), Field::new(value.known, true))
                     .is_some()
                 {
                     self.error("PNX2790", pair[0].span, format!("Duplicate map key {key}"));
@@ -494,13 +488,7 @@ pub(super) fn narrow_key_presence(ty: &Type, key: &Type, present: bool) -> Type 
             if present {
                 // An undeclared field still has no known value type on the present path.
                 if let MapSlot::Optional(ty) = map.slot(key) {
-                    map.set_field(
-                        key.to_owned(),
-                        Field {
-                            ty: ty.clone(),
-                            required: true,
-                        },
-                    );
+                    map.set_field(key.to_owned(), Field::new(ty.clone(), true));
                 }
             } else {
                 map.dissociate(key);

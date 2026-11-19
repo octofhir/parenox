@@ -835,6 +835,13 @@ An `s/fdef` for a var in an external namespace remains an explicit coverage gap.
 Recursive specs and `s/coll-of` without a collection kind report incomplete
 coverage.
 
+`s/keys` checks that required keys are present even when no value spec is
+available. In that case an explicitly present `nil` still counts as present.
+The value stays unknown on reads and Parenox reports incomplete coverage.
+If the value spec becomes available, subsequent checks use it to constrain
+the field. A direct reference to a missing spec outside `s/keys` is still an
+error.
+
 `s/and` can narrow input types when earlier checks preserve the value. For
 example, `(s/and keyword? #{:read :write})` accepts only those two keywords.
 A final `(s/conformer second)` after a direct `s/or` removes the tag without

@@ -152,6 +152,84 @@ fn external_fdefs_and_specs_without_a_collection_kind_report_incomplete_coverage
 }
 
 #[test]
+fn keys_check_required_presence_without_a_registered_value_spec() {
+    let source = r#"(ns wire (:require [clojure.spec.alpha :as s]))
+        (s/def ::payload (s/keys :req [::id] :req-un [::name]))
+        (s/def ::extras (s/keys :opt [::comment] :opt-un [::note]))
+        (defn payload {:t/sig '[:-> ::payload]} [] {::id nil :name 42})
+        (defn extras {:t/sig '[map? :-> ::extras]} [m] m)"#;
+    let mut session = Session::default();
+    let report = session.check("wire.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 4, "{report:#?}");
+    assert!(
+        report.diagnostics.iter().all(|d| {
+            d.severity == "warning" && d.message.contains("s/keys checks presence only")
+        }),
+        "{report:#?}"
+    );
+
+    for map in ["{::id nil}", "{:id nil :name 42}", "{::id nil ::name 42}"] {
+        let missing = source.replace("{::id nil :name 42}", map);
+        let report = session.check("wire.clj", &missing);
+        let errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == "error")
+            .collect();
+        let [diagnostic] = errors.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(diagnostic.code, "PNX2322");
+        assert_eq!(
+            &missing[diagnostic.span.start.offset..diagnostic.span.end.offset],
+            map
+        );
+    }
+}
+
+#[test]
+fn registering_a_value_spec_checks_previously_unconstrained_keys() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [clojure.spec.alpha :as s]))
+            (s/def ::payload (s/keys :req-un [:wire/name]))
+            (defn payload {:t/sig '[:-> ::payload]} [] {:name 42})
+            (defn read-name {:t/sig '[::payload :-> string?]} [m] (:name m))"#,
+    };
+    let wire = Source {
+        path: "wire.clj",
+        source: "(ns wire (:require [clojure.spec.alpha :as s])) (s/def ::name string?)",
+    };
+    let mut session = Session::default();
+    for (sources, expected) in [
+        (&[app][..], "PNX9004"),
+        (&[app, wire][..], "PNX2322"),
+        (&[app][..], "PNX9004"),
+    ] {
+        let report = session.check_project(sources, None);
+        let errors: Vec<_> = report.files[0]
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == "error")
+            .collect();
+        let [diagnostic] = errors.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(diagnostic.code, expected, "{report:#?}");
+        let text = &app.source[diagnostic.span.start.offset..diagnostic.span.end.offset];
+        assert_eq!(
+            text,
+            if expected == "PNX9004" {
+                "(:name m)"
+            } else {
+                "{:name 42}"
+            }
+        );
+    }
+}
+
+#[test]
 fn intersections_keep_only_shared_inputs_and_recheck_callers_after_a_spec_edit() {
     let provider = Source {
         path: "routes.clj",

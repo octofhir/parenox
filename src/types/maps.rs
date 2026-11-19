@@ -16,6 +16,27 @@ pub struct MapType {
 pub struct Field {
     pub ty: Type,
     pub required: bool,
+    check_value: bool,
+}
+
+impl Field {
+    pub fn new(ty: Type, required: bool) -> Self {
+        Self {
+            ty,
+            required,
+            check_value: true,
+        }
+    }
+
+    /// The key is declared, but there is no checked constraint on its value.
+    /// Reading the field still yields Unknown.
+    pub(crate) fn presence_only(required: bool) -> Self {
+        Self {
+            ty: Type::Unknown,
+            required,
+            check_value: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -70,13 +91,18 @@ impl ExtraFields {
 
 impl MapSlot<'_> {
     pub(super) fn compatibility(&self, field: &Field) -> Compatibility {
-        match self {
-            Self::Present(actual) => actual.compatibility(&field.ty),
-            Self::Optional(actual) => {
-                Compatibility::from(!field.required).and(|| actual.compatibility(&field.ty))
+        let value = |actual: &Type| {
+            if field.check_value {
+                actual.compatibility(&field.ty)
+            } else {
+                Compatibility::Proven
             }
+        };
+        match self {
+            Self::Present(actual) => value(actual),
+            Self::Optional(actual) => Compatibility::from(!field.required).and(|| value(actual)),
             Self::Absent => (!field.required).into(),
-            Self::Undeclared => Compatibility::Mismatch,
+            Self::Undeclared => (!field.required && !field.check_value).into(),
         }
     }
 }
@@ -163,10 +189,7 @@ impl MapType {
             };
             let (right_ty, required) = slot(right.slot(key));
             let field = if required {
-                Field {
-                    ty: right_ty,
-                    required,
-                }
+                Field::new(right_ty, required)
             } else {
                 let (left_ty, required) = slot(self.slot(key));
                 let ty = if left_ty == Type::Unknown || right_ty == Type::Unknown {
@@ -174,7 +197,7 @@ impl MapType {
                 } else {
                     Type::union([left_ty, right_ty])
                 };
-                Field { ty, required }
+                Field::new(ty, required)
             };
             result.set_field(key.clone(), field);
         }
@@ -225,18 +248,12 @@ impl MapType {
 
     pub fn associate(&mut self, key: &Type, value: &Type) {
         if key.is_literal_map_key() {
-            self.set_field(
-                key.clone(),
-                Field {
-                    ty: value.clone(),
-                    required: true,
-                },
-            );
+            self.set_field(key.clone(), Field::new(value.clone(), true));
             return;
         }
         // A dynamic key may replace any overlapping fixed field or create a new entry.
         for (field_key, field) in &mut self.fields {
-            if key.key_overlaps(field_key) {
+            if field.check_value && key.key_overlaps(field_key) {
                 field.ty =
                     Type::union([std::mem::replace(&mut field.ty, Type::Never), value.clone()]);
             }
@@ -265,13 +282,8 @@ impl MapType {
             self.fields.remove(key);
             if !matches!(self.slot(key), MapSlot::Absent) {
                 // Mask this key when the remaining extra domain still admits it.
-                self.fields.insert(
-                    key.clone(),
-                    Field {
-                        ty: Type::Never,
-                        required: false,
-                    },
-                );
+                self.fields
+                    .insert(key.clone(), Field::new(Type::Never, false));
             }
         } else {
             for (name, field) in &mut self.fields {
@@ -311,6 +323,7 @@ impl MapType {
                         Field {
                             ty: field.ty.inferred(),
                             required: field.required,
+                            check_value: field.check_value,
                         },
                     )
                 })
@@ -364,9 +377,13 @@ impl MapType {
     pub(super) fn join_values(mut self, mut other: Self) -> Self {
         self.fields.retain(|key, field| {
             if let Some(right) = other.fields.remove(key) {
-                let left = std::mem::replace(&mut field.ty, Type::Never);
-                field.ty = left.join_values(right.ty);
-                field.required &= right.required;
+                let required = field.required && right.required;
+                *field = if field.check_value && right.check_value {
+                    let left = std::mem::replace(&mut field.ty, Type::Never);
+                    Field::new(left.join_values(right.ty), required)
+                } else {
+                    Field::presence_only(required)
+                };
                 true
             } else if other.extra.is_open() {
                 // The other path can have an arbitrary undeclared value here.

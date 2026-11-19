@@ -158,7 +158,7 @@ fn narrow_path(owner: &Type, path: &[Type], refine: &impl Fn(&Type) -> Type) -> 
                 return owner.clone();
             }
             let mut map = map.clone();
-            map.set_field(key.clone(), Field { ty, required });
+            map.set_field(key.clone(), Field::new(ty, required));
             Type::Map(map)
         }
         _ => owner.clone(),
