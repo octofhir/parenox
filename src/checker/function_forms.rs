@@ -38,8 +38,23 @@ pub(super) fn function_clauses(
     forms: &[Form],
     span: Span,
 ) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
+    read_function_clauses(forms, span, true)
+}
+
+pub(super) fn lexical_function_clauses(
+    forms: &[Form],
+    span: Span,
+) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
+    read_function_clauses(forms, span, false)
+}
+
+fn read_function_clauses(
+    forms: &[Form],
+    span: Span,
+    check_types: bool,
+) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
     if forms.first().and_then(Form::vector).is_some() {
-        let clause = function_clause(forms, span)?;
+        let clause = function_clause(forms, span, check_types)?;
         return Ok(BTreeMap::from([(clause.arity(), clause)]));
     }
     let mut clauses = BTreeMap::new();
@@ -51,7 +66,7 @@ pub(super) fn function_clauses(
                 "Expected a function arity declaration",
             ));
         };
-        let clause = function_clause(forms, arm.span)?;
+        let clause = function_clause(forms, arm.span, check_types)?;
         let count = clause.arity();
         if clauses.insert(count, clause).is_some() {
             return Err(error(
@@ -108,7 +123,11 @@ pub(super) fn pack_arguments(arity: Arity, mut values: Vec<Value>) -> Vec<Value>
     values
 }
 
-fn function_clause(forms: &[Form], span: Span) -> Result<Clause<'_>, Box<Diagnostic>> {
+fn function_clause(
+    forms: &[Form],
+    span: Span,
+    check_types: bool,
+) -> Result<Clause<'_>, Box<Diagnostic>> {
     let [parameters, body @ ..] = forms else {
         return Err(error(
             "PNX1001",
@@ -125,7 +144,8 @@ fn function_clause(forms: &[Form], span: Span) -> Result<Clause<'_>, Box<Diagnos
     };
     let (params, rest) = split_rest(params)
         .map_err(|span| error("PNX1001", span, "& requires exactly one rest binding"))?;
-    if let Some(rest) = rest
+    if check_types
+        && let Some(rest) = rest
         && rest.map().is_some()
     {
         return Err(Box::new(Diagnostic::analysis_gap(
@@ -172,7 +192,7 @@ fn function_clause(forms: &[Form], span: Span) -> Result<Clause<'_>, Box<Diagnos
             .find_map(|key| parameters.metadata(key).map(|form| form.span));
         (span, body)
     };
-    if let Some(span) = condition_span {
+    if check_types && let Some(span) = condition_span {
         return Err(Box::new(Diagnostic::analysis_gap(
             "PNX9001",
             span,

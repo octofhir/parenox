@@ -649,6 +649,58 @@ fn checks_project_calls_in_standard_test_assertions() {
 }
 
 #[test]
+fn checks_exception_assertions_inside_mutually_scoped_local_functions() {
+    let source = r#"(ns cases (:require [clojure.test :refer :all] [catalog :as c :refer [label]]))
+        (deftest examples
+          (letfn [(outer [x] (label x x))
+                  (label [x y & {:keys [style]}] (c/label x :extra))]
+            (is (thrown? IllegalArgumentException (c/lable "typo")))
+            (is (thrown-with-msg? Exception (c/regex) (outer "ok")))
+            (is (custom-assertion (c/quoted-data)))))"#;
+    let mut session = Session::default();
+    let report = session.check_project(
+        &[
+            Source {
+                path: "cases.cljc",
+                source,
+            },
+            Source {
+                path: "catalog.cljc",
+                source: "(ns catalog)\n(defn label [x] x)",
+            },
+        ],
+        None,
+    );
+    let findings: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &source[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2554", "c/label"),
+            ("PNX2304", "c/lable"),
+            ("PNX2304", "c/regex")
+        ],
+        "{report:#?}"
+    );
+    let reference = source.find("(label x x)").unwrap() + 1;
+    let binding = session.definition("cases.cljc", reference).unwrap();
+    assert_eq!(binding.path, "cases.cljc");
+    assert_eq!(
+        binding.span.start.offset,
+        source.find("(label [x y ").unwrap() + 1
+    );
+}
+
+#[test]
 fn checks_fixed_calls_in_are_templates_and_preserves_placeholder_scope() {
     let source = r#"(ns cases (:require [clojure.test :as t] [catalog :as c :refer [label]]))
         (t/deftest examples

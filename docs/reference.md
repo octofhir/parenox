@@ -361,9 +361,11 @@ for extern-only namespaces. Run `just all-refers` for examples.
 
 `clojure.test` also supports `:refer :all` using public names from the pinned
 JVM reference. `deftest` bodies, `testing` scopes, and standard `is` and `are`
-assertions with equality or simple predicates can report project var and arity
-errors. For `are`, this covers fixed calls in the assertion template. Template
-substitution, custom assertion expansion, and test types remain unchecked.
+assertions with equality, simple predicates, `thrown?`, or `thrown-with-msg?`
+can report project var and arity errors. Calls inside `letfn` see all local
+function bindings. For `are`, checks cover fixed calls in the assertion
+template. Template substitution, custom assertion expansion, and test types
+remain unchecked.
 
 `:import` resolves short class names in `catch` for modeled JVM exception
 classes, including the `IOException` hierarchy. It accepts qualified names

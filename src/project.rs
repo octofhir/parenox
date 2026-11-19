@@ -543,6 +543,7 @@ impl Session {
         }
         let mut macro_gaps = BTreeMap::new();
         if matches!(mode, SnapshotMode::Check(_)) {
+            let standard_test = !namespaces.contains_key("clojure.test");
             let provider = |namespace: &str| {
                 let &index = namespaces.get(namespace)?;
                 let (_, file) = &entries[index];
@@ -582,6 +583,7 @@ impl Session {
                         .extend(declarations.check_untyped_references(
                             &file.forms,
                             model,
+                            standard_test,
                             |namespace, local, actual| {
                                 known_provider(namespace).map_or(
                                     ProjectCall::Unknown,

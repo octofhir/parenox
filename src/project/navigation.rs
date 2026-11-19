@@ -92,6 +92,12 @@ impl Session {
             None => match declarations.scoped_reference_at(
                 forms,
                 offset,
+                !self.files.values().any(|file| {
+                    file.snapshot == self.snapshot
+                        && file.navigation_source().is_some_and(|(declarations, _)| {
+                            declarations.namespace() == "clojure.test"
+                        })
+                }),
                 |namespace, local, actual| {
                     self.navigation_provider(namespace)
                         .filter(|(_, file, declarations, forms)| {

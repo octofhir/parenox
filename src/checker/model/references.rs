@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use crate::Diagnostic;
 use crate::checker::bindings::binding_names;
 use crate::checker::calls::arity_counts;
-use crate::checker::function_forms::{Clause, function_clauses};
+use crate::checker::function_forms::{Clause, function_clauses, lexical_function_clauses};
 use crate::reader::{Form, Kind, Span};
 
 use super::contracts::function_parts;
@@ -97,6 +97,7 @@ impl Declarations {
         &self,
         forms: &[Form],
         model: &Model,
+        standard_test: bool,
         mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Vec<Diagnostic> {
         let mut unchecked = self.unchecked_definitions(forms, model).peekable();
@@ -110,6 +111,7 @@ impl Declarations {
             top_level_names: &top_level_names,
             locals: Vec::new(),
             inside_test: false,
+            standard_test,
             template_scope: None,
             resolve: &mut resolve,
             purpose: Purpose::Check(&mut diagnostics),
@@ -148,6 +150,7 @@ impl Declarations {
         &'a self,
         forms: &'a [Form],
         offset: usize,
+        standard_test: bool,
         mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Option<ScopedReference<'a>> {
         let index = forms.partition_point(|form| form.span.end.offset <= offset);
@@ -162,6 +165,7 @@ impl Declarations {
             top_level_names: &top_level_names,
             locals: Vec::new(),
             inside_test,
+            standard_test,
             template_scope: None,
             resolve: &mut resolve,
             purpose: Purpose::Navigate {
@@ -216,6 +220,7 @@ struct References<'source, 'query, F> {
     top_level_names: &'query BTreeSet<&'source str>,
     locals: Vec<(&'source str, Span)>,
     inside_test: bool,
+    standard_test: bool,
     template_scope: Option<usize>,
     resolve: &'query mut F,
     purpose: Purpose<'source, 'query>,
@@ -225,7 +230,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
     fn definition(&mut self, form: &'a Form) {
         if let Kind::List(items) = &form.without_metadata().kind
             && let Some(tail) = items.get(2..)
-            && let Ok(clauses) = function_clauses(function_parts(tail).0, form.span)
+            && let Ok(clauses) = lexical_function_clauses(function_parts(tail).0, form.span)
         {
             for clause in clauses.values() {
                 self.clause(clause);
@@ -267,9 +272,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             return self.forms(items);
         };
         let span = head.without_metadata().span;
-        if let Some(scope) = self.template_scope
-            && self.locals[scope..].iter().any(|(name, _)| *name == symbol)
-        {
+        if self.template_parameter(symbol) {
             // Substitution may turn an operator into a macro or special form.
             self.select_reference(symbol, span);
             return;
@@ -294,7 +297,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             self.forms(args);
             return;
         }
-        if self.inside_test && self.test_macro(symbol, args) {
+        if self.inside_test && self.standard_test && self.test_macro(symbol, args) {
             return;
         }
         let qualified = self.names.qualified_reference(symbol);
@@ -303,6 +306,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             match local {
                 "let" | "loop" => return self.bindings(args),
                 "fn" => return self.function(args, head.span),
+                "letfn" => return self.local_functions(args),
                 "when" | "when-not" | "if-not" | "and" | "or" | "cond" | "=" | "not=" | "<"
                 | "<=" | ">" | ">=" | "+" | "-" | "*" | "inc" | "dec" | "not" | "nil?"
                 | "some?" | "str" | "vector" | "list" | "hash-map" | "set" | "get"
@@ -378,10 +382,17 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         self.locals.iter().rev().any(|(name, _)| *name == symbol)
     }
 
+    fn template_parameter(&self, symbol: &str) -> bool {
+        self.template_scope
+            .is_some_and(|scope| self.locals[scope..].iter().any(|(name, _)| *name == symbol))
+    }
+
     fn trusted_core(&self, symbol: &str, namespace: &str) -> bool {
+        let refers = &self.names.all_refers;
+        let known = refers.is_empty()
+            || (self.standard_test && refers.len() == 1 && refers.contains("clojure.test"));
         namespace == "clojure.core"
-            && (symbol.contains('/')
-                || (self.names.all_refers.is_empty() && !self.top_level_names.contains(symbol)))
+            && (symbol.contains('/') || (known && !self.top_level_names.contains(symbol)))
     }
 
     fn test_macro(&mut self, symbol: &str, args: &'a [Form]) -> bool {
@@ -407,18 +418,31 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         let Kind::List(items) = &assertion.without_metadata().kind else {
             return self.forms(std::slice::from_ref(assertion));
         };
-        if let Some((head, values)) = items.split_first()
-            && let Some(name) = head.symbol()
-            && (name.contains('/')
+        let Some((head, values)) = items.split_first() else {
+            return;
+        };
+        let Some(name) = head.symbol().filter(|name| !self.template_parameter(name)) else {
+            return;
+        };
+        match name {
+            "thrown?" | "thrown-with-msg?"
+                if let [class, expressions @ ..] = values
+                    && class.symbol().is_some() =>
+            {
+                self.forms(expressions)
+            }
+            _ if (name.contains('/')
                 || (!self.top_level_names.contains(name) && !self.is_local(name)))
-            && matches!(
-                self.names.names.resolve_parts(name),
-                ("clojure.core", "=" | "nil?" | "some?" | "true?" | "false?")
-            )
-        {
-            self.forms(values);
+                && matches!(
+                    self.names.names.resolve_parts(name),
+                    ("clojure.core", "=" | "nil?" | "some?" | "true?" | "false?")
+                ) =>
+            {
+                self.forms(values)
+            }
+            // Other assertion forms can have user-defined expansion.
+            _ => {}
         }
-        // Other assertion forms can have user-defined expansion.
     }
 
     fn assertion_template(&mut self, args: &'a [Form]) {
@@ -463,11 +487,52 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         } else {
             args
         };
-        if let Ok(clauses) = function_clauses(clauses, span) {
+        if let Ok(clauses) = lexical_function_clauses(clauses, span) {
             for clause in clauses.values() {
                 self.clause(clause);
             }
         }
+        self.locals.truncate(scope);
+    }
+
+    fn local_functions(&mut self, args: &'a [Form]) {
+        if self.template_scope.is_some() {
+            return;
+        }
+        let [specs, body @ ..] = args else {
+            return;
+        };
+        let Some(specs) = specs.vector() else {
+            return;
+        };
+        let mut functions = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let Kind::List(items) = &spec.without_metadata().kind else {
+                return;
+            };
+            let [name, tail @ ..] = items.as_slice() else {
+                return;
+            };
+            let Some(symbol) = name
+                .symbol()
+                .filter(|name| !name.contains('/') || *name == "/")
+            else {
+                return;
+            };
+            let Ok(clauses) = lexical_function_clauses(tail, spec.span) else {
+                return;
+            };
+            functions.push(((symbol, name.without_metadata().span), clauses));
+        }
+        let scope = self.locals.len();
+        self.locals
+            .extend(functions.iter().map(|(binding, _)| *binding));
+        for (_, clauses) in &functions {
+            for clause in clauses.values() {
+                self.clause(clause);
+            }
+        }
+        self.forms(body);
         self.locals.truncate(scope);
     }
 
