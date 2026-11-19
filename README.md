@@ -86,6 +86,7 @@ contracts extend checking to call and return types.
 
 For development, run `just verify` for formatting, Clippy, and tests.
 `just agent-loop` exercises the clinic edit-and-check workflow.
+`just pilot-setup` prepares a larger [local pilot for RustRover](docs/reference.md#local-clojure-lsp-pilot).
 
 ## License
 

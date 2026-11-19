@@ -150,3 +150,127 @@ fn external_fdefs_and_specs_without_a_collection_kind_report_incomplete_coverage
         "{report:#?}"
     );
 }
+
+#[test]
+fn intersections_keep_only_shared_inputs_and_recheck_callers_after_a_spec_edit() {
+    let provider = Source {
+        path: "routes.clj",
+        source: r#"(ns routes (:require [clojure.spec.alpha :as s]))
+            (s/def ::mode (s/and (s/nilable keyword?) #{:read :write} #{:read :admin}))
+            (s/fdef authorize :args (s/cat :mode ::mode) :ret ::mode)
+            (defn authorize [mode] mode)"#,
+    };
+    let caller = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [routes :as routes]))
+            (defn view {:t/sig '[:-> keyword?]} [] (routes/authorize :read))"#,
+    };
+    let mut session = Session::default();
+    let good = session.check_project(&[caller, provider], None);
+    assert!(good.ok && good.complete, "{good:#?}");
+
+    let edited = provider
+        .source
+        .replace("#{:read :admin}", "#{:write :admin}");
+    let changed = session.check_project(
+        &[
+            caller,
+            Source {
+                source: &edited,
+                ..provider
+            },
+        ],
+        None,
+    );
+    assert!(changed.complete, "{changed:#?}");
+    let [diagnostic] = changed.files[0].diagnostics.as_slice() else {
+        panic!("{changed:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX2322");
+    assert_eq!(diagnostic.expected.as_deref(), Some(":write"));
+    assert_eq!(diagnostic.actual.as_deref(), Some(":read"));
+}
+
+#[test]
+fn projecting_a_tagged_choice_checks_the_raw_input_not_the_conformed_tuple() {
+    let source = r#"(ns routes (:require [clojure.spec.alpha :as s]))
+        (s/def ::route (s/and (s/or :key keyword? :text string?)
+                             (s/conformer clojure.core/second)))
+        (defn route-id [value] value)
+        (s/fdef route-id :args (s/cat :value ::route) :ret ::route)
+        (defn key-route {:t/sig '[:-> ::route]} [] (route-id :demo))
+        (defn text-route {:t/sig '[:-> ::route]} [] (route-id "demo"))"#;
+    let mut session = Session::default();
+    let good = session.check("routes.clj", source);
+    assert!(good.ok && good.complete, "{good:#?}");
+    let unqualified = source.replace("clojure.core/second", "second");
+    let scoped = session.check("routes.clj", &unqualified);
+    assert!(scoped.ok && scoped.complete, "{scoped:#?}");
+    let bad = session.check(
+        "routes.clj",
+        &source.replace("(route-id :demo)", "(route-id [:key :demo])"),
+    );
+    let [diagnostic] = bad.diagnostics.as_slice() else {
+        panic!("{bad:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX2322");
+}
+
+#[test]
+fn opaque_predicates_and_conforming_stages_are_not_accepted_as_exact_contracts() {
+    let source = Source {
+        path: "routes.clj",
+        source: r#"(ns routes (:require [clojure.spec.alpha :as s]))
+            (s/def ::named (s/and string? #(re-matches #"[a-z]+" %)))
+            (s/def ::converted (s/and keyword? (s/conformer name)))
+            (s/def ::tagged (s/and (s/or :tag keyword?) keyword?))
+            (defn second [_] :clojure.spec.alpha/invalid)
+            (s/def ::removing-tag (s/and (s/or :tag keyword?) (s/conformer second)))
+            (defn string? [_] true)
+            (s/def ::custom-string (s/and (s/nilable string?) #{:demo}))
+            (defn choose {:t/sig '[::tagged :-> keyword?]} [_] :demo)"#,
+    };
+    let report = Session::default().export_externs(&[source], &[]);
+    assert!(
+        !report.report.complete && report.edn.is_none(),
+        "{report:?}"
+    );
+    let diagnostics = &report.report.files[0].diagnostics;
+    assert!(
+        diagnostics.iter().all(|d| d.severity == "warning"),
+        "{diagnostics:#?}"
+    );
+    for expected in [
+        "Custom predicate in s/and",
+        "Input and result of this s/conformer",
+        "This s/and stage checks a conformed value",
+        "Source predicate string? is unchecked",
+    ] {
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains(expected)),
+            "{diagnostics:#?}"
+        );
+    }
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|d| d.message.contains("this s/conformer"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn quoted_inline_conjunctions_track_a_shadowing_predicate() {
+    let source = r#"(ns routes (:require [clojure.spec.alpha :as s]))
+        (defn string? [_] true)
+        (defn route {:t/sig '[(s/and string? #{:demo}) :-> keyword?]} [_] :demo)"#;
+    let checked = Session::default().check("routes.clj", source);
+    assert!(!checked.complete, "{checked:#?}");
+    assert!(
+        checked.diagnostics.iter().any(|d| {
+            d.severity == "warning" && d.message.contains("Custom predicate in s/and")
+        }),
+        "{checked:#?}"
+    );
+}

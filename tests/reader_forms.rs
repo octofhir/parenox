@@ -150,6 +150,7 @@ fn top_level_evaluation_leaves_coverage_open_for_other_declarations() {
 fn metadata_shorthands_and_stacked_precedence_share_the_lossless_reader() {
     for (source, key) in [
         ("^:private item", ":private"),
+        ("#^String item", ":tag"),
         ("^String item", ":tag"),
         ("^\"java.lang.String\" item", ":tag"),
         ("^[String long _] item", ":param-tags"),
@@ -188,6 +189,38 @@ fn metadata_shorthands_and_stacked_precedence_share_the_lossless_reader() {
         assert!(!parsed.errors.is_empty(), "{source}");
         assert_eq!(parsed.syntax().text().to_string(), source);
     }
+}
+
+#[test]
+fn clojure_dispatch_comments_and_cr_line_endings_are_lossless() {
+    let source = "#!/usr/bin/env clojure\r\n[#^String name #! skip ) ]\rnext] ; keep\rlast";
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let comments: Vec<_> = parsed
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| token.kind() == SyntaxKind::Comment)
+        .map(|token| token.text().to_owned())
+        .collect();
+    assert_eq!(
+        comments,
+        ["#!/usr/bin/env clojure", "#! skip ) ]", "; keep"]
+    );
+    let bindings = parsed.forms[0].vector().unwrap();
+    assert_eq!(bindings[0].symbol(), Some("name"));
+    assert_eq!(
+        bindings[0].metadata(":tag").unwrap().symbol(),
+        Some("String")
+    );
+    assert_eq!(bindings[0].span.start.line, 2);
+    assert_eq!(bindings[1].symbol(), Some("next"));
+    assert_eq!(bindings[1].span.start.line, 3);
+    assert_eq!(parsed.forms[1].symbol(), Some("last"));
+    assert_eq!(parsed.forms[1].span.start.line, 4);
+    assert!(reader::validate_edn("#! no EDN comment\n42").is_err());
+    assert!(reader::validate_edn("; EDN comment\r42").is_ok());
 }
 
 #[test]

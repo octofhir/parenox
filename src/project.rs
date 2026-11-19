@@ -24,6 +24,18 @@ pub struct Source<'a> {
     pub source: &'a str,
 }
 
+/// An insertion at a UTF-8 byte offset in the current source snapshot.
+pub struct SourceEdit {
+    pub offset: usize,
+    pub new_text: String,
+}
+
+/// A candidate contract. Drafts contain commented placeholders, not checked types.
+pub struct FdefSuggestion {
+    pub draft: bool,
+    pub edits: Vec<SourceEdit>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProjectReport {
     pub version: u32,
@@ -278,6 +290,20 @@ pub struct Session {
 }
 
 impl Session {
+    /// Suggest an s/fdef at a top-level function in the current Clojure/JVM snapshot.
+    pub fn suggest_fdef(&self, path: &str, offset: usize) -> Option<FdefSuggestion> {
+        // In .cljc the selected reader branch need not be a top-level source form.
+        if !path.ends_with(".clj") {
+            return None;
+        }
+        let file = self.files.get(path).filter(|file| {
+            file.snapshot == self.snapshot && file.source.is_char_boundary(offset)
+        })?;
+        file.declarations
+            .as_ref()?
+            .suggest_fdef(&file.forms, &file.source, offset)
+    }
+
     /// Discard cached data for a path. The next check uses the supplied source.
     pub fn forget_file(&mut self, path: &str) {
         self.files.remove(path);
@@ -541,7 +567,7 @@ impl Session {
             self.externs
                 .publish_dependencies(&trusted_paths, &mut globals);
         }
-        let mut macro_gaps = BTreeMap::new();
+        let mut top_level_calls = BTreeMap::new();
         if matches!(mode, SnapshotMode::Check(_)) {
             let standard_test = !namespaces.contains_key("clojure.test");
             let provider = |namespace: &str| {
@@ -563,13 +589,35 @@ impl Session {
                     continue;
                 }
                 if let (Some(declarations), Some(model)) = (&file.declarations, &file.model) {
-                    let gaps = declarations.macro_expansion_gaps(&file.forms, |namespace, name| {
-                        provider(namespace).is_some_and(|(provider, declarations)| {
-                            declarations.source_macro(&provider.forms, name, None)
-                        })
-                    });
-                    if !gaps.is_empty() {
-                        macro_gaps.insert(index, gaps);
+                    let calls = declarations.top_level_call_diagnostics(
+                        &file.forms,
+                        |namespace, name| {
+                            provider(namespace).is_some_and(|(file, declarations)| {
+                                declarations.source_macro(&file.forms, name, None)
+                            })
+                        },
+                        |namespace, name, actual| {
+                            let Some((file, declarations)) = provider(namespace) else {
+                                return ProjectCall::Unknown;
+                            };
+                            let call = declarations.project_call(&file.forms, name, actual);
+                            // A matching declaration is evidence for a coverage gap, but a
+                            // mismatch is only definite if the provider's var surface is known.
+                            if matches!(
+                                call,
+                                ProjectCall::Function {
+                                    expected_arity: Some(_)
+                                }
+                            ) && known_provider(namespace).is_none()
+                            {
+                                ProjectCall::Unknown
+                            } else {
+                                call
+                            }
+                        },
+                    );
+                    if !calls.is_empty() {
+                        top_level_calls.insert(index, calls);
                     }
                     reports[index]
                         .diagnostics
@@ -623,15 +671,15 @@ impl Session {
                 if let Some(diagnostics) = self.specs.diagnostics.get(source.path) {
                     report.diagnostics.extend(diagnostics.iter().cloned());
                 }
-                let gaps = macro_gaps.get(&index);
+                let calls = top_level_calls.get(&index);
                 report
                     .diagnostics
                     .extend(model.diagnostics.iter().map(|diagnostic| {
                         if diagnostic.code == "PNX9001"
-                            && let Some(gap) =
-                                gaps.and_then(|gaps| gaps.get(&diagnostic.span.start.offset))
+                            && let Some(call) =
+                                calls.and_then(|calls| calls.get(&diagnostic.span.start.offset))
                         {
-                            return gap.clone();
+                            return call.clone();
                         }
                         diagnostic.clone()
                     }));

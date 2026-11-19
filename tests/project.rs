@@ -312,6 +312,122 @@ fn known_source_macro_expansions_report_coverage_and_follow_provider_edits() {
 }
 
 #[test]
+fn checks_top_level_calls_to_source_functions_without_running_them() {
+    let app = Source {
+        path: "app_test.clj",
+        source:
+            "(ns app-test (:require [fixtures :as f :refer [register] :rename {register setup}]))
+(f/register)
+(setup)
+(f/register 42)
+(f/regster)
+(f/private-helper)",
+    };
+    let fixtures = Source {
+        path: "fixtures.clj",
+        source: "(ns fixtures)\n(defn register [] nil)\n(defn- private-helper [] nil)",
+    };
+    let mut session = Session::default();
+    let diagnostics = |report: ProjectReport| {
+        assert!(!report.complete);
+        report.files[0]
+            .diagnostics
+            .iter()
+            .map(|d| (d.span.start.line, d.code.clone(), d.severity))
+            .collect::<Vec<_>>()
+    };
+    let report = session.check_project(&[app, fixtures], None);
+    assert_eq!(
+        diagnostics(report),
+        [
+            (2, "PNX9001".into(), "warning"),
+            (3, "PNX9001".into(), "warning"),
+            (4, "PNX2554".into(), "error"),
+            (5, "PNX9001".into(), "error"),
+            (6, "PNX9001".into(), "error"),
+        ]
+    );
+
+    // A namespace mutation leaves the exact arity unproven.
+    let opaque = Source {
+        source: "(ns fixtures)\n(defn register [] nil)\n(alter-var-root #'register identity)",
+        ..fixtures
+    };
+    let report = session.check_project(&[app, opaque], None);
+    let findings = diagnostics(report);
+    assert!(findings.contains(&(2, "PNX9001".into(), "warning")));
+    assert!(findings.contains(&(4, "PNX9001".into(), "error")));
+
+    let edited = Source {
+        source: "(ns fixtures)\n(defn register [x] x)",
+        ..fixtures
+    };
+    let report = session.check_project(&[app, edited], None);
+    let findings = diagnostics(report);
+    assert!(findings.contains(&(2, "PNX2554".into(), "error")));
+    assert!(findings.contains(&(4, "PNX9001".into(), "warning")));
+}
+
+#[test]
+fn checks_multimethod_bodies_and_keeps_conditional_bindings_in_scope() {
+    let methods = Source {
+        path: "methods.clj",
+        source: "(ns handlers (:require [helpers :as h :refer [emit]]))
+(defmulti publish identity)
+(defmethod publish (h/tag)
+  ([payload]
+   (when-some [message (emit payload)]
+     (h/sendd message)))
+  ([payload fallback]
+   (if-let [emit (emit payload)]
+     (emit fallback)
+     (emit))))",
+    };
+    let helpers = Source {
+        path: "helpers.clj",
+        source: "(ns helpers (:gen-class))
+(defn emit [payload] payload)
+(defn tag [hint] hint)",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[methods, helpers], None);
+    let findings: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .map(|d| (d.code.as_str(), d.span.start.line))
+        .collect();
+    assert_eq!(
+        findings,
+        [("PNX2554", 3), ("PNX2304", 6), ("PNX2554", 10)],
+        "{report:#?}"
+    );
+    assert!(
+        report.files[0].diagnostics.iter().any(|d| {
+            d.severity == "warning" && d.message.contains("Dispatch and type checking")
+        })
+    );
+    assert!(
+        report.files[1]
+            .diagnostics
+            .iter()
+            .any(|d| { d.severity == "warning" && d.message.contains("JVM class generation") })
+    );
+
+    let matched = methods.source.find("(emit fallback)").unwrap() + 1;
+    let target = session.definition(methods.path, matched).unwrap();
+    assert_eq!(target.path, methods.path);
+    assert_eq!(
+        target.span.start.offset,
+        methods.source.find("[emit (emit").unwrap() + 1
+    );
+    let fallback = methods.source.rfind("(emit)").unwrap() + 1;
+    let target = session.definition(methods.path, fallback).unwrap();
+    assert_eq!(target.path, helpers.path);
+    assert_eq!(target.span.start.line, 2);
+}
+
+#[test]
 fn navigates_unchecked_named_jvm_vars_and_respects_metadata() {
     let provider = Source {
         path: "provider.clj",

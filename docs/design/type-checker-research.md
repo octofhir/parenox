@@ -90,6 +90,30 @@ Local baseline for `34ed757` on macOS arm64 with Rust 1.100.0. A locked, offline
 
 The first implementation slice is `deps.edn` source-root and alias support wired through the existing session, with one cross-namespace definition query that works on ordinary unannotated code. Then expose that query and the existing diagnostics through LSP. Regex literals, string declarations and JVM member checks enter the release backlog where they unblock a pilot. Formatting, completion and rename are follow-up consumers of the same source and resolution data.
 
+### Editor feature parity
+
+Parenox should cover the [Clojure LSP editor workflows](https://clojure-lsp.io/features/)
+before claiming it can replace Clojure LSP. The tooling preview is not that
+milestone. Match the behavior users rely on, not necessarily the implementation
+or command names. Use the pinned [local Clojure LSP pilot](../reference.md#local-clojure-lsp-pilot)
+to compare both servers on the same files and unsaved edits in RustRover.
+
+| Slice | Workflows to compare |
+|---|---|
+| Project analysis | Resolve local and dependency vars, ClojureScript branches, macro scopes and Java interop. Compare lint findings, missing information and project-specific rules separately. |
+| Navigation | Find declarations, implementations and references; list file and workspace symbols; highlight usages and show incoming and outgoing calls. |
+| Editing assistance | Complete locals, vars, aliases, Java names, dependencies and snippets. Show documentation and signature help, and classify names for syntax highlighting. |
+| Safe edits | Support rename, file and range formatting, namespace cleanup, imports, extraction, inlining, and structural edits. Compare edits and preserve comments and lexical bindings. |
+| Project tools | Show references on declarations, navigate the test and project trees, and expose dependency stubs and server inspection. |
+
+Start with two parallel tracks: fix analysis gaps on the pilot and add standard
+`textDocument/codeAction` support. The first contract action should offer a
+reviewable `s/fdef` for a single-arity `defn`. Reuse the namespace's existing
+`clojure.spec.alpha` alias, leave an existing contract alone, and derive only
+types the checker can explain. Observed calls alone do not prove which inputs
+a function accepts. Leave unknown types explicit in a draft, not in a checked
+contract. Compare the proposed edit and its check result on the same buffer.
+
 ### First pilot project
 
 The [first product iteration](first-product-iteration.md) records the final

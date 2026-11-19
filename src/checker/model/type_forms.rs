@@ -1,4 +1,5 @@
 //! The supported type syntax shared by source contracts and spec declarations.
+mod conjunction;
 mod function_specs;
 pub(super) use function_specs::read_function_spec;
 
@@ -149,24 +150,18 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             return Type::Parameter(parameter.clone());
         }
         match &form.without_metadata().kind {
-            Kind::Symbol(s) if s == "java.util.regex.Pattern" => Type::Pattern,
-            Kind::Symbol(s) => match self.names.resolve(s).as_str() {
-                "clojure.core/string?" => Type::String,
-                "clojure.core/char?" => Type::Character,
-                "clojure.core/number?" => Type::Number,
-                "clojure.core/boolean?" => Type::Boolean,
-                "clojure.core/keyword?" => Type::Keyword,
-                "clojure.core/symbol?" => Type::Symbol,
-                "clojure.core/nil?" => Type::Nil,
-                "clojure.core/map?" => Type::Map(MapType {
-                    fields: BTreeMap::new(),
-                    extra: ExtraFields::Open,
-                }),
-                _ => {
+            Kind::Symbol(s) => predicate_type(self.names, s).unwrap_or_else(|| {
+                if self.names.spec_core_shadows.contains(s) {
+                    self.diagnostics.push(Diagnostic::analysis_gap(
+                        "PNX9001",
+                        form.span,
+                        format!("Source predicate {s} is unchecked"),
+                    ));
+                } else {
                     self.error("PNX9001", form.span, format!("Unsupported type {s}"));
-                    Type::Unknown
                 }
-            },
+                Type::Unknown
+            }),
             Kind::Keyword(key) => self.spec(&self.names.key(key), form.span),
             Kind::Map(forms) if self.literal_shapes => {
                 let mut fields = BTreeMap::new();
@@ -215,6 +210,10 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                         self.parse(&xs[1]).nilable()
                     }
                     Some("clojure.spec.alpha/with-gen") if xs.len() == 3 => self.parse(&xs[1]),
+                    Some("clojure.spec.alpha/and") => self.conjunction(form, &xs[1..]),
+                    Some("clojure.spec.alpha/conformer") if matches!(xs.len(), 2 | 3) => {
+                        self.unchecked_conformer(form)
+                    }
                     Some("clojure.spec.alpha/or") if xs.len() >= 3 && xs.len() % 2 == 1 => {
                         let mut types = Vec::new();
                         for pair in xs[1..].as_chunks::<2>().0 {
@@ -340,6 +339,35 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             }
         }
     }
+}
+
+fn predicate_type(names: &Names, symbol: &str) -> Option<Type> {
+    if symbol == "java.util.regex.Pattern" {
+        return Some(Type::Pattern);
+    }
+    let (namespace, local) = names.resolve_parts(symbol);
+    if namespace == "clojure.core" && !names.spec_core_shadows.contains(symbol) {
+        core_predicate_type(local)
+    } else {
+        None
+    }
+}
+
+pub(super) fn core_predicate_type(name: &str) -> Option<Type> {
+    Some(match name {
+        "string?" => Type::String,
+        "char?" => Type::Character,
+        "number?" => Type::Number,
+        "boolean?" => Type::Boolean,
+        "keyword?" => Type::Keyword,
+        "symbol?" => Type::Symbol,
+        "nil?" => Type::Nil,
+        "map?" => Type::Map(MapType {
+            fields: BTreeMap::new(),
+            extra: ExtraFields::Open,
+        }),
+        _ => return None,
+    })
 }
 
 fn generation_options(options: &[Form]) -> bool {

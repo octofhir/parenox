@@ -1,4 +1,6 @@
 //! Function contracts read from a bounded subset of clojure.spec forms.
+
+mod suggest;
 use std::collections::BTreeMap;
 
 use super::{Globals, Model, Signature};

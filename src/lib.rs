@@ -16,7 +16,8 @@ pub use extern_diff::{
     ExternMismatchReason, ExternPathStep, ExternSnapshot,
 };
 pub use project::{
-    Definition, ExternExport, ProjectReport, Session, Source, VarInfo, compare_externs,
+    Definition, ExternExport, FdefSuggestion, ProjectReport, Session, Source, SourceEdit, VarInfo,
+    compare_externs,
 };
 
 #[derive(Clone, Debug, Serialize)]

@@ -101,6 +101,127 @@ fn transcript(messages: &[Value]) -> Vec<Value> {
     std::iter::from_fn(|| read_message(&mut reader)).collect()
 }
 
+#[test]
+fn generates_a_versioned_fdef_from_the_unsaved_function() {
+    let fixture = Fixture::new("generate fdef");
+    let path = fixture.0.join("src/demo.clj");
+    let ns = "(ns demo (:require [clojure.spec.alpha :as spec]))";
+    let saved = format!("{ns}\n(defn bump [n] (str n))\n");
+    let unsaved = format!("{ns}\n(defn bump [n] (inc n)) ;; keep 🦊\n");
+    let generated =
+        "(spec/fdef bump\n  :args (spec/cat :n clojure.core/number?)\n  :ret clojure.core/number?)";
+    let applied = format!("{}\n\n{generated}\n", unsaved.trim_end());
+    fs::write(&path, &saved).unwrap();
+    let file = uri(&path);
+    let query = |id, only: Value| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/codeAction","params":{
+            "textDocument":{"uri":file},
+            "range":{"start":{"line":1,"character":7},"end":{"line":1,"character":7}},
+            "context":{"diagnostics":[],"only":only}
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),
+            "capabilities":{"workspace":{"workspaceEdit":{"documentChanges":true}}}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"version":3,"languageId":"clojure","text":unsaved}
+        }}),
+        query(2, json!(["refactor"])),
+        query(3, json!(["quickfix"])),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":4},"contentChanges":[{"text":applied}]
+        }}),
+        query(4, Value::Null),
+        json!({"jsonrpc":"2.0","id":5,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    assert_eq!(
+        response(1)["capabilities"]["codeActionProvider"]["codeActionKinds"],
+        json!(["refactor.rewrite"])
+    );
+    let position =
+        json!({"line":1,"character":unsaved.lines().nth(1).unwrap().encode_utf16().count()});
+    assert_eq!(
+        response(2),
+        &json!([{"title":"Generate s/fdef","kind":"refactor.rewrite","edit":{
+            "documentChanges":[{"textDocument":{"uri":file,"version":3},"edits":[{
+                "range":{"start":position,"end":position},"newText":format!("\n\n{generated}")
+            }]}]
+        }}])
+    );
+    assert_eq!(response(3), &json!([]));
+    assert_eq!(response(4), &json!([]));
+    let diagnostics = messages
+        .iter()
+        .find(|m| m["method"] == "textDocument/publishDiagnostics" && m["params"]["version"] == 4)
+        .unwrap();
+    assert_eq!(diagnostics["params"]["diagnostics"], json!([]));
+    assert_eq!(fs::read_to_string(path).unwrap(), saved);
+}
+
+#[test]
+fn adds_spec_require_only_for_active_contracts_and_comments_unknown_types() {
+    let fixture = Fixture::new("draft fdef");
+    let path = fixture.0.join("src/demo.clj");
+    let source = "(ns demo)\n(defn label [] \"hello\")\n(defn render [x] (str x))\n(defn hidden {:t/sig '[:-> string?]} [] \"ok\")\n(defn multi ([] nil) ([x] x))\n(defn shadow [inc] (inc 1))\n";
+    fs::write(&path, source).unwrap();
+    let file = uri(&path);
+    let query = |id, line| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/codeAction","params":{
+            "textDocument":{"uri":file},"range":{"start":{"line":line,"character":7},"end":{"line":line,"character":7}},
+            "context":{"diagnostics":[]}
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"version":1,"languageId":"clojure","text":source}
+        }}),
+        query(2, 1),
+        query(3, 2),
+        query(4, 3),
+        query(5, 4),
+        query(6, 5),
+        json!({"jsonrpc":"2.0","id":7,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    let edits = |id| {
+        response(id)[0]["edit"]["changes"][&file]
+            .as_array()
+            .unwrap()
+    };
+    let active = edits(2);
+    assert_eq!(active.len(), 2);
+    assert_eq!(active[0]["newText"], "\n  (:require [clojure.spec.alpha])");
+    assert_eq!(active[0]["range"]["start"], json!({"line":0,"character":8}));
+    assert_eq!(
+        active[1]["newText"],
+        "\n\n(clojure.spec.alpha/fdef label\n  :args (clojure.spec.alpha/cat)\n  :ret clojure.core/string?)"
+    );
+    let draft = edits(3);
+    assert_eq!(draft.len(), 1);
+    let text = draft[0]["newText"].as_str().unwrap();
+    assert!(
+        text.lines()
+            .filter(|line| !line.is_empty())
+            .all(|line| line.starts_with(";; "))
+    );
+    assert!(text.contains(":x clojure.core/any?"));
+    assert!(text.contains(":ret clojure.core/string?"));
+    assert_eq!(response(4), &json!([]));
+    assert_eq!(response(5), &json!([]));
+    assert!(
+        edits(6)[0]["newText"]
+            .as_str()
+            .unwrap()
+            .contains(":ret clojure.core/any?")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn editor_merges_physical_buffers_with_linked_source_roots() {

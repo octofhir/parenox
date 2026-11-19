@@ -6,6 +6,42 @@ default:
 build:
     cargo build --locked --release
 
+pilot_revision := "1e93ac58bede574786c5cc75b0fd3a51bc224f7a"
+pilot_deps := "playground/clojure-lsp/deps.edn"
+
+# Download the pinned Clojure LSP checkout without touching local edits.
+pilot-fetch:
+    #!/bin/sh
+    set -eu
+    dest=playground/clojure-lsp
+    revision={{quote(pilot_revision)}}
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if [ -d "$dest/.git" ] && [ "$(git -C "$dest" rev-parse --verify HEAD 2>/dev/null)" = "$revision" ]; then
+            printf '%s\n' "$dest" >&2
+            exit 0
+        fi
+        printf '%s\n' "$dest already exists but is not at $revision. Move it aside and retry." >&2
+        exit 1
+    fi
+    mkdir -p playground
+    tmp=$(mktemp -d playground/.clojure-lsp.XXXXXX)
+    trap 'rm -rf "$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    git init --quiet "$tmp"
+    git -C "$tmp" remote add origin https://github.com/clojure-lsp/clojure-lsp.git
+    git -C "$tmp" fetch --quiet --depth=1 origin "$revision"
+    git -C "$tmp" checkout --quiet --detach FETCH_HEAD
+    mv "$tmp" "$dest"
+    printf '%s\n' "$dest" >&2
+
+# Prepare the local pilot for RustRover.
+pilot-setup: pilot-fetch build
+
+# Check all configured pilot sources, including files not open in the editor.
+pilot-check format="pretty": build
+    @test -f {{quote(pilot_deps)}} || { echo "Run just pilot-setup first." >&2; exit 2; }
+    @./target/release/parenox check --deps {{quote(pilot_deps)}} --alias test --allow-incomplete --format {{quote(format)}}
+
 # Check a file or directory: just check path [pretty|plain|json] [auto|always|never].
 check path="examples/good.clj" format="pretty" color="auto": build
     @./target/release/parenox check {{quote(path)}} --format {{quote(format)}} --color {{quote(color)}}

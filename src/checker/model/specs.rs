@@ -2,10 +2,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use super::declarations::{Declarations, Names, SpecDeclaration};
-use super::type_forms::read_type;
+use super::contracts::function_parts;
+use super::declarations::{Declarations, Names, SpecDeclaration, symbols_match};
+use super::type_forms::{core_predicate_type, read_type};
 use crate::Diagnostic;
-use crate::reader::Span;
+use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
 #[derive(PartialEq, Eq)]
@@ -15,6 +16,48 @@ pub(crate) struct SpecFingerprint {
 }
 
 impl Declarations {
+    pub(super) fn has_inline_spec_composition(&self, forms: &[Form]) -> bool {
+        self.functions.iter().any(|&index| {
+            let Kind::List(items) = &forms[index].without_metadata().kind else {
+                return false;
+            };
+            let [_, name, tail @ ..] = items.as_slice() else {
+                return false;
+            };
+            // Dependency scanning skips quoted data; :t/sig uses quoted types.
+            let signature = function_parts(tail)
+                .1
+                .find_map(|[key, value]| (key.keyword() == Some(":t/sig")).then_some(value))
+                .or_else(|| name.metadata(":t/sig"));
+            signature.is_some_and(|form| {
+                !symbols_match(form.unquoted(), &mut |symbol| {
+                    !matches!(
+                        self.names.resolve_parts(symbol),
+                        ("clojure.spec.alpha", "and" | "conformer")
+                    )
+                })
+            })
+        })
+    }
+
+    pub(super) fn read_spec_core_scope(&mut self, forms: &[Form]) {
+        self.names.spec_core_shadows = self
+            .top_level_names(forms)
+            .into_iter()
+            .chain(self.forward_vars.keys().map(String::as_str))
+            .filter(|name| {
+                let (namespace, local) = self.names.resolve_parts(name);
+                namespace == "clojure.core"
+                    && (local == "second" || core_predicate_type(local).is_some())
+                    && (self.forward_vars.contains_key(*name)
+                        || self.source_declarations(forms, name).next().is_some())
+            })
+            .map(str::to_owned)
+            .collect();
+        self.names.spec_core_scope_known =
+            self.all_refers.is_empty() && self.has_known_var_surface(forms);
+    }
+
     pub fn spec_fingerprint(&self, source: &str) -> Option<SpecFingerprint> {
         if self.specs.is_empty() {
             return None;

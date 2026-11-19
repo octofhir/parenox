@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Globals;
 use super::contracts::function_parts;
+use super::references::ProjectCall;
 use super::require::ExplicitReferral;
 use crate::Diagnostic;
 use crate::checker::bindings::binding_names;
@@ -50,6 +51,8 @@ pub(super) struct Names {
     pub(super) imports: BTreeMap<String, String>,
     pub(super) core_only: Option<BTreeSet<String>>,
     pub(super) core_hidden: BTreeSet<String>,
+    pub(super) spec_core_shadows: BTreeSet<String>,
+    pub(super) spec_core_scope_known: bool,
 }
 
 impl Names {
@@ -120,6 +123,7 @@ pub(crate) struct Declarations {
     pub(super) fdefs: Vec<usize>,
     pub(super) functions: Vec<usize>,
     pub(super) test_forms: Vec<usize>,
+    pub(super) method_forms: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
     pub(super) unchecked_vars: Vec<usize>,
     scoped_functions: Vec<ScopedFunction>,
@@ -340,10 +344,11 @@ impl Declarations {
             }
     }
 
-    pub(crate) fn macro_expansion_gaps(
+    pub(crate) fn top_level_call_diagnostics(
         &self,
         forms: &[Form],
         mut public_macro: impl FnMut(&str, &str) -> bool,
+        mut public_call: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> BTreeMap<usize, Diagnostic> {
         self.unmodeled_calls
             .iter()
@@ -357,21 +362,43 @@ impl Declarations {
                 let offset = form.span.start.offset;
                 let local = namespace == self.namespace()
                     || (!op.contains('/') && !self.names.refers.contains_key(op));
-                let found = if local && self.source_macro(forms, name, Some(offset)) {
+                let known_macro = if local && self.source_macro(forms, name, Some(offset)) {
                     true
                 } else {
                     namespace != self.namespace() && public_macro(namespace, name)
                 };
-                found.then(|| {
-                    (
-                        offset,
-                        Diagnostic::analysis_gap(
-                            "PNX9001",
-                            items[0].without_metadata().span,
-                            format!("Expansion of source macro {op} is unchecked"),
-                        ),
+                let span = items[0].without_metadata().span;
+                let diagnostic = if known_macro {
+                    Diagnostic::analysis_gap(
+                        "PNX9001",
+                        span,
+                        format!("Expansion of source macro {op} is unchecked"),
                     )
-                })
+                } else if !local {
+                    let actual = items.len() - 1;
+                    match public_call(namespace, name, actual) {
+                        ProjectCall::Function {
+                            expected_arity: Some(expected),
+                        } => Diagnostic::new(
+                            "PNX2554",
+                            span,
+                            format!("{op} expects {expected} arguments, got {actual}"),
+                        ),
+                        ProjectCall::Function {
+                            expected_arity: None,
+                        } => Diagnostic::analysis_gap(
+                            "PNX9001",
+                            span,
+                            format!(
+                                "Analysis of top-level call to source function {op} is unavailable"
+                            ),
+                        ),
+                        _ => return None,
+                    }
+                } else {
+                    return None;
+                };
+                Some((offset, diagnostic))
             })
             .collect()
     }
@@ -439,9 +466,13 @@ impl Declarations {
             }
         }
         let mut dependencies: BTreeSet<_> = model.dependencies.iter().map(String::as_str).collect();
+        let mut uses_spec_composition = false;
         for form in forms {
             symbols_match(form, &mut |name| {
-                dependencies.insert(model.names.resolve_parts(name).0);
+                let (namespace, local) = model.names.resolve_parts(name);
+                dependencies.insert(namespace);
+                uses_spec_composition |=
+                    namespace == "clojure.spec.alpha" && matches!(local, "and" | "conformer");
                 true
             });
         }
@@ -504,7 +535,17 @@ impl Declarations {
                             model.protocols.push(index);
                             model.opaque_var_surface = true;
                         }
-                        "clojure.core/defmethod" => {}
+                        "clojure.core/defmethod" => {
+                            if op.contains('/')
+                                || (model.all_refers.is_empty()
+                                    && model.source_declarations(forms, op).next().is_none()
+                                    && !model.forward_vars.contains_key(op))
+                            {
+                                model.method_forms.push(index);
+                            } else {
+                                model.opaque_var_surface = true;
+                            }
+                        }
                         "clojure.core/let" => {
                             if op.contains('/')
                                 || (model.all_refers.is_empty()
@@ -531,6 +572,8 @@ impl Declarations {
                     let message =
                         if matches!(qualified, "clojure.test/deftest" | "clojure.test/deftest-") {
                             format!("Type checking for {op} declarations is unavailable")
+                        } else if qualified == "clojure.core/defmethod" {
+                            format!("Dispatch and type checking for {op} are unavailable")
                         } else {
                             format!("Analysis for {op} declarations is unavailable")
                         };
@@ -547,6 +590,9 @@ impl Declarations {
                     );
                 }
             }
+        }
+        if uses_spec_composition || model.has_inline_spec_composition(forms) {
+            model.read_spec_core_scope(forms);
         }
         model
     }
@@ -628,6 +674,13 @@ impl Declarations {
                     clause.span,
                     "Only one :refer-clojure clause is supported",
                 ),
+                Some(":gen-class") if items.len() == 1 => {
+                    self.diagnostics.push(Diagnostic::analysis_gap(
+                        "PNX9001",
+                        items[0].span,
+                        "JVM class generation for :gen-class is unchecked",
+                    ));
+                }
                 _ => self.error("PNX9001", clause.span, "Unsupported ns clause"),
             }
         }

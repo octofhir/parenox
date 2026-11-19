@@ -63,7 +63,7 @@ impl<'a> Lines<'a> {
         Some(start + text.len())
     }
 
-    fn position(&self, offset: usize) -> Option<Position> {
+    pub fn position(&self, offset: usize) -> Option<Position> {
         if !self.source.is_char_boundary(offset) {
             return None;
         }

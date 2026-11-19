@@ -427,6 +427,8 @@ Splicing directly through a quote, metadata prefix, tag or conditional feature/v
 pair is currently unsupported; ordinary collection splicing is supported.
 
 The same reader handles the currently supported common Clojure/EDN syntax.
+In Clojure source, `#!` is a line comment and `#^` is an alternate metadata
+prefix. Both retain their spelling in the CST. EDN rejects `#!`.
 This does not implement a complete EDN reader, macro expansion, incremental
 reparsing or a formatter. A future formatter can consume the CST and verify
 that its output preserves significant tokens and comments.
@@ -564,6 +566,16 @@ Open `.edn` files receive syntax diagnostics from the data reader. Tagged
 values are read as inert data. Clojure navigation is available for `.clj` and
 `.cljc` buffers.
 
+On a top-level function in a `.clj` buffer, use the editor's code actions
+to generate an `s/fdef`. Parenox uses the unsaved definition to infer
+supported predicates from literals and selected calls, for example
+`number?` for the input and result of `(defn bump [n] (inc n))`.
+It does not infer argument types from observed callers. Unknown predicates
+produce a commented draft with `any?` placeholders for review. For an active
+contract, Parenox reuses the `clojure.spec.alpha` alias or adds the require.
+The action is limited to one fixed arity and does not replace an existing
+contract. Applying a contract can expose coverage gaps in its function body.
+
 Saving a project manifest or an indexed extern file refreshes the workspace
 while preserving open buffers. The server logs configuration failures and keeps
 its last loaded snapshot. If startup configuration is invalid, open-file
@@ -593,6 +605,39 @@ Run `just uri-editor-smoke /absolute/path/to/uri` against the pinned
 The smoke test exercises the stdio protocol with an unsaved typo and an invalid
 EDN buffer, checks the definition location, and compares the typo diagnostics
 with a fresh CLI check. It leaves the pilot checkout intact.
+
+### Local Clojure LSP pilot
+
+From the Parenox project root, run `just pilot-setup`. It downloads a pinned
+[Clojure LSP checkout](https://github.com/clojure-lsp/clojure-lsp) into
+`playground/clojure-lsp` and builds the release binary. Git ignores
+`playground/` in Parenox. Running setup again leaves local edits in the
+checkout alone.
+
+Keep the Parenox project open in RustRover. In LSP4IJ, set the existing
+Parenox server's **Command** to:
+
+```text
+"$PROJECT_DIR$/target/release/parenox" lsp --deps "$PROJECT_DIR$/playground/clojure-lsp/deps.edn" --alias test
+```
+
+Open `playground/clojure-lsp/cli/src/clojure_lsp/clojure_coercer.clj` in
+that window. Parenox publishes diagnostics for open files, including
+unsaved changes. For example, look for `PNX9001` at an unsupported
+`clojure.spec` form. After rebuilding Parenox, restart its language server
+to pick up the new binary.
+
+In the pilot's `lib/src/clojure_lsp/shared.clj`, open the RustRover
+intention menu (`Alt+Enter`) on `clojure-lsp-version*` for **Generate s/fdef**
+or on `colorize` for **Draft s/fdef (review unknown types)**. Both proposals
+include a string return predicate. The draft leaves the types of `s` and
+`color` for review.
+
+Use `just pilot-check` from the RustRover terminal to check all Clojure files
+in the pilot's `:test` source roots, including closed files.
+`just pilot-check json` prints a machine-readable report. Neither check runs
+the pilot's code nor resolves its Maven dependencies. Diagnostics on the
+unmodified checkout can describe analysis gaps rather than upstream bugs.
 
 ## Agent sessions
 
@@ -790,6 +835,15 @@ An `s/fdef` for a var in an external namespace remains an explicit coverage gap.
 Recursive specs and `s/coll-of` without a collection kind report incomplete
 coverage.
 
+`s/and` can narrow input types when earlier checks preserve the value. For
+example, `(s/and keyword? #{:read :write})` accepts only those two keywords.
+A final `(s/conformer second)` after a direct `s/or` removes the tag without
+changing which inputs the choice accepts, if `second` resolves to the core
+function. Other conformers,
+custom predicates, and checks on a previously transformed value report
+incomplete coverage. Parenox does not execute these callbacks or infer the
+type of the result of calling `s/conform`.
+
 An unannotated function can still receive `PNX2304` for an absent or private
 qualified var, and `PNX2554` for a wrong argument count on a qualified or
 explicitly referred call. Parenox checks known project source declarations,
@@ -803,10 +857,21 @@ arguments to known functions. Local bindings shadow referred vars. Unknown
 macros and ambiguous declarations limit how far Parenox can follow calls.
 The report still marks type coverage as incomplete.
 
+In `if-let`, `if-some`, `when-let`, `when-some` and `when-first`, the
+binding applies only to the matching branch, not to the initializer or
+fallback. Reference checks and go-to-definition also cover these bindings
+in unannotated code.
+
 Source `defmacro` declarations provide navigation. When a top-level call
 targets a defined source macro, Parenox reports the unchecked expansion as
 a coverage warning. Any declarations and contracts produced by the expansion
 remain outside the source model.
+
+For a qualified or explicitly referred call to a public function from another
+project namespace at the top level, Parenox can check its argument count when
+the provider's vars are known. A call that matches a source declaration still
+gets a coverage warning: Parenox does not check its arguments or run its
+body. An unresolved top-level call keeps its unsupported-form diagnostic.
 
 Top-level `let`, `require`, and `clojure.test/testing` report incomplete
 coverage. Vars and imports created by those expressions depend on runtime
@@ -814,6 +879,10 @@ evaluation. Direct `defn` and `defn-` forms inside a top-level `let` provide
 source navigation and keep their captured values and call types unchecked.
 `defprotocol` provides navigation to the protocol var and its method vars.
 Protocol dispatch and method signatures remain unchecked.
+`defmethod` gets reference and arity checks in the dispatch expression and
+method body, including navigation to method parameters. Multimethod dispatch
+and method body types remain unchecked. A bare `(:gen-class)` in `ns` does
+not block source resolution; JVM class generation remains unchecked.
 
 Supported string operations can also report input mismatches in a function
 without a contract. This analysis follows supported local bindings, map

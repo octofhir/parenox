@@ -384,7 +384,7 @@ impl<'a> Reader<'a> {
     fn bump(&mut self) -> Option<char> {
         let ch = self.peek()?;
         self.pos.offset += ch.len_utf8();
-        if ch == '\n' {
+        if ch == '\n' || (ch == '\r' && self.peek() != Some('\n')) {
             self.pos.line += 1;
             self.pos.column = 1;
         } else {
@@ -441,7 +441,7 @@ impl<'a> Reader<'a> {
             let start = self.pos;
             match self.peek() {
                 Some(';') => {
-                    while self.peek().is_some_and(|c| c != '\n') {
+                    while self.peek().is_some_and(|c| !matches!(c, '\r' | '\n')) {
                         self.bump();
                     }
                     self.token(SyntaxKind::Comment, start);
@@ -460,6 +460,12 @@ impl<'a> Reader<'a> {
                             following_offset: 0,
                         });
                     }
+                }
+                Some('#') if !self.edn && self.source[start.offset..].starts_with("#!") => {
+                    while self.peek().is_some_and(|c| !matches!(c, '\r' | '\n')) {
+                        self.bump();
+                    }
+                    self.token(SyntaxKind::Comment, start);
                 }
                 Some('#') if self.source[self.pos.offset..].starts_with("#_") => {
                     self.start_node(start);
@@ -617,6 +623,11 @@ impl<'a> Reader<'a> {
             Some('#') if self.peek() == Some('\'') && !self.edn => {
                 self.bump();
                 return self.prefix_call(start, SyntaxKind::VarQuoteMark, "var");
+            }
+            Some('#') if self.peek() == Some('^') => {
+                self.bump();
+                self.token(SyntaxKind::MetadataMark, start);
+                self.metadata_form(start)?
             }
             Some('#') if self.peek() == Some('#') => self.symbolic_number(start)?,
             Some('#') if self.peek() == Some(':') => self.namespaced_map(start)?,

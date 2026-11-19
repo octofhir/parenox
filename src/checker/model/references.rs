@@ -101,7 +101,8 @@ impl Declarations {
         mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Vec<Diagnostic> {
         let mut unchecked = self.unchecked_definitions(forms, model).peekable();
-        if unchecked.peek().is_none() && self.test_forms.is_empty() {
+        if unchecked.peek().is_none() && self.test_forms.is_empty() && self.method_forms.is_empty()
+        {
             return Vec::new();
         }
         let top_level_names = self.top_level_names(forms);
@@ -118,6 +119,9 @@ impl Declarations {
         };
         for form in unchecked {
             visit.definition(form);
+        }
+        for &index in &self.method_forms {
+            visit.method(&forms[index]);
         }
         visit.inside_test = true;
         for &index in &self.test_forms {
@@ -156,7 +160,8 @@ impl Declarations {
         let index = forms.partition_point(|form| form.span.end.offset <= offset);
         let form = forms.get(index)?;
         let inside_test = self.test_forms.binary_search(&index).is_ok();
-        if !inside_test && self.functions.binary_search(&index).is_err() {
+        let inside_method = self.method_forms.binary_search(&index).is_ok();
+        if !inside_test && !inside_method && self.functions.binary_search(&index).is_err() {
             return None;
         }
         let top_level_names = self.top_level_names(forms);
@@ -177,6 +182,8 @@ impl Declarations {
             if let Kind::List(items) = &form.without_metadata().kind {
                 visit.forms(&items[2..]);
             }
+        } else if inside_method {
+            visit.method(form);
         } else {
             visit.definition(form);
         }
@@ -247,6 +254,18 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         self.locals.truncate(scope);
     }
 
+    fn method(&mut self, form: &'a Form) {
+        if let Kind::List(items) = &form.without_metadata().kind
+            && let [_, declaration @ ..] = items.as_slice()
+            && let [target, dispatch, tail @ ..] = declaration
+        {
+            // The dispatch value is evaluated before the method's bindings exist.
+            self.forms(std::slice::from_ref(target));
+            self.forms(std::slice::from_ref(dispatch));
+            self.function(tail, form.span);
+        }
+    }
+
     fn forms(&mut self, forms: &'a [Form]) {
         for form in forms {
             if let Purpose::Navigate { offset, .. } = self.purpose
@@ -305,6 +324,10 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         if self.trusted_core(symbol, namespace) {
             match local {
                 "let" | "loop" => return self.bindings(args),
+                "if-let" | "if-some" => return self.conditional_binding(args, true),
+                "when-let" | "when-some" | "when-first" => {
+                    return self.conditional_binding(args, false);
+                }
                 "fn" => return self.function(args, head.span),
                 "letfn" => return self.local_functions(args),
                 "when" | "when-not" | "if-not" | "and" | "or" | "cond" | "=" | "not=" | "<"
@@ -552,5 +575,28 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             self.forms(body);
             self.locals.truncate(scope);
         }
+    }
+
+    fn conditional_binding(&mut self, args: &'a [Form], has_else: bool) {
+        let [bindings, body @ ..] = args else {
+            return;
+        };
+        if self.template_scope.is_some() || (has_else && !(1..=2).contains(&body.len())) {
+            return;
+        }
+        let Some([pattern, value]) = bindings.vector() else {
+            return;
+        };
+        let (matched, fallback) = if has_else {
+            body.split_at(1)
+        } else {
+            (body, &[][..])
+        };
+        self.forms(std::slice::from_ref(value));
+        let scope = self.locals.len();
+        binding_names(pattern, &mut self.locals);
+        self.forms(matched);
+        self.locals.truncate(scope);
+        self.forms(fallback);
     }
 }

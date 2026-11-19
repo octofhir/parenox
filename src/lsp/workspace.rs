@@ -20,6 +20,7 @@ pub(super) struct Workspace {
     source_roots: Vec<PathBuf>,
     source_aliases: Vec<(PathBuf, PathBuf)>,
     register_watches: bool,
+    versioned_edits: bool,
     documents: BTreeMap<String, Document>,
     externs: Vec<FileSnapshot>,
     session: Session,
@@ -101,14 +102,33 @@ pub(super) struct TextQuery {
     position: Position,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CodeActionQuery {
+    text_document: DocumentUri,
+    range: Range,
+    context: CodeActionContext,
+}
+
+#[derive(Deserialize)]
+struct CodeActionContext {
+    only: Option<Vec<String>>,
+}
+
 impl Workspace {
-    pub fn load(root: PathBuf, options: &ProjectOptions, register_watches: bool) -> Self {
+    pub fn load(
+        root: PathBuf,
+        options: &ProjectOptions,
+        register_watches: bool,
+        versioned_edits: bool,
+    ) -> Self {
         let mut workspace = Self {
             root,
             options: options.clone(),
             source_roots: Vec::new(),
             source_aliases: Vec::new(),
             register_watches,
+            versioned_edits,
             documents: BTreeMap::new(),
             externs: Vec::new(),
             session: Session::default(),
@@ -404,6 +424,46 @@ impl Workspace {
             lines.push("Checked type information unavailable".into());
         }
         Some(json!({"contents":{"kind":"plaintext","value":lines.join("\n")}}))
+    }
+
+    pub fn code_actions(&self, params: CodeActionQuery) -> Vec<Value> {
+        self.fdef_action(params).into_iter().collect()
+    }
+
+    fn fdef_action(&self, params: CodeActionQuery) -> Option<Value> {
+        const KIND: &str = "refactor.rewrite";
+        if params.context.only.is_some_and(|kinds| {
+            !kinds.iter().any(|kind| {
+                kind.is_empty()
+                    || KIND == kind
+                    || KIND.strip_prefix(kind).is_some_and(|s| s.starts_with('.'))
+            })
+        }) {
+            return None;
+        }
+        let path = self.document_key(&params.text_document.uri)?;
+        let document = self.documents.get(&path)?;
+        let editor = document.editor.as_ref()?;
+        let lines = Lines::new(&document.source);
+        let offset = lines.byte_range(params.range)?.start;
+        let suggestion = self.session_for(&path)?.suggest_fdef(&path, offset)?;
+        let title = if suggestion.draft {
+            "Draft s/fdef (review unknown types)"
+        } else {
+            "Generate s/fdef"
+        };
+        let edits = suggestion.edits.into_iter().map(|edit| {
+            let position = lines.position(edit.offset)?;
+            Some(json!({"range": {"start": position, "end": position}, "newText": edit.new_text}))
+        }).collect::<Option<Vec<_>>>()?;
+        let edit = if self.versioned_edits {
+            json!({"documentChanges": [{
+                "textDocument":{"uri": editor.uri, "version": editor.version}, "edits": edits
+            }]})
+        } else {
+            json!({"changes": {(editor.uri.clone()): edits}})
+        };
+        Some(json!({"title":title,"kind":KIND,"edit":edit}))
     }
 
     fn session_for(&self, path: &str) -> Option<&Session> {

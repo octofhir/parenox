@@ -148,13 +148,19 @@ fn request(
             .pointer("/workspace/didChangeWatchedFiles/dynamicRegistration")
             .and_then(Value::as_bool)
             == Some(true);
-        *workspace = Some(Workspace::load(root, options, watch));
+        let versioned_edits = init
+            .capabilities
+            .pointer("/workspace/workspaceEdit/documentChanges")
+            .and_then(Value::as_bool)
+            == Some(true);
+        *workspace = Some(Workspace::load(root, options, watch, versioned_edits));
         return result(
             output,
             id,
             json!({"capabilities": {
             "positionEncoding":"utf-16", "textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},
-            "definitionProvider":true, "hoverProvider":true
+            "definitionProvider":true, "hoverProvider":true,
+            "codeActionProvider":{"codeActionKinds":["refactor.rewrite"]}
         }, "serverInfo":{"name":"parenox", "version":env!("CARGO_PKG_VERSION")}}),
         );
     }
@@ -172,6 +178,10 @@ fn request(
         },
         "textDocument/hover" => match serde_json::from_value(params) {
             Ok(params) => workspace.hover(params).unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/codeAction" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.code_actions(params)),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         _ => return send_error(output, id, -32601, "Method not found"),
