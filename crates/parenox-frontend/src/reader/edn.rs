@@ -35,6 +35,7 @@ impl Reader<'_> {
         let kind = match self.peek() {
             Some('^') => {
                 self.bump();
+                self.token(super::SyntaxKind::MetadataMark, start);
                 self.metadata_form(start)?
             }
             _ => return Err(self.error(start, "Clojure reader form is unavailable in EDN")),

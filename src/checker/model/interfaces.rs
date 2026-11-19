@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::{
-    Contract, DeclaredValue, Function, Globals, LiteralVar, Model, Names, UncheckedFunction,
+    Contract, DeclaredValue, Function, Globals, LiteralVar, Model, Names, SpecConversion,
+    UncheckedFunction,
     declarations::symbols_match,
     externs::{ExternalDeclaration, ExternalDeclarations},
 };
@@ -79,6 +80,8 @@ struct LocalFunction {
 pub(crate) struct InterfaceKey {
     local: Arc<LocalInterface>,
     dependencies: Vec<Dependency>,
+    specs: Arc<BTreeMap<String, Type>>,
+    spec_conversions: Arc<BTreeMap<String, SpecConversion>>,
 }
 
 struct Dependency {
@@ -113,6 +116,11 @@ pub(crate) struct InterfaceChanges<'a> {
 }
 
 impl InterfaceKey {
+    pub fn same_specs(&self, before: &Self) -> bool {
+        Arc::ptr_eq(&self.specs, &before.specs)
+            && Arc::ptr_eq(&self.spec_conversions, &before.spec_conversions)
+    }
+
     pub fn changes<'a>(&'a self, before: &'a Self) -> InterfaceChanges<'a> {
         let same_local = self.local == before.local;
         let compatible_scope = same_local
@@ -320,6 +328,8 @@ impl Model {
         InterfaceKey {
             local: self.local_interface.clone(),
             dependencies,
+            specs: globals.specs.clone(),
+            spec_conversions: globals.spec_conversions.clone(),
         }
     }
 }

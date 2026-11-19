@@ -1,7 +1,9 @@
 mod extern_export;
 mod navigation;
+mod symbols;
 
 pub use navigation::{Definition, VarInfo};
+pub use symbols::{SourceSymbol, SourceSymbolKind};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -11,7 +13,7 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::checker::{
-    Declarations, ExternCache, Globals, InterfaceKey, Model, ProjectCall, SpecCache,
+    Declarations, ExternCache, FunctionCheck, Globals, InterfaceKey, Model, ProjectCall, SpecCache,
     SpecFingerprint, SpecSource,
 };
 use crate::reader::{self, Form, Position, Span};
@@ -121,7 +123,7 @@ struct FileCache {
 
 struct CheckedFunction {
     ranges: Vec<Span>,
-    diagnostics: Vec<Diagnostic>,
+    result: FunctionCheck,
 }
 
 struct NavigationPrefix {
@@ -132,7 +134,7 @@ struct NavigationPrefix {
 impl CheckedFunction {
     fn reusable(&self, previous_source: &str, source: &str, ranges: &[Span]) -> bool {
         // Diagnostics and call-chain notes contain absolute source positions.
-        if !self.diagnostics.is_empty() && self.ranges != ranges {
+        if !self.result.diagnostics.is_empty() && self.ranges != ranges {
             return false;
         }
         self.ranges.len() == ranges.len()
@@ -495,7 +497,7 @@ impl Session {
                 })
                 .collect(),
         );
-        let mut globals = Globals::with_specs(self.specs.types.clone());
+        let mut globals = Globals::with_specs(&self.specs);
         for namespace in namespaces.keys() {
             globals.register_namespace(namespace);
         }
@@ -703,10 +705,19 @@ impl Session {
                     .interface
                     .as_ref()
                     .map(|previous| interface.changes(previous));
+                let same_specs = cache
+                    .interface
+                    .as_ref()
+                    .is_some_and(|previous| interface.same_specs(previous));
                 let unchanged = Arc::ptr_eq(&cache.checked_source, &cache.source)
                     && changes
                         .as_ref()
-                        .is_some_and(|changes| changes.is_unchanged());
+                        .is_some_and(|changes| changes.is_unchanged())
+                    && (same_specs
+                        || cache
+                            .functions
+                            .values()
+                            .all(|cached| cached.result.matches_specs(&globals)));
                 if !unchanged {
                     cache.partial_diagnostics = None;
                 }
@@ -735,7 +746,7 @@ impl Session {
                         cache
                             .functions
                             .values()
-                            .flat_map(|function| function.diagnostics.iter().cloned()),
+                            .flat_map(|function| function.result.diagnostics.iter().cloned()),
                     );
                 } else {
                     for function in model.functions.values().filter(|f| !f.inferred()) {
@@ -743,12 +754,13 @@ impl Session {
                         if let Some(cached) =
                             cache.functions.get_mut(&function.name).filter(|cached| {
                                 cached.reusable(&cache.checked_source, source.source, &ranges)
+                                    && (same_specs || cached.result.matches_specs(&globals))
                                     && changes.as_ref().is_some_and(|changes| {
                                         // Cached messages can contain the original binder names.
                                         changes.allows_reuse(
                                             model,
                                             function,
-                                            cached.diagnostics.is_empty(),
+                                            cached.result.diagnostics.is_empty(),
                                         )
                                     })
                             })
@@ -756,20 +768,17 @@ impl Session {
                             report.stats.reused_functions += 1;
                             report
                                 .diagnostics
-                                .extend(cached.diagnostics.iter().cloned());
+                                .extend(cached.result.diagnostics.iter().cloned());
                             cached.ranges = ranges;
                         } else {
                             report.stats.checked_functions += 1;
-                            let diagnostics =
-                                model.check_function(function, source.source, &globals);
-                            report.diagnostics.extend(diagnostics.iter().cloned());
-                            cache.functions.insert(
-                                function.name.clone(),
-                                CheckedFunction {
-                                    ranges,
-                                    diagnostics,
-                                },
-                            );
+                            let result = model.check_function(function, source.source, &globals);
+                            report
+                                .diagnostics
+                                .extend(result.diagnostics.iter().cloned());
+                            cache
+                                .functions
+                                .insert(function.name.clone(), CheckedFunction { ranges, result });
                         }
                     }
                     let active = report.stats.checked_functions + report.stats.reused_functions;

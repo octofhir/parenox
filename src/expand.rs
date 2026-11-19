@@ -16,13 +16,17 @@ pub enum Threading {
 
 impl Threading {
     pub fn from_core_symbol(symbol: &str) -> Option<Self> {
-        match symbol {
-            "clojure.core/->" => Some(Self::First),
-            "clojure.core/->>" => Some(Self::Last),
-            "clojure.core/some->" => Some(Self::SomeFirst),
-            "clojure.core/some->>" => Some(Self::SomeLast),
-            "clojure.core/cond->" => Some(Self::ConditionalFirst),
-            "clojure.core/cond->>" => Some(Self::ConditionalLast),
+        Self::from_core_name(symbol.strip_prefix("clojure.core/")?)
+    }
+
+    pub(crate) fn from_core_name(name: &str) -> Option<Self> {
+        match name {
+            "->" => Some(Self::First),
+            "->>" => Some(Self::Last),
+            "some->" => Some(Self::SomeFirst),
+            "some->>" => Some(Self::SomeLast),
+            "cond->" => Some(Self::ConditionalFirst),
+            "cond->>" => Some(Self::ConditionalLast),
             _ => None,
         }
     }

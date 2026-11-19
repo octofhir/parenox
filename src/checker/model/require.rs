@@ -57,6 +57,16 @@ pub(super) struct ExplicitReferral {
 }
 
 impl Declarations {
+    pub(crate) fn referrals_to<'a>(&'a self, target: &'a str) -> impl Iterator<Item = Span> + 'a {
+        self.referrals
+            .iter()
+            .filter(move |referral| referral.qualified == target)
+            .flat_map(|referral| {
+                std::iter::once(referral.source)
+                    .chain(referral.renaming.as_slice().iter().flatten().copied())
+            })
+    }
+
     pub(crate) fn referral_at(&self, offset: usize) -> Option<(&str, &str)> {
         let referral = self.referrals.iter().find(|referral| {
             std::iter::once(&referral.source)

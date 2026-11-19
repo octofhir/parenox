@@ -6,6 +6,7 @@ mod uniqueness;
 pub use edn::{read_edn, validate_edn};
 #[doc(hidden)]
 pub use namespace_map::qualify_namespaced_entries;
+pub use numbers::{NumericLiteral, classify_number};
 
 use crate::syntax::{Builder, SyntaxKind, SyntaxNode};
 
@@ -259,8 +260,17 @@ pub fn parse(source: &str) -> Parse {
 
 /// Captures the whole CST and applies the requested policy to semantic forms in one pass.
 pub fn parse_with(source: &str, conditionals: Conditionals<'_>) -> Parse {
-    let mut reader = Reader::new(source, true, conditionals);
+    parse_tree(Reader::new(source, true, conditionals))
+}
 
+/// Captures inert EDN syntax, preserving trivia just like the source reader.
+pub fn parse_edn(source: &str) -> Parse {
+    let mut reader = Reader::new(source, true, Conditionals::Reject);
+    reader.edn = true;
+    parse_tree(reader)
+}
+
+fn parse_tree(mut reader: Reader<'_>) -> Parse {
     let mut forms = Vec::new();
     let mut errors = Vec::new();
     loop {

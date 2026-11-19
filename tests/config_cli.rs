@@ -48,6 +48,52 @@ fn conventional_config_is_loaded_without_positional_paths() {
     assert_eq!(report["files"][0]["path"], "app.clj");
 }
 
+#[test]
+fn formatter_loads_edn_rules_and_requires_explicit_write() {
+    let dir = TestDir::new("formatter config");
+    fs::write(
+        dir.0.join("parenox.edn"),
+        r#"{:paths ["src"]
+      :format {:indent-width 4 :indent-rules {my/wrap :block}
+                :insert-final-newline? false}}"#,
+    )
+    .unwrap();
+    fs::create_dir(dir.0.join("src")).unwrap();
+    let path = dir.0.join("src/app.cljs");
+    let original = "(my/wrap  x\n  (js/alert  x))";
+    let expected = "(my/wrap x\n    (js/alert x))";
+    fs::write(&path, original).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_parenox"))
+            .current_dir(&dir.0)
+            .arg("fmt")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let preview = run(&["src/app.cljs"]);
+    assert!(preview.status.success(), "{preview:?}");
+    assert_eq!(preview.stdout, expected.as_bytes());
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(run(&["--check"]).status.code(), Some(1));
+    let invalid = dir.0.join("src/bad.edn");
+    fs::write(&invalid, "{:x @thing}").unwrap();
+    assert_eq!(run(&["--write"]).status.code(), Some(1));
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    assert_eq!(fs::read_to_string(&invalid).unwrap(), "{:x @thing}");
+    fs::remove_file(invalid).unwrap();
+    assert!(run(&["--write"]).status.success());
+    assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+    assert!(run(&["--check"]).status.success());
+    fs::write(dir.0.join("parenox.edn"), "{:format {:indent-width 0}}").unwrap();
+    let invalid = run(&["--write", "src/app.cljs"]);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr)
+            .contains(":indent-width must be an integer from 1 to 8")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn explicit_linked_roots_follow_the_project_classpath() {

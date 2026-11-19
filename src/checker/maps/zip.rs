@@ -16,8 +16,8 @@ impl<'a> ZipInput<'a> {
     fn from_seq(ty: &'a Type) -> Option<Self> {
         match ty {
             Type::Nil => Some(Self::Fixed(&[])),
-            Type::SeqTuple(items) => Some(Self::Fixed(items)),
-            Type::Seq(item) => Some(Self::Repeated(item)),
+            Type::SeqTuple(items) | Type::ListTuple(items) => Some(Self::Fixed(items)),
+            Type::Seq(item) | Type::List(item) => Some(Self::Repeated(item)),
             _ => None,
         }
     }

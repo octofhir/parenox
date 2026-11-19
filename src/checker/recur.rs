@@ -236,6 +236,7 @@ pub(super) fn widen_growing_collections(state: &mut [Value], seen: &[Vec<Value>]
             let known = match &value.known {
                 Type::Tuple(items) => Type::Vector(Box::new(Type::union(items.iter().cloned()))),
                 Type::SeqTuple(items) => Type::Seq(Box::new(Type::union(items.iter().cloned()))),
+                Type::ListTuple(items) => Type::List(Box::new(Type::union(items.iter().cloned()))),
                 _ => unreachable!(),
             };
             value.narrow(known);
@@ -256,7 +257,9 @@ fn growing_slots(current: &[Value], previous: &[Value]) -> Option<Vec<usize>> {
         }
         match (&current.known, &previous.known) {
             (Type::Tuple(items), Type::Tuple(old)) if items.starts_with(old) => {}
-            (Type::SeqTuple(items), Type::SeqTuple(old)) if items.ends_with(old) => {}
+            (Type::SeqTuple(items), Type::SeqTuple(old))
+            | (Type::ListTuple(items), Type::ListTuple(old))
+                if items.ends_with(old) => {}
             _ => return None,
         }
         growing.push(index);
@@ -273,7 +276,7 @@ pub(super) fn bounded_state(state: &[Value]) -> bool {
         };
         *remaining = next;
         match ty {
-            Type::Tuple(parts) | Type::SeqTuple(parts) => {
+            Type::Tuple(parts) | Type::SeqTuple(parts) | Type::ListTuple(parts) => {
                 parts.iter().all(|part| visit(part, remaining))
             }
             Type::Union(parts) => parts.iter().all(|part| visit(part, remaining)),
@@ -281,6 +284,7 @@ pub(super) fn bounded_state(state: &[Value]) -> bool {
             Type::Vector(part)
             | Type::Set(part)
             | Type::Seq(part)
+            | Type::List(part)
             | Type::Reduced(part)
             | Type::ExceptionInfo(part) => visit(part, remaining),
             Type::Function(signatures) => signatures

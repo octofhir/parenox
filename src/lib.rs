@@ -1,6 +1,7 @@
 mod checker;
 pub mod expand;
 mod extern_diff;
+pub mod formatter;
 pub mod output;
 mod project;
 mod suppressions;
@@ -16,8 +17,8 @@ pub use extern_diff::{
     ExternMismatchReason, ExternPathStep, ExternSnapshot,
 };
 pub use project::{
-    Definition, ExternExport, FdefSuggestion, ProjectReport, Session, Source, SourceEdit, VarInfo,
-    compare_externs,
+    Definition, ExternExport, FdefSuggestion, ProjectReport, Session, Source, SourceEdit,
+    SourceSymbol, SourceSymbolKind, VarInfo, compare_externs,
 };
 
 #[derive(Clone, Debug, Serialize)]

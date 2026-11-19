@@ -9,6 +9,7 @@ mod interfaces;
 mod partial;
 mod references;
 mod require;
+mod spec_navigation;
 mod specs;
 mod type_forms;
 mod vars;
@@ -24,8 +25,8 @@ use externs::{ExternFile, Externs};
 pub(super) use guards::VerifiedGuard;
 pub(crate) use interfaces::InterfaceKey;
 use interfaces::{Exports, LocalInterface, visible_value};
-pub(crate) use references::{ProjectCall, ScopedReference};
-pub(crate) use specs::{SpecCache, SpecFingerprint, SpecSource};
+pub(crate) use references::{DocumentReferences, ProjectCall, ScopedReference};
+pub(crate) use specs::{SpecCache, SpecConversion, SpecFingerprint, SpecSource};
 use vars::LiteralVar;
 
 use crate::reader::{Form, Kind, Span};
@@ -105,21 +106,31 @@ pub(super) enum DeclaredValue<'a> {
 #[derive(Default)]
 pub(crate) struct Globals {
     specs: Arc<BTreeMap<String, Type>>,
+    spec_conversions: Arc<BTreeMap<String, SpecConversion>>,
     pub(super) project_namespaces: BTreeSet<String>,
     exports: BTreeMap<String, Arc<Exports>>,
     externs: Option<Arc<Externs>>,
 }
 
 impl Globals {
-    pub fn with_specs(specs: Arc<BTreeMap<String, Type>>) -> Self {
+    pub fn with_specs(cache: &SpecCache) -> Self {
         Self {
-            specs,
+            specs: cache.types.clone(),
+            spec_conversions: cache.conversions.clone(),
             ..Self::default()
         }
     }
 
     pub fn register_namespace(&mut self, namespace: &str) {
         self.project_namespaces.insert(namespace.into());
+    }
+
+    pub fn spec(&self, key: &str) -> Option<&Type> {
+        self.specs.get(key)
+    }
+
+    pub fn spec_conversion(&self, key: &str) -> Option<SpecConversion> {
+        self.spec_conversions.get(key).copied()
     }
 
     fn declared_value(&self, name: &str) -> Option<DeclaredValue<'_>> {
@@ -306,6 +317,10 @@ impl Model {
 
     pub(super) fn key(&self, key: &str) -> String {
         self.names.key(key)
+    }
+
+    pub(super) fn validation_key(&self, keyword: &str) -> Option<String> {
+        self.names.validation_key(keyword)
     }
 
     pub(super) fn function_name(&self, name: &str) -> String {

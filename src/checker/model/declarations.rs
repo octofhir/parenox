@@ -1,4 +1,5 @@
 //! Source declarations and the namespace context used to read them.
+mod outline;
 mod reader_names;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,6 +101,19 @@ impl Names {
             key.to_string()
         }
     }
+
+    pub(super) fn validation_key(&self, keyword: &str) -> Option<String> {
+        if let Some((alias, _)) = keyword
+            .strip_prefix("::")
+            .and_then(|key| key.split_once('/'))
+            && !self.aliases.contains_key(alias)
+        {
+            return None;
+        }
+        let key = self.key(keyword);
+        let (namespace, name) = key.strip_prefix(':')?.split_once('/')?;
+        (!namespace.is_empty() && !name.is_empty()).then_some(key)
+    }
 }
 
 pub(super) struct SpecDeclaration {
@@ -120,6 +134,7 @@ pub(crate) struct Declarations {
     pub(super) all_refers: BTreeSet<String>,
     pub(super) referrals: Vec<ExplicitReferral>,
     pub(super) specs: BTreeMap<String, SpecDeclaration>,
+    pub(super) duplicate_specs: BTreeSet<String>,
     pub(super) fdefs: Vec<usize>,
     pub(super) functions: Vec<usize>,
     pub(super) test_forms: Vec<usize>,
@@ -145,12 +160,37 @@ impl Declarations {
         &self.diagnostics
     }
 
+    pub(crate) fn spec_site(&self, key: &str) -> Option<Result<Span, ()>> {
+        self.specs.get(key).map(|spec| {
+            if self.duplicate_specs.contains(key) {
+                Err(())
+            } else {
+                Ok(spec.name)
+            }
+        })
+    }
+
     pub(crate) fn qualified_reference<'a>(&'a self, symbol: &'a str) -> Option<(&'a str, &'a str)> {
         let (prefix, local) = symbol.split_once('/')?;
         if prefix.is_empty() || local.is_empty() || local.contains('/') {
             return None;
         }
         Some(self.names.resolve_parts(symbol))
+    }
+
+    pub(crate) fn qualifier<'a>(&'a self, name: &'a str) -> &'a str {
+        self.names.aliases.get(name).map_or(name, String::as_str)
+    }
+
+    pub(crate) fn core_completion_visible(
+        &self,
+        forms: &[Form],
+        name: &str,
+        offset: usize,
+    ) -> bool {
+        self.names.core_visible(name)
+            && !self.names.refers.contains_key(name)
+            && self.source_var_before(forms, name, offset).is_none()
     }
 
     pub(crate) fn source_var(
@@ -310,14 +350,23 @@ impl Declarations {
         &'a self,
         forms: &'a [Form],
     ) -> impl Iterator<Item = &'a [Form]> {
+        self.scoped_function_forms(forms).map(|(_, form)| {
+            let Kind::List(items) = &form.without_metadata().kind else {
+                unreachable!();
+            };
+            items.as_slice()
+        })
+    }
+
+    pub(super) fn scoped_function_forms<'a>(
+        &'a self,
+        forms: &'a [Form],
+    ) -> impl Iterator<Item = (&'a [Form], &'a Form)> {
         self.scoped_functions.iter().map(|var| {
             let Kind::List(enclosing) = &forms[var.enclosing].without_metadata().kind else {
                 unreachable!();
             };
-            let Kind::List(items) = &enclosing[var.definition].without_metadata().kind else {
-                unreachable!();
-            };
-            items.as_slice()
+            (enclosing[1].vector().unwrap(), &enclosing[var.definition])
         })
     }
 
@@ -471,8 +520,9 @@ impl Declarations {
             symbols_match(form, &mut |name| {
                 let (namespace, local) = model.names.resolve_parts(name);
                 dependencies.insert(namespace);
-                uses_spec_composition |=
-                    namespace == "clojure.spec.alpha" && matches!(local, "and" | "conformer");
+                uses_spec_composition |= (namespace == "clojure.spec.alpha"
+                    && matches!(local, "and" | "conformer"))
+                    || (namespace == "clojure.core" && local == "integer?");
                 true
             });
         }
@@ -515,6 +565,7 @@ impl Declarations {
                         };
                         if model.specs.insert(key.clone(), declaration).is_some() {
                             model.error("PNX2790", xs[1].span, format!("Duplicate spec {key}"));
+                            model.duplicate_specs.insert(key);
                         }
                     } else {
                         model.error("PNX9001", xs[1].span, "Spec name must be a keyword");
@@ -812,7 +863,7 @@ fn unqualified(name: &str) -> bool {
     !name.contains('/') || name == "/"
 }
 
-fn multimethod_parts(tail: &[Form]) -> (&[Form], &[Form]) {
+pub(super) fn multimethod_parts(tail: &[Form]) -> (&[Form], &[Form]) {
     let tail = if tail.first().is_some_and(Form::is_string) {
         &tail[1..]
     } else {

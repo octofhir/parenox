@@ -1,11 +1,15 @@
 //! Narrow contracts for instance methods on a known JVM String receiver.
 use super::{Checker, Env, Form, Span, Type, Value, call_returns};
 use crate::reader::Kind;
+use crate::types::Compatibility;
 
 #[derive(Clone, Copy)]
 enum StringMethod {
     Length,
     CharAt,
+    StartsWith,
+    EndsWith,
+    IndexOf,
 }
 
 impl StringMethod {
@@ -13,6 +17,9 @@ impl StringMethod {
         match name {
             "length" => Some(Self::Length),
             "charAt" => Some(Self::CharAt),
+            "startsWith" => Some(Self::StartsWith),
+            "endsWith" => Some(Self::EndsWith),
+            "indexOf" => Some(Self::IndexOf),
             _ => None,
         }
     }
@@ -21,14 +28,24 @@ impl StringMethod {
         match self {
             Self::Length => "java.lang.String/length",
             Self::CharAt => "java.lang.String/charAt",
+            Self::StartsWith => "java.lang.String/startsWith",
+            Self::EndsWith => "java.lang.String/endsWith",
+            Self::IndexOf => "java.lang.String/indexOf",
         }
     }
 
     fn arity(self) -> usize {
         match self {
             Self::Length => 0,
-            Self::CharAt => 1,
+            Self::CharAt | Self::StartsWith | Self::EndsWith | Self::IndexOf => 1,
         }
+    }
+
+    fn unsupported_arity(self, arity: usize) -> bool {
+        matches!(
+            (self, arity),
+            (Self::StartsWith, 2) | (Self::IndexOf, 2 | 3)
+        )
     }
 }
 
@@ -65,7 +82,16 @@ impl Checker<'_> {
         if receiver_type.known == Type::Never || !call_returns(&typed) {
             return Some(Value::new(Type::Never));
         }
-        if !receiver_type.known.subtype_of(&Type::String.nilable()) {
+        let tag = receiver
+            .metadata(":tag")
+            .and_then(tag_name)
+            .or_else(|| receiver.symbol().and_then(|name| env.java_hint(name)));
+        let string_receiver = match tag.map(|name| self.model.class_name(name)) {
+            Some("String" | "java.lang.String") => true,
+            Some(_) => false,
+            None => receiver_type.known.subtype_of(&Type::String.nilable()),
+        };
+        if !string_receiver {
             return Some(
                 self.unchecked_form(span, "JVM member analysis requires a known String receiver"),
             );
@@ -90,6 +116,11 @@ impl Checker<'_> {
         args: &[(Value, Span)],
         span: Span,
     ) -> Type {
+        if method.unsupported_arity(args.len()) {
+            return self
+                .unchecked_form(span, "This JVM String overload is not supported")
+                .known;
+        }
         if args.len() != method.arity() {
             self.error(
                 "PNX2554",
@@ -104,7 +135,16 @@ impl Checker<'_> {
             self.may_throw();
             return Type::Unknown;
         }
-        self.expect(receiver, &Type::String, receiver_span, method.name());
+        // An explicit tag selects the method but does not prove a non-null
+        // receiver, or even that the compiler's cast will succeed.
+        if receiver.known.compatibility(&Type::String) == Compatibility::Unproven {
+            self.unchecked_form(
+                receiver_span,
+                "Cannot verify that the hinted JVM receiver is a non-nil String",
+            );
+        } else {
+            self.expect(receiver, &Type::String, receiver_span, method.name());
+        }
         if !receiver.known.subtype_of(&Type::String) {
             self.may_throw();
             if receiver.known == Type::Nil {
@@ -122,6 +162,46 @@ impl Checker<'_> {
                 let (index, span) = &args[0];
                 self.string_char_at(&receiver.known, index, *span)
             }
+            StringMethod::StartsWith | StringMethod::EndsWith | StringMethod::IndexOf => {
+                let (argument, argument_span) = &args[0];
+                self.string_search(method, argument, *argument_span)
+            }
+        }
+    }
+
+    fn string_search(&mut self, method: StringMethod, argument: &Value, span: Span) -> Type {
+        let compatibility = argument.known.compatibility(&Type::String);
+        if compatibility == Compatibility::Unproven {
+            return self
+                .unchecked_form(span, "Cannot verify the argument to this JVM String method")
+                .known;
+        }
+        if compatibility == Compatibility::Mismatch {
+            let expected = if matches!(method, StringMethod::IndexOf) {
+                // The JVM also has an int code-point overload. Recognize the
+                // possible overload without trying to prove primitive conversion.
+                let domain = Type::union([Type::String, Type::Number]);
+                if argument.known.compatibility(&domain) != Compatibility::Mismatch {
+                    return self
+                        .unchecked_form(
+                            span,
+                            "Only the String overload of String.indexOf is supported",
+                        )
+                        .known;
+                }
+                domain
+            } else {
+                Type::String
+            };
+            self.expect(argument, &expected, span, method.name());
+            self.may_throw();
+            if argument.known == Type::Nil {
+                return Type::Never;
+            }
+        }
+        match method {
+            StringMethod::IndexOf => Type::Number,
+            _ => Type::Boolean,
         }
     }
 
@@ -146,6 +226,13 @@ impl Checker<'_> {
             );
             Type::Never
         }
+    }
+}
+
+fn tag_name(tag: &Form) -> Option<&str> {
+    match &tag.without_metadata().kind {
+        Kind::String(name) => Some(name),
+        _ => tag.symbol(),
     }
 }
 

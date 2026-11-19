@@ -1,4 +1,7 @@
 //! Source queries over the current project snapshot.
+mod specs;
+mod usages;
+
 use serde::Serialize;
 
 use crate::ContractOrigin;
@@ -29,15 +32,20 @@ struct ResolvedVar<'a> {
     span: Span,
 }
 
+type Provider<'a> = (&'a str, &'a FileCache, &'a Declarations, &'a [Form]);
+
 enum SourceTarget<'a> {
     Local(Span),
     Var(ResolvedVar<'a>),
 }
 
 impl Session {
-    /// Resolves a source var or local binding at a UTF-8 byte offset in the latest snapshot.
-    /// Ambiguous namespaces and references outside successfully read forms have no target.
+    /// Resolves a source var, local binding or named spec at a UTF-8 byte offset.
+    /// Ambiguous declarations and references outside successfully read forms have no target.
     pub fn definition(&self, path: &str, offset: usize) -> Option<Definition> {
+        if let Some(spec) = self.spec_definition(path, offset) {
+            return Some(spec);
+        }
         Some(match self.source_target(path, offset)? {
             SourceTarget::Var(target) => Definition {
                 path: target.path.into(),
@@ -75,11 +83,86 @@ impl Session {
         })
     }
 
-    fn source_target(&self, path: &str, offset: usize) -> Option<SourceTarget<'_>> {
-        let file = self
-            .files
+    /// Complete a qualified var from the current source snapshot, using its
+    /// namespace or an alias in the caller's (possibly incomplete) buffer.
+    pub fn complete_qualified_var(&self, path: &str, prefix: &str, limit: usize) -> Vec<String> {
+        let Some((qualifier, prefix)) = prefix.split_once('/').filter(|(ns, _)| !ns.is_empty())
+        else {
+            return Vec::new();
+        };
+        let Some((caller, _)) = self
+            .current_file(path)
+            .and_then(FileCache::navigation_source)
+        else {
+            return Vec::new();
+        };
+        let Some((provider_path, _, provider, forms)) =
+            self.navigation_provider(caller.qualifier(qualifier))
+        else {
+            return Vec::new();
+        };
+        provider
+            .top_level_names(forms)
+            .into_iter()
+            .filter(|name| {
+                name.starts_with(prefix)
+                    && provider
+                        .source_var(forms, name, provider_path != path)
+                        .is_some()
+            })
+            .take(limit)
+            .map(|name| format!("{qualifier}/{name}"))
+            .collect()
+    }
+
+    /// Complete named specs registered in this project, preserving the alias
+    /// or auto-resolution prefix used by the caller.
+    pub fn complete_spec_key(&self, path: &str, prefix: &str, limit: usize) -> Vec<String> {
+        let Some((caller, _)) = self
+            .current_file(path)
+            .and_then(FileCache::navigation_source)
+        else {
+            return Vec::new();
+        };
+        let (search, qualified) = if let Some(auto) = prefix.strip_prefix("::") {
+            let (namespace, local) = auto
+                .split_once('/')
+                .map_or((caller.namespace(), auto), |(alias, local)| {
+                    (caller.qualifier(alias), local)
+                });
+            (format!(":{namespace}/{local}"), true)
+        } else {
+            (prefix.to_owned(), false)
+        };
+        self.specs
+            .types
+            .range(search.clone()..)
+            .map_while(|(key, _)| key.strip_prefix(&search).map(|suffix| (key, suffix)))
+            .take(limit)
+            .map(|(key, suffix)| {
+                if qualified {
+                    format!("{prefix}{suffix}")
+                } else {
+                    key.clone()
+                }
+            })
+            .collect()
+    }
+
+    pub fn core_completion_visible(&self, path: &str, name: &str, offset: usize) -> bool {
+        self.current_file(path)
+            .and_then(FileCache::navigation_source)
+            .is_none_or(|(decl, forms)| decl.core_completion_visible(forms, name, offset))
+    }
+
+    fn current_file(&self, path: &str) -> Option<&FileCache> {
+        self.files
             .get(path)
-            .filter(|file| file.snapshot == self.snapshot)?;
+            .filter(|file| file.snapshot == self.snapshot)
+    }
+
+    fn source_target(&self, path: &str, offset: usize) -> Option<SourceTarget<'_>> {
+        let file = self.current_file(path)?;
         if !file.source.is_char_boundary(offset) {
             return None;
         }
@@ -92,24 +175,8 @@ impl Session {
             None => match declarations.scoped_reference_at(
                 forms,
                 offset,
-                !self.files.values().any(|file| {
-                    file.snapshot == self.snapshot
-                        && file.navigation_source().is_some_and(|(declarations, _)| {
-                            declarations.namespace() == "clojure.test"
-                        })
-                }),
-                |namespace, local, actual| {
-                    self.navigation_provider(namespace)
-                        .filter(|(_, file, declarations, forms)| {
-                            file.parse_error.is_none()
-                                && *file
-                                    .known_var_surface
-                                    .get_or_init(|| declarations.has_known_var_surface(forms))
-                        })
-                        .map_or(ProjectCall::Unknown, |(_, _, declarations, forms)| {
-                            declarations.project_call(forms, local, actual)
-                        })
-                },
+                self.has_standard_test(),
+                |namespace, local, actual| self.navigation_call(namespace, local, actual),
             )? {
                 ScopedReference::Referred(namespace, local) => (namespace, local, None),
                 ScopedReference::InNamespace(local) => {
@@ -118,25 +185,59 @@ impl Session {
                 ScopedReference::Local(span) => return Some(SourceTarget::Local(span)),
             },
         };
+        self.resolve_source_var(path, namespace, local, before)
+            .map(SourceTarget::Var)
+    }
+
+    fn resolve_source_var<'a>(
+        &'a self,
+        path: &str,
+        namespace: &'a str,
+        local: &'a str,
+        before: Option<usize>,
+    ) -> Option<ResolvedVar<'a>> {
         let (target_path, candidate, provider, forms) = self.navigation_provider(namespace)?;
         let span = if let Some(offset) = before {
             provider.source_var_before(forms, local, offset)
         } else {
             provider.source_var(forms, local, target_path != path)
         }?;
-        Some(SourceTarget::Var(ResolvedVar {
+        Some(ResolvedVar {
             namespace,
             name: local,
             path: target_path,
             source: candidate,
             span,
-        }))
+        })
     }
 
-    fn navigation_provider(
-        &self,
-        namespace: &str,
-    ) -> Option<(&str, &FileCache, &Declarations, &[Form])> {
+    fn has_standard_test(&self) -> bool {
+        !self.has_source_namespace("clojure.test")
+    }
+
+    fn has_source_namespace(&self, namespace: &str) -> bool {
+        self.files.values().any(|file| {
+            file.snapshot == self.snapshot
+                && file
+                    .navigation_source()
+                    .is_some_and(|(declarations, _)| declarations.namespace() == namespace)
+        })
+    }
+
+    fn navigation_call(&self, namespace: &str, local: &str, actual: usize) -> ProjectCall {
+        self.navigation_provider(namespace)
+            .filter(|(_, file, declarations, forms)| {
+                file.parse_error.is_none()
+                    && *file
+                        .known_var_surface
+                        .get_or_init(|| declarations.has_known_var_surface(forms))
+            })
+            .map_or(ProjectCall::Unknown, |(_, _, declarations, forms)| {
+                declarations.project_call(forms, local, actual)
+            })
+    }
+
+    fn navigation_provider(&self, namespace: &str) -> Option<Provider<'_>> {
         let mut providers = self.files.iter().filter_map(|(path, candidate)| {
             if candidate.snapshot != self.snapshot {
                 return None;

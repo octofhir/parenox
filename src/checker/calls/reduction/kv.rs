@@ -101,6 +101,8 @@ impl Checker<'_> {
             Type::MapEntry(_)
             | Type::Seq(_)
             | Type::SeqTuple(_)
+            | Type::List(_)
+            | Type::ListTuple(_)
             | Type::Set(_)
             | Type::Str(_)
             | Type::String => self.unsupported(
@@ -130,7 +132,7 @@ impl Checker<'_> {
                 .iter()
                 .map(|part| self.reduce_kv_items(part, items, call))
                 .fold(Value::new(Type::Never), Value::join),
-            Type::Tuple(values) | Type::SeqTuple(values) => {
+            Type::Tuple(values) | Type::SeqTuple(values) | Type::ListTuple(values) => {
                 if values.is_empty() {
                     return self.reduce_kv_empty(call);
                 }
@@ -152,8 +154,8 @@ impl Checker<'_> {
                     },
                 )
             }
-            Type::Vector(value) | Type::Seq(value) => {
-                let result = if matches!(ty, Type::Seq(_)) {
+            Type::Vector(value) | Type::Seq(value) | Type::List(value) => {
+                let result = if matches!(ty, Type::Seq(_) | Type::List(_)) {
                     Value::new(Type::Never)
                 } else {
                     call.initial.0.clone()

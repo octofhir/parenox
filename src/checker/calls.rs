@@ -1,5 +1,6 @@
 //! Function resolution, call-site inference and built-in calls.
 mod apply;
+mod comprehensions;
 mod forms;
 mod generics;
 mod indexing;
@@ -229,6 +230,9 @@ impl<'model> Checker<'model> {
                 }
                 None => {
                     let resolved = self.model.resolve(name);
+                    if let Some(value) = self.spec_operation_call(&resolved, &xs[1..], span, env) {
+                        return value;
+                    }
                     if resolved == "clojure.core/deref" {
                         return self.deref_call(&xs[1..], span, env);
                     }
@@ -688,6 +692,8 @@ impl<'model> Checker<'model> {
                         | Type::Tuple(_)
                         | Type::Seq(_)
                         | Type::SeqTuple(_)
+                        | Type::List(_)
+                        | Type::ListTuple(_)
                         | Type::Set(_)
                         | Type::Never
                         | Type::Unknown => true,
@@ -768,9 +774,12 @@ pub(super) fn predicate_type(name: &str) -> Option<Type> {
         "clojure.core/string?" => Some(Type::String),
         "clojure.core/char?" => Some(Type::Character),
         "clojure.core/number?" => Some(Type::Number),
+        "clojure.core/integer?" => Some(Type::Integral),
         "clojure.core/boolean?" => Some(Type::Boolean),
         "clojure.core/keyword?" => Some(Type::Keyword),
         "clojure.core/symbol?" => Some(Type::Symbol),
+        "clojure.core/simple-symbol?" => Some(Type::SimpleSymbol),
+        "clojure.core/qualified-symbol?" => Some(Type::QualifiedSymbol),
         _ => None,
     }
 }
@@ -839,6 +848,10 @@ fn predicate_result(actual: &Type, expected: &Type) -> Type {
         Type::Union(parts) => {
             Type::union(parts.iter().map(|part| predicate_result(part, expected)))
         }
+        Type::Symbol if matches!(expected, Type::SimpleSymbol | Type::QualifiedSymbol) => {
+            Type::Boolean
+        }
+        Type::Number if *expected == Type::Integral => Type::Boolean,
         actual => Type::Bool(actual.subtype_of(expected)),
     }
 }

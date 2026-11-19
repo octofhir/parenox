@@ -128,7 +128,9 @@ pub(super) enum CollectionError {
 
 pub(super) fn element_type(collection: Type) -> Result<Type, CollectionError> {
     match collection {
-        Type::Vector(element) | Type::Set(element) | Type::Seq(element) => Ok(*element),
+        Type::Vector(element) | Type::Set(element) | Type::Seq(element) | Type::List(element) => {
+            Ok(*element)
+        }
         Type::Parameter(parameter) if parameter.upper.as_ref() == Some(&Type::String) => {
             Ok(Type::Character)
         }
@@ -143,7 +145,9 @@ pub(super) fn element_type(collection: Type) -> Result<Type, CollectionError> {
             .map(Type::union),
         Type::Map(map) => map.into_entry_type().ok_or(CollectionError::OpenMap),
         Type::MapEntry(items) => Ok(Type::union(*items)),
-        Type::Tuple(items) | Type::SeqTuple(items) => Ok(Type::union(items.into_vec())),
+        Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => {
+            Ok(Type::union(items.into_vec()))
+        }
         _ => Err(CollectionError::NotSeqable),
     }
 }

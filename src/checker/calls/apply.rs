@@ -52,12 +52,14 @@ impl Checker<'_> {
             let elements = match ty {
                 Type::Nil => &[][..],
                 Type::Vector(element) if **element == Type::Never => &[][..],
-                Type::Tuple(elements) | Type::SeqTuple(elements) => elements,
+                Type::Tuple(elements) | Type::SeqTuple(elements) | Type::ListTuple(elements) => {
+                    elements
+                }
                 Type::MapEntry(elements) => elements.as_slice(),
-                Type::Vector(element) | Type::Seq(element) => {
+                Type::Vector(element) | Type::Seq(element) | Type::List(element) => {
                     let open = OpenSpread {
                         element,
-                        minimum: usize::from(matches!(ty, Type::Seq(_))),
+                        minimum: usize::from(matches!(ty, Type::Seq(_) | Type::List(_))),
                         span: spread.span,
                         notes: &collection.notes,
                     };
@@ -159,11 +161,11 @@ impl Checker<'_> {
             },
             Callable::Builtin(name) if name == "clojure.core/list" => {
                 let items = prefix.iter().map(|(value, _)| value.known.clone());
-                let sequence = Type::Seq(Box::new(Type::union(
+                let sequence = Type::List(Box::new(Type::union(
                     items.chain(std::iter::once(element.known.clone())),
                 )));
                 Value::new(if minimum == 0 {
-                    Type::union([Type::empty_seq(), sequence])
+                    Type::union([Type::empty_list(), sequence])
                 } else {
                     sequence
                 })

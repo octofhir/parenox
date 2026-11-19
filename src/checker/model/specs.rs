@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::contracts::function_parts;
 use super::declarations::{Declarations, Names, SpecDeclaration, symbols_match};
-use super::type_forms::{core_predicate_type, read_type};
+use super::type_forms::{core_predicate_type, read_type, source_conversion};
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
@@ -13,6 +13,7 @@ use crate::types::Type;
 pub(crate) struct SpecFingerprint {
     names: Names,
     bodies: Vec<(String, Span, Span, String)>,
+    duplicates: BTreeSet<String>,
 }
 
 impl Declarations {
@@ -33,7 +34,7 @@ impl Declarations {
                 !symbols_match(form.unquoted(), &mut |symbol| {
                     !matches!(
                         self.names.resolve_parts(symbol),
-                        ("clojure.spec.alpha", "and" | "conformer")
+                        ("clojure.spec.alpha", "and" | "conformer") | ("clojure.core", "integer?")
                     )
                 })
             })
@@ -47,8 +48,9 @@ impl Declarations {
             .chain(self.forward_vars.keys().map(String::as_str))
             .filter(|name| {
                 let (namespace, local) = self.names.resolve_parts(name);
-                namespace == "clojure.core"
-                    && (local == "second" || core_predicate_type(local).is_some())
+                ((namespace == "clojure.core"
+                    && (matches!(local, "second" | "int") || core_predicate_type(local).is_some()))
+                    || (namespace == "clojure.spec.alpha" && matches!(local, "and" | "conformer")))
                     && (self.forward_vars.contains_key(*name)
                         || self.source_declarations(forms, name).next().is_some())
             })
@@ -74,6 +76,7 @@ impl Declarations {
         Some(SpecFingerprint {
             names: self.names.clone(),
             bodies,
+            duplicates: self.duplicate_specs.clone(),
         })
     }
 }
@@ -84,10 +87,41 @@ pub(crate) struct SpecSource<'a> {
     pub fingerprint: &'a Arc<SpecFingerprint>,
 }
 
+/// An exact built-in conversion, separate from a spec's static input shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpecConversion {
+    CheckedInt32,
+}
+
+impl SpecConversion {
+    /// Inputs that pass the predicate. Integral values outside JVM int range
+    /// reach the conversion and throw rather than returning the invalid marker.
+    pub fn predicate_input(self) -> Type {
+        match self {
+            Self::CheckedInt32 => Type::Integral,
+        }
+    }
+
+    /// The original input domain of a checked contract (successful validation).
+    pub fn success_input(self) -> Type {
+        match self {
+            Self::CheckedInt32 => Type::Int32,
+        }
+    }
+
+    /// The value domain of the JVM Integer returned on normal conformance.
+    pub fn output(self) -> Type {
+        match self {
+            Self::CheckedInt32 => Type::Int32,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SpecCache {
     previous: Vec<(String, Arc<SpecFingerprint>)>,
     pub types: Arc<BTreeMap<String, Type>>,
+    pub conversions: Arc<BTreeMap<String, SpecConversion>>,
     pub diagnostics: BTreeMap<String, Vec<Diagnostic>>,
 }
 
@@ -122,6 +156,9 @@ impl SpecCache {
                 } else {
                     resolver.declarations.insert(key, owner);
                 }
+                if source.declarations.duplicate_specs.contains(key) {
+                    resolver.types.insert(key.to_owned(), Type::Unknown);
+                }
             }
         }
         for key in duplicate {
@@ -134,6 +171,7 @@ impl SpecCache {
             resolver.resolve(key, owner.path, owner.declaration.name);
         }
         self.types = Arc::new(resolver.types);
+        self.conversions = Arc::new(resolver.conversions);
         self.diagnostics = resolver.diagnostics;
         self.previous = sources
             .into_iter()
@@ -154,6 +192,7 @@ struct Resolver<'a> {
     declarations: BTreeMap<&'a str, Owner<'a>>,
     active: Vec<&'a str>,
     types: BTreeMap<String, Type>,
+    conversions: BTreeMap<String, SpecConversion>,
     diagnostics: BTreeMap<String, Vec<Diagnostic>>,
 }
 
@@ -187,6 +226,14 @@ impl Resolver<'_> {
             &mut diagnostics,
             |key, span| self.resolve(key, owner.path, span),
         );
+        let body = &owner.declaration.body;
+        let conversion = source_conversion(owner.names, body).or_else(|| {
+            let alias = owner.names.key(body.keyword()?);
+            self.conversions.get(&alias).copied()
+        });
+        if let Some(conversion) = conversion {
+            self.conversions.insert(key.to_owned(), conversion);
+        }
         self.active.pop();
         if !diagnostics.is_empty() {
             self.diagnostics

@@ -15,7 +15,7 @@ const STRING_OPERATORS: &[&str] = &[
     "replace",
     "split",
 ];
-const STRING_MEMBERS: &[&str] = &["charAt", "length"];
+const STRING_MEMBERS: &[&str] = &["charAt", "length", "startsWith", "endsWith", "indexOf"];
 
 impl Declarations {
     pub(crate) fn check_untyped_strings(

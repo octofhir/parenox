@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::extern_diff_cli::DiffOptions;
 
 #[derive(Parser)]
-#[command(about = "Experimental source-only Clojure checker", version)]
+#[command(about = "Clojure checker, formatter and language server", version)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
@@ -23,12 +23,16 @@ pub(crate) enum Command {
     },
     /// Run clojure.test namespaces on the project's JVM.
     Test(TestOptions),
+    /// Send explicit requests to an existing local nREPL server.
+    Nrepl(crate::nrepl::Options),
     /// Find a source var or local binding definition.
     Definition(DefinitionOptions),
     /// Check library bodies and validate the extern promises they ship.
     ValidateExterns(CheckOptions),
     /// Write checked public signatures and literal values as EDN to stdout.
     ExportExterns(CheckOptions),
+    /// Format Clojure and EDN files using parenox.edn.
+    Fmt(FmtOptions),
     /// Compare the public extern promises of two releases.
     DiffExterns(DiffOptions),
     /// Print the lossless syntax tree of a source file.
@@ -140,6 +144,18 @@ impl CheckOptions {
     pub(crate) fn format(&self) -> Format {
         if self.json { Format::Json } else { self.format }
     }
+}
+
+#[derive(Args)]
+pub(crate) struct FmtOptions {
+    #[command(flatten)]
+    pub(crate) project: ProjectOptions,
+    /// Exit 1 if formatting would change any file; do not write.
+    #[arg(long)]
+    pub(crate) check: bool,
+    /// Update source files instead of printing one formatted file to stdout.
+    #[arg(long, conflicts_with_all = ["check", "classpath"])]
+    pub(crate) write: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]

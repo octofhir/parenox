@@ -15,7 +15,8 @@ impl Checker<'_> {
     pub(super) fn quoted_data(&mut self, form: &Form) -> Value {
         let form = form.without_metadata();
         let ty = match &form.kind {
-            Kind::Symbol(_) | Kind::AnonymousArgument(_) => Type::Symbol,
+            Kind::Symbol(symbol) if symbol != "/" && symbol.contains('/') => Type::QualifiedSymbol,
+            Kind::Symbol(_) | Kind::AnonymousArgument(_) => Type::SimpleSymbol,
             Kind::List(items) => {
                 let values = items
                     .iter()
@@ -38,7 +39,9 @@ impl Checker<'_> {
                     .map(|item| self.quoted_data(item).known)
                     .collect(),
             )),
-            Kind::Quote(item) => sequence_type(vec![Type::Symbol, self.quoted_data(item).known]),
+            Kind::Quote(item) => {
+                sequence_type(vec![Type::SimpleSymbol, self.quoted_data(item).known])
+            }
             Kind::AnonymousFunction(_) => {
                 return self.unsupported(
                     form.span,
@@ -53,8 +56,8 @@ impl Checker<'_> {
 
 fn sequence_type(items: Vec<Type>) -> Type {
     if items.len() <= MAX_TUPLE_ITEMS {
-        Type::SeqTuple(items.into_boxed_slice())
+        Type::ListTuple(items.into_boxed_slice())
     } else {
-        Type::Seq(collection_element(items))
+        Type::List(collection_element(items))
     }
 }

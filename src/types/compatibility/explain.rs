@@ -61,8 +61,11 @@ fn type_failure(actual: &Type, expected: &Type, outcome: Compatibility) -> Exter
         (Type::Map(a), Type::Map(e)) => map_failure(a, e, outcome),
         (Type::Vector(a), Type::Vector(e))
         | (Type::Set(a), Type::Set(e))
-        | (Type::Seq(a), Type::Seq(e)) => Some(type_failure(a, e, outcome).at(Step::Element)),
-        (Type::Tuple(a), Type::Tuple(e)) | (Type::SeqTuple(a), Type::SeqTuple(e)) => {
+        | (Type::Seq(a) | Type::List(a), Type::Seq(e))
+        | (Type::List(a), Type::List(e)) => Some(type_failure(a, e, outcome).at(Step::Element)),
+        (Type::Tuple(a), Type::Tuple(e))
+        | (Type::SeqTuple(a) | Type::ListTuple(a), Type::SeqTuple(e))
+        | (Type::ListTuple(a), Type::ListTuple(e)) => {
             if a.len() != e.len() {
                 Some(ExternMismatch::new(Reason::TupleLength {
                     expected: e.len(),
@@ -75,7 +78,9 @@ fn type_failure(actual: &Type, expected: &Type, outcome: Compatibility) -> Exter
                 })
             }
         }
-        (Type::Tuple(items), Type::Vector(e)) | (Type::SeqTuple(items), Type::Seq(e)) => {
+        (Type::Tuple(items), Type::Vector(e))
+        | (Type::SeqTuple(items) | Type::ListTuple(items), Type::Seq(e))
+        | (Type::ListTuple(items), Type::List(e)) => {
             items.iter().enumerate().find_map(|(index, a)| {
                 (a.compatibility(e) == outcome)
                     .then(|| type_failure(a, e, outcome).at(Step::Item { index }))

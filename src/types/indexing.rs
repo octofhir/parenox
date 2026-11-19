@@ -26,12 +26,14 @@ impl Type {
 
     pub fn nth_item(&self, index: i32) -> Option<IndexedItem<'_>> {
         match self {
-            Type::Seq(element) => Some(match index {
+            Type::Seq(element) | Type::List(element) => Some(match index {
                 0 => IndexedItem::Present(element),
                 1.. => IndexedItem::Optional(element),
                 _ => IndexedItem::Absent(None),
             }),
-            Type::SeqTuple(items) => Some(fixed_item(items, usize::try_from(index).ok())),
+            Type::SeqTuple(items) | Type::ListTuple(items) => {
+                Some(fixed_item(items, usize::try_from(index).ok()))
+            }
             _ => self.indexed_item(index),
         }
     }

@@ -1,12 +1,18 @@
 //! Input contracts for sequential spec checks. A conformed value is not the input.
 
-use super::{TypeReader, predicate_type};
+use super::{TypeReader, conversion::source_conversion, predicate_type};
 use crate::Diagnostic;
 use crate::reader::{Form, Kind};
 use crate::types::Type;
 
 impl<F: FnMut(&str, crate::reader::Span) -> Option<Type>> TypeReader<'_, F> {
     pub(super) fn conjunction(&mut self, form: &Form, stages: &[Form]) -> Type {
+        if let Some(conversion) = source_conversion(self.names, form) {
+            // Type positions refer to the original value, and accept only
+            // inputs that can conform without throwing. The runtime
+            // predicate domain and converted output are tracked separately.
+            return conversion.success_input();
+        }
         let [first, rest @ ..] = stages else {
             return self.conjunction_gap(form, "An empty s/and has no modeled input type");
         };
@@ -162,6 +168,11 @@ fn scalar_members(ty: &Type) -> Option<&[Type]> {
                     | Type::Boolean
                     | Type::Bool(_)
                     | Type::Number
+                    | Type::Integral
+                    | Type::Int32
+                    | Type::OutsideInt32
+                    | Type::OutsideInt64
+                    | Type::NonIntegral
                     | Type::Integer(_)
                     | Type::String
                     | Type::Str(_)
@@ -170,6 +181,8 @@ fn scalar_members(ty: &Type) -> Option<&[Type]> {
                     | Type::Keyword
                     | Type::Key(_)
                     | Type::Symbol
+                    | Type::SimpleSymbol
+                    | Type::QualifiedSymbol
                     | Type::Pattern
             )
         })

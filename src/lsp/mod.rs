@@ -1,5 +1,8 @@
 //! Editor-facing LSP requests over stdin and stdout.
+mod completion;
+mod projects;
 mod protocol;
+mod symbols;
 mod text;
 mod workspace;
 
@@ -10,9 +13,9 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use self::projects::Projects;
 use self::protocol::{read_message, write_message};
 use self::text::file_path;
-use self::workspace::Workspace;
 use crate::cli::ProjectOptions;
 
 const WATCH_REQUEST_ID: &str = "parenox/file-watch";
@@ -122,7 +125,7 @@ pub(super) fn run(options: ProjectOptions) -> Result<u8, String> {
 fn request(
     output: &mut impl Write,
     options: &ProjectOptions,
-    workspace: &mut Option<Workspace>,
+    workspace: &mut Option<Projects>,
     shutdown: &mut bool,
     id: Value,
     method: &str,
@@ -153,20 +156,49 @@ fn request(
             .pointer("/workspace/workspaceEdit/documentChanges")
             .and_then(Value::as_bool)
             == Some(true);
-        *workspace = Some(Workspace::load(root, options, watch, versioned_edits));
+        let snippets = init
+            .capabilities
+            .pointer("/textDocument/completion/completionItem/snippetSupport")
+            .and_then(Value::as_bool)
+            == Some(true);
+        let hierarchical_symbols = init
+            .capabilities
+            .pointer("/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
+            .and_then(Value::as_bool)
+            == Some(true);
+        *workspace = Some(Projects::load(
+            root,
+            options,
+            watch,
+            versioned_edits,
+            snippets,
+            hierarchical_symbols,
+        ));
         return result(
             output,
             id,
             json!({"capabilities": {
             "positionEncoding":"utf-16", "textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},
-            "definitionProvider":true, "hoverProvider":true,
+            "definitionProvider":true, "hoverProvider":true, "documentFormattingProvider":true,
+            "referencesProvider":true,"documentHighlightProvider":true,
+            "documentSymbolProvider":true,"workspaceSymbolProvider":true,
+            "completionProvider":{"triggerCharacters":["/"]},
             "codeActionProvider":{"codeActionKinds":["refactor.rewrite"]}
         }, "serverInfo":{"name":"parenox", "version":env!("CARGO_PKG_VERSION")}}),
         );
     }
-    let Some(workspace) = workspace else {
+    let Some(projects) = workspace else {
         return send_error(output, id, -32002, "Server not initialized");
     };
+    if method == "workspace/symbol" {
+        let search: symbols::Search = match serde_json::from_value(params) {
+            Ok(search) => search,
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        };
+        let matches = projects.workspace_symbols(&search.query, output)?;
+        return result(output, id, json!(matches));
+    }
+    let workspace = projects.for_document(document_uri(&params));
     let value = match method {
         "shutdown" => {
             *shutdown = true;
@@ -176,12 +208,38 @@ fn request(
             Ok(params) => workspace.definition(params).unwrap_or(Value::Null),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
+        "textDocument/references" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.references(params)),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/documentHighlight" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.highlights(params)),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/documentSymbol" => match serde_json::from_value(params) {
+            Ok(params) => {
+                json!(workspace.document_symbols(params, projects.hierarchical_symbols()))
+            }
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
         "textDocument/hover" => match serde_json::from_value(params) {
             Ok(params) => workspace.hover(params).unwrap_or(Value::Null),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
+        "textDocument/completion" => match serde_json::from_value(params) {
+            Ok(params) => workspace
+                .completion(params, projects.snippets())
+                .unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
         "textDocument/codeAction" => match serde_json::from_value(params) {
             Ok(params) => json!(workspace.code_actions(params)),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/formatting" => match serde_json::from_value(params) {
+            Ok(params) => workspace
+                .format_document(params)
+                .unwrap_or_else(|| json!([])),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         _ => return send_error(output, id, -32601, "Method not found"),
@@ -191,40 +249,53 @@ fn request(
 
 fn notification(
     output: &mut impl Write,
-    workspace: &mut Workspace,
+    projects: &mut Projects,
     method: &str,
     params: Value,
 ) -> io::Result<()> {
     match method {
-        "initialized" => workspace.initialized(output)?,
+        "initialized" => projects.initialized(output)?,
         "textDocument/didOpen" => {
+            let uri = document_uri(&params).map(str::to_owned);
             if let Ok(params) = serde_json::from_value(params) {
-                workspace.open(params, output)?;
+                projects.track_open(uri.as_deref(), output)?;
+                projects
+                    .for_document_mut(uri.as_deref())
+                    .open(params, output)?;
             }
         }
         "textDocument/didChange" => {
+            let workspace = projects.for_document_mut(document_uri(&params));
             if let Ok(params) = serde_json::from_value(params) {
                 workspace.change(params, output)?;
             }
         }
         "textDocument/didClose" => {
+            let uri = document_uri(&params).map(str::to_owned);
             if let Ok(params) = serde_json::from_value(params) {
-                workspace.close(params, output)?;
+                projects
+                    .for_document_mut(uri.as_deref())
+                    .close(params, output)?;
+                projects.track_close(uri.as_deref());
             }
         }
         "textDocument/didSave" => {
             if let Ok(params) = serde_json::from_value(params) {
-                workspace.save(params, output)?;
+                projects.save(params, output)?;
             }
         }
         "workspace/didChangeWatchedFiles" => {
             if let Ok(params) = serde_json::from_value(params) {
-                workspace.changed_files(params, output)?;
+                projects.changed_files(params, output)?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+fn document_uri(params: &Value) -> Option<&str> {
+    params.pointer("/textDocument/uri")?.as_str()
 }
 
 fn result(output: &mut impl Write, id: Value, value: Value) -> io::Result<()> {

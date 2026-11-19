@@ -74,16 +74,16 @@ impl Checker<'_> {
             let items = match shape {
                 Type::Nil => &[][..],
                 Type::Vector(element) if **element == Type::Never => &[][..],
-                Type::Tuple(items) | Type::SeqTuple(items) => items,
+                Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => items,
                 Type::MapEntry(items) => items.as_slice(),
-                Type::Vector(element) | Type::Seq(element) => {
+                Type::Vector(element) | Type::Seq(element) | Type::List(element) => {
                     let item =
                         Value::with_notes(element.as_ref().clone(), collection.notes.clone());
                     result = result.join(self.reduce_open(
                         &callable,
                         initial,
                         (item, source.span),
-                        matches!(shape, Type::Seq(_)),
+                        matches!(shape, Type::Seq(_) | Type::List(_)),
                         span,
                         env,
                     ));
@@ -137,8 +137,10 @@ impl Checker<'_> {
                     alternatives.push((Cow::Owned(sequence), false));
                 }
             } else {
-                let casts_reducer = matches!(shape, Type::Tuple(_) | Type::Vector(_))
-                    || matches!(shape, Type::SeqTuple(items) if !items.is_empty());
+                let casts_reducer = matches!(
+                    shape,
+                    Type::Tuple(_) | Type::Vector(_) | Type::List(_)
+                ) || matches!(shape, Type::SeqTuple(items) | Type::ListTuple(items) if !items.is_empty());
                 alternatives.push((Cow::Borrowed(shape), casts_reducer));
             }
         }
@@ -324,6 +326,8 @@ fn reducer_argument(ty: &Type) -> bool {
         | Type::Never
         | Type::Function(_)
         | Type::Symbol
+        | Type::SimpleSymbol
+        | Type::QualifiedSymbol
         | Type::Key(_)
         | Type::Keyword
         | Type::Map(_)

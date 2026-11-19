@@ -428,6 +428,124 @@ fn checks_multimethod_bodies_and_keeps_conditional_bindings_in_scope() {
 }
 
 #[test]
+fn checks_calls_in_untyped_try_and_case_without_visiting_case_constants() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [api :as a]))
+(defn handle [problem]
+  (try (throw (a/missing problem))
+    (catch Exception problem
+      (case (a/dispatch problem)
+        (a/constant "literal") (a/emit problem)
+        () (a/dead)
+        (a/emit)))
+    (finally (a/cleanup problem))))"#,
+    };
+    let api = Source {
+        path: "api.clj",
+        source: "(ns api)
+(defn dispatch [x] x)
+(defn emit [x] x)
+(defn cleanup [x] x)",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app, api], None);
+    let errors: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &app.source[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        [("PNX2304", "a/missing"), ("PNX2554", "a/emit")],
+        "{report:#?}"
+    );
+
+    let catch_use = app.source.find("a/emit problem").unwrap() + "a/emit ".len();
+    let cleanup_use = app.source.find("a/cleanup problem").unwrap() + "a/cleanup ".len();
+    let catch = session.definition(app.path, catch_use).unwrap();
+    let cleanup = session.definition(app.path, cleanup_use).unwrap();
+    assert_eq!(
+        catch.span.start.offset,
+        app.source.find("Exception problem").unwrap() + "Exception ".len()
+    );
+    assert_eq!(
+        cleanup.span.start.offset,
+        app.source.find("[problem]").unwrap() + 1
+    );
+}
+
+#[test]
+fn checks_untyped_thread_steps_with_the_implicit_argument_and_named_scope() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [api :as a :refer [trim]] [macros :as m]))
+(defn pipeline [input]
+  (-> input trim (a/append "tail"))
+  (->> input (a/trim :extra))
+  (some-> input a/missing)
+  (cond-> input (a/test) (a/append :tail))
+  (as-> input value (a/trim value))
+  (-> (a/not-expanded) m/ignore))"#,
+    };
+    let api = Source {
+        path: "api.clj",
+        source: "(ns api)
+(defn trim [x] x)
+(defn append [x y] [x y])
+(defn test [x] x)",
+    };
+    let macros = Source {
+        path: "macros.clj",
+        source: "(ns macros) (defmacro ignore [_] nil)",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app, api, macros], None);
+    let errors: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &app.source[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            ("PNX2554", "a/trim"),
+            ("PNX2304", "a/missing"),
+            ("PNX2554", "a/test")
+        ],
+        "{report:#?}"
+    );
+    assert!(
+        report.files[0]
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("a/trim expects 1 arguments, got 2"))
+    );
+
+    let trim = app.source.find("input trim").unwrap() + "input ".len();
+    let target = session.definition(app.path, trim).unwrap();
+    assert_eq!(target.path, api.path);
+    assert_eq!(target.span.start.line, 2);
+    let bound = app.source.find("input value").unwrap() + "input ".len();
+    let usage = app.source.find("a/trim value").unwrap() + "a/trim ".len();
+    let target = session.definition(app.path, usage).unwrap();
+    assert_eq!(target.path, app.path);
+    assert_eq!(target.span.start.offset, bound);
+}
+
+#[test]
 fn navigates_unchecked_named_jvm_vars_and_respects_metadata() {
     let provider = Source {
         path: "provider.clj",

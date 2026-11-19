@@ -1,0 +1,6 @@
+;; The string-parameter SQL subset used in this example. context-clj/pg's
+;; execute! also accepts other SQL parameter types and dsql. No row schema is
+;; inferred from the SQL; the returned vector contains maps.
+{pg/execute! [map?
+              (clojure.spec.alpha/keys :req-un [:context-web-pg.query/sql])
+              :-> (clojure.spec.alpha/coll-of map? :kind vector?)]}

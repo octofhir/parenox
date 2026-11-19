@@ -1,9 +1,11 @@
 //! The supported type syntax shared by source contracts and spec declarations.
 mod conjunction;
+mod conversion;
 mod function_specs;
+pub(super) use conversion::source_conversion;
 pub(super) use function_specs::read_function_spec;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::Names;
 use crate::Diagnostic;
@@ -232,30 +234,40 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                     }
                     Some("clojure.spec.alpha/keys") if xs.len() % 2 == 1 => {
                         let mut fields = BTreeMap::new();
+                        let mut directives = BTreeSet::new();
+                        let mut supported = true;
                         for pair in xs[1..].as_chunks::<2>().0 {
                             let directive = pair[0].keyword().unwrap_or("");
                             if !matches!(directive, ":req" | ":opt" | ":req-un" | ":opt-un") {
                                 self.error("PNX9001", pair[0].span, "Unsupported s/keys directive");
+                                supported = false;
                                 continue;
+                            }
+                            if !directives.insert(directive) {
+                                self.error("PNX9001", pair[0].span, "Repeated s/keys directive");
+                                supported = false;
                             }
                             let Some(keys) = pair[1].vector() else {
                                 self.error("PNX9001", pair[1].span, "s/keys requires key vectors");
+                                supported = false;
                                 continue;
                             };
                             for key in keys {
                                 let Some(k) = key.keyword() else {
                                     self.error("PNX9001", key.span, "Expected a spec keyword");
+                                    supported = false;
                                     continue;
                                 };
                                 let qualified = self.names.key(k);
-                                if !qualified.contains('/') {
+                                let Some((_, name)) = qualified.split_once('/') else {
                                     self.error(
                                         "PNX9001",
                                         key.span,
                                         "s/keys needs qualified spec keys",
                                     );
+                                    supported = false;
                                     continue;
-                                }
+                                };
                                 let required = directive.starts_with(":req");
                                 let field = match (self.lookup)(&qualified, key.span) {
                                     Some(ty) => Field::new(ty, required),
@@ -269,7 +281,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                                     }
                                 };
                                 let field_key = if directive.ends_with("-un") {
-                                    format!(":{}", qualified.rsplit('/').next().unwrap())
+                                    format!(":{name}")
                                 } else {
                                     qualified
                                 };
@@ -279,13 +291,20 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                                         key.span,
                                         format!("Repeated field {field_key}"),
                                     );
+                                    supported = false;
                                 }
                             }
                         }
-                        Type::Map(MapType {
-                            fields,
-                            extra: ExtraFields::Open,
-                        })
+                        if supported {
+                            Type::Map(MapType {
+                                fields,
+                                extra: ExtraFields::Open,
+                            })
+                        } else {
+                            // Repeated options or colliding unqualified keys
+                            // can alter both presence and the winning predicate.
+                            Type::Unknown
+                        }
                     }
                     Some("clojure.spec.alpha/coll-of") if xs.len() >= 2 => {
                         self.collection(form, &xs[1], &xs[2..])
@@ -335,6 +354,10 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             Some("clojure.core/seq?") => {
                 Type::union([Type::empty_seq(), Type::Seq(Box::new(self.parse(element)))])
             }
+            Some("clojure.core/list?") => Type::union([
+                Type::empty_list(),
+                Type::List(Box::new(self.parse(element))),
+            ]),
             _ => {
                 self.error("PNX9001", kind.span, "Unsupported collection kind");
                 Type::Unknown
@@ -360,9 +383,12 @@ pub(super) fn core_predicate_type(name: &str) -> Option<Type> {
         "string?" => Type::String,
         "char?" => Type::Character,
         "number?" => Type::Number,
+        "integer?" => Type::Integral,
         "boolean?" => Type::Boolean,
         "keyword?" => Type::Keyword,
         "symbol?" => Type::Symbol,
+        "simple-symbol?" => Type::SimpleSymbol,
+        "qualified-symbol?" => Type::QualifiedSymbol,
         "nil?" => Type::Nil,
         "map?" => Type::Map(MapType {
             fields: BTreeMap::new(),

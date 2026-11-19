@@ -235,11 +235,17 @@ impl SnapshotWriter {
             Type::Nil => "clojure.core/nil?",
             Type::Boolean => "clojure.core/boolean?",
             Type::Number => "clojure.core/number?",
+            Type::Integral => "clojure.core/integer?",
+            Type::Int32 => {
+                return self.nested(2, "(clojure.spec.alpha/and clojure.core/integer? (clojure.spec.alpha/conformer clojure.core/int", "))", |_| Ok(()));
+            }
             Type::String => "clojure.core/string?",
             Type::Pattern => "java.util.regex.Pattern",
             Type::Character => "clojure.core/char?",
             Type::Keyword => "clojure.core/keyword?",
             Type::Symbol => "clojure.core/symbol?",
+            Type::SimpleSymbol => "clojure.core/simple-symbol?",
+            Type::QualifiedSymbol => "clojure.core/qualified-symbol?",
             Type::Bool(value) => {
                 return self.nested(1, "#{", "}", |out| Ok(write!(out, "{value}")?));
             }
@@ -293,13 +299,19 @@ impl SnapshotWriter {
         if let [Type::Nil, item] | [item, Type::Nil] = items {
             return self.nested(1, "(clojure.spec.alpha/nilable ", ")", |out| out.ty(item));
         }
-        // coll-of seq? includes the empty seq as well as its nonempty arm.
+        // Each sequential coll-of includes the empty case as well as its nonempty arm.
         let is_empty_seq = |ty: &Type| matches!(ty, Type::SeqTuple(xs) if xs.is_empty());
+        let is_empty_list = |ty: &Type| matches!(ty, Type::ListTuple(xs) if xs.is_empty());
         let seq =
             items.iter().any(is_empty_seq) && items.iter().any(|ty| matches!(ty, Type::Seq(_)));
-        let mut types = items.iter().filter(|ty| !seq || !is_empty_seq(ty));
+        let list =
+            items.iter().any(is_empty_list) && items.iter().any(|ty| matches!(ty, Type::List(_)));
+        let mut types = items
+            .iter()
+            .filter(|ty| !(seq && is_empty_seq(ty) || list && is_empty_list(ty)));
         let encode = |out: &mut Self, ty: &Type| match ty {
             Type::Seq(item) if seq => out.collection(item, "seq?"),
+            Type::List(item) if list => out.collection(item, "list?"),
             _ => out.ty(ty),
         };
         if types.clone().count() == 1 {

@@ -8,6 +8,7 @@ use crate::types::Type;
 #[derive(Clone, Default)]
 pub(super) struct Env {
     bindings: BTreeMap<String, Value>,
+    java_hints: BTreeMap<String, String>,
     presence: Vec<Presence>,
     selectors: BTreeMap<String, Selector>,
     impossible: bool,
@@ -44,11 +45,20 @@ impl Env {
     }
 
     pub(super) fn insert(&mut self, name: String, value: Value) {
+        self.java_hints.remove(&name);
         self.presence
             .retain(|fact| fact.collection != name && fact.key != name);
         self.selectors
             .retain(|alias, selector| alias != &name && selector.root != name);
         self.bindings.insert(name, value);
+    }
+
+    pub(super) fn java_hint(&self, name: &str) -> Option<&str> {
+        self.java_hints.get(name).map(String::as_str)
+    }
+
+    pub(super) fn set_java_hint(&mut self, name: &str, hint: &str) {
+        self.java_hints.insert(name.into(), hint.into());
     }
 
     pub(super) fn selector(&self, name: &str) -> Option<&Selector> {

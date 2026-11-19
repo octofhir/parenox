@@ -63,7 +63,7 @@ impl Checker<'_> {
             Type::Union(shapes) => {
                 Type::union(shapes.iter().map(|shape| self.group_items(shape, call)))
             }
-            Type::Seq(item) => {
+            Type::Seq(item) | Type::List(item) => {
                 let key = self.group_key(item, call.source.span, call);
                 if matches!(key, Type::Never | Type::Unknown) {
                     return key;
@@ -74,7 +74,7 @@ impl Checker<'_> {
                 }
                 Type::Map(MapType::dictionary(key, group))
             }
-            Type::SeqTuple(items) => self.group_fixed(items, call),
+            Type::SeqTuple(items) | Type::ListTuple(items) => self.group_fixed(items, call),
             _ => unreachable!("seq supplies sequence views"),
         }
     }

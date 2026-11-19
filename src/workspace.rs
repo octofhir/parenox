@@ -33,10 +33,21 @@ pub(super) struct DiskProject {
 impl DiskProject {
     pub fn read(settings: ProjectConfig) -> Result<Self, String> {
         Ok(Self {
-            files: read_source_roots(&settings.paths)?,
+            files: Self::read_sources(&settings)?,
             externs: read_externs(&settings.externs)?,
             dependency_externs: read_externs(&settings.dependency_externs)?,
         })
+    }
+
+    pub fn read_sources(settings: &ProjectConfig) -> Result<BTreeMap<String, String>, String> {
+        matching_paths(settings.analysis_paths(), is_clojure_source)?
+            .into_iter()
+            .map(|path| {
+                let source = fs::read_to_string(&path)
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                Ok((path.to_string_lossy().into_owned(), source))
+            })
+            .collect()
     }
 
     pub fn require_source_files(&self) -> Result<(), String> {
@@ -61,25 +72,21 @@ fn read_externs(paths: &[String]) -> Result<Vec<FileSnapshot>, String> {
         .collect()
 }
 
-pub(super) fn read_source_roots(paths: &[String]) -> Result<BTreeMap<String, String>, String> {
-    source_paths(paths)?
-        .into_iter()
-        .map(|path| {
-            let source = fs::read_to_string(&path)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
-            Ok((path.to_string_lossy().into_owned(), source))
-        })
-        .collect()
+pub(super) fn source_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
+    matching_paths(paths, is_clojure_source)
 }
 
-pub(super) fn source_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
+pub(super) fn matching_paths<'a>(
+    paths: impl IntoIterator<Item = &'a String>,
+    include: impl Fn(&Path) -> bool,
+) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let mut roots = BTreeSet::new();
     let mut pending = Vec::new();
-    for path in paths.iter().map(PathBuf::from) {
+    for path in paths.into_iter().map(PathBuf::from) {
         let metadata =
             fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-        if !metadata.is_dir() && !is_clojure_source(&path) {
+        if !metadata.is_dir() && !include(&path) {
             continue;
         }
         let resolved = path
@@ -109,7 +116,7 @@ pub(super) fn source_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
                 }
                 pending.push((child, None));
             }
-        } else if is_clojure_source(&path) {
+        } else if include(&path) {
             files.push(path);
         }
     }

@@ -27,6 +27,9 @@ Point the binary at your source, or run `parenox check` from a project with
 paths from `deps.edn`. CI can use `--format json` for machine-readable diagnostics.
 [CLI and project configuration](docs/reference.md#a-project-sized-example)
 
+Format Clojure and EDN with `parenox fmt --write src` or **Reformat Code**
+in your editor. Both use the same [`parenox.edn` settings](docs/reference.md#formatting).
+
 `parenox check --allow-incomplete` accepts coverage warnings when adding
 contracts gradually. The report still shows which checks were incomplete.
 

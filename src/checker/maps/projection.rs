@@ -92,10 +92,10 @@ fn selected_keys(sequence: &Type) -> Option<BTreeMap<&Type, bool>> {
     for ty in alternatives {
         let items = match ty {
             Type::Nil => &[],
-            Type::SeqTuple(items) => items.as_ref(),
+            Type::SeqTuple(items) | Type::ListTuple(items) => items.as_ref(),
             // A nonempty homogeneous sequence guarantees its key only when
             // every element has the same literal type.
-            Type::Seq(item) => std::slice::from_ref(item.as_ref()),
+            Type::Seq(item) | Type::List(item) => std::slice::from_ref(item.as_ref()),
             _ => return None,
         };
         let mut present = BTreeSet::new();

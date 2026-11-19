@@ -1,5 +1,5 @@
 //! Function specs shared by s/fspec type forms and top-level s/fdef declarations.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Names, TypeReader};
 use crate::Diagnostic;
@@ -13,7 +13,7 @@ pub(in crate::checker::model) fn read_function_spec(
     span: Span,
     diagnostics: &mut Vec<Diagnostic>,
     lookup: impl FnMut(&str, Span) -> Option<Type>,
-) -> Option<Signature> {
+) -> Option<Vec<Signature>> {
     TypeReader {
         names,
         parameters: None,
@@ -21,16 +21,35 @@ pub(in crate::checker::model) fn read_function_spec(
         diagnostics,
         lookup,
     }
-    .function_spec(options, span, "s/fdef")
+    .fdef(options, span)
 }
 
 impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
+    fn fdef(&mut self, options: &[Form], span: Span) -> Option<Vec<Signature>> {
+        let (args, ret) = self.function_spec_options(options, span, "s/fdef")?;
+        if self.spec_operator(args) == Some("alt") {
+            return self.fixed_alt(args, ret);
+        }
+        self.cat_signature(args, ret, "s/fdef")
+            .map(|signature| vec![signature])
+    }
+
     pub(super) fn function_spec(
         &mut self,
         options: &[Form],
         span: Span,
         operator: &str,
     ) -> Option<Signature> {
+        let (args, ret) = self.function_spec_options(options, span, operator)?;
+        self.cat_signature(args, ret, operator)
+    }
+
+    fn function_spec_options<'a>(
+        &mut self,
+        options: &'a [Form],
+        span: Span,
+        operator: &str,
+    ) -> Option<(&'a Form, &'a Form)> {
         let (pairs, remainder) = options.as_chunks::<2>();
         if let [key] = remainder {
             self.error(
@@ -67,26 +86,97 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             );
             return None;
         };
-        let items = match &args.without_metadata().kind {
-            Kind::List(items)
-                if items.len() % 2 == 1
-                    && items
-                        .first()
-                        .and_then(Form::symbol)
-                        .is_some_and(|op| self.names.resolve(op) == "clojure.spec.alpha/cat") =>
+        Some((args, ret))
+    }
+
+    fn spec_operator<'a>(&'a self, form: &'a Form) -> Option<&'a str> {
+        let Kind::List(items) = &form.without_metadata().kind else {
+            return None;
+        };
+        let (namespace, operator) = self.names.resolve_parts(items.first()?.symbol()?);
+        (namespace == "clojure.spec.alpha").then_some(operator)
+    }
+
+    fn regex_pairs<'a>(&self, form: &'a Form, operator: &str) -> Option<&'a [[Form; 2]]> {
+        let Kind::List(items) = &form.without_metadata().kind else {
+            return None;
+        };
+        if self.spec_operator(form) != Some(operator) {
+            return None;
+        }
+        let (pairs, extra) = items[1..].as_chunks::<2>();
+        extra.is_empty().then_some(pairs)
+    }
+
+    fn fixed_alt(&mut self, args: &Form, ret: &Form) -> Option<Vec<Signature>> {
+        let Some(branches) = self
+            .regex_pairs(args, "alt")
+            .filter(|pairs| !pairs.is_empty())
+        else {
+            self.regex_gap(
+                args,
+                "s/alt requires keyword tags and at least one s/cat branch",
+            );
+            return None;
+        };
+        let mut tags = BTreeSet::new();
+        let mut arities = BTreeMap::new();
+        for [tag, branch] in branches {
+            if !tag
+                .keyword()
+                .is_some_and(|tag| tags.insert(self.names.key(tag)))
             {
-                items
-            }
-            _ => {
-                self.error(
-                    "PNX9001",
-                    args.span,
-                    format!("{operator} :args requires (s/cat :tag Type ...)"),
-                );
+                self.regex_gap(tag, "s/alt requires distinct keyword tags");
                 return None;
             }
+            let Some(pairs) = self.regex_pairs(branch, "cat") else {
+                self.regex_gap(branch, "s/fdef s/alt requires fixed s/cat branches");
+                return None;
+            };
+            let (inputs, _) = self.cat_arguments(pairs, branch, true)?;
+            if arities.insert(inputs.len(), inputs).is_some() {
+                self.regex_gap(branch, "s/fdef s/alt branches have overlapping arities");
+                return None;
+            }
+        }
+        let ret = self.parse(ret);
+        Some(
+            arities
+                .into_values()
+                .map(|args| Signature {
+                    args,
+                    rest: None,
+                    ret: ret.clone(),
+                    parameters: None,
+                })
+                .collect(),
+        )
+    }
+
+    fn cat_signature(&mut self, args: &Form, ret: &Form, operator: &str) -> Option<Signature> {
+        let Some(pairs) = self.regex_pairs(args, "cat") else {
+            self.error(
+                "PNX9001",
+                args.span,
+                format!("{operator} :args requires (s/cat :tag Type ...)"),
+            );
+            return None;
         };
-        let pairs = items[1..].as_chunks::<2>().0;
+        let (args, rest) = self.cat_arguments(pairs, args, false)?;
+        Some(Signature {
+            args,
+            rest,
+            ret: self.parse(ret),
+            parameters: None,
+        })
+    }
+
+    fn cat_arguments(
+        &mut self,
+        pairs: &[[Form; 2]],
+        args: &Form,
+        fixed_only: bool,
+    ) -> Option<(Vec<Type>, Option<Type>)> {
         let mut tags = BTreeSet::new();
         let mut fixed = Vec::new();
         let mut rest = None;
@@ -98,11 +188,18 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                 self.error("PNX9001", tag.span, "s/cat requires distinct keyword tags");
                 return None;
             }
-            if let Kind::List(repeat) = &ty.without_metadata().kind
-                && repeat
-                    .first()
-                    .and_then(Form::symbol)
-                    .is_some_and(|op| self.names.resolve(op) == "clojure.spec.alpha/*")
+            let operator = self.spec_operator(ty);
+            if fixed_only
+                && matches!(
+                    operator,
+                    Some("cat" | "alt" | "*" | "+" | "?" | "&" | "keys*")
+                )
+            {
+                self.regex_gap(ty, "s/fdef s/alt does not support nested argument regexes");
+                return None;
+            }
+            if operator == Some("*")
+                && let Kind::List(repeat) = &ty.without_metadata().kind
             {
                 if index + 1 != pairs.len() || repeat.len() != 2 {
                     self.error(
@@ -114,7 +211,16 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                 }
                 rest = Some(self.parse(&repeat[1]));
             } else {
-                fixed.push(self.parse(ty));
+                let diagnostic_count = self.diagnostics.len();
+                let input = self.parse(ty);
+                if fixed_only && input == Type::Unknown {
+                    // An unresolved spec can itself be an argument regex.
+                    if self.diagnostics.len() == diagnostic_count {
+                        self.regex_gap(ty, "Cannot determine the arity of this s/cat entry");
+                    }
+                    return None;
+                }
+                fixed.push(input);
             }
         }
         if fixed.len() > MAX_FIXED_PARAMETERS {
@@ -125,11 +231,11 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             );
             return None;
         }
-        Some(Signature {
-            args: fixed,
-            rest,
-            ret: self.parse(ret),
-            parameters: None,
-        })
+        Some((fixed, rest))
+    }
+
+    fn regex_gap(&mut self, form: &Form, message: &str) {
+        self.diagnostics
+            .push(Diagnostic::analysis_gap("PNX9001", form.span, message));
     }
 }

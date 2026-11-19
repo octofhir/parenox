@@ -178,11 +178,18 @@ impl Model {
             None
         };
         let spec_signature = if let Some(fdef) = fdef {
-            let Some(signature) = self.parse_fdef(fdef, globals) else {
+            let Some(spec_signatures) = self.parse_fdef(fdef, globals) else {
+                let arities = (source_arities_known && !opaque_callable())
+                    .then(|| arities.keys().copied().collect());
+                self.remember_unchecked_function(
+                    name,
+                    symbol,
+                    super::UncheckedFunction { arities, private },
+                );
                 return;
             };
             if let Some((signatures, _, _)) = &declared
-                && signatures.as_slice() != std::slice::from_ref(&signature)
+                && *signatures != spec_signatures
             {
                 self.error(
                     "PNX2790",
@@ -190,7 +197,7 @@ impl Model {
                     format!("s/fdef and :t/sig disagree for {name}"),
                 );
             }
-            Some((vec![signature], fdef[1].span, ContractKind::SFdef))
+            Some((spec_signatures, fdef[1].span, ContractKind::SFdef))
         } else {
             None
         };

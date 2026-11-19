@@ -72,22 +72,41 @@ impl Type {
                 .upper
                 .as_ref()
                 .map_or(Mismatch, |upper| upper.compatibility(expected)),
-            (Type::Integer(_), Type::Number)
+            (
+                Type::Integral
+                | Type::Int32
+                | Type::Integer(_)
+                | Type::OutsideInt32
+                | Type::OutsideInt64
+                | Type::NonIntegral,
+                Type::Number,
+            )
+            | (
+                Type::Int32 | Type::Integer(_) | Type::OutsideInt32 | Type::OutsideInt64,
+                Type::Integral,
+            )
+            | (Type::Integer(_), Type::Int32)
             | (Type::Str(_), Type::String)
             | (Type::Char(_), Type::Character)
             | (Type::Key(_), Type::Keyword)
+            | (Type::SimpleSymbol | Type::QualifiedSymbol, Type::Symbol)
             | (Type::ExceptionInfo(_), Type::Throwable)
             | (Type::Bool(_), Type::Boolean) => Proven,
+            (Type::Number, Type::Integral | Type::Int32) | (Type::Integral, Type::Int32) => {
+                Unproven
+            }
             (Type::MapEntry(a), Type::MapEntry(e)) => positions(a.as_slice(), e.as_slice()),
             (Type::MapEntry(a), Type::Tuple(e)) => positions(a.as_slice(), e),
-            (Type::Tuple(a), Type::Tuple(e)) | (Type::SeqTuple(a), Type::SeqTuple(e)) => {
-                positions(a, e)
-            }
+            (Type::Tuple(a), Type::Tuple(e))
+            | (Type::SeqTuple(a) | Type::ListTuple(a), Type::SeqTuple(e))
+            | (Type::ListTuple(a), Type::ListTuple(e)) => positions(a, e),
             (Type::MapEntry(items), Type::Vector(e)) => {
                 Compatibility::all(items.iter().map(|item| item.compatibility(e)))
             }
-            (Type::Tuple(items), Type::Vector(e)) | (Type::SeqTuple(items), Type::Seq(e)) => {
-                if items.is_empty() && matches!(self, Type::SeqTuple(_)) {
+            (Type::Tuple(items), Type::Vector(e))
+            | (Type::SeqTuple(items) | Type::ListTuple(items), Type::Seq(e))
+            | (Type::ListTuple(items), Type::List(e)) => {
+                if items.is_empty() && !matches!(self, Type::Tuple(_)) {
                     Mismatch
                 } else {
                     Compatibility::all(items.iter().map(|item| item.compatibility(e)))
@@ -95,7 +114,8 @@ impl Type {
             }
             (Type::Vector(a), Type::Vector(e))
             | (Type::Set(a), Type::Set(e))
-            | (Type::Seq(a), Type::Seq(e))
+            | (Type::Seq(a) | Type::List(a), Type::Seq(e))
+            | (Type::List(a), Type::List(e))
             | (Type::Reduced(a), Type::Reduced(e))
             | (Type::ExceptionInfo(a), Type::ExceptionInfo(e)) => a.compatibility(e),
             (Type::Function(actual), Type::Function(expected)) => Compatibility::all(

@@ -70,12 +70,15 @@ impl Checker<'_> {
                     .map(|part| self.nth_value(collection, (part, key.1), fallback, access)),
             ),
             Type::Integer(index) => self.nth_at(collection, (*index, key.1), fallback, access),
-            Type::Number if matches!(access, IndexedAccess::VectorCall) => {
+            Type::NonIntegral if matches!(access, IndexedAccess::VectorCall) => {
+                self.invalid_index(key, access)
+            }
+            Type::Number | Type::Int32 | Type::OutsideInt32
+                if matches!(access, IndexedAccess::VectorCall) =>
+            {
                 let source = &self.source[key.1.start.offset..key.1.end.offset];
                 if let Some(index) = vector_literal_index(source) {
                     self.nth_at(collection, (index, key.1), fallback, access)
-                } else if source.contains(['.', 'e', 'E']) && source.parse::<f64>().is_ok() {
-                    self.invalid_index(key, access)
                 } else {
                     self.unsupported(
                         key.1,
@@ -84,7 +87,19 @@ impl Checker<'_> {
                     .known
                 }
             }
-            Type::Number => {
+            Type::Integral | Type::OutsideInt64 if matches!(access, IndexedAccess::VectorCall) => {
+                self.unsupported(
+                    key.1,
+                    "Vector invocation analysis needs a known integer index",
+                )
+                .known
+            }
+            Type::Number
+            | Type::Integral
+            | Type::Int32
+            | Type::OutsideInt32
+            | Type::OutsideInt64
+            | Type::NonIntegral => {
                 self.unsupported(
                     key.1,
                     "nth analysis requires a known decimal integer index in the i32 range",

@@ -76,7 +76,7 @@ impl Checker<'_> {
         writing: bool,
     ) -> Result<KeyPath, Type> {
         let items: Box<[Type]> = match ty {
-            Type::Tuple(items) | Type::SeqTuple(items) => items,
+            Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => items,
             Type::MapEntry(items) => items,
             Type::Nil => Box::new([]),
             Type::Vector(element) if *element == Type::Never => Box::new([]),

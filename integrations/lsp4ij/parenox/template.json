@@ -7,7 +7,7 @@
   },
   "fileTypeMappings": [
     {
-      "fileType": { "patterns": ["*.clj", "*.cljc"] },
+      "fileType": { "patterns": ["*.clj", "*.cljc", "*.cljs"] },
       "languageId": "clojure"
     },
     {

@@ -102,6 +102,151 @@ fn transcript(messages: &[Value]) -> Vec<Value> {
 }
 
 #[test]
+fn formats_unsaved_buffers_with_the_project_profile_and_leaves_invalid_text_alone() {
+    let fixture = Fixture::new("formatting");
+    let path = fixture.0.join("src/demo.clj");
+    fs::write(
+        fixture.0.join("parenox.edn"),
+        r#"{:format {:indent-width 4
+        :indent-rules {my/wrap :block} :insert-final-newline? false}}"#,
+    )
+    .unwrap();
+    let saved = "(ns saved)";
+    fs::write(&path, saved).unwrap();
+    let file = uri(&path);
+    let text = "(my/wrap  :label\r\n  (println :indent)\r\n    (str \"🦊\"  :ok))";
+    let expected = "(my/wrap :label\r\n    (println :indent)\r\n    (str \"🦊\" :ok))";
+    let query = |id| {
+        json!({
+            "jsonrpc":"2.0","id":id,"method":"textDocument/formatting",
+            "params":{"textDocument":{"uri":file},"options":{"tabSize":8,"insertSpaces":false}}
+        })
+    };
+    let change = |version, text| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"version":1,"languageId":"clojure","text":text}
+        }}),
+        query(2),
+        change(2, expected),
+        query(3),
+        change(3, "(my/wrap"),
+        query(4),
+        json!({"jsonrpc":"2.0","id":5,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    assert_eq!(
+        response(1)["capabilities"]["documentFormattingProvider"],
+        true
+    );
+    assert_eq!(
+        response(2),
+        &json!([
+            {"range":{"start":{"line":0,"character":9},"end":{"line":0,"character":10}},"newText":""},
+            {"range":{"start":{"line":1,"character":2},"end":{"line":1,"character":2}},"newText":"  "},
+            {"range":{"start":{"line":2,"character":14},"end":{"line":2,"character":15}},"newText":""}
+        ])
+    );
+    assert_eq!(response(3), &json!([]));
+    assert_eq!(response(4), &json!([]));
+    assert_eq!(fs::read_to_string(path).unwrap(), saved);
+}
+
+#[test]
+fn completes_incomplete_forms_project_vars_and_specs_from_closed_sources() {
+    let fixture = Fixture::new("completion");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    fs::write(
+        fixture.0.join("src/api.clj"),
+        "(ns lib.api (:require [clojure.spec.alpha :as s]))\n\
+         (s/def :wire/id string?) (s/def ::title string?)\n\
+         (defn render [x] x) (defn- render-private [x] x)\n",
+    )
+    .unwrap();
+    let namespace = "(ns app (:require [lib.api :as lib]))\n";
+    let incomplete = format!("{namespace}(de");
+    let source = |last_line| format!("{namespace}{last_line}");
+    let change = |version, text| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let query = |id, character| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/completion","params":{
+            "textDocument":{"uri":file},"position":{"line":1,"character":character}
+        }})
+    };
+    let alias_line = "(defn f [] (do \"🦊\" (lib/re";
+    let keyword_line = "(defn f {:t/sig '[:-> :wire/i";
+    let relative_line = "(defn f {:t/sig '[:-> ::lib/ti";
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),"capabilities":{"textDocument":{"completion":{"completionItem":{"snippetSupport":true}}}}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":file,"version":1,"languageId":"clojure","text":incomplete
+        }}}),
+        query(2, 3),
+        change(2, source("(de unchanged [] nil)")),
+        query(3, 3),
+        change(3, source(alias_line)),
+        query(4, alias_line.encode_utf16().count()),
+        change(4, source(keyword_line)),
+        query(5, keyword_line.len()),
+        change(5, source(relative_line)),
+        query(6, relative_line.len()),
+        change(6, source(";; (de")),
+        query(7, 6),
+        change(7, source("(println \"de\")")),
+        query(8, 12),
+        json!({"jsonrpc":"2.0","id":9,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    let find_item = |id, label| {
+        response(id)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == label)
+            .unwrap()
+    };
+    assert!(response(1)["capabilities"]["completionProvider"].is_object());
+    assert_eq!(find_item(2, "defn")["insertTextFormat"], 2);
+    assert_eq!(
+        find_item(2, "defn")["textEdit"],
+        json!({
+            "range":{"start":{"line":1,"character":1},"end":{"line":1,"character":3}},
+            "newText":"defn ${1:name} [${2:args}] $0)"
+        })
+    );
+    assert_eq!(find_item(3, "defn")["textEdit"]["newText"], "defn");
+    assert_eq!(response(4)["items"].as_array().unwrap().len(), 1);
+    let alias_end = alias_line.encode_utf16().count();
+    assert_eq!(
+        find_item(4, "lib/render")["textEdit"],
+        json!({
+            "range":{"start":{"line":1,"character":alias_end-6},"end":{"line":1,"character":alias_end}},
+            "newText":"lib/render"
+        })
+    );
+    assert_eq!(find_item(5, ":wire/id")["detail"], "Project spec");
+    assert_eq!(
+        find_item(6, "::lib/title")["textEdit"]["newText"],
+        "::lib/title"
+    );
+    assert!(response(7).is_null());
+    assert!(response(8).is_null());
+}
+
+#[test]
 fn generates_a_versioned_fdef_from_the_unsaved_function() {
     let fixture = Fixture::new("generate fdef");
     let path = fixture.0.join("src/demo.clj");
@@ -347,6 +492,124 @@ fn editor_isolates_a_second_checkout_from_the_configured_project() {
 }
 
 #[test]
+fn nested_project_uses_closed_specs_and_rechecks_only_its_own_overlays() {
+    let fixture = Fixture::new("nested project");
+    let primary = fixture.0.join("src/primary.clj");
+    let primary_source = "(ns primary (:require [clojure.spec.alpha :as s]))\n\
+        (s/def :wire/id number?)\n(defn id {:t/sig '[:-> :wire/id]} [] 42)\n";
+    fs::write(&primary, primary_source).unwrap();
+
+    let nested = fixture.0.join("examples/namespace_specs");
+    fs::create_dir_all(&nested).unwrap();
+    let app_path = nested.join("app.clj");
+    let handler_path = nested.join("handler.clj");
+    let config_path = nested.join("config.clj");
+    let app = include_str!("../examples/namespace_specs/app.clj");
+    let handler = include_str!("../examples/namespace_specs/handler.clj");
+    fs::write(&app_path, app).unwrap();
+    fs::write(&handler_path, handler).unwrap();
+    fs::write(
+        &config_path,
+        include_str!("../examples/namespace_specs/config.clj"),
+    )
+    .unwrap();
+    fs::write(
+        nested.join("parenox.edn"),
+        include_str!("../examples/namespace_specs/parenox.edn"),
+    )
+    .unwrap();
+
+    let mut child = lsp_server();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |message| {
+        send_message(&mut input, &message);
+        read_message(&mut output).expect("language server produced no message")
+    };
+    let open = |path: &Path, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri(path),"languageId":"clojure","version":1,"text":text}
+        }})
+    };
+    let request =
+        |id, method, params| json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+    let expect_diagnostics = |message: Value, path: &Path, codes: &[&str]| {
+        assert_eq!(message["method"], "textDocument/publishDiagnostics");
+        assert_eq!(message["params"]["uri"], uri(path));
+        let actual: Vec<_> = message["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|diagnostic| diagnostic["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(actual, codes, "{message}");
+    };
+
+    let init = exchange(request(1, "initialize", json!({"rootUri":uri(&fixture.0)})));
+    assert_eq!(init["id"], 1);
+    expect_diagnostics(exchange(open(&primary, primary_source)), &primary, &[]);
+    expect_diagnostics(exchange(open(&app_path, app)), &app_path, &[]);
+
+    // The user's failing case should be a real type error, not a missing spec.
+    let wrong = app.replace("\"req-123\"", "123");
+    let changed = |version, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":uri(&app_path),"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let mismatch = exchange(changed(2, &wrong));
+    assert!(
+        mismatch["params"]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expected String")
+    );
+    expect_diagnostics(mismatch, &app_path, &["PNX2322"]);
+
+    // Update a spec in a closed file through a watch notification. The unsaved
+    // numeric return now matches the nested project, not the primary project.
+    let changed_spec = handler.replace("::id string?", "::id number?");
+    fs::write(&handler_path, &changed_spec).unwrap();
+    expect_diagnostics(
+        exchange(
+            json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles",
+        "params":{"changes":[{"uri":uri(&handler_path),"type":2}]}}),
+        ),
+        &app_path,
+        &[],
+    );
+    expect_diagnostics(
+        exchange(open(&handler_path, &changed_spec)),
+        &handler_path,
+        &[],
+    );
+    let line = changed_spec
+        .lines()
+        .position(|line| line.contains("config/request-key"))
+        .unwrap();
+    let character = changed_spec
+        .lines()
+        .nth(line)
+        .unwrap()
+        .find("config/request-key")
+        .unwrap();
+    let target = exchange(request(
+        2,
+        "textDocument/definition",
+        json!({
+            "textDocument":{"uri":uri(&handler_path)},"position":{"line":line,"character":character}
+        }),
+    ));
+    assert_eq!(target["result"]["uri"], uri(&config_path));
+
+    assert_eq!(exchange(request(3, "shutdown", Value::Null))["id"], 3);
+    send_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"}));
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(fs::read_to_string(app_path).unwrap(), app);
+}
+
+#[test]
 fn editor_applies_ordered_utf16_edits_atomically() {
     let fixture = Fixture::new("incremental source");
     let caller = fixture.0.join("src/demo.cljc");
@@ -486,6 +749,292 @@ fn editor_uses_aliases_overlays_and_utf16_ranges() {
     }
     assert_eq!(messages[13]["id"], 5);
     assert!(messages[13]["result"].is_null());
+}
+
+#[test]
+fn references_track_real_usages_in_closed_files_and_unsaved_buffers() {
+    let fixture = Fixture::new("find references");
+    let provider = fixture.0.join("src/provider.clj");
+    let client = fixture.0.join("src/client.clj");
+    let other = fixture.0.join("src/other.clj");
+    let provider_source = concat!(
+        "(ns provider)\n",
+        "(defn title [x] x)\n",
+        "(defn wrap [] (title \"local\"))\n",
+        "(let [title 0] (defn captured [] title))\n",
+    );
+    let client_source = indoc_client();
+    fs::write(&provider, provider_source).unwrap();
+    fs::write(&client, client_source).unwrap();
+    fs::write(&other, "(ns other) (defn title [x] x)").unwrap();
+    let request =
+        |id, method, params| json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+    let position = |source: &str, line: usize, needle: &str| {
+        let text = source.lines().nth(line).unwrap();
+        let start = text.find(needle).unwrap();
+        json!({"line":line,"character":text[..start].encode_utf16().count()})
+    };
+    let reference = |id, path: &Path, pos, include_declaration| {
+        request(
+            id,
+            "textDocument/references",
+            json!({
+                "textDocument":{"uri":uri(path)},"position":pos,"context":{"includeDeclaration":include_declaration}
+            }),
+        )
+    };
+    let open = |path: &Path, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":uri(path),"languageId":"clojure","version":1,"text":text
+        }}})
+    };
+    let declaration = position(provider_source, 1, "title");
+    let overlay = client_source.replace("(detail \"two\") ", "");
+    let parameters = position(&overlay, 5, "detail");
+    let messages = transcript(&[
+        request(1, "initialize", json!({"rootUri":uri(&fixture.0)})),
+        open(&provider, provider_source),
+        reference(2, &provider, declaration.clone(), false),
+        reference(3, &provider, declaration.clone(), true),
+        open(&client, &overlay),
+        reference(4, &provider, declaration, false),
+        reference(5, &client, parameters.clone(), false),
+        request(
+            6,
+            "textDocument/documentHighlight",
+            json!({
+                "textDocument":{"uri":uri(&client)},"position":parameters
+            }),
+        ),
+        request(7, "shutdown", Value::Null),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    assert_eq!(response(1)["capabilities"]["referencesProvider"], true);
+    let initial = response(2).as_array().unwrap();
+    assert_eq!(initial.len(), 8, "{initial:#?}");
+    let from_client: Vec<_> = initial
+        .iter()
+        .filter(|m| m["uri"] == uri(&client))
+        .collect();
+    assert_eq!(from_client.len(), 7, "{from_client:#?}");
+    let on_line = |found: &Value, line: usize| found["range"]["start"]["line"] == line;
+    assert_eq!(from_client.iter().filter(|m| on_line(m, 1)).count(), 3); // :refer and both :rename names
+    assert_eq!(from_client.iter().filter(|m| on_line(m, 3)).count(), 2); // only actual calls, not other/title
+    assert_eq!(from_client.iter().filter(|m| on_line(m, 6)).count(), 2); // call and var literal in def value
+    assert!(
+        from_client
+            .iter()
+            .any(|m| m["range"]["start"] == position(client_source, 3, "p/title"))
+    );
+    assert_eq!(response(3).as_array().unwrap().len(), 9);
+    assert!(
+        response(3)
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["uri"] == uri(&provider) && on_line(m, 1))
+    );
+    assert_eq!(response(4).as_array().unwrap().len(), 7);
+    let uses = response(5).as_array().unwrap();
+    assert_eq!(uses.len(), 1, "{uses:#?}");
+    assert_eq!(
+        uses[0]["range"]["start"],
+        position(&overlay, 5, "detail \"initial\"")
+    );
+    let highlights = response(6).as_array().unwrap();
+    assert_eq!(highlights.len(), 2, "{highlights:#?}");
+    assert_eq!(
+        highlights[0]["range"]["start"],
+        position(&overlay, 5, "detail")
+    );
+    assert_eq!(fs::read_to_string(client).unwrap(), client_source);
+
+    fn indoc_client() -> &'static str {
+        concat!(
+            "(ns client\n",
+            "  (:require [provider :as p :refer [title] :rename {title detail}] [other :as o]))\n",
+            "(defn use-it []\n",
+            "  (do \"🦀\" (p/title \"one\") (detail \"two\") (o/title \"foreign\")\n",
+            "      '(p/title) (quote p/title) #_(p/title) (opaque (p/title \"data\"))))\n",
+            "(defn shadow [detail] (let [detail (detail \"initial\")] (detail \"inner\")))\n",
+            "(def result [(p/title 1) #'p/title])\n",
+        )
+    }
+}
+
+#[test]
+fn symbols_cover_closed_project_files_and_outline_survives_an_incomplete_edit() {
+    let fixture = Fixture::new("outline");
+    let api = fixture.0.join("src/api.clj");
+    let nested = fixture.0.join("samples/widget");
+    let app = nested.join("app.clj");
+    let implementation = nested.join("model.clj");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("parenox.edn"), r#"{:paths ["."]}"#).unwrap();
+    fs::write(&app, "(ns widget.app)").unwrap();
+    fs::write(
+        &implementation,
+        "(ns widget.model) (defn widget-entry [] 1)",
+    )
+    .unwrap();
+    let source = concat!(
+        "(ns demo.api (:require [clojure.spec.alpha :as s]))\n",
+        "(s/def ::id string?)\n",
+        "(defprotocol Readable\n",
+        "  (read-out [x]))\n",
+        "#_(defn not-present [])\n",
+        "(defn ^String read-name []\n",
+        "  \"hello\")\n",
+    );
+    fs::write(&api, source).unwrap();
+    let overlay = format!(
+        "{}(defn open-form [",
+        source.replace("read-name", "read-current")
+    );
+    let request =
+        |id, method, params| json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+    let open = |path: &Path, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":uri(path),"languageId":"clojure","version":1,"text":text
+        }}})
+    };
+    let search = |id, query| request(id, "workspace/symbol", json!({"query":query}));
+    let messages = transcript(&[
+        request(
+            1,
+            "initialize",
+            json!({"rootUri":uri(&fixture.0),"capabilities":{
+                "textDocument":{"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}
+            }}),
+        ),
+        search(2, "demo.api/read-name"),
+        open(&api, &overlay),
+        request(
+            3,
+            "textDocument/documentSymbol",
+            json!({"textDocument":{"uri":uri(&api)}}),
+        ),
+        search(4, "read-name"),
+        search(5, "read-current"),
+        open(&app, "(ns widget.app)"),
+        search(6, "widget-entry"),
+        search(7, "not-present"),
+        request(8, "shutdown", Value::Null),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    assert_eq!(response(1)["capabilities"]["documentSymbolProvider"], true);
+    assert_eq!(response(1)["capabilities"]["workspaceSymbolProvider"], true);
+    assert_eq!(response(2)[0]["location"]["uri"], uri(&api));
+    let found = response(3).as_array().unwrap();
+    let names: Vec<_> = found
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["demo.api", "::id", "Readable", "read-current"]);
+    assert_eq!(found[2]["children"][0]["name"], "read-out");
+    assert_eq!(found[3]["kind"], 12);
+    assert_eq!(
+        found[3]["selectionRange"]["start"],
+        json!({"line":5,"character":14})
+    );
+    assert_eq!(found[3]["range"]["end"]["line"], 6);
+    assert_eq!(response(4), &json!([]));
+    assert_eq!(response(5)[0]["name"], "read-current");
+    assert_eq!(response(6)[0]["location"]["uri"], uri(&implementation));
+    assert_eq!(response(7), &json!([]));
+}
+
+#[test]
+#[ignore = "requires the pinned Clojure LSP checkout"]
+fn clojure_lsp_pilot_navigation() {
+    let pilot =
+        PathBuf::from(std::env::var_os("PARENOX_LSP_PILOT").expect("set PARENOX_LSP_PILOT"));
+    let pilot = pilot.canonicalize().unwrap();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let provider = pilot.join("lib/src/clojure_lsp/shared.clj");
+    let service = pilot.join("cli/src/clojure_lsp/server.clj");
+    let tests = pilot.join("lib/test/clojure_lsp/shared_test.clj");
+    let source = fs::read_to_string(&provider).unwrap();
+    let name = "normalize-uri-from-client";
+    let (line, text) = source
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.starts_with("(defn normalize-uri-from-client "))
+        .unwrap();
+    let character = text.find(name).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .args(["lsp", "--deps"])
+        .arg(pilot.join("deps.edn"))
+        .args(["--alias", "test"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut id = 0;
+    let mut request = |method: &str, params: Value, input: &mut std::process::ChildStdin| {
+        id += 1;
+        let before = Instant::now();
+        send_message(
+            input,
+            &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
+        );
+        loop {
+            let message = read_message(&mut output).expect("unexpected EOF");
+            if message["id"] == id {
+                assert!(message["error"].is_null(), "{message}");
+                break (message["result"].clone(), before.elapsed().as_micros());
+            }
+        }
+    };
+    let (initialized, _) = request("initialize", json!({"rootUri":uri(workspace)}), &mut input);
+    assert_eq!(initialized["capabilities"]["referencesProvider"], true);
+    let symbol_params = json!({"query":format!("clojure-lsp.shared/{name}")});
+    let (first_symbols, cold_symbols) =
+        request("workspace/symbol", symbol_params.clone(), &mut input);
+    assert_eq!(first_symbols[0]["location"]["uri"], uri(&provider));
+    assert_eq!(
+        first_symbols[0]["location"]["range"]["start"],
+        json!({"line":line,"character":character})
+    );
+    send_message(
+        &mut input,
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri(&provider),"languageId":"clojure","version":1,"text":source}
+        }}),
+    );
+    let usage_params = json!({"textDocument":{"uri":uri(&provider)},
+        "position":{"line":line,"character":character},"context":{"includeDeclaration":false}});
+    let mut warm_symbols = Vec::new();
+    let mut references = Vec::new();
+    let service = uri(&service);
+    let tests = uri(&tests);
+    let mut found_count = 0;
+    for _ in 0..25 {
+        let (found, elapsed) = request("textDocument/references", usage_params.clone(), &mut input);
+        let hits = found.as_array().unwrap();
+        assert!(hits.iter().any(|hit| hit["uri"] == service), "{found}");
+        assert!(hits.iter().any(|hit| hit["uri"] == tests), "{found}");
+        found_count = hits.len();
+        references.push(elapsed);
+        let (symbols, elapsed) = request("workspace/symbol", symbol_params.clone(), &mut input);
+        assert_eq!(symbols, first_symbols);
+        warm_symbols.push(elapsed);
+    }
+    request("shutdown", Value::Null, &mut input);
+    send_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"}));
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    eprintln!(
+        "{}",
+        json!({
+            "hits":found_count, "cold_symbol_us":cold_symbols,
+            "warm_symbol_us":latencies(warm_symbols), "references_us":latencies(references)
+        })
+    );
 }
 
 #[test]
@@ -715,6 +1264,219 @@ fn untyped_call_typo_matches_cli_and_clears_on_edit() {
     ).unwrap();
     fs::write(&provider, "(ns normalize)\n(defn percent-decode [s] s)\n").unwrap();
     change_call(&fixture.0, &caller, &provider, 4, 2);
+}
+
+#[test]
+fn checker_diagnostics_match_cli_after_unsaved_portable_edit() {
+    let fixture = Fixture::new("checker overlay");
+    let path = fixture.0.join("src/portable.cljc");
+    let saved = r#"(ns portable (:require [clojure.spec.alpha :as s]))
+(defn label ([] "") ([x] x))
+(s/fdef label :args (s/alt :empty (s/cat) :one (s/cat :x string?)) :ret string?)
+(defn exercise {:t/sig '[:-> boolean?]} []
+  #?(:clj (label "ok") :cljrs (label))
+  (for [x [1]] (inc x))
+  (.startsWith "hello" "he"))
+"#;
+    let edited = saved
+        .replace("(label \"ok\")", "(label 42)")
+        .replace("[x [1]]", "[x [\"bad\"]]")
+        .replace("\"hello\" \"he\"", "\"hello\" nil");
+    fs::write(&path, saved).unwrap();
+    let file = uri(&path);
+    let change = |version, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"version":1,"languageId":"clojure","text":saved}
+        }}),
+        change(2, &edited),
+        change(3, saved),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let diagnostics = |version| {
+        messages
+            .iter()
+            .find(|m| {
+                m["method"] == "textDocument/publishDiagnostics"
+                    && m["params"]["version"] == version
+            })
+            .map(|m| m["params"]["diagnostics"].as_array().unwrap())
+            .unwrap()
+    };
+    assert!(diagnostics(1).is_empty(), "{:?}", diagnostics(1));
+    assert!(diagnostics(3).is_empty(), "{:?}", diagnostics(3));
+    assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+
+    let cli_input = fixture.0.join("edited.cljc");
+    fs::write(&cli_input, edited).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .args(["check", "--format", "json"])
+        .arg(cli_input)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let checked: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let cli = checked["diagnostics"].as_array().unwrap();
+    let lsp = diagnostics(2);
+    assert_eq!(cli.len(), 3, "{cli:?}");
+    assert_eq!(cli.len(), lsp.len(), "{lsp:?}");
+    for (cli, lsp) in cli.iter().zip(lsp) {
+        assert_eq!(cli["code"], "PNX2322");
+        assert_eq!(lsp["code"], cli["code"]);
+        assert_eq!(lsp["message"], cli["message"]);
+        assert_eq!(lsp["severity"], 1);
+        for (lsp_pos, cli_pos) in [("start", "start"), ("end", "end")] {
+            let point = &cli["span"][cli_pos];
+            assert_eq!(
+                lsp["range"][lsp_pos],
+                json!({
+                    "line":point["line"].as_u64().unwrap()-1,
+                    "character":point["column"].as_u64().unwrap()-1
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn follows_spec_references_to_closed_and_unsaved_declarations() {
+    let fixture = Fixture::new("spec definition");
+    let path = fixture.0.join("src/demo.cljc");
+    let provider = fixture.0.join("src/wire.clj");
+    let definitions = "(ns wire (:require [clojure.spec.alpha :as s]))\n(s/def ::value string?)\n";
+    let row = "(s/def ::row (s/keys :req-un [::value]))\n";
+    let saved = format!("{definitions}{row}");
+    let overlay = format!("{definitions};; inserted in the editor\n{row}");
+    let source = r#"(ns demo (:require [wire :as-alias w] [clojure.spec.alpha :as s]))
+(defn checked-row {:t/sig '[map? :-> ::w/row]} [row]
+  (if (s/valid? ::w/row row) row (throw (ex-info "invalid row" {}))))
+"#;
+    fs::write(&path, source).unwrap();
+    fs::write(&provider, &saved).unwrap();
+    let open = |path: &Path, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri(path),"version":1,"languageId":"clojure","text":text}
+        }})
+    };
+    let jump = |id, line: usize| {
+        let character = source.lines().nth(line).unwrap().find("::w/row").unwrap();
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/definition","params":{
+            "textDocument":{"uri":uri(&path)},"position":{"line":line,"character":character}
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        open(&path, source),
+        jump(2, 1),
+        jump(3, 2),
+        open(&provider, &overlay),
+        jump(4, 1),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":uri(&provider),"version":2},"contentChanges":[{"text":definitions}]
+        }}),
+        jump(5, 1),
+        json!({"jsonrpc":"2.0","id":6,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let result = |id| &messages.iter().find(|message| message["id"] == id).unwrap()["result"];
+    let location = |line| {
+        json!({
+            "uri":uri(&provider),
+            "range":{"start":{"line":line,"character":7},"end":{"line":line,"character":12}}
+        })
+    };
+    let initial = messages
+        .iter()
+        .find(|m| {
+            m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&path)
+        })
+        .unwrap();
+    assert_eq!(initial["params"]["diagnostics"], json!([]));
+    assert_eq!(*result(2), location(2));
+    assert_eq!(*result(3), location(2));
+    assert_eq!(*result(4), location(3));
+    assert_eq!(*result(5), Value::Null);
+    assert_eq!(fs::read_to_string(provider).unwrap(), saved);
+}
+
+#[test]
+fn changing_an_open_dependency_spec_rechecks_rest_bindings_in_consumers() {
+    let fixture = Fixture::new("dependency overlay");
+    let provider = fixture.0.join("wire.clj");
+    let path = fixture.0.join("src/demo.cljc");
+    let dependency = "(ns wire (:require [clojure.spec.alpha :as s]))\n(s/def ::element number?)";
+    let edited = dependency.replace("number?", "string?");
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+(defn bump {:t/sig '[(s/coll-of :wire/element :kind seq?) :-> number?]}
+  [items]
+  (if (empty? items) 0
+    (loop [[x & xs] items]
+      (if (empty? xs) (inc x) (recur xs)))))
+"#;
+    fs::write(
+        fixture.0.join("parenox.edn"),
+        r#"{:dependency-sources ["wire.clj"]}"#,
+    )
+    .unwrap();
+    fs::write(&provider, dependency).unwrap();
+    fs::write(&path, source).unwrap();
+    let open = |path: &Path, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri(path),"version":1,"languageId":"clojure","text":text}
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        open(&path, source),
+        open(&provider, dependency),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":uri(&provider),"version":2},"contentChanges":[{"text":edited}]
+        }}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let published: Vec<_> = messages
+        .iter()
+        .filter(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == uri(&path)
+        })
+        .map(|message| &message["params"]["diagnostics"])
+        .collect();
+    assert_eq!(published.len(), 2, "{messages:?}");
+    assert_eq!(*published[0], json!([]));
+    assert_eq!(published[1].as_array().unwrap().len(), 1);
+    let lsp = &published[1][0];
+    assert_eq!(lsp["code"], "PNX2322");
+    assert_eq!(lsp["range"]["start"], json!({"line":5,"character":27}));
+    assert_eq!(fs::read_to_string(&provider).unwrap(), dependency);
+
+    fs::write(&provider, edited).unwrap();
+    let cli = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .current_dir(&fixture.0)
+        .args(["check", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(cli.status.code(), Some(1));
+    let checked: Value = serde_json::from_slice(&cli.stdout).unwrap();
+    let consumer = checked["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "src/demo.cljc")
+        .unwrap();
+    let findings = consumer["diagnostics"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["message"], lsp["message"]);
+    assert_eq!(findings[0]["code"], lsp["code"]);
+    assert_eq!(findings[0]["span"]["start"]["line"], 6);
+    assert_eq!(findings[0]["span"]["start"]["column"], 28);
 }
 
 #[test]

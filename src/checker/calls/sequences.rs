@@ -36,6 +36,14 @@ impl ReadSequence {
             _ => result,
         }
     }
+
+    fn list_result(self, result: Type) -> Type {
+        if matches!(self, Self::Head) {
+            result
+        } else {
+            sequence_kind(result, true)
+        }
+    }
 }
 
 fn nonempty_seq(items: &[Type]) -> Type {
@@ -49,9 +57,9 @@ fn nonempty_seq(items: &[Type]) -> Type {
 pub(super) fn list_value(args: &[(Value, Span)]) -> Value {
     let items = args.iter().map(|(value, _)| value.known.clone());
     Value::new(if args.len() <= MAX_TUPLE_ITEMS {
-        Type::SeqTuple(items.collect())
+        Type::ListTuple(items.collect())
     } else {
-        Type::Seq(Box::new(Type::union(items)))
+        Type::List(Box::new(Type::union(items)))
     })
 }
 
@@ -59,12 +67,27 @@ impl Checker<'_> {
     pub(super) fn cons(&mut self, args: &[(Value, Span)]) -> Value {
         let (item, _) = &args[0];
         let (tail, span) = &args[1];
-        let sequence = self.seq_type(&tail.known, "clojure.core/cons", *span);
+        let result = self.cons_type(&item.known, &tail.known, *span);
+        Value::with_notes(result, tail.notes.clone())
+    }
+
+    fn cons_type(&mut self, item: &Type, tail: &Type, span: Span) -> Type {
+        match tail {
+            Type::Nil => return Type::ListTuple(Box::new([item.clone()])),
+            Type::Union(parts) => {
+                return Type::union(parts.iter().map(|part| self.cons_type(item, part, span)));
+            }
+            _ => {}
+        }
+        let sequence = self.seq_type(tail, "clojure.core/cons", span);
         if sequence.contains_unknown() {
             self.may_throw();
         }
-        let result = self.conj_type(&sequence, std::slice::from_ref(&item.known), *span);
-        Value::with_notes(result, tail.notes.clone())
+        // A non-nil tail produces a Cons, even when the tail is an empty list.
+        sequence_kind(
+            self.conj_type(&sequence, std::slice::from_ref(item), span),
+            false,
+        )
     }
 
     pub(super) fn conj(&mut self, args: &[(Value, Span)]) -> Value {
@@ -87,9 +110,11 @@ impl Checker<'_> {
         };
         match collection {
             Type::Unknown | Type::Never => collection.clone(),
-            Type::Nil => conj_seq(&[], items),
+            Type::Nil => sequence_kind(conj_seq(&[], items), true),
+            Type::ListTuple(previous) => sequence_kind(conj_seq(previous, items), true),
             Type::SeqTuple(previous) => conj_seq(previous, items),
             Type::Seq(element) => Type::Seq(joined(element)),
+            Type::List(element) => Type::List(joined(element)),
             Type::Vector(element) => Type::Vector(joined(element)),
             Type::Set(element) => Type::Set(joined(element)),
             Type::Tuple(previous) => {
@@ -239,12 +264,18 @@ impl Checker<'_> {
             Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
                 self.read_sequence(op, upper, name, span)
             }
+            Type::Nil if matches!(op, ReadSequence::Rest) => Type::empty_list(),
             Type::Nil => op.fixed(&[]),
+            Type::Tuple(items) if items.len() < 2 && matches!(op, ReadSequence::Rest) => {
+                Type::empty_list()
+            }
             Type::Tuple(items) | Type::SeqTuple(items) => op.fixed(items),
+            Type::ListTuple(items) => op.list_result(op.fixed(items)),
             Type::MapEntry(items) => op.fixed(items.as_ref()),
             Type::Vector(element) | Type::Set(element) if **element == Type::Never => op.fixed(&[]),
             Type::Vector(element) | Type::Set(element) => op.open(element, 0),
             Type::Seq(element) => op.open(element, 1),
+            Type::List(element) => op.list_result(op.open(element, 1)),
             Type::Str(text) => {
                 let items: Vec<_> = text
                     .encode_utf16()
@@ -328,6 +359,21 @@ fn conj_seq(previous: &[Type], items: &[Type]) -> Type {
     }
 }
 
+fn sequence_kind(ty: Type, persistent_list: bool) -> Type {
+    match (ty, persistent_list) {
+        (Type::SeqTuple(items), true) => Type::ListTuple(items),
+        (Type::Seq(item), true) => Type::List(item),
+        (Type::ListTuple(items), false) => Type::SeqTuple(items),
+        (Type::List(item), false) => Type::Seq(item),
+        (Type::Union(parts), _) => Type::union(
+            parts
+                .into_iter()
+                .map(|part| sequence_kind(part, persistent_list)),
+        ),
+        (ty, _) => ty,
+    }
+}
+
 pub(in crate::checker) fn iteration_may_throw(ty: &Type) -> bool {
     match ty {
         Type::Seq(_) | Type::Unknown => true,
@@ -342,8 +388,10 @@ pub(super) fn collection_emptiness(ty: &Type) -> Option<Type> {
         Type::Never => Type::Never,
         Type::Unknown => Type::Boolean,
         Type::Parameter(parameter) => return collection_emptiness(parameter.upper.as_ref()?),
-        Type::Tuple(items) | Type::SeqTuple(items) => Type::Bool(items.is_empty()),
-        Type::Seq(_) | Type::MapEntry(_) => Type::Bool(false),
+        Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => {
+            Type::Bool(items.is_empty())
+        }
+        Type::Seq(_) | Type::List(_) | Type::MapEntry(_) => Type::Bool(false),
         Type::Vector(element) | Type::Set(element) if **element == Type::Never => Type::Bool(true),
         Type::Vector(_) | Type::Set(_) | Type::String => Type::Boolean,
         Type::Str(text) => Type::Bool(text.is_empty()),

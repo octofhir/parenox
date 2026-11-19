@@ -1,7 +1,9 @@
 mod cli;
 mod config;
 mod extern_diff_cli;
+mod format_cli;
 mod lsp;
+mod nrepl;
 mod runtime;
 mod serve;
 mod workspace;
@@ -19,7 +21,7 @@ use serde_json::json;
 
 use cli::{CheckOptions, Cli, Color, Command, DefinitionOptions, Format};
 use config::ProjectConfig;
-use workspace::{DiskProject, FileSnapshot, read_source_roots};
+use workspace::{DiskProject, FileSnapshot};
 
 fn main() -> ExitCode {
     match run() {
@@ -45,9 +47,11 @@ fn run() -> Result<u8, String> {
             },
         ),
         Some(Command::Test(options)) => runtime::run_tests(options),
+        Some(Command::Nrepl(options)) => nrepl::run(options),
         Some(Command::Definition(options)) => definition(options),
         Some(Command::ValidateExterns(options)) => check(options, CheckMode::ValidateExterns),
         Some(Command::ExportExterns(options)) => export_externs(options),
+        Some(Command::Fmt(options)) => format_cli::run(options),
         Some(Command::DiffExterns(options)) => extern_diff_cli::run(options),
         Some(Command::Serve) => serve::run(),
         Some(Command::Lsp(options)) => lsp::run(options),
@@ -75,7 +79,7 @@ fn syntax(path: &str) -> Result<u8, String> {
 
 fn definition(options: DefinitionOptions) -> Result<u8, String> {
     let config = options.project.load()?;
-    let files = read_source_roots(&config.paths)?;
+    let files = DiskProject::read_sources(&config)?;
     if files.is_empty() {
         return Err("No Clojure source files found".into());
     }

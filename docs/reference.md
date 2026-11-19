@@ -1,1545 +1,411 @@
 # Parenox reference
 
-Commands, file formats and examples for [Parenox](../README.md). Run the
-repository examples from the project root. Use `just --list` for the full
-catalog of runnable fixtures.
+Command, contract, and editor reference for [Parenox](../README.md). Static
+analysis checks Clojure source without running it. Run repository examples
+from the project root; `just --list` lists more examples.
 
 ## CLI conventions
 
-Run `parenox --help` for available commands and `parenox check --help` for
-project options. Build the executable with `cargo build --locked --release`.
+Build with `cargo build --locked --release`. If `parenox` is not on `PATH`,
+use `./target/release/parenox` from the checkout. Use `parenox --help` or
+`parenox COMMAND --help` for all flags.
 
-Use the built binary's full path if it is not on `PATH`. Pretty output goes to
-stderr. Plain and JSON go to stdout. Pretty output uses Cargo-style checking
-and finish lines, red errors, blue source gutters, cyan patch help and
-red/green edits. A project check prints a single final summary.
-Color is automatic in a terminal. In a pipe, `CLICOLOR_FORCE=1` enables ANSI
-unless `NO_COLOR` is set. `TERM=dumb` disables terminal auto-detection.
-`--color always|never` takes precedence, including in `just errors pretty always`.
-`--json` remains an alias for `--format json`.
+`check` prints pretty diagnostics to stderr; `--format plain` and
+`--format json` print to stdout. `--json` is short for `--format json`.
+Use `--color always|never` to override automatic color. Suggested edits
+are never applied automatically.
 
-Exit codes: **0** no unsuppressed diagnostics, **1** diagnostics, **2** usage or I/O failure.
-Suggested edits require review and are never applied automatically.
+| Check exit code | Meaning |
+|---|---|
+| 0 | No unsuppressed diagnostics, or only warnings with `--allow-incomplete` |
+| 1 | Diagnostics not accepted by the selected options |
+| 2 | Usage, configuration, or I/O error |
 
-Use `parenox check --allow-incomplete` when adopting contracts gradually in an
-existing project. Unavailable function contracts and some known unsupported
-constructs are coverage warnings in both the CLI and editor. With this option,
-a report with only warnings exits **0** and has `ok: true, complete: false`.
-Definite errors and gaps reported at error severity still exit **1**. The
-default check, extern validation, and export require their usual strict results.
+`complete: true` means the implemented checks had enough information,
+not that the program is correct at runtime. `--allow-incomplete` changes
+the exit status, not what the checker analyzes. It accepts coverage warnings
+but not findings reported as errors. JSON uses a direct report for a single
+file without externs; a project report groups per-file results under `files`.
 
-## Targeted suppressions
+Each diagnostic has a stable rule `code` and an opaque occurrence `id`. IDs
+can change when the source span or path changes. The optional `contract`
+object gives the origin's qualified `name`, `kind`, and file `path` when
+available. The primary span remains at the use being checked.
 
-Put a comment before the form whose finding you want to suppress:
+### Targeted suppressions
 
-```clojure
-(defn label {:t/sig '[:-> string?]} []
-  ;; parenox-ignore PNX2322: the legacy caller handles a numeric label
-  42)
-```
-
-The comment requires one rule code and a nonempty reason. It matches only
-findings of that rule inside the next form, not its siblings. Supported codes
-are `PNX2322` (type mismatch), `PNX2741` (missing checked key), `PNX2801`
-(out-of-bounds index), and `PNX2802` (unhandled `case` value). Place the
-comment inside the selected branch of a reader conditional. Comments in
-inactive branches, discarded forms, and quoted data do not apply.
-
-JSON reports keep each suppressed finding, its original `id`, the reason and
-the comment span in `suppressed`. Text output lists suppressed findings as
-notes. Suppressing a finding does not change the inferred type. A report with
-only suppressed findings is `ok: true` but `complete: false`.
-Invalid directives report `PNX9006`. A directive that matches no finding
-reports `PNX9007` when no other reader, resolution, or analysis error prevented
-checking.
-
-## JVM tests
-
-From a `deps.edn` project, name the test namespaces to run:
-
-```sh
-parenox test --alias test my-app.routes-test my-app.storage-test
-```
-
-Parenox launches the standard Clojure CLI from the project directory. It uses
-the project's dependencies and the selected aliases' classpath and JVM options.
-The command runs the named namespaces with `clojure.test`, including their
-fixtures and namespace hooks. It supplies its own main entry point. Use
-`--project DIR` to select a project or `--clojure EXECUTABLE` to select a CLI.
-Run it after saving the changes you want the JVM to load.
-
-For a focused run, select one or more qualified test vars:
-
-```sh
-parenox test --alias test --var my-app.routes-test/decodes-unicode
-```
-
-Repeat `--var` to run several tests together. The selected vars run with their
-`:once` and `:each` fixtures. Namespace hooks apply to whole-namespace runs.
-
-`parenox test --alias test --discover` selects namespaces declared in
-`*_test.clj` and `*_test.cljc` files under the local `deps.edn` source paths
-and selected aliases. Use a namespace or `--var` for other test layouts.
-
-Test output includes the regular `clojure.test` report. When the assertion's JVM
-location resolves to local Clojure source, including a shared assertion helper,
-Parenox adds its `path:line` with the qualified test var. Macros can report the
-location of the expanded assertion's source expression. For exceptions, Parenox
-looks for a local Clojure source frame, including application functions and
-methods defined with `deftype` or `defrecord`. Unmapped locations retain the
-runtime's report.
-
-Use the same command in CI. Exit status **0** means the requested tests passed.
-**1** means an assertion failed or a test reported an error. **2** means the
-run did not complete, a requested test var was unavailable, or no test vars ran.
-Run `just jvm-test-smoke` to exercise
-the command on the pinned Clojure/JVM version.
-The JVM subprocess exits after writing the result, including when a test has
-left background worker threads running.
-
-With `--format json`, stdout contains one report. Completed runs include
-test and assertion counts, failures, errors, and source locations where
-available. Assertion findings include bounded `expected` and `actual` display
-strings when available. Exceptions carry their JVM class and message.
-An incomplete run includes a `run_error` with its phase,
-message, and any available source path, line and column. When the JVM runner
-catches an exception, `run_error.exception` carries the root class and message.
-This includes incomplete runs caused by fixture setup or teardown. Runtime logs go to
-stderr. The exit status has the same meaning in both formats.
-An error before the runner starts is reported in the `launch` phase. A JVM
-that exits before the running suite writes results reports `execution`.
-
-For a library release, keep the public snapshot from the previous version
-and run the following commands in CI:
-
-```sh
-parenox check --alias test --allow-incomplete --format json > check.json
-parenox test --alias test --format json my-app.routes-test > tests.json
-parenox export-externs > current-api.edn
-parenox diff-externs --before previous-api.edn --after current-api.edn --json > api-diff.json
-```
-
-`export-externs` requires a complete check of the selected source roots.
-Use release source roots for that step and include test roots for the check
-and test steps. The JVM smoke fixture also tests a change from an optional
-route key to a required one. The compatibility gate rejects it and reports
-the path to `:route` in the first argument.
+Write `;; parenox-ignore PNX2322: reason` before the next form. The reason
+is required. The directive applies only to that rule and form, not siblings,
+quoted data, discards, or inactive reader branches. Supported rules are
+`PNX2322` (type mismatch), `PNX2741` (missing key), `PNX2801`
+(out-of-bounds index), and `PNX2802` (unhandled `case` value). Suppressions
+do not change inferred types; JSON retains the original finding in
+`suppressed` and the report remains incomplete. Invalid directives and
+unmatched ones in fully checked code report `PNX9006` and `PNX9007`.
 
 ## A project-sized example
 
-The [clinic example](../examples/clinic) has four namespaces:
-
-| Namespace | Responsibility |
-|---|---|
-| `clinic.model` | Patient, request and response shapes |
-| `clinic.store` | A deterministic repository stand-in returning a patient or nil |
-| `clinic.service` | Display-name logic using the shared patient contract |
-| `clinic.http` | An HTTP-style handler with 200, 400 and 404 responses |
-
-It also declares a contract for the real library function
-`clojure.string/starts-with?` in [externs.edn](../examples/clinic/externs.edn).
-Externs are trusted declarations for library functions. A matching project
-source declaration takes precedence, and source privacy applies to every caller.
-An extern for a name that Parenox already models reports `PNX2790`; it does not
-replace the built-in rule. An unmodeled name in the same namespace is allowed.
-
-Repeat `--externs` to load separate EDN files. Two files can declare different
-names in the same namespace. If they declare the same qualified name, both
-locations report `PNX2790` and neither extern is used. Each contract keeps its
-own declaration path in diagnostics. Run `just split-externs` for an example.
+The [clinic example](../examples/clinic) checks a service and HTTP boundary
+across namespaces. Run `just errors` to see three deliberate type errors,
+or `just agent-loop` to fix them in memory and measure incremental checking.
 
 ### Project configuration
 
-Put a `parenox.edn` file beside the project:
+From a project directory, run `parenox check`, or supply one or more files
+and directories. Source scans include `.clj` and `.cljc`, skip hidden entries
+and do not follow symlinks within a directory. Explicitly supplied source
+roots may be symlinks. The checker uses the `:clj` branches of `.cljc`.
 
 ```edn
 {:paths ["src"]
  :externs ["externs/api.edn"]
- :dependency-externs ["externs/dependencies.edn"]}
+ :dependency-externs ["externs/dependencies.edn"]
+ :dependency-sources ["../vendor/library/src"]}
 ```
 
-Run `parenox check` from that directory, or pass `--config path/to/parenox.edn`
-from anywhere. Relative paths in the config resolve from the config directory.
-Explicit source paths, `--externs` or `--dependency-externs` replace the matching
-configured list; they don't append to it. If you pass source paths without
-`--config`, Parenox doesn't load the default file. All three keys are optional;
-unknown or repeated keys and non-string paths are errors. The config is read
-as data. `serve` accepts client snapshots or loads the project configuration on
-an explicit `open_project` request.
+All keys in this `parenox.edn` example are optional. Relative paths resolve
+from its directory. Select another file with `--config FILE`. For `check`,
+positional paths replace `:paths` and skip the default `parenox.edn` unless
+`--config` is supplied. Repeated `--externs` or `--dependency-externs` flags
+replace their matching configured list.
+
+Without configured source roots, Parenox falls back to `deps.edn`. Use
+`--deps FILE` to select a different manifest or repeat `--alias NAME` to
+include alias paths. Either option selects manifest paths instead of
+`:paths`. As an alternative, use `--classpath classpath.txt`, produced by
+`clojure -Spath -M:test > classpath.txt`. This uses only directories, not
+JARs, and cannot be combined with positional paths, `--deps`, or `--alias`.
+
+`:dependency-sources` adds explicit files or directories for analysis by
+`check`, `lsp`, and disk-backed `serve` sessions, including their named specs.
+Bulk formatting excludes dependency-only paths. Parenox does not fetch
+dependencies or load Maven artifacts. Supply a source checkout or use externs.
+
+### Formatting
+
+`fmt` supports `.clj`, `.cljc`, `.cljs`, and `.edn`. The CLI and language
+server both use `:format` from `parenox.edn`. The formatter reads the default
+configuration even with explicit source paths.
+
+```edn
+{:format {:indent-width 2
+          :insert-final-newline? true
+          :indent-rules {my.macros/with-resource :block
+                         my.macros/combine :align}}}
+```
+
+The default indent is two spaces (allowed: 1–8). `:block` uses a fixed indent;
+`:align` aligns with the first argument when it shares the head's line.
+Rules match the head symbol as written. Formatting preserves literal text,
+comments, discards, and reader branches. It does not wrap lines.
+
+```sh
+parenox fmt src/demo/core.clj
+parenox fmt --check
+parenox fmt --write src
+```
+
+The first command previews one file on stdout. `--check` exits 1 if any
+file would change. `--write` updates files only after the whole batch parses.
+
+## Contracts and externs
+
+### Function and data contracts
+
+Declare contracts with named `s/def` specs, source `s/fdef`, or quoted
+`:t/sig` metadata. Matching `s/fdef` and `:t/sig` declarations must agree.
+Public functions need a contract for full checking. Parenox can infer direct
+calls to supported single-arity private helpers from their arguments. Recursive
+helpers, unused helpers without typed callers, and helpers passed as values
+require a signature.
+
+```clojure
+(ns example.labels (:require [clojure.spec.alpha :as s]))
+
+(s/def ::name string?)
+(s/def ::label (s/keys :req-un [::name]))
+
+(defn label {:t/sig '[::label :-> string?]} [entry]
+  (:name entry))
+
+(s/fdef render :args (s/alt :short (s/cat :text string?)
+                            :prefixed (s/cat :prefix string? :text string?))
+               :ret string?)
+(defn render
+  ([text] text)
+  ([prefix text] (str prefix text)))
+```
+
+- `s/fdef` targets a local `defn` or `defn-`. Use `s/cat` with fixed
+  arguments and an optional final `(s/* T)`, or `s/alt` with distinct fixed
+  arities and one shared `:ret`. Other argument regexes, overlapping
+  arities, and `:fn` conditions remain unchecked.
+- For several `:t/sig` arities, use a vector or list of signature vectors.
+  `[number? & string? :-> number?]` gives each extra argument the same type;
+  an exact fixed clause takes precedence at a matching argument count.
+- `s/keys` is an open map shape. A literal map contract, such as
+  `{:name string?}`, is closed. Use `(t/map {:req {:id string?} :opt {:label string?} :extra :open})`
+  for inline required and optional fields. Omit `:extra` for a closed shape.
+  An optional field can be absent; a present nil still needs a nilable type.
+- `s/keys` checks key presence even when the value spec is missing. The
+  unknown field type still reports incomplete coverage. A missing spec
+  referenced directly is an error. Named specs resolve across source files
+  and via declared aliases, including `:as-alias`.
+- `s/fspec` uses `s/cat` and `:ret` for callback contracts. Direct
+  fixed-arity calls can supply types to `fn` and `#()` arguments.
+  General callback and variadic inference remain limited.
+- `t/all` supports a fixed generic arity with up to two input type
+  parameters and one immediate callback result parameter. Inference uses
+  arguments, not the expected return. Use `(a :< number?)` for a supported
+  scalar bound. Empty collections alone do not establish an element type.
+  See [generic callbacks](../examples/generic_callbacks.clj),
+  [two-input inference](../examples/generic_zip.clj), and
+  [typed map boundaries](../examples/map_boundary).
+
+A successful `(s/valid? ::label entry)` narrows supported scalars and open
+map shapes in the true branch. The false branch does not exclude that shape.
+An approximate map shape does not prove the runtime predicate returns true.
+Recursive specs, dynamic spec names, and unsupported projections report gaps.
+
+For `(s/and integer? (s/conformer int))` with the core functions,
+`integer?` accepts Clojure integers, including BigInt. A successful input
+must fit a signed 32-bit integer. The normal result is a JVM `Integer`;
+Parenox represents its value range as `Int32`, not its boxed class.
+In a direct `s/conform` on this named scalar spec, a non-integer returns
+`:clojure.spec.alpha/invalid` and overflow throws. `s/valid?` distinguishes
+true, false, and an exception. Map conformation, arbitrary conformers, and
+user predicates are not executed or generally inferred. See the
+[JVM fixture](../tests/fixtures/spec-int-conformer.clj).
+
+### EDN externs
+
+Externs are trusted, inert declarations for qualified names, not
+implementations:
+
+```edn
+{vendor.store/find [string? :-> (clojure.spec.alpha/nilable map?)]
+ vendor.store/default-limit {:value 50}
+ vendor.bindings/with-bindings {:macro :let-like}}
+```
+
+A checked source declaration takes precedence. Duplicate externs or attempts
+to replace a modeled built-in report `PNX2790`. Literal values describe the
+initializer, not later runtime changes. A `:let-like` description supplies
+lexical scope for sequential bindings, not the macro's result, effects, or
+tail positions; such calls still report `PNX9009`.
 
 ### Validating library externs
 
-Use `parenox validate-externs --config parenox.edn` to check a library against
-the externs it ships. It checks the source bodies and verifies that the public
-functions accept the calls promised in `:externs` and return compatible types.
-For variadic signatures, it checks both the fixed clauses selected at the
-promised argument counts and the variadic tail.
-Literal externs must match the public source initializer.
-
-The selected externs do not fill in missing source definitions. Separate
-`:dependency-externs` (or `--dependency-externs`) are trusted while checking
-source bodies, but are not themselves validated. Ordinary `check` trusts
-both sets. A duplicate across the sets is still an error; neither declaration
-is used.
-
-A known mismatch reports `PNX2322` at the EDN declaration and names the source
-file. For a signature mismatch, a note points to the rejected argument,
-result, or nested field. If there is no matching checked public definition,
-or compatibility cannot be proven, Parenox reports `PNX9011`. Macro scope verification and general
-generic subtyping are not supported. Validation succeeds only if the whole
-report is both `ok` and `complete`, so a suppressed source error does not
-certify a library. Run `just validate-externs` for passing and failing examples.
+`parenox validate-externs --config parenox.edn` checks source bodies and
+compares the library's `:externs` promises against its public definitions.
+`:dependency-externs` are trusted for calls but not validated. Validation
+requires a complete check. A known mismatch reports `PNX2322`; missing
+definitions and unproven compatibility report `PNX9011`.
 
 ### Exporting public contracts
 
-Save a checked library's public function contracts and literal `def` values.
-Clients can then check against the snapshot without the library's source or specs:
-
-```sh
-just export-externs > /tmp/showcase.edn
-target/release/parenox check examples/showcase_client.clj --externs /tmp/showcase.edn
-```
-
-`export-externs` accepts source paths or `--config` like `check`. It trusts any
-supplied externs as dependencies but doesn't copy them into the snapshot. The
-output sorts declarations by qualified name and inlines named specs. It preserves
-arities, callbacks, type parameters and map shapes. It doesn't export private
-vars, macro scopes or the narrowing behavior of `:t/guard`.
-
-EDN goes to stdout only after a complete source check and a second check of the
-generated snapshot in isolation. Parenox compares the reloaded signatures and
-literal values with the originals. Export stops at the 1 MiB snapshot limit or
-if an expanded signature exceeds the reader's nesting limit. Both limits
-report `PNX9012` at the affected declaration. A failed export exits with status
-`1` and writes diagnostics to stderr in the requested `--format`.
-The resulting file works with `check`, `validate-externs` and `diff-externs`.
-
-Run `just bench-export chain 45` and `just bench-export shared 15` to measure
-the nesting and snapshot size limits on synthetic named specs.
-
-### Literal externs
-
-Use `{:value ...}` for a public literal `def`:
-
-```edn
-{demo.config/default-plan {:value {:limit 4 :mode :demo.config/online}}}
-```
-
-The checker reads the value as inert EDN. A list is data, not a call.
-Maps, vectors, sets, lists and scalars retain the same type precision as in
-source; map keys must be keywords or strings. Export resolves auto-keywords
-and preserves numeric spelling, but not metadata. It describes the
-initializer, not later changes to a Var's root. Run `just literal-externs`
-to check a client using exported constants instead of library source.
+`parenox export-externs > current-api.edn` writes a checked snapshot of public
+signatures and literal vars, with named specs inlined. It requires a complete
+source check and verifies the generated EDN before printing it. It does not
+export private vars, imported externs, macro scopes, or guard refinements.
+Snapshots above the export size or nesting limits report `PNX9012`.
 
 ### Comparing releases
 
-`diff-externs` compares the new promises to the old ones without checking
-implementation bodies. Repeat `--before` and `--after` for standalone EDN files:
-
 ```sh
-parenox diff-externs --before previous/api.edn --after current/api.edn --json
+parenox diff-externs --before previous-api.edn --after current-api.edn --json
 ```
 
-If an extern names a project spec, use `--before-config` and `--after-config`
-to resolve each release's `:paths` and `:externs` separately. Dependency externs
-are not part of the comparison. Explicit EDN flags replace that side's
-configured extern list. An empty EDN map represents an empty surface.
+Use `--before-config` and `--after-config` when either side relies on source
+specs. Each side resolves its own specs; dependency externs are not part of
+the public comparison. Exit 0 means that the new snapshot preserves the old
+promises. Incompatible and unproven changes exit 1; usage and I/O errors
+exit 2. Changed literal values can break compatibility even at the same
+type. JSON includes a structured path to the failure, such as an argument's
+nested field.
 
-Besides function and macro changes, the report lists changed literals as
-`value_changed`. A changed value is incompatible even if its type is the
-same. Map and set entry order doesn't count; different numeric spellings
-are compared conservatively as a change.
+## Current scope
 
-For signature failures, the report shows both declaration locations, a call
-argument count, and one failed requirement. For example:
+| Area | What Parenox checks |
+|---|---|
+| Flow | Lexical scopes, conditionals, literal `case`, `loop`/`recur`, `try`/`catch`, core threading, and selected predicates |
+| Maps | Presence, required/optional fields, open and closed shapes, dictionaries, stable lookup narrowing, and supported reads, updates, and projections |
+| Collections | Vectors, sets, map entries, sequences, positional destructuring, and selected calls including `mapv`, `filterv`, `reduce`, and `reduce-kv` |
+| JVM | Selected regex and string operations and known exception classes, not general Java interop |
+| Unannotated code | Source name resolution, known arities, and selected string mismatches; no claim of full type coverage |
 
-```text
-argument 1 → field :payload → field :title: expected Keyword, got String
-```
+Clojure truthiness distinguishes nil and false from zero and empty
+collections. A missing key is not a present nil or false. `get` and map
+destructuring defaults apply only to absence, and their default expressions
+are evaluated eagerly. Clojure 1.13 checked lookups such as `req!` and
+`:keys!` require presence but preserve the field's value type. Positional
+bindings fill missing positions with nil; `[head & tail :as whole]`
+keeps the original collection in `whole` and a remaining seq or nil in
+`tail`. See `just checked`, `just defaults`, and `just presence`.
 
-JSON puts this explanation in `detail` with a `reason` and a structured `path`.
-Argument numbers start at one; collection indices start at zero. The expected
-type is the one the value needs to fit: the new input for a call, the old
-output for a return. Callback inputs reverse direction again. Unproven
-generic compatibility is reported as such, not as a specific type mismatch.
+`for` and `doseq` check seqable inputs, sequential bindings, destructuring,
+and `:let`, `:when`, and `:while`. `for` evaluates the first source expression
+immediately but defers traversal and the body. `doseq` is eager and normally
+returns nil; with no bindings or only `:let` clauses it returns the last body
+expression. `some->` stops on nil, not false. `recur` must target a supported
+tail position and analysis is bounded when argument types keep growing.
 
-Invalid input reports its diagnostics
-instead of guessing which promises were removed. Exit status is `0` only if
-every old promise is still covered, `1` for breaking or incomplete comparisons,
-and `2` for usage or I/O errors. Run `just diff-externs` for an example where
-the extern text is unchanged but a referenced spec breaks compatibility.
+Verified `:t/guard '[:then value string?]` narrows the argument after a true
+result. Use `:both` only if the checker can also verify the false branch.
+An unproved guard reports `PNX9008` and doesn't narrow callers. See
+[checked predicates](../examples/checked_guards.clj).
 
-### External macro scopes
+On known String receivers, checked JVM calls include `length`, `charAt`,
+`startsWith(String)`, `endsWith(String)`, and `indexOf(String)`.
+Offsets count UTF-16 code units. A String hint identifies the class but
+does not rule out nil. General interop and other overloads remain outside
+the supported subset. Known explicit throws can narrow the set of reachable
+handlers; ordinary calls may throw.
 
-An extern can describe where a macro introduces local names:
-
-```edn
-{vendor.bindings/with-bindings {:macro :let-like}}
-```
-
-`(vendor/with-bindings [label input decorated (str label "!")] decorated)`
-has sequential bindings. Each initializer sees the preceding bindings but
-not its own new binding. The body sees all of them. They do not escape
-the macro call. Use simple unqualified symbols in the binding vector.
-
-This is a scope description, not an expansion or a function signature.
-Parenox checks name resolution in the forms it understands without loading
-or running the macro. `PNX9009` marks the call incomplete: its result, effects
-and tail positions are not inferred. Lexical bindings and project functions
-still take precedence over the extern. Run `just macro-scopes` for the
-comparison with an ordinary `let`.
-
-```sh
-./target/release/parenox check examples/clinic \
-  --externs examples/clinic/externs.edn
-
-cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations 100
-```
-
-The CLI shows three planted mistakes: a number passed as a patient id, a number
-passed to a string-library function, and an optional patient name used without
-handling nil. The Rust example fixes all three in memory, checks the result, measures
-warm round trips and body edits, then changes a public signature and verifies
-that its caller is checked again. It leaves example files unchanged.
-
-Directories are scanned recursively for `.clj` and `.cljc` files. Symbolic links
-and hidden directory entries are skipped. Supplied files form one project;
-namespace cycles and duplicate namespaces are reported. JSON output for a project
-is one object with per-file reports and aggregate statistics. Single-file JSON
-keeps the simpler file-report shape.
-
-From a Clojure CLI project, `parenox check` can read source roots from the local
-`deps.edn`. Use `parenox check --alias test` to include the paths of the `:test`
-alias. Repeat `--alias` in composition order and use `--deps FILE` for a different
-project manifest. Explicit `parenox.edn` source paths are used by default when
-available. A selected manifest or alias supplies the source paths instead.
-Parenox reads project paths, including path aliases, `:extra-paths`, and path
-replacements, as EDN. Supply dependency sources as paths or configure their
-contracts as externs. [Clojure CLI project configuration](https://clojure.org/reference/deps_edn)
-
-To include source directories from the Clojure CLI's resolved classpath,
-generate a file from the project directory:
-
-```sh
-clojure -Spath -M:test > classpath.txt
-parenox check --classpath classpath.txt
-parenox lsp --classpath classpath.txt
-```
-
-The file selects source directories, including those of local dependencies.
-Relative classpath entries are resolved from the project root. This mode reads
-directories from disk and skips JARs and missing generated directories. Classpath
-selection replaces the `--deps`, `--alias` and positional source options.
-Explicit source roots can be symbolic links. Parenox indexes each physical
-root once and recognizes the same editor buffer through its linked or physical
-path. Symlink entries encountered while walking a root are skipped.
-
-Named specs resolve against the supplied project declarations, including keys
-whose namespace differs from the file that declares them. Input file order does
-not affect resolution. An alias created with `:as-alias` can qualify keywords
-without creating a namespace load dependency. Competing declarations of the
-same spec key in separate files report an analysis gap.
-
-Auto-resolved keywords such as `::schema/name` require a declared alias.
-The checker validates these tokens in discarded forms and inactive reader
-branches. Externs use ordinary EDN keywords, such as `:schema/name`.
-Run `just keyword-aliases` for examples.
-
-Namespace `:use` clauses share referral resolution with `:require`, including
-explicit `:only` names. A var introduced with `declare` can be followed to its
-definition when available. A declaration without a source definition has
-unknown type and reports incomplete coverage.
-
-`:refer-clojure` supports `:exclude`, `:only` and nonoverlapping `:rename`
-mappings. Qualified calls to `clojure.core` continue to resolve when an
-unqualified name is excluded.
-
-`:require` supports `:refer :all` for a namespace supplied as project source,
-including `:exclude` and `:rename`. It resolves public functions with contracts
-and public literal vars. Changes to the set of exports refresh the referral
-mapping. Externs describe selected contracts, so use an explicit referral list
-for extern-only namespaces. Run `just all-refers` for examples.
-
-`clojure.test` also supports `:refer :all` using public names from the pinned
-JVM reference. `deftest` bodies, `testing` scopes, and standard `is` and `are`
-assertions with equality, simple predicates, `thrown?`, or `thrown-with-msg?`
-can report project var and arity errors. Calls inside `letfn` see all local
-function bindings. For `are`, checks cover fixed calls in the assertion
-template. Template substitution, custom assertion expansion, and test types
-remain unchecked. Standard `use-fixtures` registrations are recognized and
-report unchecked evaluation.
-
-`:import` resolves short class names in `catch` for modeled JVM exception
-classes, including the `IOException` hierarchy. It accepts qualified names
-and package groups with lists or vectors. Custom exception classes report
-an analysis gap when used in `catch`. Run `just imports` for examples.
-
-`def` supports literal maps, vectors, sets and scalar values. Their inferred
-types are available to importing namespaces, subject to `^:private`. Changes
-to exported values invalidate their consumers. Dynamic vars, unbound vars and
-computed initializers report an analysis gap.
-
-Quoted lists, vectors, sets and maps can be used as data and exported as
-literal vars. Quoted symbols have type `Symbol`. Quoted maps retain precise
-keyword and string fields alongside a dictionary type for other keys, such
-as symbols and vectors in destructuring data. Run `just quoted` for examples.
+Unknown macros, runtime-created declarations, and unsupported reader or
+numeric semantics remain explicit coverage gaps. In checked code, an
+untyped source call reports `PNX9002` and a comparison without enough
+type information can report `PNX9004`. An unknown field does not hide a
+definite mismatch elsewhere in the value.
 
 ## Lossless syntax
 
-```sh
-just syntax                          # comments, commas, quotes, sets and #_ forms
-just syntax examples/syntax_bad.clj   # deliberate mismatch; exit 1, later code retained
-```
-
-`parenox syntax FILE` prints the CST to stdout and source-highlighted reader
-errors to stderr. It uses [Rowan](https://github.com/rust-analyzer/rowan)
-0.18.0-alpha.2, pinned exactly while its trivia APIs evolve. The same reader
-serves the checker and the CST. The library exposes `reader::parse(source)`:
-its `syntax()` view preserves every input byte, including whitespace, comments,
-commas, discarded forms, all reader-conditional branches and malformed input.
-Valid top-level forms and reader errors are returned separately. Check the errors before using recovered forms.
-
-`reader::read(source)` is the strict semantic path used by checking: it stops at
-the first reader error and does not construct a CST. CST capture is optional;
-ordinary checks keep using semantic forms and their existing caches.
-Clojure numeric tokens include octal, hexadecimal, radix integers, ratios,
-and the `N` and `M` suffixes. The checker tracks these as `Number` and reports
-invalid tokens at their source spans. Run `just numbers` for a checked example.
-
-The reader preserves the original text of regex literals such as `#"\d+"`.
-The checker reports incomplete type analysis for regex values.
-
-The checker selects `:clj` branches in `.cljc` files. First matching feature wins;
-`:default` matches in order, an unmatched `#?` contributes no form, and `#?@`
-inserts a selected list or vector into its surrounding collection. Selected forms
-retain their original spans for diagnostics. Inactive definitions and requires do
-not enter the checked interface or dependency graph. Ordinary `.clj` input rejects
-reader conditionals, while `syntax` preserves them for tooling.
-
-The library also exposes `reader::read_with(source, Conditionals::Select(":clj"))`
-and `Conditionals::Preserve`. `reader::parse_with(source, policy)` produces both
-selected semantic forms and the complete CST in one pass. Selection is a reader
-policy, separate from type analysis; selecting `:cljs` in the reader does not make the checker a ClojureScript
-analyzer. Preserved forms still need selection and validation before checking.
-Unsupported reader syntax remains a reported gap even in inactive branches.
-Splicing directly through a quote, metadata prefix, tag or conditional feature/value
-pair is currently unsupported; ordinary collection splicing is supported.
-
-The same reader handles the currently supported common Clojure/EDN syntax.
-In Clojure source, `#!` is a line comment and `#^` is an alternate metadata
-prefix. Both retain their spelling in the CST. EDN rejects `#!`.
-This does not implement a complete EDN reader, macro expansion, incremental
-reparsing or a formatter. A future formatter can consume the CST and verify
-that its output preserves significant tokens and comments.
-
-## Shared frontend and extension boundaries
-
-Parenox owns its reader and semantic forms. A single reading pass produces
-`Form` / `Kind` with source spans; optional capture also produces the lossless
-Rowan CST. Consumers reuse these representations rather than implementing a
-second parser. Forms and spans belong to an exact source snapshot. The source
-and CST retain lexical details that the current type-oriented forms normalize,
-including numeric spelling; the forms alone are not yet a runtime value model.
-
-| Layer | Responsibility | Extension point |
-|---|---|---|
-| Reader and forms | Recognize syntax, preserve spans and metadata, retain tag/payload pairs | More reader forms and literal decoding |
-| Optional CST | Preserve every byte, trivia and malformed input | Formatter and editor operations |
-| Analysis and sessions | Resolve names, infer types, track dependencies and cache checks | Library analysis and richer contracts |
-| Core transformations | Transform threading steps using existing forms and source spans | More reviewed core macro rules |
-| Future runtime and lowering | Consume forms with source origins | Interpreter or compiled runtime |
-
-Core form transformations and execution are separate semantic stages. Types, namespace
-resolution and mutable runtime state do not belong in the CST. Macro-generated
-code will need explicit expansion origins and its own cache dependencies; source
-spans alone cannot represent an expansion history. These are extension boundaries,
-not implemented runtime features. We keep one crate and add abstractions when
-there is a concrete consumer.
-
-`just reader` demonstrates name metadata (`^:private`, `^{:t/sig ...}`), parameter
-hints and character contracts. Metadata is a wrapper around a form, not an extra
-allocation on every ordinary node. Its descriptor is normalized to a map; the CST
-retains the original spelling. Outer metadata overrides inner metadata, and a
-`defn` attribute map overrides name metadata. JVM hints such as `^String` do not
-coerce a value or replace a type contract.
-
-Characters are distinct from strings. The reader accepts single JVM characters,
-named escapes, four-digit Unicode escapes and octal escapes. Tagged literals retain
-the tag and payload as data. The syntax command does not run data readers or Java
-constructors. Checking a tagged expression currently reports unsupported analysis
-instead of guessing a type from its payload. This is shared Clojure/EDN syntax
-support, not a strict or complete EDN validator.
-
-In Clojure source, the reader preserves `@value` and `#'name` in the CST and
-provides the JVM reader forms `(clojure.core/deref value)` and `(var name)` to
-analysis. Var objects and dereferenced value types are reported as coverage gaps
-when encountered in a checked function.
-Syntax quote, unquote and unquote splicing retain their source structure.
-Macro expansion and type checking of syntax quote results remain coverage gaps.
-Namespaces with `definterface`, `deftype`, `defprotocol`, `extend-type`,
-`extend-protocol` and `extend` can be checked for supported declarations.
-These JVM forms and recognized compiler flag assignments report incomplete
-coverage. `defmulti` and `defonce` provide source navigation to the declared
-var while their values and dispatch behavior remain unchecked.
-[JVM declarations example](../examples/jvm_forms.clj)
-
-Repeated simple values in set literals and repeated map keys report a reader
-error at the repeated form. This check compares decoded strings and characters,
-symbols, keywords, booleans, nil and symbolic numbers. Integers with a magnitude
-that fits in 128 bits compare across decimal, octal, hexadecimal and radix
-spellings. Other ordinary numeric literals compare by spelling.
-Clojure and EDN support `##Inf`, `##-Inf` and `##NaN`. String escapes include
-octal spellings such as `\033` and preserve JVM UTF-16. Unpaired surrogates retain their code units for literal export,
-and the checker gives such values the general string type.
-Explicit namespaced maps such as `#:stock{:sku "id" :_/source "api"}`
-qualify their unqualified keyword and symbol keys and remove the `_`
-namespace. The same reader handles the namespaced maps in project EDN.
-In Clojure source, `#::{...}` uses the current namespace and
-`#::alias{...}` uses its declared alias. Alias names are checked in
-discarded forms and inactive reader branches. [Namespaced map example](../examples/namespaced_keys.cljc)
-
-Regex literals and `re-pattern` produce a JVM `java.util.regex.Pattern`,
-which can appear in a contract. `clojure.string/split` returns a vector
-of strings. Its length is unknown to the checker, so destructuring a
-second field preserves the possibility of nil. Java regex validation is
-performed by the JVM. [Regex split example](../examples/regex_split.cljc)
-
-`re-find` and `re-matches` preserve a nil result for a failed match. For
-simple literal patterns, Parenox distinguishes a string match from a vector
-whose first item is the match and whose later items may be nil. An opaque
-capture layout uses the union of the possible shapes. The stateful
-`re-find` overload taking a JVM matcher reports a coverage gap.
-
-`clojure.string/replace` checks character pairs, string pairs and a regex
-with a string replacement. Regex callback type checking remains incomplete.
-`clojure.string/join` accepts nil and seqable inputs, including map entries
-and strings. It stringifies its elements and optional separator.
-A false result from `clojure.string/blank?` excludes nil from the tested
-value, including a stable lookup of an optional map field.
-
-The checked JVM string members are `length` and `charAt`, with the usual
-dot-method spellings. String length and offsets count UTF-16 code units.
-`subs` uses the same UTF-16 offsets. Known bounds can identify an invalid
-index or a reversed range. A literal slice retains its exact value when the
-slice is valid Unicode.
-Analysis checks nil receivers and numeric index arguments. For `charAt`, a
-known out-of-bounds index is diagnosed in checked and unannotated functions.
-An exact character is preserved when the UTF-16 unit is a Unicode scalar.
-[String member example](../examples/jvm_strings.cljc)
-
-Design references include [clojure-reader](https://github.com/Grinkers/clojure-reader)
-for data reading, [Crabjure](https://github.com/ribelo/crabjure) for static analysis,
-and [clojurust](https://github.com/csm/clojurust) for future reader/expansion/runtime
-boundaries. Parenox implements its own APIs; these projects are references rather
-than runtime or frontend dependencies.
-
-See [type checker research](design/type-checker-research.md) for proposed
-next steps, including Crabjure's macro scopes and dependency resolution.
+`parenox syntax FILE` prints the Rowan concrete syntax tree and reports
+reader errors. Comments, whitespace, original literal spellings, discards,
+inactive reader branches, and malformed input remain in the tree. The
+shared reader exposes semantic forms with original spans; checking does
+not build the syntax tree. `reader::parse`, `parse_with`, and `parse_edn`
+are available to Rust callers. None of these run tagged readers or macros.
 
 ## Editor integration
 
-Configure your editor to start `parenox lsp` over stdin and stdout. The server
-loads one workspace using the same `parenox.edn` and `deps.edn` settings as
-`check`. Use `parenox lsp --alias test` to include test source roots.
+Start `parenox lsp` over stdin and stdout. It shares project configuration
+with `check`; `lsp --alias test` includes test roots. Unsaved buffers
+participate in analysis and navigation. A nested project can use its nearest
+`parenox.edn` or `deps.edn`. Outside configured roots and without a nested
+project, a buffer has no project context.
 
-The server publishes Parenox diagnostics for open `.clj` and `.cljc` files and
-supports go-to-definition for qualified source vars, including namespace aliases.
-Named referrals in `:require`, `:use` and their renamings also link to source
-declarations. Within supported function and test scopes, referred uses,
-same-namespace uses, and lexical locals link to their declarations.
-Parenox reports missing or private
-referral targets when it can determine the providing namespace's public vars.
-Hover on those references shows the checked function signature when available
-and its contract source. Unsaved buffers participate in checks and navigation.
-The workspace supplies declarations for all sources. Editor requests check
-and publish diagnostics for open source documents.
-A Clojure buffer outside the configured source roots is checked on its own.
-Opening a second checkout in the same window preserves name resolution in the
-configured project.
-Completed top-level forms before a reader error remain available for navigation.
-The server requests incremental synchronization. It applies UTF-16 range
-edits in order and also accepts full document replacements. See the
-[LSP document change specification](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_didChange).
+- `.clj` and `.cljc`: diagnostics, completion, definition, hover, find usages,
+  highlights, document outline, and workspace symbols. Hover shows checked
+  signatures and origins when available. Closed source files can contribute
+  declarations and usages. Opaque macro expansions are not indexed.
+- **Go to Definition** on a named spec in `:t/sig`, `s/fdef`, `s/def`, or a
+  supported direct `s/valid?` call opens its source `s/def`. It follows
+  qualified keys and aliases. Ordinary keyword values and ambiguous declarations
+  have no spec target. Completed forms before reader errors remain usable.
+- **Generate s/fdef** works on supported top-level, single-arity `.clj`
+  functions. Unknown types produce a commented draft for review; existing
+  contracts are not replaced.
+- **Reformat Code** formats the whole unsaved document with project settings.
+  Invalid syntax produces no edits. Open `.edn` buffers also report
+  reader diagnostics. Incremental LSP positions are UTF-16.
 
-Open `.edn` files receive syntax diagnostics from the data reader. Tagged
-values are read as inert data. Clojure navigation is available for `.clj` and
-`.cljc` buffers.
-
-On a top-level function in a `.clj` buffer, use the editor's code actions
-to generate an `s/fdef`. Parenox uses the unsaved definition to infer
-supported predicates from literals and selected calls, for example
-`number?` for the input and result of `(defn bump [n] (inc n))`.
-It does not infer argument types from observed callers. Unknown predicates
-produce a commented draft with `any?` placeholders for review. For an active
-contract, Parenox reuses the `clojure.spec.alpha` alias or adds the require.
-The action is limited to one fixed arity and does not replace an existing
-contract. Applying a contract can expose coverage gaps in its function body.
-
-Saving a project manifest or an indexed extern file refreshes the workspace
-while preserving open buffers. The server logs configuration failures and keeps
-its last loaded snapshot. If startup configuration is invalid, open-file
-diagnostics remain available while you repair and save the manifest.
-When the editor supports dynamic file watching, Parenox also refreshes its
-snapshot after changes to closed `.clj` and `.cljc` project files and watched
-EDN configuration files. File watching uses workspace events from the editor.
+Watch events from the editor can refresh closed files and configuration.
+A failed project reload preserves the last valid project snapshot.
 
 ### RustRover and JetBrains IDEs
 
-1. Install [LSP4IJ](https://plugins.jetbrains.com/plugin/23257-lsp4ij) in the IDE.
-2. From the Parenox checkout, run `cargo install --locked --path .` to put the
-   binary in the default Cargo bin directory. For a local build, use the full
-   path to `target/release/parenox` followed by `lsp` in the server's command field.
-3. Open **Settings → Languages & Frameworks → Language Servers (LSP4IJ)**. Click
-   **+**, choose **Import from custom template…**, and select the
+1. Install [LSP4IJ](https://plugins.jetbrains.com/plugin/23257-lsp4ij), then
+   run `cargo install --locked --path .` from this checkout.
+2. In **Settings → Languages & Frameworks → Language Servers (LSP4IJ)**,
+   choose **Import from custom template…** and select the
    [Parenox template directory](../integrations/lsp4ij/parenox).
-4. Check the filename mappings for `*.clj`, `*.cljc` and `*.edn`. If another
-   Clojure server handles the same patterns, disable its overlapping mappings to
-   avoid duplicate diagnostics. The [LSP4IJ guide](https://github.com/redhat-developer/lsp4ij/blob/main/docs/UserDefinedLanguageServer.md) describes server mappings and import.
-
-Open a Clojure project and check the **Language Servers** tool window for
-Parenox. Use `lsp --alias test` in the command to include test roots from `deps.edn`.
-
-Run `just uri-editor-smoke /absolute/path/to/uri` against the pinned
-[lambdaisland/uri pilot](design/type-checker-research.md#first-pilot-project).
-The smoke test exercises the stdio protocol with an unsaved typo and an invalid
-EDN buffer, checks the definition location, and compares the typo diagnostics
-with a fresh CLI check. It leaves the pilot checkout intact.
+3. Set the command to `parenox lsp` or the full path to the built binary
+   followed by `lsp`. Disable overlapping file mappings from other
+   Clojure language servers to avoid duplicate diagnostics.
 
 ### Local Clojure LSP pilot
 
-From the Parenox project root, run `just pilot-setup`. It downloads a pinned
-[Clojure LSP checkout](https://github.com/clojure-lsp/clojure-lsp) into
-`playground/clojure-lsp` and builds the release binary. Git ignores
-`playground/` in Parenox. Running setup again leaves local edits in the
-checkout alone.
+Run `just pilot-setup` for the pinned checkout at
+`playground/clojure-lsp` and a local release build. It does not overwrite
+local changes to an existing checkout. Run `just pilot-check json`
+for the read-only project report; Maven dependencies are not resolved.
 
-Keep the Parenox project open in RustRover. In LSP4IJ, set the existing
-Parenox server's **Command** to:
+In the Parenox RustRover workspace, use this command to analyze the pilot:
 
 ```text
 "$PROJECT_DIR$/target/release/parenox" lsp --deps "$PROJECT_DIR$/playground/clojure-lsp/deps.edn" --alias test
 ```
 
-Open `playground/clojure-lsp/cli/src/clojure_lsp/clojure_coercer.clj` in
-that window. Parenox publishes diagnostics for open files, including
-unsaved changes. For example, look for `PNX9001` at an unsupported
-`clojure.spec` form. After rebuilding Parenox, restart its language server
-to pick up the new binary.
+Keep `:format` in the workspace's `parenox.edn`. Use
+`just pilot-format-smoke` and `just pilot-navigation-smoke` for read-only
+checks of the editor workflows. Reports on the unmodified pilot can include
+coverage gaps, not upstream bugs.
 
-In the pilot's `lib/src/clojure_lsp/shared.clj`, open the RustRover
-intention menu (`Alt+Enter`) on `clojure-lsp-version*` for **Generate s/fdef**
-or on `colorize` for **Draft s/fdef (review unknown types)**. Both proposals
-include a string return predicate. The draft leaves the types of `s` and
-`color` for review.
+## JVM tests
 
-Use `just pilot-check` from the RustRover terminal to check all Clojure files
-in the pilot's `:test` source roots, including closed files.
-`just pilot-check json` prints a machine-readable report. Neither check runs
-the pilot's code nor resolves its Maven dependencies. Diagnostics on the
-unmodified checkout can describe analysis gaps rather than upstream bugs.
+```sh
+parenox test --alias test my-app.routes-test
+parenox test --alias test --var my-app.routes-test/decodes-unicode
+parenox test --alias test --discover
+```
+
+`test` launches the project's standard Clojure CLI and runs `clojure.test`
+against saved files. Repeat `--var` to select several qualified tests;
+discovery finds `*_test.clj` and `*_test.cljc` in the selected source roots.
+Both namespace and var runs use test fixtures; only whole-namespace runs
+use namespace hooks.
+Use `--project DIR` or `--clojure EXECUTABLE` to override the defaults.
+Reports include local failure locations when the runtime supplies them.
+With `--format json`, stdout carries one report and runtime logs go to
+stderr. Exit 0 means success, 1 means test failures or errors, and 2 means
+the requested run did not complete. Run `just jvm-test-smoke` for examples.
+
+## Local nREPL
+
+```sh
+parenox nrepl --port 7888
+parenox nrepl --port 7888 --eval '(def total 40)' --eval '(+ total 2)'
+```
+
+The client only connects explicitly to an existing server on `127.0.0.1`.
+Without `--eval`, it lists supported operations. Otherwise it clones a
+session, sends forms in order, stops after an eval error, and closes the
+session. JSON separates values, `out`, `err`, exceptions, and completion.
+Exit 1 means an eval error; exit 2 means a connection or protocol error.
+`--timeout-ms` changes the per-operation timeout (default 5000 ms).
+A timeout does not cancel evaluation or guarantee session closure.
+Opening or checking sources never starts or connects to nREPL.
 
 ## Agent sessions
 
-```sh
-./target/release/parenox serve
-```
-
-One request and one flushed response per line. A single-file request:
+`parenox serve` reads JSON Lines. Each request gets one flushed response
+with `id` and `result`, or an error. Use full file contents, not patches.
 
 ```json
 {"id":1,"path":"demo.clj","source":"(defn f {:t/sig '[:-> number?]} [] 1)"}
+{"id":2,"op":"open","files":[{"path":"demo.clj","source":"(ns demo)"}]}
+{"id":3,"op":"update","changes":[{"path":"demo.clj","source":"(ns demo) (def limit 5) (defn f [] limit)"}]}
+{"id":4,"op":"definition","path":"demo.clj","offset":35}
 ```
 
-A project request contains a **complete snapshot** of its files, plus optional
-extern files. The `source` values are full file contents, not patches:
-
-```json
-{"id":2,"files":[{"path":"a.clj","source":"(ns a)"}],"externs":[{"path":"store.edn","source":"{}"},{"path":"http.edn","source":"{}"}]}
-```
-
-The previous single extern object still works. Rust callers can use
-`Session::check_project_with_externs` with a slice of extern snapshots.
-
-Responses have `id` and `result`. Results include `ok`, `complete`, diagnostics,
-and `stats`: elapsed microseconds, parsed/reused files and checked/reused functions.
-Project results contain a `files` array. Invalid JSON returns an error and the
-process continues.
-
-Each diagnostic in a check report has an `id` for that occurrence. Use it to
-match diagnostics between repeated checks of the same snapshot, including
-diagnostics with the same `code` and `span`. Treat the ID as opaque: it can
-change when a file is renamed or a diagnostic moves. Use `code` to identify
-the rule. The top-level response `id` still identifies the request.
-
-When a diagnostic checks a known function contract, text output names its
-source and JSON includes a `contract` object. Scope diagnostics and literal
-extern validation can also carry their declaration. The object contains the
-qualified `name`, the `kind` (`t_sig`, `s_fdef`, `extern`, `extern_literal`,
-`builtin` or `macro_scope`) and, for
-file-backed contracts, the `path`. The primary diagnostic span still points
-to the call or return being checked.
-
-Use `open_project` to start a tracked session from the same `parenox.edn` and
-`deps.edn` inputs as `check` and `lsp`:
-
-```json
-{"id":3,"op":"open_project","root":"/path/to/project","aliases":["test"]}
-```
-
-The response includes the initial report. Use its paths for later edits,
-definition and hover requests. Updates change the tracked snapshot in memory.
-Send `{"id":4,"op":"refresh_project"}` to reload the disk project with its
-selected aliases and preserve in-memory edits, removals, and extern overrides.
-A failed refresh keeps the current snapshot. A new `open_project` starts a
-fresh session from disk.
-
-Use `"classpath":"classpath.txt"` in place of `"aliases"` to open an externally
-resolved classpath in an agent session.
-
-Open a supplied snapshot with `open` and send the changed files as
-full source strings in each update. This example checks one file, edits it, and
-then removes it:
-
-```json
-{"id":3,"op":"open","files":[{"path":"a.clj","source":"(ns a)"}]}
-{"id":4,"op":"update","changes":[{"path":"a.clj","source":"(ns a) (def limit 5)"}]}
-{"id":5,"op":"update","remove":["a.clj"]}
-```
-
-`open` replaces the tracked project. `update` accepts optional `changes` to add
-or replace files and `remove` with paths to remove. An empty update checks the
-current project. Omit `externs` in an update to keep the current set. An array
-replaces the full set; a single object replaces it with one file. Use `null`
-or `[]` to clear it. Each operation returns a full project report ordered by
-source path, followed by the extern reports in the supplied order. Invalid
-operations leave the tracked project intact. A valid edit is
-saved even when it produces diagnostics. Single-file and complete-snapshot
-requests work independently of the tracked project.
-
-Query a source var after `open` or `update` with a zero-based UTF-8 byte
-offset inside a reference or a namespace referral:
-
-```json
-{"id":6,"op":"definition","path":"src/app.clj","offset":105}
-{"id":7,"op":"hover","path":"src/app.clj","offset":105}
-```
-
-The definition response contains the target `path` and `span`, or a `null` result when no
-unique source definition can be resolved. It supports qualified and referred
-project vars as well as local bindings in supported scopes. For a file-backed query, run
-`parenox definition --file src/app.clj --offset 105` with the same project path
-options as `check`.
-
-Hover returns the qualified var name, display signatures and the contract
-origin when available. The signatures array is empty for an untyped var.
-
-- Unchanged sources reuse their parsed forms and declaration models.
-- Unchanged externs reuse their declarations until a referenced spec changes.
-- An extern edit rechecks callers of the changed declarations, not all callers
-  in the same namespace.
-- Annotated body edits recheck that function while preserving callers' cached results.
-- Edits to unannotated private helpers invalidate their transitive callers in the same file.
-- Public contract changes recheck functions that reference the changed var,
-  including references reached through inferred private helpers.
-- A guard body edit also rechecks its callers if the verified refinement
-  changes, even when its signature stays the same.
-- Local var changes recheck their consumers in the same file. Changes to
-  namespace resolution or local spec declarations can still recheck that file.
-- Removed files and externs disappear from the current environment immediately.
-- Unchanged functions with successful checks can be reused after their source ranges move.
-  Functions with diagnostics are rechecked if their own ranges or a helper's ranges move.
-- Tracked projects discard cached files when they are removed or the project is
-  reopened. One-off snapshot requests have their own cache.
-- The one-off cache lasts for the process lifetime. The protocol uses in-memory
-  snapshots; it has no filesystem watcher or disk cache.
-
-`source_hash` is a session fingerprint, not a cryptographic digest. Cache validity
-uses exact source, positions and interface comparisons.
-
-To measure the same clinic edit sequence with a larger extern file, run
-`just agent-loop 1000 target/release/parenox 512`. This adds synthetic library
-contracts that refer to the clinic's patient spec. Run
-`just agent-loop 1000 target/release/parenox 0 128` to append 128 typed functions
-whose ranges move as the agent edits the first function in their file.
-
-Run `just agent-loop 1000 target/release/parenox 512 0 delta` to measure the
-same edit sequence through tracked updates.
-
-Run `just agent-loop 1000 target/release/parenox 512 0 delta 0 8` to split the
-512 synthetic contracts across eight extern files and keep the clinic contract
-in its own file. The final edit changes one unused extern and verifies that
-only that file is parsed, with no new function checks.
-
-Run `just agent-loop 1000 target/release/parenox 0 0 snapshot 128` to add 128
-consumer functions and alternate edits to an unused export in their provider.
-The final signature edit changes the export those consumers actually call.
-Set the fourth argument to `128` as well to add 128 functions to the edited file
-and measure reuse within that file.
-
-## Showcase: batch processing
-
-[examples/showcase.clj](../examples/showcase.clj) is a single Clojure file that
-turns a batch of meter readings and notes into a typed response. Run
-`just showcase` to check it and `just showcase-run` to print its response on JVM.
-
-- `event-row` uses an exhaustive `case` to select the right type of `:value`.
-- `zip-results` infers two input types and the result of its named callback.
-- `find-label` returns a nullable value. Parenox checks `use-title?` before
-  trusting it to narrow the title to `String`.
-- Typed exception data supplies the error response; a generic envelope keeps
-  the normal response's body type. Private helpers get types from their callers.
-
-Run `just showcase-errors` to check
-[examples/showcase_bad.clj](../examples/showcase_bad.clj) against the original
-contracts. It shows six diagnostics without editing either file:
-
-| Regression | What Parenox shows |
-|---|---|
-| A branch for `:note` was dropped | The missing tag in `case` |
-| An enabled flag is mistaken for proof that a title exists | The unproved guard, then the nullable call with a reviewable fallback suggestion |
-| The two input vectors are swapped | The inferred callback signature and the contract it violates in the other file |
-| The response score is formatted as text | `String` in the `:score` field where the API promises `Number` |
-| The error handler puts an internal code in the title | `Number` in the `:title` field, traced through `ex-info` and `catch` |
-
-Use `just showcase-errors plain` for compact output or `just showcase-errors json`
-for spans, contract origins, and suggestions as data. `just showcase` checks
-the unchanged implementation completely without suppressions.
-
-## Current scope
-
-Types are read from `s/def`, `s/fdef` and quoted `:t/sig` metadata. Public functions
-need signatures. Direct calls to single-arity private helpers (`defn-`, `^:private` or `{:private true}`)
-can omit them: the checker uses the actual argument types to analyze the body and
-infer its result. This is inference for each call, not a generalized function signature.
-
-Use `s/fdef` to check an existing single-arity function without adding metadata:
-
-```clojure
-(ns example.labels (:require [clojure.spec.alpha :as s]))
-
-(s/fdef label :args (s/cat :name string?) :ret string?)
-(defn label [name] (clojure.string/upper-case name))
-```
-
-Parenox checks the function body and its callers. The target must be a `defn`
-or `defn-` in the same namespace. The supported `:args` form is `s/cat` with
-fixed arguments and an optional final `(s/* T)` for a rest parameter. Both
-`:args` and `:ret` are required. Other options such as `:fn` and more general
-argument regexes report an analysis gap. If both signature sources are present,
-they must agree. Checking does not evaluate the spec or instrument the function.
-An `s/fdef` for a var in an external namespace remains an explicit coverage gap.
-
-`s/with-gen` keeps the underlying spec's type, and `:gen-max` can accompany
-`s/map-of` and supported `s/coll-of` forms. Generator behavior is unchecked.
-Recursive specs and `s/coll-of` without a collection kind report incomplete
-coverage.
-
-`s/keys` checks that required keys are present even when no value spec is
-available. In that case an explicitly present `nil` still counts as present.
-The value stays unknown on reads and Parenox reports incomplete coverage.
-If the value spec becomes available, subsequent checks use it to constrain
-the field. A direct reference to a missing spec outside `s/keys` is still an
-error.
-
-`s/and` can narrow input types when earlier checks preserve the value. For
-example, `(s/and keyword? #{:read :write})` accepts only those two keywords.
-A final `(s/conformer second)` after a direct `s/or` removes the tag without
-changing which inputs the choice accepts, if `second` resolves to the core
-function. Other conformers,
-custom predicates, and checks on a previously transformed value report
-incomplete coverage. Parenox does not execute these callbacks or infer the
-type of the result of calling `s/conform`.
-
-An unannotated function can still receive `PNX2304` for an absent or private
-qualified var, and `PNX2554` for a wrong argument count on a qualified or
-explicitly referred call. Parenox checks known project source declarations,
-including variadic functions and the generated factories of `defrecord` and
-`deftype`. Go-to-definition on `->Type`, `->Record` or `map->Record` opens the
-type or record declaration. Factory arity is checked while the generated result
-type and member bodies remain unchecked.
-
-These checks follow `let`, `loop`, `fn`, conditionals, collection literals and
-arguments to known functions. Local bindings shadow referred vars. Unknown
-macros and ambiguous declarations limit how far Parenox can follow calls.
-The report still marks type coverage as incomplete.
-
-In `if-let`, `if-some`, `when-let`, `when-some` and `when-first`, the
-binding applies only to the matching branch, not to the initializer or
-fallback. Reference checks and go-to-definition also cover these bindings
-in unannotated code.
-
-Source `defmacro` declarations provide navigation. When a top-level call
-targets a defined source macro, Parenox reports the unchecked expansion as
-a coverage warning. Any declarations and contracts produced by the expansion
-remain outside the source model.
-
-For a qualified or explicitly referred call to a public function from another
-project namespace at the top level, Parenox can check its argument count when
-the provider's vars are known. A call that matches a source declaration still
-gets a coverage warning: Parenox does not check its arguments or run its
-body. An unresolved top-level call keeps its unsupported-form diagnostic.
-
-Top-level `let`, `require`, and `clojure.test/testing` report incomplete
-coverage. Vars and imports created by those expressions depend on runtime
-evaluation. Direct `defn` and `defn-` forms inside a top-level `let` provide
-source navigation and keep their captured values and call types unchecked.
-`defprotocol` provides navigation to the protocol var and its method vars.
-Protocol dispatch and method signatures remain unchecked.
-`defmethod` gets reference and arity checks in the dispatch expression and
-method body, including navigation to method parameters. Multimethod dispatch
-and method body types remain unchecked. A bare `(:gen-class)` in `ns` does
-not block source resolution; JVM class generation remains unchecked.
-
-Supported string operations can also report input mismatches in a function
-without a contract. This analysis follows supported local bindings, map
-lookups, conditions, and arguments to known functions. The second value from
-destructuring `str/split` can be nil when the separator is absent. A guard can establish
-that the value passed to `str/replace` is a string. Unknown inputs and opaque
-expressions retain incomplete coverage.
-
-A checked function can call a source function that has no contract yet. The
-call reports a `PNX9002` coverage warning, and explicit source arities still
-apply. A supported source signature or a trusted extern supplies typing for
-the call. The source declaration still reports its own coverage status.
-
-At calls and returns, an unknown type does not hide a mismatch in a different
-part of the value. If missing type information prevents checking the contract
-and there is no local diagnostic yet, Parenox reports `PNX9004` and marks the
-check incomplete.
-
-### Checked predicates
-
-```clojure
-(defn enabled-text?
-  {:t/sig '[boolean? (s/nilable string?) :-> boolean?]
-   :t/guard '[:then value string?]}
-  [enabled value]
-  (and enabled (string? value)))
-```
-
-`:then` narrows the named argument only when the call returns true. False could
-mean `enabled` was false even when `value` was a string. Use `:both` only when
-the body also proves that a false result excludes the declared type.
-
-The checker verifies both claims without running the function. The subset
-requires one fixed arity with plain symbol parameters, a Boolean result, and
-one expression built from Boolean parameters or literals, `and`, `or`, `not`,
-`if`, and the supported core predicates: `string?`, `char?`, `number?`,
-`boolean?`, `keyword?`, `symbol?` and `nil?`. The body may also use `some?`.
-A shadowed primitive or other unsupported form cannot prove a claim. An
-unproved claim reports `PNX9008` and does not narrow callers. Run
-`just checked-guards` for both directions.
-
-### Contextual callbacks
-
-```clojure
-(s/def ::text-transform
-  (s/fspec :args (s/cat :text string?) :ret string?))
-
-(defn transform {:t/sig '[::text-transform string? :-> string?]} [f text]
-  (f text))
-
-(defn clean-label {:t/sig '[string? :-> string?]} [label]
-  (transform #(clojure.string/trim %) label))
-```
-
-`s/fspec` describes a callable value. Parenox checks calls to the callback in
-the receiving function. At a direct call with a fixed-arity callback contract,
-it uses that contract to check the parameters and result of a passed `fn` or
-`#()`. Errors point inside the callback and its body is not run during
-argument evaluation. Named functions are checked against the contract too:
-they must accept every declared input and return a compatible result.
-
-The spec uses the same `:args (s/cat ...)` and `:ret` subset as `s/fdef`.
-Named specs and externs can supply it. No generative tests are run.
-Typing a standalone `fn` without context, inferring a callback's type through
-`apply`, and contextual checking against a variadic callback contract are
-not supported yet. Run `just contextual-callbacks`.
-
-### Generic callbacks
-
-```clojure
-(defn transform
-  {:t/sig '(t/all [a] [(s/fspec :args (s/cat :value a) :ret a) a :-> a])}
-  [f value]
-  (f value))
-
-(defn next-id {:t/sig '[number? :-> number?]} [id]
-  (transform #(inc %) id))
-```
-
-Parenox infers `a` from the first argument declared directly as `a` (`value`
-here). It uses that type for the callback and the result, then checks any other
-occurrences against it. The body of `transform` is checked without assuming
-that `a` is a number, a string, or any other concrete type.
-
-Use a second parameter when the callback changes the type:
-
-```clojure
-(defn convert
-  {:t/sig '(t/all [a b] [(s/fspec :args (s/cat :value a) :ret b) a :-> b])}
-  [f value]
-  (f value))
-
-(defn label-length {:t/sig '[string? :-> number?]} [label]
-  (convert #(count %) label))
-```
-
-Here `label` gives the callback its input type (`String`), and the callback
-gives the call its result type (`Number`). A named callback supplies that type
-from its matching fixed-arity signature. A callback can produce a concrete
-map or collection; the type it produces is inferred without running it.
-
-A contract can also infer `a` from vector elements and return a vector of
-callback results:
-
-```clojure
-(defn map-values
-  {:t/sig '(t/all [a b] [(s/fspec :args (s/cat :element a) :ret b)
-                        (s/coll-of a :kind vector?) :-> (s/coll-of b :kind vector?)])}
-  [f values]
-  (mapv f values))
-```
-
-If no argument is declared directly as `a`, the first declared argument that
-uses it as a vector element, dictionary value, or required map field supplies
-it. For vectors and dictionaries, Parenox considers all possible element or
-value types. An empty literal `[]` or `{}` alone cannot supply that type.
-Parenox reports `PNX9010` instead of guessing.
-
-Source contracts and EDN externs support one fixed generic arity, with one
-or two parameters inferred from ordinary arguments. A parameter without such
-an argument can be inferred from one immediate fixed-arity callback's result,
-if it also appears in the call's result. Parameters in map keys, sets, general
-unions, nested collections, or deeper callbacks are not supported. Generic calls
-through `apply` require a spread with known positions and do not infer inline
-callback bodies. Run `just generic-callbacks`.
-
-### Two independent inputs
-
-```clojure
-(defn zip-with
-  {:t/sig '(t/all [a b c]
-             [(s/fspec :args (s/cat :left a :right b) :ret c)
-              (s/coll-of a :kind vector?) (s/coll-of b :kind vector?)
-              :-> (s/coll-of c :kind vector?)])}
-  [combine left right]
-  (mapv combine left right))
-```
-
-Each vector supplies its own element type. The callback supplies `c`. The
-order of the names in `t/all` doesn't decide their roles: a parameter that
-appears in an ordinary argument gets its type from that argument, even if it
-also appears in the callback result. If one input lacks evidence, Parenox
-reports an analysis gap without hiding a definite mismatch on the other
-input. Run `just generic-zip`.
-
-A result can be `(s/nilable a)` when `a` has a separate source of evidence.
-For example, `[(s/map-of keyword? a) keyword? :-> (s/nilable a)]` describes
-a dictionary lookup. Its result must be checked for `nil` before it is used
-as an `a`. A nullable callback result alone does not supply evidence for a
-parameter: `nil` might mean there was no result.
-
-Renaming the parameters of a `t/all` declaration without changing how they're
-used leaves the contract equivalent. An incremental check can reuse passing
-callers after that edit. Callers with diagnostics are checked again so their
-messages use the current names. Changing a bound changes the contract.
-
-### Type parameter bounds
-
-Write `(a :< number?)` to require that the type inferred for `a` is numeric.
-Any input parameter or the optional callback result parameter can have a
-bound. Supported bounds are `number?`, `string?`, `boolean?`, `char?`,
-`keyword?`, and `symbol?`.
-
-```clojure
-(defn number-label
-  {:t/sig '(t/all [(a :< number?)] [a :-> string?])}
-  [value]
-  (str (inc value)))
-
-(defn labels {:t/sig '[:-> (s/coll-of string? :kind vector?)]} []
-  (map-values number-label [1 2]))
-```
-
-Inside `number-label`, `value` can be used as a number. A declaration returning
-`a` would still need to return a value of that same abstract type, not just any
-number. At a call, a bound is checked against the inferred type; it is not a
-default when evidence is missing.
-
-A named generic function can be specialized to a fixed-arity callback. Its
-input parameters come from the expected callback inputs; a result parameter
-can come from a known non-generic callback argument of that signature. The
-expected return is checked after specialization, not used to infer either
-parameter. Parenox reports an analysis gap when the context cannot supply
-that evidence. It does not recursively specialize generic callback arguments.
-
-### Generic map contracts
-
-A literal map type in `:t/sig` or an EDN extern is closed: every declared key
-is required and additional keys are rejected. Use `s/keys` for an open shape
-with named specs and optional fields, or inline the fields in a contract:
-`(t/map {:req {:id string?} :opt {:label string?} :extra :open})`. The fields in
-`:opt` may be absent, but a present `nil` still needs a nilable type. Omit
-`:extra` or use `:extra :closed` to reject unlisted keys.
-
-A parameter can describe a direct value
-in a literal map type or the value type in `(s/map-of key-spec a)`. When a
-literal map type has several fields with the same parameter, Parenox infers
-from the first such field in key order and checks the other fields against it.
-
-```clojure
-(defn ok
-  {:t/sig '(t/all [a b] [(s/fspec :args (s/cat :row a) :ret {:body b})
-                        {:row a} :-> {:status number? :body b}])}
-  [render result]
-  (assoc (render (:row result)) :status 200))
-```
-
-Here the required `:row` field supplies `a`, and the renderer's required
-`:body` field supplies `b`. A present field with value `nil` is evidence of
-type `Nil`; a missing or optional field does not satisfy a required field.
-Run `just map-boundary` for a storage declaration and a response handler that
-keep these cases distinct. This checks the declared boundary, not a database
-schema.
-
-### Arity and argument spreading
-
-For a multi-arity definition, write one signature per clause in a
-quoted vector or list, for example `:t/sig '[[:-> string?] [string? :-> number?]]`.
-Each body is checked against its signature. Calls select the signature for their
-argument count, including when the function is passed as a callback. Externs
-accept the same vector of signatures as EDN data. Run `just arities` for a
-multi-namespace example with arity and argument diagnostics.
-
-A variadic signature uses `&` followed by the type of each extra argument, for
-example `:t/sig '[number? & string? :-> number?]`. Clojure supplies extra arguments
-as a seq, or nil when there are none. An exact fixed clause takes precedence
-over a variadic clause at the same argument count. Inside the variadic body
-`recur` takes one argument for the rest binding. Run `just variadic` for examples.
-
-`apply` checks positional arguments from nil and collections with known
-positions, including vector literals. It selects a signature for each exact
-shape and supports inline `fnil` wrappers. For an open vector or seq, it
-checks possible counts and element types against declared signatures and
-supported built-ins. Applying `merge` with an open spread reports an analysis
-gap because the result depends on how many maps are passed and which keys they
-overwrite. Run `just spread` for examples.
-
-Use `#(...)` in immediate calls and supported callbacks. `%` and `%1` name the
-first argument, `%2` and later positions set the required count, and `%&` holds
-the remaining arguments. The reader preserves the original shorthand tokens
-and spans. Run `just anonymous` for examples.
-Map destructuring of rest arguments reports an analysis gap.
-
-```clojure
-(defn- normalized [name]
-  (clojure.string/upper-case (or name "Unknown")))
-
-(defn display-name
-  {:t/sig '[(s/nilable string?) :-> string?]}
-  [name]
-  (normalized name))
-```
-
-Run `just inference` for passing and failing patient-label examples. Errors point
-to the helper body and include notes showing its call chain. Repeated calls with
-the same inputs reuse inferred results within the checked entry function.
-An inferred helper also carries known exception data to the caller's handler.
-Run `just helper-effects` to check this through a private request helper.
-
-Core threading macros `->`, `->>`, `some->` and `some->>` are supported. The checker
-resolves names before selecting a rule, so local and project functions can shadow
-these names. `some->` variants stop on nil; false continues through the chain.
-Ordinary threading expands each step in place, preserving evaluation order and
-tail position when the input becomes part of a special form. Long chains of bare
-built-ins or keyword lookups are processed iteratively. Other nested expansions
-are bounded to 32 active forms and report an analysis gap at the limit.
-Compiler-level resolution and arity checks still apply to skipped steps; runtime
-type and missing-key errors are excluded from proven skipped paths.
-Run `just threading` for examples and three deliberate errors.
-
-`cond->` and `cond->>` process every condition/step pair, preserving the current
-value when a condition is false and continuing after nil. Unknown conditions join
-the executed and skipped result types. Branch-specific guards narrow outer locals
-for that step; a guard on the unchanged seed local also narrows its threaded input.
-After a potentially executed transformation, repeated tests are analyzed
-conservatively without correlating earlier branches. Scalar type predicates retain
-known true/false results, and joined causal notes are deduplicated. Inferred map
-alternatives are compacted into a shape with optional fields, keeping chains of
-conditional `assoc` operations bounded by the number of fields. Correlations
-between keys are not retained; declared contract unions keep their alternatives.
-
-`as->` supports a simple unqualified symbol binding. It rebinds that local before
-each original expression, allows the value in any argument position, and continues
-through nil and false. Its lexical binding does not escape to the outer scope.
-Clojure also permits destructuring bindings here; those remain an explicit analysis
-gap in Parenox. Run `just conditional` for examples and deliberate errors.
-
-[expand.rs](../src/expand.rs) transforms individual threading steps using the shared
-`Form` representation, independently of the type checker. The consumer
-owns evaluation order, nil guards and temporary lifetime. Source steps and their
-metadata are preserved; diagnostics include macro origin notes. Mechanical edits
-inside transformed calls are withheld when source replacement could change the
-threading semantics. User macro execution, a general macroexpander and full
-expansion provenance remain future work.
-
-`if-not` and `when-not` select their body when the condition is falsey.
-Their guards narrow values in the selected branch and preserve tail position.
-
-`if-let` and `when-let` bind truthy values. `if-some` and `when-some` also bind
-`false`. Each initializer is checked once. The successful branch can use the
-narrowed value through a local symbol or a supported map destructuring pattern.
-The fallback runs in the outer scope and defaults to nil.
-`when-first` enters its body for a nonempty input and binds the first element,
-including nil or false. Its final expression can recur to the enclosing loop.
-Known scalar literals let `=` resolve branches, including status comparisons
-on each iteration of that loop. Run `just guards`
-to see the result type when no fallback is supplied and a type error when
-`if-some` passes `false` into a numeric call.
-
-`merge` accepts maps and nil. Rightmost present values win, including explicit
-nil. An optional right-hand field can change the value type without removing a
-required left-hand field. An undeclared field in an open map can overwrite a
-known value; if its type remains unknown after the merge, Parenox reports a gap.
-
-`merge-with` checks direct calls on maps and nil. On a conflict the callback
-receives the accumulated value and the next map's value in that order. An
-optional conflict keeps the possible one-sided results, and a present nil or
-false is a value. An overlap with an undeclared value in an open map reports an
-analysis gap. The callback shares the map callback budget with `group-by`,
-`update-keys` and `update-vals`. Run `just merge-with` for examples.
-
-`select-keys` derives a closed result shape from a map or nil and a
-collection of statically known keyword or string choices. It preserves field
-types, including present nil and false. A field is required when the input
-requires it and every possible selection includes it. Unbounded key types and
-selected fields with undeclared types report analysis gaps. Run
-`just map-projection` to check a public response derived from an open record.
-
-`dissoc` tracks a removed keyword or string even when the input map is open.
-A dynamic key makes overlapping required fields optional and preserves the
-others. The one-argument call returns its input and removing keys from nil
-returns nil. An `:opt` entry with type `#{}` can declare an absent field in
-an open result contract. An `apply` spread with unknown length reports an
-analysis gap.
-
-`update-vals` checks direct calls on closed maps, typed dictionaries, and nil.
-It checks the updater against each declared field's value type and preserves
-key types and presence on normal returns. Present nil and false are passed to
-the updater. Nil and empty maps produce an empty map with zero invocations.
-A field whose updater always throws can only be absent in a successful result.
-An open map with undeclared values or excessive callback analysis reports a gap.
-Run `just update-vals` for examples.
-
-`zipmap` pairs sequence items up to the shorter input and keeps the later
-value for duplicate keys. Fixed positions produce precise fields. A later pair
-that may be absent leaves room for an earlier value at the same key. Typed
-sequences can produce a dictionary. The supported keys are keywords and strings.
-
-`update-keys` checks direct calls on maps with finite keyword or string keys,
-and on nil. The updater must produce known key choices. The returned shape
-preserves the source values and tracks which destination keys are guaranteed.
-Definite collisions report `PNX2790`. Possible collisions and excessive key
-expansion report `PNX9001`. Run `just map-builders` for examples.
-
-`group-by` checks the grouping callback and returns map entries whose values
-are vectors of the original items. Fixed inputs with known group keys retain
-the item order and length in each group. With dynamic groups, the checker
-tracks a typed dictionary and the collection may be empty. Group keys must
-be keywords or strings. The operation shares the map callback analysis limit
-with `update-vals` and `update-keys`. Run `just group-by` for examples.
-
-`get-in`, `assoc-in`, and `update-in` accept vectors and sequences with
-known keyword or string positions, including computed paths such as
-`(list sku tier)`. Paths can pass through locals or typed arguments.
-Each complete conditional path is checked separately. An empty or nil read
-path returns the input. A missing key uses the `get-in` fallback and a
-present terminal nil or false is preserved. Writes create missing or nil intermediate maps, preserve
-sibling fields, and report scalar parents. Write paths support 1 to 32 keys.
-Read paths also accept known decimal integer indices in the i32 range.
-Unknown-length paths and numeric write keys report an analysis gap.
-Run `just dynamic-paths pretty always` for inline examples and
-`just ordered-paths pretty always` for saved paths and diagnostics.
-
-`nth`, `get`, `req!` and `contains?` analyze known decimal integer indices
-in the i32 range. Vectors and map entries retain known positions. String
-reads use UTF-16 positions, matching Clojure/JVM. For an out-of-range index,
-`get` yields nil or its fallback. `nth` without a fallback reports a
-provably out-of-range index; on nil it returns nil. A general vector
-contract gives `nth` the element type on successful reads. A supplied
-fallback handles absence and preserves present nil. Index expressions
-whose exact decimal integer value is unavailable report an analysis gap.
-Run `just indices pretty always` for examples and diagnostics.
-
-Lookup and update arguments run from left to right. The default expression in
-`get` and `get-in` runs even when the key exists. `assoc` and `assoc-in`
-evaluate every argument before validating the write. Run `just lookup-order` to
-see which error reaches the handler and how the checker reports a mismatched
-recovery type.
-
-`contains?` checks keyword and string keys. A guard such as `(contains? patient :name)`
-refines a local map in each branch. The successful branch can read a declared
-optional field without adding nil for absence. The failure branch lets `get`
-or `get-in` use the fallback. A field declared nilable still accepts explicit
-nil, and the type of an undeclared field in an open map remains unknown.
-With `(contains? prices sku)`, the guard also refines a direct lookup or the
-first segment of a nested operation using the same two bindings. Rebinding
-either local removes the fact.
-Run `just presence` for examples and source diagnostics.
-
-`update` accepts a keyword or string expression, and `update-in` uses a key
-path. The updater receives the old value first, followed by any extra
-arguments. An absent entry passes nil. The updater's result becomes the new
-field type. A dynamic key may overlap a field, so Parenox combines the
-old and new value types for that field. Supported updaters
-include built-in functions, functions with signatures, and directly named
-private helpers. Inline `fnil` evaluates the target and defaults when it creates
-the wrapper. At invocation, it replaces nil arguments and preserves false.
-For example, `(update patient :visits (fnil inc 0))` works when visits is absent.
-Parenox supports one to three defaults when the wrapper is called immediately
-or passed directly as a supported callback. Storing the wrapper for later use
-reports an analysis gap.
-
-Inline `(fn [params] ...)` works in immediate calls and as a supported callback.
-Its parameters take their types from the call, supported map destructuring
-works in the parameter vector, and the body can access outer locals.
-Diagnostics inside the body point at its original expressions and include
-the call location. Anonymous functions can define several fixed arities and
-one variadic clause. An inline call checks the selected body with its argument
-types and checks compiler constraints across the other bodies.
-Local storage of the function itself, named functions, and preconditions or
-postconditions report analysis gaps.
-Run `just updates` to see both an implicit old-value error and a body error.
-
-`mapv` takes one callback argument from each input collection and returns a
-vector of callback results. It stops at the shortest input. `filterv` retains
-elements for which the callback returns a truthy value. Core scalar predicates
-narrow the retained type. `some?` removes nil and keeps false.
-
-Both support vectors, sets, strings (as characters), closed maps,
-`s/map-of` dictionaries, and nil (as empty). User-defined predicates retain the
-input element type unless the callback is known to always return a falsey
-value. On a guaranteed nonempty input, a callback that throws prevents the
-pipeline from returning. Empty inputs skip callback invocation. Run
-`just vectors pretty always` for a patient-label pipeline, recovery from a
-rejected row, and callback diagnostics.
-
-Maps and keywords work in function position and as inline callbacks, for
-example `(mapv :active patients)`. Lookup defaults apply to missing entries
-and preserve explicit nil and false. Vectors and map entries accept one integer
-index and report known out-of-bounds calls. Run `just callables` for examples.
-
-`list` preserves argument order and `cons` prepends to any modeled sequence.
-Use `(s/coll-of element-spec :kind seq?)` for an ordered sequence that may be
-empty. An empty list is truthy, while `(seq (list))` yields nil. Run
-`just list-accumulators` for reversal with `loop` and a non-seqable tail diagnostic.
-
-`reduce` checks known positions in order and supports vectors, sequences, maps,
-sets, and strings. Maps supply entries, sets supply their element type, and
-strings supply UTF-16 characters. Map and set inference allows any iteration
-order. Without
-an initial value it invokes the reducer with zero arguments on empty input and
-uses the first item as the accumulator on nonempty input. With an initial value,
-an empty input returns that value. Reducer diagnostics identify the failing
-step and point at literal elements when possible. For typed vectors and seqs
-with unknown length, Parenox follows possible accumulator types across steps
-and widens collections whose length grows. Excessive shape growth reports an
-analysis gap. A step returning `(reduced value)` stops that path and returns
-the wrapped value. Unexecuted later steps leave its result intact. Run
-`just reductions` for examples.
-
-`reduce-kv` checks direct calls over maps with declared entry types, vectors
-and nil. The reducer receives the accumulator, key and value. Map keys stay
-paired with their value types and each step allows any possible entry.
-Fixed vectors supply ordered integer indices starting at zero. Empty input
-returns the initial value and `reduced` stops the fold. Open map entries,
-protocol fallbacks and reductions beyond the analysis limits report gaps.
-Run `just reduce-kv` for examples.
-
-A closed map supplies a `MapEntry<K, V>` for each present field. Use `key`,
-`val`, or fixed positional bindings such as `(fn [[k v :as entry]] ...)`.
-Optional fields contribute entries only when present, and a present nil remains
-nil. An entry satisfies vector contracts for its two items. Iterating an open
-map, including an `s/keys` contract, reports an analysis gap because undeclared
-fields can have arbitrary types. Run `just entries pretty always` for examples.
-
-`find` returns the entry for a present key and nil for an absent one. Use
-`if-let` with `find` when a fallback should apply only to missing fields.
-An entry holding nil or false still takes the present branch. The checker
-supports maps, vectors and map entries as targets with keyword or string
-keys or known decimal integer indices in the i32 range.
-
-A contract of the form `(s/map-of key-spec value-spec)` types the entries of
-a dictionary. It allows empty maps. The key and value specs flow into
-`MapEntry<K, V>` when a dictionary is iterated. Keyword and string lookups
-use the value type if the key can occur and preserve missing-key defaults.
-`contains?` narrows presence, and `assoc` and `update` track the updated
-entry while retaining the types of the remaining entries.
-Run `just dictionaries pretty always` for contracts and
-`just map-keys pretty always` for dynamic key examples. Dictionary validation
-options and lookup keys outside keywords, strings and known decimal integer
-indices report gaps.
-
-Clojure 1.13 checked lookups support keyword and string keys in `req!` and
-explicit map bindings, plus `:keys!`, namespaced keyword directives and
-`:strs!` for string keys.
-Keys after `&` in a keys vector are not bound; checked directives require their
-presence. Ordinary keyword renaming and nested map patterns use the same binding
-analysis. Run `just checked` for passing examples and two deliberate errors.
-
-A presence check keeps the declared value type, including explicit nil. For an
-optional `String` field, a successful checked lookup yields `String`; an optional
-nilable field still yields `Nil | String`. Checks describe successful execution;
-runtime presence guards remain in the program. A key proven absent produces
-`PNX2741` at the binding or lookup key. An undeclared value type in an open map
-remains an explicit analysis gap; presence-only checks after `&` need no value type.
-Refinement applies to bound locals and checked lookup results. Source-map aliases
-keep their declared types.
-
-Map `:or` defaults can use local symbols or literal keyword and string lookup keys, including
-renamed, namespaced and nested bindings. An absent key uses its default; a present
-nil or false is preserved. Every default expression is analyzed eagerly in the
-outer lexical scope, including unused defaults and defaults for present keys.
-Defaults in one map do not introduce locals for each other. Ordinary function
-arguments are available before parameter destructuring, including later arguments.
-Private helpers used in parameter defaults participate in inference and cache
-invalidation. Run `just defaults` for examples and deliberate failures.
-
-Providing both a local-symbol default and a keyword default for the same binding,
-or providing a default for a checked required key, produces `PNX1001` at the
-default. A default applies to the local value; `:as` retains the input collection.
-
-Map destructuring with `:missing`, `:select`, `:all` or `:excess` and
-symbol lookup keys remain unsupported. Positional destructuring covers
-vectors, map entries, strings and nil. Vector literals of at most 32 elements retain
-their positions, and `(s/tuple ...)` describes a vector with 1 to 32 position
-types. Longer literals retain an element type. Missing positions bind nil.
-A vector with unknown length contributes nil as a possible value at each
-position. Rest bindings report an analysis gap.
-
-Recursive helpers, unused helpers with no typed caller, and helpers used as
-function values currently require `:t/sig`. Private inference is bounded to 32
-nested calls and 256 specializations per checked entry function; hitting a limit
-reports an explicit analysis gap. Function statistics count annotated definitions;
-inferred helper work is included in the check of their callers.
-
-| Area | Supported |
-|---|---|
-| Types | Strings, characters, numbers, booleans, keywords, nil, literal constraints, maps, vectors, sets, unions |
-| Spec forms | `s/keys`, `s/map-of`, `s/tuple`, `s/nilable`, `s/or`, vector/set `s/coll-of` |
-| Control flow | `let`, `do`, `if`/`if-not`, `when`/`when-not`, `cond`, `case`, `or`, `and`, `if-let`/`when-let`, `if-some`/`when-some`, `loop`/`recur`, local predicate narrowing |
-| Core macros | `->`, `->>`, `some->`, `some->>`, `cond->`, `cond->>`, simple-binding `as->` with source diagnostics |
-| Data operations | Keyword calls, string and keyword lookups and updates, ordered vector paths, indexed reads, positional and nested map destructuring and checked keys |
-| Functions | Fixed and variadic arities, forward calls, bare requires, namespace aliases, `:as-alias`, explicit `:refer` with `:exclude` and `:rename`, private-var boundaries, direct private-helper inference |
-| Libraries | Built-in rules and EDN extern files; checked public signatures and literal values can be exported as EDN |
-| Output | Cargo-style pretty, plain, JSON Lines; reviewable suggested edits |
-
-Clojure distinctions are preserved: a set in expression position is a `Set<T>`;
-a set in spec position describes allowed values. Nil, false and absent keys are
-separate. `get` defaults preserve explicit nil; zero and empty collections are
-truthy. Callable sets return a matching value or nil, not a boolean; membership
-results are currently conservative.
-
-Inference separates a general expression type from precise known values. Ordinary
-strings are shown as `String`, including inside maps and collections, while exact
-values remain available to check finite-value contracts.
-
-`recur` transfers values to the nearest loop or supported function body. Each
-iteration is checked with the types of its incoming arguments. Structural
-errors such as wrong arity and non-tail use are reported even in branches that
-will not run. Inference reports a gap if a loop keeps generating distinct or
-growing types beyond its analysis budget.
-
-`case` narrows local values in each branch, including grouped constants. An
-omitted default throws when no clause matches, and Parenox reports a definite
-miss at the input expression. Supported constants are nil, booleans, characters,
-strings, keywords and known decimal integers in the i32 range.
-
-For a union of map shapes, testing a literal tag can narrow the whole map.
-For example, in `(if (= :note (:kind event)) ...)`, each branch sees the
-remaining variants of `event` and their own `:value` types. `cond` narrows
-later clauses using earlier tests. `case` on a map tag also reports unhandled
-values from a known finite set when there is no default.
-
-Supported selectors are keyword calls, `get` with a literal key, and
-`get-in` with a literal vector of keys. A `let` alias retains the relation to
-the original binding until either name is rebound. Missing keys still read as
-nil; `some?` also accepts false. A lookup with a default, a computed key, or a
-user-defined predicate is not evidence for a tag. Run `just tagged-maps`.
-
-`seq`, `first`, `next` and `rest` model traversal of vectors, sequences,
-sets, strings and maps with declared entry types. Strings use JVM UTF-16
-positions. Map traversal preserves entry types and known lengths without
-assuming their order. An exhausted `rest` returns a truthy empty list. Use `seq` to
-detect exhaustion and refine the remaining elements. The `empty?` and
-`not-empty` guards narrow known empty and nonempty alternatives. Empty
-collections, empty strings and nil satisfy `empty?`; a collection holding nil or
-false still has an element. Guarding
-the result of `seq` or `next` establishes that a first item exists. That item
-can still be nil. A seq made from a fixed vector retains its positions for
-`first`, `next`, `nth` and positional destructuring.
-
-`keys` and `vals` preserve the key or value types of a typed map. Nil and an
-empty map produce nil. A nonempty map produces a sequence even if its values
-are nil or false. The checker retains known lengths and uses all possible
-element types at each position. Open maps with undeclared entry types and
-sequences passed directly to `keys` or `vals` report analysis gaps. Run
-`just map-sequences` for a reduction over typed dictionary values.
-
-`conj` appends to vectors, prepends to seqs, and adds items to sets. Short fixed
-vectors retain their positions. Repeated growth across loop iterations widens
-the collection length while keeping the inferred element types. Map `conj`
-reports an analysis gap.
-
-`throw` ends the current execution path. Ordinary function calls and vector
-literals preserve that exit, while still checking whether later expressions
-resolve and compile. `ex-info` retains the data map for `ex-data` and follows the
-JVM's treatment of a nil data argument as an empty map.
-
-`try` joins normal results with values from possible `catch` clauses. Explicit
-throws preserve `ExceptionInfo` data for a matching handler. Catch analysis
-recognizes common `java.lang` throwable classes and conservatively allows
-ordinary calls to throw. The return value of `finally` is discarded. A `recur`
-can target a loop or function defined inside a `try`, and Parenox diagnoses
-transfers to targets outside the `try`.
-
-Limitations include user macros, Java interop, generics, lazy sequence functions,
-recursive specs, full numeric
-tower semantics and some reader forms. Numeric expressions use `Number`,
-with decimal integer literals retaining their value for indexed reads.
-Externs describe qualified functions, literal vars and supported macro scopes; they do not load JARs or
-resolve Maven/Git dependencies. There is no runtime, interpreter or VM yet.
-
-Any error gives `ok=false`. `PNX9xxx` also gives `complete=false`: some analysis
-could not be performed. `complete=true` describes coverage of the implemented
-subset, not proof of all runtime behavior or application intent.
+- A request with `files` and no `op` checks a complete snapshot without
+  changing the tracked project. `open` replaces the tracked snapshot.
+- `update` accepts optional `changes` and `remove`. An omitted `externs`
+  retains the extern snapshots; an array of `{path, source}` objects
+  replaces them. A single object is also accepted. Use `null` or `[]`
+  to clear externs. A valid edit is kept even if it introduces diagnostics.
+- `{"op":"open_project","root":"/path/to/project","aliases":["test"]}`
+  loads the project from disk. Specify `classpath` instead of `aliases`
+  for a resolved classpath. `refresh_project` reloads disk while
+  retaining unsaved overlays and extern overrides.
+- `definition` and `hover` use a zero-based UTF-8 byte offset.
+  Definition returns a source `path` and `span` or `null`. Hover returns
+  a var's qualified name, display signatures, and any contract origin.
+  Use `parenox definition --file FILE --offset N` for a disk-backed query.
+
+Results include `ok`, `complete`, diagnostics, and statistics for parsed
+and reused files and checked and reused functions. The in-memory session
+reuses unaffected results on edits; there is no on-disk cache.
 
 ## Performance and development
 
-```sh
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo fmt --all -- --check
+- `just verify` runs formatting checks, Clippy, and tests.
+- `just agent-loop` measures the clinic edit scenario; `just bench` runs a
+  synthetic workload. `parenox bench FILE` measures in-process checks.
+- `just runtime-smoke` uses Clojure/JVM. Run
+  `clojure -M tests/fixtures/spec-int-conformer.clj` to verify the integer
+  conformer against the pinned JVM reference.
 
-./target/release/parenox bench examples/good.clj --iterations 1000
-cargo run --locked --release --example agent_loop -- --iterations 100 --functions 1000
-cargo run --locked --release --example agent_loop -- --project examples/clinic --iterations 100
-```
-
-`bench` measures in-process checking. The Rust example measures full JSON round
-trips including source transfer, encoding, pipes and decoding. Measurements are
-local examples, not claims about large production projects. Recorded results are
-in [benchmarks](../benchmarks).
-
-Optional independent runtime smoke checks use the pinned Clojure 1.13 reference
-and require the Clojure CLI with Java 17 or newer:
-
-```sh
-clojure -M scripts/runtime_smoke.clj
-```
-
-`parenox-frontend` contains the reader, source positions, and lossless CST.
-`parenox` provides project analysis, checking, rendering, and editor transports.
-Build the frontend alone with `cargo check --locked -p parenox-frontend`.
+See [research and pilot results](design/type-checker-research.md),
+[benchmarks](../benchmarks), and the [next development prompt](next-prompt.md).

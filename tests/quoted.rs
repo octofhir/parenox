@@ -27,6 +27,36 @@ fn checks_quoted_data_as_values_without_resolving_or_calling_their_symbols() {
 }
 
 #[test]
+fn symbol_qualification_is_checked_in_literals_guards_and_externs() {
+    let library = Source {
+        path: "routes.clj",
+        source: r#"(ns routes (:require [clojure.spec.alpha :as s]))
+            (defn keep-simple [name] name)
+            (s/fdef keep-simple :args (s/cat :name simple-symbol?) :ret simple-symbol?)
+            (defn keep-qualified {:t/sig '[qualified-symbol? :-> qualified-symbol?]} [name] name)
+            (defn resolve-name {:t/sig '[symbol? :-> symbol?]} [name]
+              (if (simple-symbol? name) (keep-simple name) (keep-qualified name)))
+            (defn divide {:t/sig '[:-> simple-symbol?]} [] (keep-simple '/))
+            (defn divide-core {:t/sig '[:-> qualified-symbol?]} [] (keep-qualified 'clojure.core//))"#,
+    };
+    let mut session = Session::default();
+    let exported = session.export_externs(&[library], &[]);
+    let externs = exported.edn.expect("expected verified externs");
+    assert!(externs.contains("clojure.core/simple-symbol?"));
+    assert!(externs.contains("clojure.core/qualified-symbol?"));
+    let bad = library
+        .source
+        .replace("(keep-simple '/)", "(keep-simple 'routes/name)");
+    let report = session.check(library.path, &bad);
+    let [diagnostic] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX2322");
+    assert_eq!(diagnostic.expected.as_deref(), Some("SimpleSymbol"));
+    assert_eq!(diagnostic.actual.as_deref(), Some("QualifiedSymbol"));
+}
+
+#[test]
 fn quotes_do_not_create_a_cycle_or_mark_an_inferred_helper_as_called() {
     let app = Source {
         path: "alpha.clj",

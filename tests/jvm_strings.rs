@@ -123,3 +123,117 @@ fn checks_member_arguments_and_marks_other_receivers_incomplete() {
     assert_eq!(report.diagnostics[1].severity, "warning");
     assert!(!report.complete);
 }
+
+#[test]
+fn string_search_members_infer_boolean_and_numeric_results() {
+    let source = r#"(ns urls (:require [clojure.spec.alpha :as s]))
+        (defn http? {:t/sig '[(s/nilable string?) :-> boolean?]} [^String url]
+          (if url (.startsWith url "http") false))
+        (defn suffix? {:t/sig '[string? :-> boolean?]} [text]
+          (. text (endsWith ".")))
+        (defn first-dot {:t/sig '[string? :-> number?]} [text]
+          (.indexOf ^java.lang.String text "."))"#;
+    let report = Session::default().check("urls.cljc", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn string_search_members_reject_wrong_and_nil_arguments() {
+    let source = r#"(ns urls)
+        (defn wrong-prefix [] (.startsWith "http" :http))
+        (defn nil-suffix [] (.endsWith "text" nil))
+        (defn wrong-needle [] (.indexOf "prefix." ["."]))"#;
+    let report = Session::default().check("urls.clj", source);
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .collect();
+    assert_eq!(errors.len(), 3, "{report:#?}");
+    for (error, (member, argument)) in errors.into_iter().zip([
+        ("startsWith", ":http"),
+        ("endsWith", "nil"),
+        ("indexOf", r#"["."]"#),
+    ]) {
+        assert_eq!(error.code, "PNX2322");
+        assert_eq!(
+            error.contract.as_ref().unwrap().name,
+            format!("java.lang.String/{member}")
+        );
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            argument
+        );
+    }
+}
+
+#[test]
+fn receiver_hints_resolve_members_without_proving_a_non_nil_string() {
+    let source = r#"(ns urls (:require [clojure.spec.alpha :as s]))
+        (defn hinted-param {:t/sig '[(s/nilable string?) :-> boolean?]} [^String url]
+          (.startsWith url "http"))
+        (defn hinted-use {:t/sig '[(s/nilable string?) :-> number?]} [text]
+          (.indexOf ^java.lang.String text "."))
+        (defn nil-receiver {:t/sig '[:-> boolean?]} [] (.endsWith nil "."))"#;
+    let report = Session::default().check("urls.clj", source);
+    assert_eq!(report.diagnostics.len(), 3, "{report:#?}");
+    for (error, (member, actual, receiver)) in report.diagnostics.iter().zip([
+        ("startsWith", "Nil | String", "url"),
+        ("indexOf", "Nil | String", "text"),
+        ("endsWith", "Nil", "nil"),
+    ]) {
+        assert_eq!(error.code, "PNX2322");
+        assert_eq!(error.expected.as_deref(), Some("String"));
+        assert_eq!(error.actual.as_deref(), Some(actual));
+        assert_eq!(
+            error.contract.as_ref().unwrap().name,
+            format!("java.lang.String/{member}")
+        );
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            receiver
+        );
+    }
+}
+
+#[test]
+fn string_search_reports_analysis_gaps_for_unknown_values_and_unmodeled_overloads() {
+    let source = r#"(ns urls)
+        (defn unknown-receiver {:t/sig '[map? :-> boolean?]} [m]
+          (.startsWith (:url m) "http"))
+        (defn hinted-unknown {:t/sig '[map? :-> boolean?]} [m]
+          (let [^String url (:url m)] (.startsWith url "http")))
+        (defn unknown-argument {:t/sig '[map? :-> boolean?]} [m]
+          (.endsWith "text" (:suffix m)))
+        (defn int-overload {:t/sig '[:-> number?]} [] (.indexOf "abc" 97))
+        (defn offset-overload {:t/sig '[:-> boolean?]} [] (.startsWith "abc" "b" 1))
+        (defn shadowed-hint {:t/sig '[string? :-> boolean?]} [^String url]
+          (let [url {}] (.startsWith url "http")))
+        (defn other-class {:t/sig '[map? :-> boolean?]} [m]
+          (let [^java.nio.file.Path path (:path m)] (.startsWith path "dir")))"#;
+    let report = Session::default().check("urls.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    // The untyped map lookups also report their own missing type.
+    let gaps: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code != "PNX9003")
+        .collect();
+    assert_eq!(gaps.len(), 7, "{report:#?}");
+    for (gap, expression) in gaps.into_iter().zip([
+        r#"(.startsWith (:url m) "http")"#,
+        "url",
+        "(:suffix m)",
+        "97",
+        r#"(.startsWith "abc" "b" 1)"#,
+        r#"(.startsWith url "http")"#,
+        r#"(.startsWith path "dir")"#,
+    ]) {
+        assert_eq!(gap.code, "PNX9001");
+        assert_eq!(gap.severity, "warning");
+        assert_eq!(
+            &source[gap.span.start.offset..gap.span.end.offset],
+            expression
+        );
+    }
+}

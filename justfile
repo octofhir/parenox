@@ -42,6 +42,14 @@ pilot-check format="pretty": build
     @test -f {{quote(pilot_deps)}} || { echo "Run just pilot-setup first." >&2; exit 2; }
     @./target/release/parenox check --deps {{quote(pilot_deps)}} --alias test --allow-incomplete --format {{quote(format)}}
 
+# Verify formatting is lossless and idempotent on the local pilot without writing to it.
+pilot-format-smoke project="playground/clojure-lsp":
+    PARENOX_FORMAT_PILOT={{quote(project)}} cargo test --locked --release --test formatter pilot_formatting_is_lossless_and_idempotent -- --ignored --nocapture
+
+# Verify project search and references on the local pilot, including unopened source and test files.
+pilot-navigation-smoke project="playground/clojure-lsp":
+    PARENOX_LSP_PILOT={{quote(project)}} cargo test --locked --release --test lsp clojure_lsp_pilot_navigation -- --ignored --nocapture
+
 # Check a file or directory: just check path [pretty|plain|json] [auto|always|never].
 check path="examples/good.clj" format="pretty" color="auto": build
     @./target/release/parenox check {{quote(path)}} --format {{quote(format)}} --color {{quote(color)}}
@@ -311,7 +319,7 @@ libspecs format="pretty" color="auto": build
 # Check alias-only imports and a named spec declared in another file.
 namespace-specs format="pretty" color="auto": build
     @./target/release/parenox check examples/namespace_specs/config.clj examples/namespace_specs/app.clj examples/namespace_specs/handler.clj --format {{quote(format)}} --color {{quote(color)}}
-    @./target/release/parenox check examples/namespace_specs/config.clj examples/namespace_specs/bad.clj examples/namespace_specs/handler.clj --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
+    @./target/release/parenox check --config examples/namespace_specs/parenox.edn --format {{quote(format)}} --color {{quote(color)}} || test "$?" -eq 1
 
 # Check literal dispatch, then show a bad branch and a definite missing match.
 case format="pretty" color="auto": build

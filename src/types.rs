@@ -3,6 +3,7 @@ mod indexing;
 mod maps;
 mod parameters;
 
+use crate::reader::{NumericLiteral, classify_number};
 pub(crate) use compatibility::{Compatibility, extern_drift};
 pub use indexing::IndexedItem;
 pub use maps::{ExtraFields, Field, MapSlot, MapType};
@@ -128,7 +129,17 @@ pub enum Type {
     Boolean,
     Bool(bool),
     Number,
+    /// Values satisfying Clojure's integer? predicate, including BigInt.
+    Integral,
+    /// Integral values representable by a JVM int, regardless of storage class.
+    Int32,
     Integer(i32),
+    /// Integral values representable by a JVM long but not by an int.
+    OutsideInt32,
+    /// Integral values not representable by a JVM long.
+    OutsideInt64,
+    /// Numeric values for which Clojure's integer? predicate is false.
+    NonIntegral,
     String,
     Pattern,
     Character,
@@ -137,6 +148,8 @@ pub enum Type {
     Keyword,
     Key(String),
     Symbol,
+    SimpleSymbol,
+    QualifiedSymbol,
     Map(MapType),
     MapEntry(Box<[Type; 2]>),
     Vector(Box<Type>),
@@ -145,6 +158,10 @@ pub enum Type {
     Seq(Box<Type>),
     /// A sequence of known length, including the empty list.
     SeqTuple(Box<[Type]>),
+    /// A nonempty persistent list with an unknown length.
+    List(Box<Type>),
+    /// A persistent list of known length.
+    ListTuple(Box<[Type]>),
     Set(Box<Type>),
     Reduced(Box<Type>),
     Throwable,
@@ -154,8 +171,35 @@ pub enum Type {
 }
 
 impl Type {
+    pub(crate) fn from_numeric_token(token: &str) -> Self {
+        match classify_number(token) {
+            NumericLiteral::Integer(value) => {
+                let Ok(value) = i32::try_from(value) else {
+                    return Self::OutsideInt32;
+                };
+                let digits = token.strip_prefix(['+', '-']).unwrap_or(token);
+                // Keep the existing exact decimal index model. Other
+                // spellings supply range evidence without changing indexing.
+                if (digits.len() == 1 || !digits.starts_with('0'))
+                    && digits.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    Self::Integer(value)
+                } else {
+                    Self::Int32
+                }
+            }
+            NumericLiteral::IntegerOutsideI64 => Self::OutsideInt64,
+            NumericLiteral::NonInteger => Self::NonIntegral,
+            NumericLiteral::Unclassified => Self::Number,
+        }
+    }
+
     pub fn empty_seq() -> Self {
         Self::SeqTuple(Box::new([]))
+    }
+
+    pub fn empty_list() -> Self {
+        Self::ListTuple(Box::new([]))
     }
 
     /// General expression type. Exact string values remain available separately as refinements.
@@ -163,7 +207,9 @@ impl Type {
     pub fn inferred(&self) -> Type {
         match self {
             Type::Str(_) => Type::String,
-            Type::Integer(_) => Type::Number,
+            Type::Integer(_) | Type::OutsideInt32 | Type::OutsideInt64 | Type::NonIntegral => {
+                Type::Number
+            }
             Type::Char(_) => Type::Character,
             Type::Union(xs) => Type::union(xs.iter().map(Type::inferred)),
             Type::MapEntry(items) => {
@@ -175,8 +221,12 @@ impl Type {
                 Type::Vector(Box::new(Type::union(items.iter().map(Type::inferred))))
             }
             Type::Seq(t) => Type::Seq(Box::new(t.inferred())),
+            Type::List(t) => Type::List(Box::new(t.inferred())),
             Type::SeqTuple(items) if !items.is_empty() => {
                 Type::Seq(Box::new(Type::union(items.iter().map(Type::inferred))))
+            }
+            Type::ListTuple(items) if !items.is_empty() => {
+                Type::List(Box::new(Type::union(items.iter().map(Type::inferred))))
             }
             Type::Set(t) => Type::Set(Box::new(t.inferred())),
             Type::Reduced(t) => Type::Reduced(Box::new(t.inferred())),
@@ -188,12 +238,19 @@ impl Type {
 
     pub fn requires_precise_type(&self) -> bool {
         match self {
-            Type::Str(_) | Type::Char(_) | Type::Tuple(_) | Type::SeqTuple(_) => true,
+            Type::Str(_)
+            | Type::Char(_)
+            | Type::Integral
+            | Type::Int32
+            | Type::Tuple(_)
+            | Type::SeqTuple(_)
+            | Type::ListTuple(_) => true,
             Type::Union(xs) => xs.iter().any(Type::requires_precise_type),
             Type::MapEntry(items) => items.iter().any(Type::requires_precise_type),
             Type::Vector(t)
             | Type::Set(t)
             | Type::Seq(t)
+            | Type::List(t)
             | Type::Reduced(t)
             | Type::ExceptionInfo(t) => t.requires_precise_type(),
             Type::Map(map) => map.any_type(Type::requires_precise_type),
@@ -216,6 +273,25 @@ impl Type {
             }
         }
         if set.contains(&Type::Number) {
+            set.retain(|t| {
+                !matches!(
+                    t,
+                    Type::Integral
+                        | Type::Int32
+                        | Type::Integer(_)
+                        | Type::OutsideInt32
+                        | Type::OutsideInt64
+                        | Type::NonIntegral
+                )
+            });
+        } else if set.contains(&Type::Integral) {
+            set.retain(|t| {
+                !matches!(
+                    t,
+                    Type::Int32 | Type::Integer(_) | Type::OutsideInt32 | Type::OutsideInt64
+                )
+            });
+        } else if set.contains(&Type::Int32) {
             set.retain(|t| !matches!(t, Type::Integer(_)));
         }
         if set.contains(&Type::String) {
@@ -226,6 +302,13 @@ impl Type {
         }
         if set.contains(&Type::Keyword) {
             set.retain(|t| !matches!(t, Type::Key(_)));
+        }
+        if set.contains(&Type::Symbol)
+            || (set.contains(&Type::SimpleSymbol) && set.contains(&Type::QualifiedSymbol))
+        {
+            set.remove(&Type::SimpleSymbol);
+            set.remove(&Type::QualifiedSymbol);
+            set.insert(Type::Symbol);
         }
         if set.contains(&Type::Boolean)
             || (set.contains(&Type::Bool(true)) && set.contains(&Type::Bool(false)))
@@ -341,12 +424,13 @@ impl Type {
         match self {
             Type::Union(xs) => xs.iter().any(|ty| ty.any_component(predicate)),
             Type::MapEntry(items) => items.iter().any(|ty| ty.any_component(predicate)),
-            Type::Tuple(items) | Type::SeqTuple(items) => {
+            Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => {
                 items.iter().any(|ty| ty.any_component(predicate))
             }
             Type::Vector(t)
             | Type::Set(t)
             | Type::Seq(t)
+            | Type::List(t)
             | Type::Reduced(t)
             | Type::ExceptionInfo(t) => t.any_component(predicate),
             Type::Map(m) => m.any_type(|ty| ty.any_component(predicate)),
@@ -368,7 +452,12 @@ impl fmt::Display for Type {
             Type::Boolean => write!(f, "Boolean"),
             Type::Bool(b) => write!(f, "{b}"),
             Type::Number => write!(f, "Number"),
+            Type::Integral => write!(f, "Integer"),
+            Type::Int32 => write!(f, "Int32"),
             Type::Integer(index) => write!(f, "{index}"),
+            Type::OutsideInt32 => write!(f, "Integer outside the JVM int range"),
+            Type::OutsideInt64 => write!(f, "Integer outside the JVM long range"),
+            Type::NonIntegral => write!(f, "Number that is not a Clojure integer"),
             Type::String => write!(f, "String"),
             Type::Pattern => write!(f, "Pattern"),
             Type::Character => write!(f, "Character"),
@@ -386,15 +475,19 @@ impl fmt::Display for Type {
             Type::Keyword => write!(f, "Keyword"),
             Type::Key(s) => write!(f, "{s}"),
             Type::Symbol => write!(f, "Symbol"),
+            Type::SimpleSymbol => write!(f, "SimpleSymbol"),
+            Type::QualifiedSymbol => write!(f, "QualifiedSymbol"),
             Type::MapEntry(items) => write!(f, "MapEntry<{}, {}>", items[0], items[1]),
             Type::Vector(t) => write!(f, "Vector<{t}>"),
             Type::Seq(t) => write!(f, "Seq<{t}>"),
+            Type::List(t) => write!(f, "List<{t}>"),
+            Type::ListTuple(items) if items.is_empty() => write!(f, "EmptyList"),
             Type::SeqTuple(items) if items.is_empty() => write!(f, "()"),
-            Type::Tuple(items) | Type::SeqTuple(items) => {
-                let name = if matches!(self, Type::SeqTuple(_)) {
-                    "SeqTuple"
-                } else {
-                    "Tuple"
+            Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => {
+                let name = match self {
+                    Type::ListTuple(_) => "ListTuple",
+                    Type::SeqTuple(_) => "SeqTuple",
+                    _ => "Tuple",
                 };
                 let items = items.iter().map(ToString::to_string).collect::<Vec<_>>();
                 write!(f, "{name}<{}>", items.join(", "))

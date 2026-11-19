@@ -49,7 +49,11 @@ impl Model {
         fdefs
     }
 
-    pub(super) fn parse_fdef(&mut self, parts: &[Form], globals: &Globals) -> Option<Signature> {
+    pub(super) fn parse_fdef(
+        &mut self,
+        parts: &[Form],
+        globals: &Globals,
+    ) -> Option<Vec<Signature>> {
         read_function_spec(
             &self.names,
             &parts[2..],

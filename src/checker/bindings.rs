@@ -93,6 +93,10 @@ impl Checker<'_> {
         match &form.without_metadata().kind {
             Kind::Symbol(name) | Kind::AnonymousArgument(name) => {
                 env.insert(name.clone(), value);
+                // Class selection and non-nil evidence are independent.
+                if let Some(hint) = form.metadata(":tag").and_then(Form::symbol) {
+                    env.set_java_hint(name, hint);
+                }
             }
             Kind::Vector(xs) => {
                 self.may_throw();
@@ -129,7 +133,7 @@ impl Checker<'_> {
                     match directive.as_deref() {
                         Some(":or") => {}
                         Some(":as") if pair[1].symbol().is_some() => {
-                            env.insert(pair[1].symbol().unwrap().into(), value.clone());
+                            self.bind(&pair[1], value.clone(), env);
                         }
                         Some(":req!") => {
                             let Some(entries) = pair[1].map() else {

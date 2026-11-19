@@ -13,10 +13,10 @@ mod recur;
 
 use env::Env;
 use exceptions::Throws;
-use model::{Contract, DeclaredValue, Function, VerifiedGuard};
+use model::{Contract, DeclaredValue, Function, SpecConversion, VerifiedGuard};
 pub(crate) use model::{
-    Declarations, EncodeError, ExternCache, Globals, InterfaceKey, Model, ProjectCall,
-    ScopedReference, SnapshotWriter, SpecCache, SpecFingerprint, SpecSource,
+    Declarations, DocumentReferences, EncodeError, ExternCache, Globals, InterfaceKey, Model,
+    ProjectCall, ScopedReference, SnapshotWriter, SpecCache, SpecFingerprint, SpecSource,
 };
 use recur::RecurTarget;
 
@@ -27,13 +27,32 @@ use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, Compatibility, MAX_TUPLE_ITEMS, Type};
 use crate::{ContractOrigin, Diagnostic, Suggestion};
 
+pub(crate) struct FunctionCheck {
+    pub diagnostics: Vec<Diagnostic>,
+    specs: BTreeMap<String, SpecInput>,
+}
+
+struct SpecInput {
+    ty: Option<Type>,
+    conversion: Option<SpecConversion>,
+}
+
+impl FunctionCheck {
+    pub fn matches_specs(&self, globals: &Globals) -> bool {
+        self.specs.iter().all(|(key, previous)| {
+            globals.spec(key) == previous.ty.as_ref()
+                && globals.spec_conversion(key) == previous.conversion
+        })
+    }
+}
+
 impl Model {
     pub fn check_function(
         &self,
         function: &Function,
         source: &str,
         globals: &Globals,
-    ) -> Vec<Diagnostic> {
+    ) -> FunctionCheck {
         let mut checker = Checker::new(self, globals, source);
         let contract = function
             .contract
@@ -65,7 +84,10 @@ impl Model {
                 Some(&contract.origin),
             );
         }
-        checker.diagnostics
+        FunctionCheck {
+            diagnostics: checker.diagnostics,
+            specs: checker.spec_inputs,
+        }
     }
 }
 
@@ -149,6 +171,7 @@ struct Checker<'a> {
     source: &'a str,
     partial_scope: Option<&'a BTreeSet<&'a str>>,
     diagnostics: Vec<Diagnostic>,
+    spec_inputs: BTreeMap<String, SpecInput>,
     active_helpers: Vec<String>,
     thread_depth: usize,
     specializations: BTreeMap<(String, Vec<Value>), calls::Specialization>,
@@ -169,6 +192,7 @@ impl<'a> Checker<'a> {
             source,
             partial_scope: None,
             diagnostics: Vec::new(),
+            spec_inputs: BTreeMap::new(),
             active_helpers: Vec::new(),
             thread_depth: 0,
             specializations: BTreeMap::new(),
@@ -184,6 +208,18 @@ impl<'a> Checker<'a> {
 }
 
 impl Checker<'_> {
+    fn read_spec(&mut self, key: &str) -> (Option<&Type>, Option<SpecConversion>) {
+        let ty = self.globals.spec(key);
+        let conversion = self.globals.spec_conversion(key);
+        self.spec_inputs
+            .entry(key.into())
+            .or_insert_with(|| SpecInput {
+                ty: ty.cloned(),
+                conversion,
+            });
+        (ty, conversion)
+    }
+
     fn error(&mut self, code: &str, span: Span, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::new(code, span, message));
     }
@@ -340,16 +376,9 @@ impl Checker<'_> {
             Kind::Bool(b) => Value::new(Type::Bool(*b)),
             Kind::Number => {
                 let token = &self.source[form.span.start.offset..form.span.end.offset];
-                let digits = token.trim_start_matches(['+', '-']);
-                let ty = if digits.len() > 1 && digits.starts_with('0') {
-                    // A leading zero can denote octal syntax in Clojure.
-                    Type::Number
-                } else {
-                    token.parse::<i32>().map_or(Type::Number, Type::Integer)
-                };
-                Value::new(ty)
+                Value::new(Type::from_numeric_token(token))
             }
-            Kind::SymbolicNumber(_) => Value::new(Type::Number),
+            Kind::SymbolicNumber(_) => Value::new(Type::NonIntegral),
             Kind::String(s) => Value::new(Type::Str(s.clone())),
             Kind::Utf16String(_) => Value::new(Type::String),
             Kind::Regex => Value::new(Type::Pattern),
@@ -423,7 +452,7 @@ impl Checker<'_> {
             }
             Kind::Map(xs) => self.map_literal(xs, maps::MapLiteral::Expression(env)),
             Kind::AutoNamespacedMap { .. } => self.unchecked_form(form.span, "Namespaced map needs source namespace context"),
-            Kind::List(xs) if xs.is_empty() => Value::new(Type::empty_seq()),
+            Kind::List(xs) if xs.is_empty() => Value::new(Type::empty_list()),
             Kind::List(xs) => self.list(xs, form.span, env, tail),
             Kind::AnonymousFunction(_) => self.unsupported(
                 form.span,
@@ -448,7 +477,9 @@ fn vector_type(items: Vec<Type>) -> Type {
 
 fn collection_element(types: Vec<Type>) -> Box<Type> {
     Box::new(Type::union(types.into_iter().map(|ty| match ty {
-        Type::Integer(_) => Type::Number,
+        Type::Integer(_) | Type::OutsideInt32 | Type::OutsideInt64 | Type::NonIntegral => {
+            Type::Number
+        }
         ty => ty,
     })))
 }

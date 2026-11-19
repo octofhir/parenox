@@ -1,5 +1,6 @@
 //! Control flow, type narrowing and core threading forms.
 mod selectors;
+mod spec_guards;
 
 pub(super) use selectors::{narrow_literal, refine_owner};
 
@@ -608,10 +609,13 @@ impl Checker<'_> {
             return None;
         }
         let op = self.model.resolve(op);
-        (op.starts_with("clojure.core/") || op == "clojure.string/blank?").then_some(op)
+        (op.starts_with("clojure.core/")
+            || op == "clojure.string/blank?"
+            || self.is_spec_validation(&op))
+        .then_some(op)
     }
 
-    fn narrow(&self, test: &Form, truth: bool, env: &mut Env) {
+    pub(super) fn narrow(&self, test: &Form, truth: bool, env: &mut Env) {
         if !env.reachable() {
             return;
         }
@@ -698,6 +702,11 @@ impl Checker<'_> {
             ("clojure.string/blank?", [operand]) if !truth => {
                 self.narrow_subject(operand, env, Type::without_nil);
             }
+            ("clojure.spec.alpha/valid?", [spec, operand] | [spec, operand, _]) if truth => {
+                if let Some(projection) = self.validation_projection(spec) {
+                    self.narrow_subject(operand, env, |ty| spec_guards::refine(ty, projection));
+                }
+            }
             (_, [operand]) => {
                 if let Some(wanted) = predicate_type(&op) {
                     self.narrow_subject(operand, env, |ty| narrow_by_type(ty, &wanted, truth));
@@ -737,6 +746,12 @@ pub(super) fn narrow_by_type(actual: &Type, wanted: &Type, truth: bool) -> Type 
         }
         Type::Union(parts) => {
             Type::union(parts.iter().map(|part| narrow_by_type(part, wanted, truth)))
+        }
+        Type::Symbol if matches!(wanted, Type::SimpleSymbol | Type::QualifiedSymbol) => {
+            match (wanted, truth) {
+                (Type::SimpleSymbol, true) | (Type::QualifiedSymbol, false) => Type::SimpleSymbol,
+                _ => Type::QualifiedSymbol,
+            }
         }
         actual if actual.subtype_of(wanted) => {
             if truth {

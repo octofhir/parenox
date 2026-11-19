@@ -18,6 +18,13 @@ pub(super) struct Range {
     end: Position,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TextEdit<'a> {
+    range: Range,
+    new_text: &'a str,
+}
+
 pub(super) struct Lines<'a> {
     source: &'a str,
     starts: Vec<usize>,
@@ -88,6 +95,74 @@ impl<'a> Lines<'a> {
         let end = self.offset(range.end)?;
         (start <= end).then_some(start..end)
     }
+
+    pub fn formatting_edits<'b>(&self, formatted: &'b str) -> Vec<TextEdit<'b>> {
+        let result = Lines::new(formatted);
+        // Local edits keep untouched lines and their editor markers in place.
+        // The current formatter preserves physical line breaks, except for
+        // optionally adding a final newline.
+        let extra_final_line = result.starts.len() == self.starts.len() + 1
+            && result.starts.last() == Some(&formatted.len())
+            && !self.source.ends_with(['\r', '\n']);
+        if self.starts.len() != result.starts.len() && !extra_final_line {
+            return self
+                .formatting_edit(0..self.source.len(), formatted)
+                .into_iter()
+                .collect();
+        }
+        self.starts
+            .iter()
+            .enumerate()
+            .filter_map(|(line, &start)| {
+                let end = self
+                    .starts
+                    .get(line + 1)
+                    .copied()
+                    .unwrap_or(self.source.len());
+                let new_start = result.starts[line];
+                let new_end = result
+                    .starts
+                    .get(line + 1)
+                    .copied()
+                    .unwrap_or(formatted.len());
+                let before = &self.source[start..end];
+                let after = &formatted[new_start..new_end];
+                if before == after {
+                    return None;
+                }
+                let prefix = common_bytes(before.chars(), after.chars());
+                let suffix = common_bytes(
+                    before[prefix..].chars().rev(),
+                    after[prefix..].chars().rev(),
+                );
+                self.formatting_edit(
+                    start + prefix..end - suffix,
+                    &after[prefix..after.len() - suffix],
+                )
+            })
+            .collect()
+    }
+
+    fn formatting_edit<'b>(
+        &self,
+        bytes: ops::Range<usize>,
+        new_text: &'b str,
+    ) -> Option<TextEdit<'b>> {
+        Some(TextEdit {
+            range: Range {
+                start: self.position(bytes.start)?,
+                end: self.position(bytes.end)?,
+            },
+            new_text,
+        })
+    }
+}
+
+fn common_bytes(a: impl Iterator<Item = char>, b: impl Iterator<Item = char>) -> usize {
+    a.zip(b)
+        .take_while(|(a, b)| a == b)
+        .map(|(ch, _)| ch.len_utf8())
+        .sum()
 }
 
 pub(super) fn normalize(path: &Path) -> PathBuf {
