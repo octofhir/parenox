@@ -49,7 +49,9 @@ directory named `catalog source` provided its checked signature and definition,
 and `demo.app/item` returned `"ADA"` on the pinned JVM. A JSON Lines session on
 URI opened five files, found an in-memory misspelling, retained it on
 `refresh_project`, cleared it on an edit, and resolved the definition at
-`normalize.cljc:82:7`. [Agent protocol](../reference.md#agent-sessions)
+`normalize.cljc:82:7`. A malformed manifest caused a refresh error while the
+session kept reporting against its previous snapshot. Restoring the manifest
+recovered disk refresh and preserved the edit. [Agent protocol](../reference.md#agent-sessions)
 
 ## Results on pinned projects
 
@@ -141,6 +143,10 @@ On `malli/core.cljc`, the first edit's JSON body was 152,044 bytes with a full
 replacement and 304 bytes with a range. The same build's p95 round trip moved
 from 5.39 to 5.12 ms across 100 edits per transport. Both transports retained
 212 diagnostics per edit with matching codes, severities and messages.
+A separate five-minute run applied 300 range edits at roughly one edit per
+second, retaining 212 diagnostics for every version. The p95 round trip was
+11.03 ms. Periodic RSS samples reached 37,120 KiB during the run and measured
+20,112 KiB at the end.
 
 The clinic agent loop used 100 requests per transport. Warm check p95 was
 38.6 µs for snapshots and 32.1 µs for deltas. Warm body edit p95 was 66.5 µs
