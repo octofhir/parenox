@@ -610,9 +610,11 @@ Use `open_project` to start a tracked session from the same `parenox.edn` and
 ```
 
 The response includes the initial report. Use its paths for later edits,
-definition and hover requests. Updates change the tracked snapshot in memory. A new
-`open_project` reads a fresh disk snapshot, and a failed open keeps the
-previous session available.
+definition and hover requests. Updates change the tracked snapshot in memory.
+Send `{"id":4,"op":"refresh_project"}` to reload the disk project with its
+selected aliases and preserve in-memory edits, removals, and extern overrides.
+A failed refresh keeps the current snapshot. A new `open_project` starts a
+fresh session from disk.
 
 Use `"classpath":"classpath.txt"` in place of `"aliases"` to open an externally
 resolved classpath in an agent session.

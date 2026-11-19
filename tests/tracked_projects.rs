@@ -115,7 +115,7 @@ fn opens_project_configuration_and_keeps_edits_in_memory() {
     }));
     assert_eq!(changed["stats"]["parsed_files"], 1);
     assert_eq!(changed["files"][1]["diagnostics"][0]["code"], "PNX2322");
-    assert_eq!(fs::read_to_string(caller).unwrap(), CONSUMER);
+    assert_eq!(fs::read_to_string(&caller).unwrap(), CONSUMER);
 
     let failed = client.send(json!({
         "op": "open_project", "root": root.0, "aliases": ["absent"]
@@ -127,6 +127,33 @@ fn opens_project_configuration_and_keeps_edits_in_memory() {
         changed["files"][1]["diagnostics"]
     );
 
+    let provider = root.0.join("src/store.clj");
+    let extra = root.0.join("test/extra.clj");
+    fs::write(&provider, PROVIDER.replace("[string? :->", "[number? :->")).unwrap();
+    fs::write(&extra, "(ns extra)").unwrap();
+    let refreshed = client.result(json!({ "op": "refresh_project" }));
+    assert_eq!(refreshed["ok"], true, "{refreshed}");
+    assert_eq!(refreshed["files"].as_array().unwrap().len(), 4);
+    assert_eq!(refreshed["stats"]["parsed_files"], 2);
+    client.result(json!({ "op": "update", "remove": [extra] }));
+    let manifest = fs::read_to_string(root.0.join("deps.edn")).unwrap();
+    fs::write(root.0.join("deps.edn"), "{:paths [\"src\"}").unwrap();
+    let failed = client.send(json!({ "op": "refresh_project" }));
+    assert_eq!(failed["error"]["code"], "invalid_request");
+    assert_eq!(client.result(json!({ "op": "update" }))["ok"], true);
+    fs::write(root.0.join("deps.edn"), manifest).unwrap();
+    assert_eq!(
+        client.result(json!({ "op": "refresh_project" }))["files"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(fs::read_to_string(&caller).unwrap(), CONSUMER);
+
+    fs::write(&provider, PROVIDER).unwrap();
+    fs::remove_file(&extra).unwrap();
+
     let classpath = std::env::join_paths(["src", "test"]).unwrap();
     fs::write(root.0.join("classpath.txt"), classpath.to_str().unwrap()).unwrap();
     let reopened = client.result(json!({
@@ -134,6 +161,14 @@ fn opens_project_configuration_and_keeps_edits_in_memory() {
     }));
     assert_eq!(reopened["ok"], true, "{reopened}");
     assert_eq!(reopened["files"].as_array().unwrap().len(), 3);
+
+    let api = root.0.join("api.edn");
+    client.result(json!({ "op": "update", "externs": { "path": api, "source": EXTERNS } }));
+    fs::remove_file(&api).unwrap();
+    assert_eq!(
+        client.result(json!({ "op": "refresh_project" }))["ok"],
+        true
+    );
 }
 
 #[test]
