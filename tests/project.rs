@@ -1,7 +1,50 @@
 use parenox::{ProjectReport, Session, Source};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
+
+#[test]
+fn editor_projection_keeps_resolution_and_checks_newly_opened_bodies() {
+    let caller = Source {
+        path: "app.cljc",
+        source: "(ns app (:require [labels :as l]))
+                 (defn read-label {:t/sig '[:-> string?]} [] (l/label))",
+    };
+    let provider = Source {
+        path: "labels.clj",
+        source: "(ns labels) (defn label {:t/sig '[:-> string?]} [] \"ok\")",
+    };
+    let mut session = Session::default();
+    let both = BTreeSet::from([caller.path, provider.path]);
+    assert!(
+        session
+            .check_project_documents(&[caller, provider], &[], &both)
+            .ok
+    );
+
+    let changed_text = provider.source.replace("\"ok\"", "42");
+    let changed = Source {
+        source: &changed_text,
+        ..provider
+    };
+    let sources = [caller, changed];
+    let open = session.check_project_documents(&sources, &[], &BTreeSet::from([caller.path]));
+    assert!(open.ok && open.complete, "{open:#?}");
+    assert_eq!(open.files.len(), 1);
+    let target = session
+        .definition(caller.path, caller.source.find("l/label").unwrap())
+        .unwrap();
+    assert_eq!(target.path, provider.path);
+
+    let opened = session.check_project_documents(&sources, &[], &BTreeSet::from([provider.path]));
+    assert_eq!(opened.files.len(), 1);
+    assert_eq!(opened.files[0].diagnostics[0].code, "PNX2322");
+    let fresh = Session::default().check_project(&sources, None);
+    assert_eq!(
+        serde_json::to_value(&opened.files[0].diagnostics).unwrap(),
+        serde_json::to_value(&fresh.files[1].diagnostics).unwrap()
+    );
+}
 
 #[test]
 fn typed_callers_report_the_gap_at_unchecked_source_calls() {

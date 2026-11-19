@@ -522,6 +522,8 @@ local bindings link to their declarations. Parenox reports missing or private
 referral targets when it can determine the providing namespace's public vars.
 Hover on those references shows the checked function signature when available
 and its contract source. Unsaved buffers participate in checks and navigation.
+The workspace supplies declarations for all sources. Editor requests check
+and publish diagnostics for open source documents.
 Completed top-level forms before a reader error remain available for navigation.
 Positions use UTF-16 and the server requests full document synchronization.
 

@@ -139,10 +139,19 @@ enum FileKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SnapshotMode {
-    Check,
+enum SnapshotMode<'a> {
+    Check(Option<&'a BTreeSet<&'a str>>),
     ValidateExterns,
     ExternSurface,
+}
+
+impl SnapshotMode<'_> {
+    fn reports(self, path: &str) -> bool {
+        match self {
+            Self::Check(Some(paths)) => paths.contains(path),
+            _ => true,
+        }
+    }
 }
 
 impl FileCache {
@@ -298,7 +307,18 @@ impl Session {
         sources: &[Source<'_>],
         externs: &[Source<'_>],
     ) -> ProjectReport {
-        self.check_snapshot(sources, externs, &[], SnapshotMode::Check)
+        self.check_snapshot(sources, externs, &[], SnapshotMode::Check(None))
+    }
+
+    /// Loads the complete snapshot for resolution and checks bodies for the selected paths.
+    /// The report's status and diagnostics describe the selected files.
+    pub fn check_project_documents(
+        &mut self,
+        sources: &[Source<'_>],
+        externs: &[Source<'_>],
+        paths: &BTreeSet<&str>,
+    ) -> ProjectReport {
+        self.check_snapshot(sources, externs, &[], SnapshotMode::Check(Some(paths)))
     }
 
     /// Checks library source without trusting the supplied extern promises and
@@ -333,7 +353,7 @@ impl Session {
         sources: &[Source<'_>],
         externs: &[Source<'_>],
         dependencies: &[Source<'_>],
-        mode: SnapshotMode,
+        mode: SnapshotMode<'_>,
     ) -> ProjectReport {
         let started = Instant::now();
         self.snapshot += 1;
@@ -384,11 +404,11 @@ impl Session {
                     ..Stats::default()
                 },
             });
-            entries.push((source, cache, parsed));
+            entries.push((source, cache));
         }
         let mut namespaces = BTreeMap::new();
         let mut ambiguous = BTreeSet::new();
-        for (index, (_, cache, _)) in entries[..count].iter().enumerate() {
+        for (index, (_, cache)) in entries[..count].iter().enumerate() {
             if let Some(declarations) = &cache.declarations
                 && namespaces
                     .insert(declarations.namespace().to_owned(), index)
@@ -404,7 +424,7 @@ impl Session {
         }
         let mut pending = vec![0; count];
         let mut consumers = vec![Vec::new(); count];
-        for (index, (_, cache, _)) in entries[..count].iter().enumerate() {
+        for (index, (_, cache)) in entries[..count].iter().enumerate() {
             if let Some(declarations) = &cache.declarations {
                 for dependency in &declarations.dependencies {
                     if let Some(&owner) = namespaces.get(dependency) {
@@ -440,7 +460,7 @@ impl Session {
             order
                 .iter()
                 .filter_map(|&index| {
-                    let (source, cache, _) = &entries[index];
+                    let (source, cache) = &entries[index];
                     Some(SpecSource {
                         path: source.path,
                         declarations: cache.declarations.as_ref()?,
@@ -455,7 +475,7 @@ impl Session {
         }
         if mode != SnapshotMode::ExternSurface {
             for index in order {
-                let (source, cache, _) = &mut entries[index];
+                let (source, cache) = &mut entries[index];
                 if let Some(declarations) = &cache.declarations {
                     if cache
                         .model
@@ -474,7 +494,7 @@ impl Session {
                 }
             }
         }
-        for (source, cache, _) in &mut entries[count..] {
+        for (source, cache) in &mut entries[count..] {
             if cache.parse_error.is_none()
                 && cache
                     .model
@@ -492,7 +512,7 @@ impl Session {
         self.externs.update(
             entries[count..]
                 .iter()
-                .filter_map(|(_, cache, _)| cache.model.as_ref()?.extern_file()),
+                .filter_map(|(_, cache)| cache.model.as_ref()?.extern_file()),
         );
         let source_literals =
             if mode == SnapshotMode::ValidateExterns && self.externs.has_literals() {
@@ -500,7 +520,7 @@ impl Session {
                     .iter()
                     .zip(&built)
                     .filter(|(_, built)| **built)
-                    .flat_map(|((source, cache, _), _)| {
+                    .flat_map(|((source, cache), _)| {
                         cache
                             .public_literals()
                             .map(move |(name, _, value)| (name.to_owned(), (source.path, value)))
@@ -509,7 +529,7 @@ impl Session {
             } else {
                 BTreeMap::new()
             };
-        if mode == SnapshotMode::Check {
+        if matches!(mode, SnapshotMode::Check(_)) {
             self.externs.publish(&mut globals);
         } else if mode == SnapshotMode::ValidateExterns && !dependencies.is_empty() {
             let mut trusted_paths: BTreeSet<_> =
@@ -522,10 +542,10 @@ impl Session {
                 .publish_dependencies(&trusted_paths, &mut globals);
         }
         let mut macro_gaps = BTreeMap::new();
-        if mode == SnapshotMode::Check {
+        if matches!(mode, SnapshotMode::Check(_)) {
             let provider = |namespace: &str| {
                 let &index = namespaces.get(namespace)?;
-                let (_, file, _) = &entries[index];
+                let (_, file) = &entries[index];
                 let declarations = file.declarations.as_ref()?;
                 (built[index] && file.snapshot == self.snapshot && !ambiguous.contains(namespace))
                     .then_some((file, declarations))
@@ -537,7 +557,10 @@ impl Session {
                         .get_or_init(|| declarations.has_known_var_surface(&file.forms))
                 })
             };
-            for (index, (_, file, _)) in entries[..count].iter().enumerate() {
+            for (index, (source, file)) in entries[..count].iter().enumerate() {
+                if !mode.reports(source.path) {
+                    continue;
+                }
                 if let (Some(declarations), Some(model)) = (&file.declarations, &file.model) {
                     let gaps = declarations.macro_expansion_gaps(&file.forms, |namespace, name| {
                         provider(namespace).is_some_and(|(provider, declarations)| {
@@ -573,9 +596,15 @@ impl Session {
         }
         let mut totals = Stats::default();
         let mut report_ordinals = BTreeMap::<&str, usize>::new();
-        for (index, (source, mut cache, changed)) in entries.into_iter().enumerate() {
+        for (index, (source, mut cache)) in entries.into_iter().enumerate() {
             let file_started = Instant::now();
             let report = &mut reports[index];
+            totals.parsed_files += report.stats.parsed_files;
+            totals.reused_parses += report.stats.reused_parses;
+            if !mode.reports(source.path) {
+                self.files.insert(source.path.into(), cache);
+                continue;
+            }
             let specs_only = mode == SnapshotMode::ExternSurface && index < count;
             if specs_only {
                 if let Some(declarations) = &cache.declarations {
@@ -624,14 +653,14 @@ impl Session {
                     .interface
                     .as_ref()
                     .map(|previous| interface.changes(previous));
-                let unchanged = !changed
+                let unchanged = Arc::ptr_eq(&cache.checked_source, &cache.source)
                     && changes
                         .as_ref()
                         .is_some_and(|changes| changes.is_unchanged());
                 if !unchanged {
                     cache.partial_diagnostics = None;
                 }
-                if mode == SnapshotMode::Check
+                if matches!(mode, SnapshotMode::Check(_))
                     && index < count
                     && let Some(declarations) = &cache.declarations
                 {
@@ -737,9 +766,10 @@ impl Session {
             report.stats.elapsed_us = file_started.elapsed().as_micros() as u64;
             totals.checked_functions += report.stats.checked_functions;
             totals.reused_functions += report.stats.reused_functions;
-            totals.parsed_files += report.stats.parsed_files;
-            totals.reused_parses += report.stats.reused_parses;
             self.files.insert(source.path.into(), cache);
+        }
+        if matches!(mode, SnapshotMode::Check(Some(_))) {
+            reports.retain(|report| mode.reports(&report.path));
         }
         totals.elapsed_us = started.elapsed().as_micros() as u64;
         ProjectReport {

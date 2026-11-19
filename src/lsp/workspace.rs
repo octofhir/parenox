@@ -1,5 +1,5 @@
 //! One workspace and its in-memory editor overlays.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -378,17 +378,24 @@ impl Workspace {
     }
 
     fn check(&mut self, output: &mut impl Write) -> io::Result<()> {
-        let sources: Vec<_> = self
-            .documents
-            .iter()
-            .filter(|(path, _)| is_clojure_source(Path::new(path)))
-            .map(|(path, doc)| Source {
+        let mut sources = Vec::new();
+        let mut open = BTreeSet::new();
+        for (path, doc) in &self.documents {
+            if !is_clojure_source(Path::new(path)) {
+                continue;
+            }
+            sources.push(Source {
                 path,
                 source: &doc.source,
-            })
-            .collect();
+            });
+            if doc.editor.is_some() {
+                open.insert(path.as_str());
+            }
+        }
         let externs: Vec<_> = self.externs.iter().map(FileSnapshot::as_source).collect();
-        let report = self.session.check_project_with_externs(&sources, &externs);
+        let report = self
+            .session
+            .check_project_documents(&sources, &externs, &open);
         for file in report.files {
             if let Some(document) = self.documents.get_mut(&file.path) {
                 document.publish(&file.diagnostics, output)?;
