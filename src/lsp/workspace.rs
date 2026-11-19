@@ -29,6 +29,7 @@ pub(super) struct Workspace {
 struct Document {
     source: String,
     indexed: bool,
+    standalone: Option<Box<Session>>,
     editor: Option<Editor>,
 }
 
@@ -164,6 +165,7 @@ impl Workspace {
                     Document {
                         source,
                         indexed: true,
+                        standalone: None,
                         editor: None,
                     },
                 )
@@ -179,7 +181,14 @@ impl Workspace {
                 let key = indexed
                     .or_else(|| editor_path.map(|path| path.to_string_lossy().into_owned()))
                     .unwrap_or_else(|| path.clone());
-                if key != path {
+                if document.indexed
+                    || in_source_roots(Path::new(&key), &source_roots, &source_aliases)
+                {
+                    document.standalone = None;
+                } else if is_clojure_source(Path::new(&key)) {
+                    document.standalone.get_or_insert_with(Box::default);
+                }
+                if key != path || document.standalone.is_some() {
                     self.session.forget_file(&path);
                 }
                 documents.insert(key, document);
@@ -208,11 +217,16 @@ impl Workspace {
             .documents
             .get(&path)
             .is_some_and(|document| document.indexed);
+        let file = Path::new(&path);
+        let standalone = !indexed
+            && is_clojure_source(file)
+            && !in_source_roots(file, &self.source_roots, &self.source_aliases);
         self.documents.insert(
             path.clone(),
             Document {
                 source: text,
                 indexed,
+                standalone: standalone.then(Box::default),
                 editor: Some(Editor {
                     uri,
                     version,
@@ -308,13 +322,7 @@ impl Workspace {
             .iter()
             .chain(self.source_aliases.iter().map(|(physical, _)| physical))
             .chain(workspace)
-            .any(|root| {
-                path.strip_prefix(root).is_ok_and(|tail| {
-                    !tail
-                        .components()
-                        .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
-                })
-            })
+            .any(|root| visible_under(path, root))
     }
 
     fn is_project_input(&self, file: &Path) -> bool {
@@ -335,7 +343,13 @@ impl Workspace {
 
     fn refresh(&mut self, output: &mut impl Write) -> io::Result<()> {
         match self.reload() {
-            Ok(()) => self.check(output),
+            Ok(()) => {
+                self.check(output)?;
+                for (path, document) in &mut self.documents {
+                    document.check_standalone(path, output)?;
+                }
+                Ok(())
+            }
             Err(message) => log_load_error(output, &message),
         }
     }
@@ -350,6 +364,7 @@ impl Workspace {
         let Some(editor) = document.editor.take() else {
             return Ok(());
         };
+        let standalone = document.standalone.is_some();
         if document.indexed
             && let Ok(source) = fs::read_to_string(&path)
         {
@@ -359,7 +374,7 @@ impl Workspace {
             self.session.forget_file(&path);
         }
         publish(output, json!({"uri":editor.uri, "diagnostics":[]}))?;
-        if is_edn(Path::new(&path)) {
+        if standalone || is_edn(Path::new(&path)) {
             Ok(())
         } else {
             self.check(output)
@@ -368,7 +383,7 @@ impl Workspace {
 
     pub fn definition(&self, params: TextQuery) -> Option<Value> {
         let (path, offset) = self.query_offset(params)?;
-        let target = self.session.definition(&path, offset)?;
+        let target = self.session_for(&path)?.definition(&path, offset)?;
         let document = self.documents.get(&target.path)?;
         let range = Lines::new(&document.source).range(target.span)?;
         let uri = document
@@ -380,7 +395,7 @@ impl Workspace {
 
     pub fn hover(&self, params: TextQuery) -> Option<Value> {
         let (path, offset) = self.query_offset(params)?;
-        let info = self.session.var_at(&path, offset)?;
+        let info = self.session_for(&path)?.var_at(&path, offset)?;
         let mut lines = vec![info.name];
         lines.extend(info.signatures);
         if let Some(contract) = &info.contract {
@@ -389,6 +404,16 @@ impl Workspace {
             lines.push("Checked type information unavailable".into());
         }
         Some(json!({"contents":{"kind":"plaintext","value":lines.join("\n")}}))
+    }
+
+    fn session_for(&self, path: &str) -> Option<&Session> {
+        Some(
+            self.documents
+                .get(path)?
+                .standalone
+                .as_deref()
+                .unwrap_or(&self.session),
+        )
     }
 
     fn query_offset(&self, params: TextQuery) -> Option<(String, usize)> {
@@ -413,10 +438,12 @@ impl Workspace {
     }
 
     fn check_document(&mut self, path: &str, output: &mut impl Write) -> io::Result<()> {
+        let document = self.documents.get_mut(path).unwrap();
         if is_edn(Path::new(path)) {
-            let document = self.documents.get_mut(path).unwrap();
             let diagnostic = validate_edn(&document.source).err().map(Diagnostic::from);
             document.publish(diagnostic.as_slice(), output)
+        } else if document.standalone.is_some() {
+            document.check_standalone(path, output)
         } else {
             self.check(output)
         }
@@ -426,7 +453,7 @@ impl Workspace {
         let mut sources = Vec::new();
         let mut open = BTreeSet::new();
         for (path, doc) in &self.documents {
-            if !is_clojure_source(Path::new(path)) {
+            if doc.standalone.is_some() || !is_clojure_source(Path::new(path)) {
                 continue;
             }
             sources.push(Source {
@@ -448,6 +475,22 @@ impl Workspace {
         }
         Ok(())
     }
+}
+
+fn in_source_roots(path: &Path, roots: &[PathBuf], aliases: &[(PathBuf, PathBuf)]) -> bool {
+    roots.is_empty()
+        || roots
+            .iter()
+            .chain(aliases.iter().map(|(physical, _)| physical))
+            .any(|root| visible_under(path, root))
+}
+
+fn visible_under(path: &Path, root: &Path) -> bool {
+    path.strip_prefix(root).is_ok_and(|tail| {
+        !tail
+            .components()
+            .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
+    })
 }
 
 fn indexed_document(
@@ -475,6 +518,14 @@ fn indexed_document(
 }
 
 impl Document {
+    fn check_standalone(&mut self, path: &str, output: &mut impl Write) -> io::Result<()> {
+        if let Some(session) = &mut self.standalone {
+            let report = session.check(path, &self.source);
+            self.publish(&report.diagnostics, output)?;
+        }
+        Ok(())
+    }
+
     fn publish(&mut self, diagnostics: &[Diagnostic], output: &mut impl Write) -> io::Result<()> {
         let Some(editor) = &mut self.editor else {
             return Ok(());

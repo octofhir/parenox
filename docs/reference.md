@@ -543,6 +543,9 @@ Hover on those references shows the checked function signature when available
 and its contract source. Unsaved buffers participate in checks and navigation.
 The workspace supplies declarations for all sources. Editor requests check
 and publish diagnostics for open source documents.
+A Clojure buffer outside the configured source roots is checked on its own.
+Opening a second checkout in the same window preserves name resolution in the
+configured project.
 Completed top-level forms before a reader error remain available for navigation.
 The server requests incremental synchronization. It applies UTF-16 range
 edits in order and also accepts full document replacements. See the

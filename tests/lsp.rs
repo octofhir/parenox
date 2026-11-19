@@ -157,6 +157,75 @@ fn editor_merges_physical_buffers_with_linked_source_roots() {
 }
 
 #[test]
+fn editor_isolates_a_second_checkout_from_the_configured_project() {
+    let fixture = Fixture::new("isolated editor source");
+    let caller = fixture.0.join("src/store.cljc");
+    let provider = fixture.0.join("src/catalog.clj");
+    let other = fixture.0.join("other-checkout/src/catalog.clj");
+    let source = "(ns store (:require [catalog :as c]))\n(defn entry [] (c/label))";
+    let library = "(ns catalog)\n(defn label {:t/sig '[:-> string?]} [] \"ok\")";
+    let outside = "(ns catalog)\n(defn- label {:t/sig '[:-> number?]} [] 42)\n(defn display {:t/sig '[:-> string?]} [] (label))";
+    fs::write(&caller, source).unwrap();
+    fs::write(&provider, library).unwrap();
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&other, outside).unwrap();
+    let open = |path: &Path, text| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri(path),"languageId":"clojure","version":1,"text":text}
+        }})
+    };
+    let definition = |id, path: &Path, line, character| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/definition","params":{
+            "textDocument":{"uri":uri(path)},"position":{"line":line,"character":character}
+        }})
+    };
+    let edited = source.replace("c/label", "c/lable");
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0),"capabilities":{}}}),
+        open(&caller, source),
+        open(&other, outside),
+        definition(
+            2,
+            &caller,
+            1,
+            source.lines().nth(1).unwrap().find("c/label").unwrap(),
+        ),
+        definition(
+            3,
+            &other,
+            2,
+            outside.lines().nth(2).unwrap().rfind("(label)").unwrap() + 1,
+        ),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":uri(&caller),"version":2},"contentChanges":[{"text":edited}]
+        }}),
+        json!({"jsonrpc":"2.0","id":4,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    assert_eq!(messages.len(), 7, "{messages:?}");
+    assert_eq!(messages[2]["params"]["uri"], uri(&other));
+    let outside_codes: Vec<_> = messages[2]["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(outside_codes, ["PNX2322"]);
+    assert_eq!(messages[3]["result"]["uri"], uri(&provider));
+    assert_eq!(messages[4]["result"]["uri"], uri(&other));
+    assert_eq!(messages[5]["params"]["uri"], uri(&caller));
+    assert!(
+        messages[5]["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| {
+                d["code"] == "PNX2304" && d["message"].as_str().unwrap().contains("c/lable")
+            })
+    );
+}
+
+#[test]
 fn editor_applies_ordered_utf16_edits_atomically() {
     let fixture = Fixture::new("incremental source");
     let caller = fixture.0.join("src/demo.cljc");
