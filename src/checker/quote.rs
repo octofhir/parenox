@@ -1,5 +1,5 @@
 //! Clojure's quoted literals keep symbols and lists as data.
-use super::{Checker, Env, Value, collection_element, vector_type};
+use super::{Checker, Env, Value, collection_element, maps::MapLiteral, vector_type};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{MAX_TUPLE_ITEMS, Type};
 
@@ -30,7 +30,7 @@ impl Checker<'_> {
                     .collect(),
             ),
             Kind::Map(entries) => {
-                return self.map_literal(entries, |checker, form| checker.quoted_data(form));
+                return self.map_literal(entries, MapLiteral::Quoted);
             }
             Kind::Set(items) => Type::Set(collection_element(
                 items

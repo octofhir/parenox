@@ -413,7 +413,7 @@ impl Checker<'_> {
                 }
                 Value::new(Type::Set(collection_element(types)))
             }
-            Kind::Map(xs) => self.map_literal(xs, |checker, form| checker.infer(form, env)),
+            Kind::Map(xs) => self.map_literal(xs, maps::MapLiteral::Expression(env)),
             Kind::AutoNamespacedMap { .. } => self.unchecked_form(form.span, "Namespaced map needs source namespace context"),
             Kind::List(xs) if xs.is_empty() => Value::new(Type::empty_seq()),
             Kind::List(xs) => self.list(xs, form.span, env, tail),

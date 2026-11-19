@@ -112,6 +112,7 @@ fn exported_data_keeps_lists_symbols_and_exact_numbers_without_executing_them() 
         source: r#"(ns literal)
             (def values (quote (not-a-call {:key [::tag \λ "x\n🙂" 16r10 1N]} 'symbol)))
             (def pair [(quote sym) '(:ok nil) 1M])
+            (def entries '{local :payload 1 :first :version 2})
             (defn fourth {:t/sig '[:-> number?]} [] (nth [0 1 2 3] 3))"#,
     };
     let snapshot = export(library);
@@ -125,6 +126,7 @@ fn exported_data_keeps_lists_symbols_and_exact_numbers_without_executing_them() 
         snapshot.contains("{:value [sym (:ok nil) 1M]}"),
         "{snapshot}"
     );
+    assert!(snapshot.contains("local :payload") && snapshot.contains("1 :first"));
     let result = Session::default().validate_externs(&[library], &[externs(&snapshot)]);
     assert!(result.ok && result.complete, "{result:#?}");
 }
@@ -217,7 +219,6 @@ fn invalid_or_conflicting_literal_externs_are_not_published() {
         ("{lib/data {:value #vendor/read [1 2]}}", "PNX9001"),
         ("{lib/data {:value 'x}}", "PNX9001"),
         ("{lib/data {:value #{:x :x}}}", "PNX9000"),
-        ("{lib/data {:value {1 :x}}}", "PNX9001"),
         ("{lib/data {:value nil :macro :let-like}}", "PNX9001"),
     ] {
         let invalid = compare(value.source, bad);

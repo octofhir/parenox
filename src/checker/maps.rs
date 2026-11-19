@@ -23,6 +23,11 @@ pub(super) enum Lookup<'a> {
     Presence,
 }
 
+pub(super) enum MapLiteral<'a> {
+    Expression(&'a Env),
+    Quoted,
+}
+
 impl Checker<'_> {
     fn take_map_callback_step(&mut self) -> bool {
         if self.map_callback_checks >= MAX_MAP_CALLBACK_CHECKS {
@@ -32,15 +37,17 @@ impl Checker<'_> {
         true
     }
 
-    pub(super) fn map_literal(
-        &mut self,
-        xs: &[Form],
-        mut evaluate: impl FnMut(&mut Self, &Form) -> Value,
-    ) -> Value {
+    pub(super) fn map_literal(&mut self, xs: &[Form], context: MapLiteral<'_>) -> Value {
         let mut fields = BTreeMap::new();
+        let mut extra_keys = Vec::new();
+        let mut extra_values = Vec::new();
         let mut returns = true;
+        let mut keys_known = true;
         for pair in xs.as_chunks::<2>().0 {
-            let value = evaluate(self, &pair[1]);
+            let value = match context {
+                MapLiteral::Expression(env) => self.infer(&pair[1], env),
+                MapLiteral::Quoted => self.quoted_data(&pair[1]),
+            };
             returns &= value.known != Type::Never;
             if let Some(key) = self.literal_map_key(&pair[0]) {
                 if fields
@@ -55,19 +62,33 @@ impl Checker<'_> {
                 {
                     self.error("PNX2790", pair[0].span, format!("Duplicate map key {key}"));
                 }
+            } else if matches!(context, MapLiteral::Quoted) {
+                extra_keys.push(self.quoted_data(&pair[0]).known);
+                extra_values.push(value.known);
             } else {
-                self.unsupported(
+                self.unchecked_form(
                     pair[0].span,
-                    "Map literals currently require keyword or string keys",
+                    "Analysis for evaluated map keys other than literal keywords and strings is unavailable",
                 );
+                keys_known = false;
             }
         }
         if !returns {
             return Value::new(Type::Never);
         }
+        if !keys_known {
+            return Value::new(Type::Unknown);
+        }
         Value::new(Type::Map(MapType {
             fields,
-            extra: ExtraFields::Closed,
+            extra: if extra_keys.is_empty() {
+                ExtraFields::Closed
+            } else {
+                ExtraFields::Typed(Box::new([
+                    Type::union(extra_keys),
+                    Type::union(extra_values),
+                ]))
+            },
         }))
     }
 

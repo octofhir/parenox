@@ -365,9 +365,10 @@ types are available to importing namespaces, subject to `^:private`. Changes
 to exported values invalidate their consumers. Dynamic vars, unbound vars and
 computed initializers report an analysis gap.
 
-Quoted lists, vectors, sets and maps with literal keyword or string keys can
-also be used as data and exported as literal vars. Quoted symbols have type
-`Symbol`. Run `just quoted` for examples.
+Quoted lists, vectors, sets and maps can be used as data and exported as
+literal vars. Quoted symbols have type `Symbol`. Quoted maps retain precise
+keyword and string fields alongside a dictionary type for other keys, such
+as symbols and vectors in destructuring data. Run `just quoted` for examples.
 
 ## Lossless syntax
 

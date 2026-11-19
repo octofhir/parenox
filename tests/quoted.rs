@@ -49,3 +49,33 @@ fn quotes_do_not_create_a_cycle_or_mark_an_inferred_helper_as_called() {
     };
     assert_eq!(diagnostic.code, "PNX9002");
 }
+
+#[test]
+fn quoted_map_data_keeps_fixed_fields_alongside_other_keys() {
+    let source = r#"
+(ns demo)
+(def bindings '{local :payload [head & tail] :remaining :version 1})
+(defn version {:t/sig '[:-> number?]} [] (:version bindings))
+(defn priority {:t/sig '[:-> string?]} [] (get '{2 "high"} 2 "default"))
+"#;
+    let report = Session::default().check("quoted.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let bad = source.replace("(:version bindings)", "(inc (:missing bindings))");
+    let report = Session::default().check("quoted.clj", &bad);
+    let [diagnostic] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(diagnostic.actual.as_deref(), Some("Nil"));
+}
+
+#[test]
+fn an_unmodeled_evaluated_key_does_not_prove_absence() {
+    let source = "(ns demo)
+        (defn read-id {:t/sig '[keyword? :-> number?]} [key]
+          (inc (:id {key 42})))";
+    let report = Session::default().check("quoted.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(report.diagnostics[0].severity, "warning");
+}
