@@ -17,6 +17,10 @@
   (let [path (.toPath (.getCanonicalFile resolved))]
     [(if (.startsWith path root) (.relativize root path) path) line]))
 
+(defn- same-file-line? [^StackTraceElement frame file line]
+  (and (= line (.getLineNumber frame))
+       (= file (.getFileName frame))))
+
 (defn- test-location [root {:keys [type file line actual]} {:keys [ns] source :file}]
   (when (and ns source file (pos-int? line)
              (or (= file source) (= file (.getName (io/file source)))))
@@ -25,27 +29,40 @@
                    (.getStackTrace ^Throwable actual)
                    (.getStackTrace (Thread/currentThread)))]
       (when (some (fn [^StackTraceElement frame]
-                    (and (= line (.getLineNumber frame))
-                         (= file (.getFileName frame))
+                    (and (same-file-line? frame file line)
                          (str/starts-with? (.getClassName frame) prefix)))
                   frames)
         (when-let [resolved (local-file source)]
           (position root resolved line))))))
 
-(defn- error-location [root ^Throwable error]
+(defn- frame-namespace [known ^String class-name]
+  (let [[^String base generated] (str/split class-name #"[$/]" 2)
+        dot (.lastIndexOf base ".")]
+    (cond
+      (and generated (contains? known base)) base
+      (pos? dot) (known (subs base 0 dot)))))
+
+(defn- stack-location [root frames relevant?]
   (let [namespace-classes (into #{} (map (comp munge str ns-name)) (all-ns))]
     (some (fn [^StackTraceElement frame]
             (let [file (.getFileName frame)
-                  line (.getLineNumber frame)
-                  [prefix generated] (str/split (.getClassName frame) #"[$/]" 2)]
-              (when (and generated (contains? namespace-classes prefix)
-                         (pos-int? line) file
+                  line (.getLineNumber frame)]
+              (when (and (pos-int? line) file (relevant? frame)
                          (or (str/ends-with? file ".clj") (str/ends-with? file ".cljc")))
-                (let [package (subs prefix 0 (inc (.lastIndexOf ^String prefix ".")))
-                      resource (str (str/replace package "." "/") file)]
-                  (when-let [resolved (local-file resource)]
-                    (position root resolved line))))))
-          (.getStackTrace error))))
+                (when-let [^String namespace (frame-namespace namespace-classes (.getClassName frame))]
+                  (let [package (subs namespace 0 (inc (.lastIndexOf namespace ".")))
+                        resource (str (str/replace package "." "/") file)]
+                    (when-let [resolved (local-file resource)]
+                      (position root resolved line)))))))
+          frames)))
+
+(defn- error-location [root ^Throwable error]
+  (stack-location root (.getStackTrace error) (constantly true)))
+
+(defn- assertion-location [root {:keys [file line]}]
+  (when (and file (pos-int? line))
+    (stack-location root (.getStackTrace (Thread/currentThread))
+                    #(same-file-line? % file line))))
 
 (defn- reporter [report findings]
   (let [root (.toPath (.getCanonicalFile (io/file ".")))]
@@ -54,7 +71,8 @@
         (let [{:keys [ns name] :as metadata} (meta (first t/*testing-vars*))
               [file line] (or (when (and (= type :error) (instance? Throwable actual))
                                 (error-location root actual))
-                              (test-location root event metadata))
+                              (test-location root event metadata)
+                              (when (= type :fail) (assertion-location root event)))
               test (when ns (str (ns-name ns) "/" name))]
           (swap! findings conj [type test (some-> file str) line (when (string? message) message)])
           (when file

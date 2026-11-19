@@ -67,7 +67,7 @@ uri-editor-bench project binary="target/release/parenox": build
 
 # Exercise passing, failing and unloadable tests on Clojure/JVM (optional).
 jvm-test-smoke:
-    cargo test --locked --test runtime_cli project_jvm_pass_failure_and_load_error -- --ignored
+    cargo test --locked --test runtime_cli -- --ignored
 
 # Run the same portable test namespace on JVM Clojure and a supplied cljrs build.
 portable-runtime-smoke native: build

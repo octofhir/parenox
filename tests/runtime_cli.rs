@@ -105,6 +105,41 @@ fn discovery_reports_a_broken_namespace_before_starting_clojure() {
 
 #[test]
 #[ignore = "requires the Clojure CLI and JVM"]
+fn jvm_locations_follow_assertion_helpers_and_type_methods() {
+    let fixture = Fixture::new("shared assertions");
+    let helper = "src/demo/location_helper.cljc";
+    fs::write(
+        fixture.0.join(helper),
+        include_str!("fixtures/jvm-locations/helper.cljc"),
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("test/demo/location_test.cljc"),
+        include_str!("fixtures/jvm-locations/location_test.cljc"),
+    )
+    .unwrap();
+    let output = fixture.run(&["demo.location-test"], &["--format", "json"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["failures"], 1);
+    assert_eq!(result["errors"], 1);
+    let findings = result["findings"].as_array().unwrap();
+    for (kind, name, line) in [
+        ("fail", "assertion-in-helper", 5),
+        ("error", "error-in-type", 13),
+    ] {
+        let finding = findings
+            .iter()
+            .find(|finding| finding["kind"] == kind)
+            .unwrap();
+        assert_eq!(finding["test"], format!("demo.location-test/{name}"));
+        assert_eq!(finding["path"], helper);
+        assert_eq!(finding["line"], line);
+    }
+}
+
+#[test]
+#[ignore = "requires the Clojure CLI and JVM"]
 fn project_jvm_pass_failure_and_load_error() {
     let fixture = Fixture::new("project");
     let run_ci = |args: &[&str]| {
