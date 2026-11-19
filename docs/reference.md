@@ -327,6 +327,9 @@ The file selects source directories, including those of local dependencies.
 Relative classpath entries are resolved from the project root. This mode reads
 directories from disk and skips JARs and missing generated directories. Classpath
 selection replaces the `--deps`, `--alias` and positional source options.
+Explicit source roots can be symbolic links. Parenox indexes each physical
+root once and recognizes the same editor buffer through its linked or physical
+path. Symlink entries encountered while walking a root are skipped.
 
 Named specs resolve against the supplied project declarations, including keys
 whose namespace differs from the file that declares them. Input file order does

@@ -48,6 +48,32 @@ fn conventional_config_is_loaded_without_positional_paths() {
     assert_eq!(report["files"][0]["path"], "app.clj");
 }
 
+#[cfg(unix)]
+#[test]
+fn explicit_linked_roots_follow_the_project_classpath() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TestDir::new("linked roots");
+    fs::create_dir(dir.0.join("sources")).unwrap();
+    fs::write(dir.0.join("sources/library.cljc"), "(ns library)").unwrap();
+    symlink("sources", dir.0.join("linked")).unwrap();
+    symlink(".", dir.0.join("sources/loop")).unwrap();
+    fs::write(dir.0.join("deps.edn"), r#"{:paths ["linked" "sources"]}"#).unwrap();
+    let classpath = std::env::join_paths(["linked", "sources"]).unwrap();
+    fs::write(dir.0.join("classpath.txt"), classpath.to_str().unwrap()).unwrap();
+    for options in [&[][..], &["--classpath", "classpath.txt"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_parenox"))
+            .current_dir(&dir.0)
+            .args(["check", "--format", "json"])
+            .args(options)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["path"], "linked/library.cljc");
+    }
+}
+
 #[test]
 fn incomplete_analysis_is_opt_in_and_keeps_definite_errors() {
     let dir = TestDir::new("coverage");

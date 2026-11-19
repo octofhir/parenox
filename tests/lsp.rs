@@ -101,6 +101,61 @@ fn transcript(messages: &[Value]) -> Vec<Value> {
     std::iter::from_fn(|| read_message(&mut reader)).collect()
 }
 
+#[cfg(unix)]
+#[test]
+fn editor_merges_physical_buffers_with_linked_source_roots() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new("linked roots");
+    let manifest = fixture.0.join("deps.edn");
+    fs::write(&manifest, r#"{:paths ["linked"] :aliases {:test {}}}"#).unwrap();
+    symlink("src", fixture.0.join("linked")).unwrap();
+    let caller = fixture.0.join("src/caller.cljc");
+    let provider = fixture.0.join("src/provider.clj");
+    let app = "(ns caller (:require [provider :as p]))\n(defn label {:t/sig '[:-> string?]} [] (p/label))";
+    let library = "(ns provider)\n(defn label {:t/sig '[:-> string?]} [] \"ok\")";
+    fs::write(&caller, app).unwrap();
+    fs::write(&provider, library).unwrap();
+    let open = |path: &Path, text| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri(path),"languageId":"clojure","version":1,"text":text}
+        }})
+    };
+    let query = |id| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/definition","params":{
+            "textDocument":{"uri":uri(&caller)},"position":{"line":1,"character":app.lines().nth(1).unwrap().find("p/label").unwrap()}
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0),"capabilities":{}}}),
+        open(&caller, app),
+        open(&provider, library),
+        query(2),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":uri(&provider),"version":2},"contentChanges":[{"text":library.replace("string?", "number?").replace("\"ok\"", "42")}]
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didSave","params":{"textDocument":{"uri":uri(&manifest)}}}),
+        query(3),
+        json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":uri(&provider)}}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    for id in [2, 3] {
+        let target = messages.iter().find(|message| message["id"] == id).unwrap();
+        assert_eq!(target["result"]["uri"], uri(&provider));
+    }
+    let caller_diagnostics: Vec<_> = messages
+        .iter()
+        .filter(|message| message["params"]["uri"] == uri(&caller))
+        .map(|message| &message["params"]["diagnostics"])
+        .collect();
+    assert_eq!(caller_diagnostics.len(), 3, "{messages:?}");
+    assert_eq!(caller_diagnostics[0], &json!([]));
+    assert_eq!(caller_diagnostics[1][0]["code"], "PNX2322");
+    assert_eq!(caller_diagnostics[2], &json!([]));
+    assert_eq!(fs::read_to_string(&provider).unwrap(), library);
+}
+
 #[test]
 fn editor_uses_aliases_overlays_and_utf16_ranges() {
     let fixture = Fixture::new("source");

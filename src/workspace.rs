@@ -1,5 +1,5 @@
 //! Project snapshots loaded from disk for CLI, editor and agent consumers.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -74,10 +74,27 @@ pub(super) fn read_source_roots(paths: &[String]) -> Result<BTreeMap<String, Str
 
 pub(super) fn source_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
-    let mut pending: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-    while let Some(path) = pending.pop() {
+    let mut roots = BTreeSet::new();
+    let mut pending = Vec::new();
+    for path in paths.iter().map(PathBuf::from) {
         let metadata =
-            fs::symlink_metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+            fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        if !metadata.is_dir() && !is_clojure_source(&path) {
+            continue;
+        }
+        let resolved = path
+            .canonicalize()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        if roots.insert(resolved) {
+            pending.push((path, Some(metadata)));
+        }
+    }
+    while let Some((path, root_metadata)) = pending.pop() {
+        let metadata = match root_metadata {
+            Some(metadata) => metadata,
+            None => fs::symlink_metadata(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?,
+        };
         if metadata.is_symlink() {
             continue;
         }
@@ -90,7 +107,7 @@ pub(super) fn source_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
                 {
                     continue;
                 }
-                pending.push(child);
+                pending.push((child, None));
             }
         } else if is_clojure_source(&path) {
             files.push(path);

@@ -18,6 +18,7 @@ pub(super) struct Workspace {
     root: PathBuf,
     options: ProjectOptions,
     source_roots: Vec<PathBuf>,
+    source_aliases: Vec<(PathBuf, PathBuf)>,
     register_watches: bool,
     documents: BTreeMap<String, Document>,
     externs: Vec<FileSnapshot>,
@@ -105,6 +106,7 @@ impl Workspace {
             root,
             options: options.clone(),
             source_roots: Vec::new(),
+            source_aliases: Vec::new(),
             register_watches,
             documents: BTreeMap::new(),
             externs: Vec::new(),
@@ -138,10 +140,17 @@ impl Workspace {
 
     fn reload(&mut self) -> Result<(), String> {
         let settings = self.options.load_at(&self.root)?;
-        let source_roots = settings
+        let source_roots: Vec<_> = settings
             .paths
             .iter()
             .map(|path| normalize(Path::new(path)))
+            .collect();
+        let source_aliases: Vec<_> = source_roots
+            .iter()
+            .filter_map(|root| {
+                let physical = root.canonicalize().ok()?;
+                (physical != *root).then(|| (physical, root.clone()))
+            })
             .collect();
         let mut project = DiskProject::read(settings)?;
         project.externs.append(&mut project.dependency_externs);
@@ -161,9 +170,19 @@ impl Workspace {
             })
             .collect();
         for (path, mut document) in std::mem::take(&mut self.documents) {
-            if document.editor.is_some() {
-                document.indexed = documents.contains_key(&path);
-                documents.insert(path, document);
+            if let Some(editor) = &document.editor {
+                let editor_path = file_path(&editor.uri);
+                let indexed = editor_path
+                    .as_deref()
+                    .and_then(|file| indexed_document(&documents, &source_aliases, file));
+                document.indexed = indexed.is_some();
+                let key = indexed
+                    .or_else(|| editor_path.map(|path| path.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| path.clone());
+                if key != path {
+                    self.session.forget_file(&path);
+                }
+                documents.insert(key, document);
             } else if !documents.contains_key(&path) {
                 self.session.forget_file(&path);
             }
@@ -175,13 +194,14 @@ impl Workspace {
         }
         self.documents = documents;
         self.source_roots = source_roots;
+        self.source_aliases = source_aliases;
         self.externs = project.externs;
         Ok(())
     }
 
     pub fn open(&mut self, params: Open, output: &mut impl Write) -> io::Result<()> {
         let OpenDocument { uri, version, text } = params.text_document;
-        let Some(path) = document_path(&uri) else {
+        let Some(path) = self.document_key(&uri) else {
             return Ok(());
         };
         let indexed = self
@@ -205,7 +225,7 @@ impl Workspace {
 
     pub fn change(&mut self, params: Change, output: &mut impl Write) -> io::Result<()> {
         let VersionedUri { uri, version } = params.text_document;
-        let Some(path) = document_path(&uri) else {
+        let Some(path) = self.document_key(&uri) else {
             return Ok(());
         };
         let Some(document) = self.documents.get_mut(&path) else {
@@ -233,8 +253,8 @@ impl Workspace {
         };
         let new_source = is_clojure_source(&file)
             && self
-                .documents
-                .get(file.to_string_lossy().as_ref())
+                .document_key(&params.text_document.uri)
+                .and_then(|key| self.documents.get(&key))
                 .is_some_and(|doc| !doc.indexed && doc.editor.is_some());
         if new_source || self.is_project_input(&file) {
             self.refresh(output)?;
@@ -264,23 +284,25 @@ impl Workspace {
         if !is_clojure_source(path) {
             return false;
         }
-        if let Some(document) = self
-            .documents
-            .get(path.to_string_lossy().as_ref())
-            .filter(|doc| doc.indexed)
+        if let Some(document) = indexed_document(&self.documents, &self.source_aliases, path)
+            .and_then(|key| self.documents.get(&key))
         {
             // A change to an open document arrives through its editor overlay.
             return kind != 2 || document.editor.is_none();
         }
         // A newly created source can also create a previously absent manifest root.
         let workspace = (kind == 1).then_some(&self.root);
-        self.source_roots.iter().chain(workspace).any(|root| {
-            path.strip_prefix(root).is_ok_and(|tail| {
-                !tail
-                    .components()
-                    .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
+        self.source_roots
+            .iter()
+            .chain(self.source_aliases.iter().map(|(physical, _)| physical))
+            .chain(workspace)
+            .any(|root| {
+                path.strip_prefix(root).is_ok_and(|tail| {
+                    !tail
+                        .components()
+                        .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
+                })
             })
-        })
     }
 
     fn is_project_input(&self, file: &Path) -> bool {
@@ -307,7 +329,7 @@ impl Workspace {
     }
 
     pub fn close(&mut self, params: DocumentParams, output: &mut impl Write) -> io::Result<()> {
-        let Some(path) = document_path(&params.text_document.uri) else {
+        let Some(path) = self.document_key(&params.text_document.uri) else {
             return Ok(());
         };
         let Some(document) = self.documents.get_mut(&path) else {
@@ -358,13 +380,24 @@ impl Workspace {
     }
 
     fn query_offset(&self, params: TextQuery) -> Option<(String, usize)> {
-        let path = document_path(&params.text_document.uri)?;
+        let path = self.document_key(&params.text_document.uri)?;
         if !is_clojure_source(Path::new(&path)) {
             return None;
         }
         let document = self.documents.get(&path)?;
         let offset = Lines::new(&document.source).offset(params.position)?;
         Some((path, offset))
+    }
+
+    fn document_key(&self, uri: &str) -> Option<String> {
+        let path = document_path(uri)?;
+        if self.documents.contains_key(&path) || is_edn(Path::new(&path)) {
+            return Some(path);
+        }
+        Some(
+            indexed_document(&self.documents, &self.source_aliases, Path::new(&path))
+                .unwrap_or(path),
+        )
     }
 
     fn check_document(&mut self, path: &str, output: &mut impl Write) -> io::Result<()> {
@@ -403,6 +436,30 @@ impl Workspace {
         }
         Ok(())
     }
+}
+
+fn indexed_document(
+    documents: &BTreeMap<String, Document>,
+    aliases: &[(PathBuf, PathBuf)],
+    path: &Path,
+) -> Option<String> {
+    let indexed = |path: &Path| {
+        let key = path.to_str()?;
+        documents
+            .get(key)
+            .is_some_and(|document| document.indexed)
+            .then(|| key.to_owned())
+    };
+    let through_alias = |path: &Path| {
+        aliases.iter().find_map(|(physical, logical)| {
+            let tail = path.strip_prefix(physical).ok()?;
+            indexed(&logical.join(tail))
+        })
+    };
+    indexed(path).or_else(|| through_alias(path)).or_else(|| {
+        let canonical = path.canonicalize().ok()?;
+        indexed(&canonical).or_else(|| through_alias(&canonical))
+    })
 }
 
 impl Document {
