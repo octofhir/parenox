@@ -244,6 +244,19 @@ impl Model {
         }
     }
 
+    pub(super) fn read_factory(&mut self, symbol: &str, span: Span, arity: Option<Arity>) {
+        if let Some(name) = self.definition_name(symbol, span, "factory") {
+            self.remember_unchecked_function(
+                name,
+                symbol,
+                super::UncheckedFunction {
+                    arities: arity.map(|arity| Arc::<[Arity]>::from([arity])),
+                    private: false,
+                },
+            );
+        }
+    }
+
     fn remember_unchecked_function(
         &mut self,
         name: String,

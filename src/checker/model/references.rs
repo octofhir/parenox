@@ -65,7 +65,7 @@ impl Declarations {
             SourceDeclaration::Value(_) | SourceDeclaration::Protocol(_) => {
                 return ProjectCall::Unknown;
             }
-            SourceDeclaration::RecordFactory { arity, .. } => {
+            SourceDeclaration::TypeFactory { arity, .. } => {
                 (!arity.accepts(actual)).then(|| arity.to_string())
             }
             SourceDeclaration::Function(items) => {

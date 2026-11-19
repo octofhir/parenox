@@ -15,7 +15,7 @@ use crate::types::Arity;
 pub(super) enum SourceDeclaration<'a> {
     Function(&'a [Form]),
     Value(&'a [Form]),
-    RecordFactory { name: &'a Form, arity: Arity },
+    TypeFactory { name: &'a Form, arity: Arity },
     Protocol(ProtocolVar<'a>),
 }
 
@@ -30,6 +30,11 @@ impl ProtocolVar<'_> {
             !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
         })
     }
+}
+
+struct TypeDeclaration {
+    form: usize,
+    has_map_factory: bool,
 }
 
 struct ScopedFunction {
@@ -121,7 +126,7 @@ pub(crate) struct Declarations {
     macros: Vec<usize>,
     unmodeled_calls: Vec<usize>,
     pub(super) forward_vars: BTreeMap<String, DeclaredVar>,
-    records: Vec<usize>,
+    types: Vec<TypeDeclaration>,
     protocols: Vec<usize>,
     pub(super) opaque_var_surface: bool,
     pub(super) diagnostics: Vec<Diagnostic>,
@@ -163,7 +168,7 @@ impl Declarations {
         }
         let name = match declaration {
             SourceDeclaration::Function(items) | SourceDeclaration::Value(items) => &items[1],
-            SourceDeclaration::RecordFactory { name, .. } => name,
+            SourceDeclaration::TypeFactory { name, .. } => name,
             SourceDeclaration::Protocol(var) => var.name,
         };
         Some(name.without_metadata().span)
@@ -218,21 +223,19 @@ impl Declarations {
             });
         let positional = local.strip_prefix("->");
         let named_map = local.strip_prefix("map->");
-        let factories = self.records.iter().filter_map(move |&index| {
-            let Kind::List(items) = &forms[index].without_metadata().kind else {
-                return None;
-            };
-            let name = &items[1];
-            let symbol = name.symbol()?;
-            let arity = if positional == Some(symbol) {
-                Arity::Fixed(items[2].vector()?.len())
-            } else if named_map == Some(symbol) {
-                Arity::Fixed(1)
-            } else {
-                return None;
-            };
-            Some(SourceDeclaration::RecordFactory { name, arity })
-        });
+        let factories = self
+            .type_declarations(forms)
+            .filter_map(move |(kind, name, fields)| {
+                let symbol = name.symbol()?;
+                let arity = if positional == Some(symbol) {
+                    Arity::Fixed(fields)
+                } else if kind.has_map_factory && named_map == Some(symbol) {
+                    Arity::Fixed(1)
+                } else {
+                    return None;
+                };
+                Some(SourceDeclaration::TypeFactory { name, arity })
+            });
         let scoped = self
             .scoped_functions(forms)
             .filter(move |items| items[1].symbol() == Some(local))
@@ -242,6 +245,34 @@ impl Declarations {
             .filter(move |var| var.name.symbol() == Some(local))
             .map(SourceDeclaration::Protocol);
         named.chain(factories).chain(scoped).chain(protocols)
+    }
+
+    fn type_declarations<'a>(
+        &'a self,
+        forms: &'a [Form],
+    ) -> impl Iterator<Item = (&'a TypeDeclaration, &'a Form, usize)> {
+        self.types.iter().map(move |kind| {
+            let Kind::List(items) = &forms[kind.form].without_metadata().kind else {
+                unreachable!();
+            };
+            (kind, &items[1], items[2].vector().unwrap().len())
+        })
+    }
+
+    pub(super) fn type_factories<'a>(
+        &'a self,
+        forms: &'a [Form],
+    ) -> impl Iterator<Item = (String, Span, Arity)> {
+        self.type_declarations(forms)
+            .flat_map(|(kind, name, fields)| {
+                let symbol = name.symbol().unwrap();
+                let span = name.without_metadata().span;
+                let positional = (format!("->{symbol}"), span, Arity::Fixed(fields));
+                let mapped = kind
+                    .has_map_factory
+                    .then(|| (format!("map->{symbol}"), span, Arity::Fixed(1)));
+                std::iter::once(positional).chain(mapped)
+            })
     }
 
     pub(super) fn protocol_vars<'a>(
@@ -291,7 +322,7 @@ impl Declarations {
             SourceDeclaration::Function(items) | SourceDeclaration::Value(items) => {
                 self.private_var(items)
             }
-            SourceDeclaration::RecordFactory { .. } => false,
+            SourceDeclaration::TypeFactory { .. } => false,
             SourceDeclaration::Protocol(var) => var.private(),
         }
     }
@@ -463,7 +494,12 @@ impl Declarations {
                 "clojure.spec.alpha/fdef" => model.fdefs.push(index),
                 qualified if known_unsupported_declaration(qualified, xs) => {
                     match qualified {
-                        "clojure.core/defrecord" => model.records.push(index),
+                        "clojure.core/defrecord" | "clojure.core/deftype" => {
+                            model.types.push(TypeDeclaration {
+                                form: index,
+                                has_map_factory: qualified == "clojure.core/defrecord",
+                            });
+                        }
                         "clojure.core/defprotocol" => {
                             model.protocols.push(index);
                             model.opaque_var_surface = true;

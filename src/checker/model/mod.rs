@@ -233,6 +233,9 @@ impl Model {
         for items in declarations.scoped_functions(forms) {
             model.read_unchecked_function(&items[1], "defn", declarations.private_var(items));
         }
+        for (symbol, span, arity) in declarations.type_factories(forms) {
+            model.read_factory(&symbol, span, source_arities_known.then_some(arity));
+        }
         for var in declarations.protocol_vars(forms) {
             if var.method {
                 model.read_unchecked_function(var.name, "defprotocol", var.private());

@@ -4,6 +4,46 @@ use std::collections::{BTreeMap, BTreeSet};
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
 #[test]
+fn deftype_factories_navigate_and_check_only_positional_arity() {
+    let provider = Source {
+        path: "cell.clj",
+        source: "(ns cell)\n(deftype ^:private Cell [name ^:unsynchronized-mutable value])",
+    };
+    let app = Source {
+        path: "app.cljc",
+        source: "(ns app (:require [cell :as c]))
+          (defn cells [] [(c/->Cell \"start\" 0) (c/->Cell \"short\") (c/map->Cell {})])
+          (defn keep-name {:t/sig '[string? :-> string?]} [name]
+            (let [_ (c/->Cell name 0)] name))",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app, provider], None);
+    let findings: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .map(|d| d.code.as_str())
+        .collect();
+    assert_eq!(findings, ["PNX2554", "PNX2304"], "{report:#?}");
+    assert!(
+        report.files[0]
+            .diagnostics
+            .iter()
+            .any(|d| { d.message == "No checked signature for source function c/->Cell" })
+    );
+    let factory = session
+        .definition(app.path, app.source.find("c/->Cell").unwrap())
+        .unwrap();
+    assert_eq!(factory.path, provider.path);
+    assert_eq!(factory.span.start.line, 2);
+    assert!(
+        session
+            .definition(app.path, app.source.find("c/map->Cell").unwrap())
+            .is_none()
+    );
+}
+
+#[test]
 fn protocol_methods_navigate_to_their_declaration_with_unchecked_dispatch() {
     let provider = Source {
         path: "notice.cljc",
