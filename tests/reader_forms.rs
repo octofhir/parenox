@@ -101,6 +101,52 @@ fn jvm_declaration_gaps_allow_checking_a_typed_function_in_the_same_namespace() 
 }
 
 #[test]
+fn top_level_evaluation_leaves_coverage_open_for_other_declarations() {
+    let source = r#"
+        (ns demo (:require [clojure.test :refer [testing]]))
+        (require '[clojure.string :as str])
+        (let [base "hello"] (defn suffix [s] (str base s)))
+        (testing "initialization" (suffix "!"))
+        (set! *assert* true)
+        (defn check {:t/sig '[:-> string?]} [] 1)
+    "#;
+    let report = Session::default().check("eval.cljc", source);
+    assert!(!report.complete);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic.code.as_str(),
+                diagnostic.severity,
+                diagnostic.span.start.line,
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX9001", "warning", 3),
+            ("PNX9001", "warning", 4),
+            ("PNX9001", "warning", 5),
+            ("PNX9001", "warning", 6),
+            ("PNX2322", "error", 7),
+        ],
+        "{report:#?}"
+    );
+
+    let invalid = Session::default().check("eval.cljc", "(ns demo) (let [missing]) (require)");
+    assert_eq!(
+        invalid
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == "error")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn metadata_shorthands_and_stacked_precedence_share_the_lossless_reader() {
     for (source, key) in [
         ("^:private item", ":private"),

@@ -478,11 +478,17 @@ impl Declarations {
 }
 
 fn known_unsupported_declaration(qualified: &str, items: &[Form]) -> bool {
-    if qualified == "clojure.core/comment" {
-        return true;
-    }
-    if qualified == "clojure.core/extend" {
-        return items.len() >= 2 && items.len().is_multiple_of(2);
+    match qualified {
+        "clojure.core/comment" => return true,
+        "clojure.core/let" => {
+            return items
+                .get(1)
+                .and_then(Form::vector)
+                .is_some_and(|bindings| bindings.len().is_multiple_of(2));
+        }
+        "clojure.core/require" | "clojure.test/testing" => return items.len() >= 2,
+        "clojure.core/extend" => return items.len() >= 2 && items.len().is_multiple_of(2),
+        _ => {}
     }
     if matches!(
         qualified,
@@ -538,7 +544,7 @@ fn compiler_flag_assignment(items: &[Form], names: &Names) -> bool {
     };
     let boolean = matches!(value.without_metadata().kind, Kind::Bool(_));
     match names.resolve_parts(symbol) {
-        ("clojure.core", "*warn-on-reflection*") => boolean,
+        ("clojure.core", "*assert*" | "*warn-on-reflection*") => boolean,
         ("clojure.core", "*unchecked-math*") => {
             boolean || value.keyword() == Some(":warn-on-boxed")
         }

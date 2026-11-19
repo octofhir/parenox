@@ -770,6 +770,10 @@ targets a defined source macro, Parenox reports the unchecked expansion as
 a coverage warning. Any declarations and contracts produced by the expansion
 remain outside the source model.
 
+Top-level `let`, `require`, and `clojure.test/testing` report incomplete
+coverage. Vars and imports created by those expressions depend on runtime
+evaluation.
+
 Supported string operations can also report input mismatches in a function
 without a contract. This analysis follows supported local bindings, map
 lookups, and conditions. For example, the second value from destructuring
