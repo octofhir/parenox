@@ -80,6 +80,9 @@
       (bounded-text (pr-str value)))
     (catch Throwable _ nil)))
 
+(defn- exception-details [^Throwable error]
+  [(.getName (class error)) (bounded-text (.getMessage error))])
+
 (defn- reporter [report findings details?]
   (let [root (.toPath (.getCanonicalFile (io/file ".")))]
     (fn [{:keys [type expected actual message] :as event}]
@@ -93,7 +96,7 @@
               expected (when (and details? (contains? event :expected)) (display-value expected))
               actual (when (and details? (nil? error) (contains? event :actual)) (display-value actual))
               exception (when (and details? error)
-                          [(.getName (class error)) (bounded-text (.getMessage ^Throwable error))])]
+                          (exception-details error))]
           (swap! findings conj [type test (some-> file str) line (when (string? message) message)
                                 expected actual exception])
           (when file
@@ -134,13 +137,15 @@
 (defn- incomplete [phase ^Throwable error]
   (let [root (.toPath (.getCanonicalFile (io/file ".")))
         causes (take 64 (take-while some? (iterate #(.getCause ^Throwable %) error)))
+        ^Throwable cause (last causes)
         [file line column] (or (some #(compiler-location root %) causes)
-                               (when (= phase :execution) (error-location root error)))
-        message (or (.getMessage ^Throwable (last causes))
+                               (when (= phase :execution)
+                                 (some #(error-location root %) (reverse causes))))
+        message (or (.getMessage cause)
                     (.getMessage error)
                     (.getName (class error)))]
     (.printStackTrace error)
-    [:run-error phase message (some-> file str) line column]))
+    [:run-error phase message (some-> file str) line column (exception-details cause)]))
 
 (let [[result mode format & names] *command-line-args*
       names (distinct (map symbol names))

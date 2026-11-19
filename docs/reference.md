@@ -102,7 +102,9 @@ test and assertion counts, failures, errors, and source locations where
 available. Assertion findings include bounded `expected` and `actual` display
 strings when available. Exceptions carry their JVM class and message.
 An incomplete run includes a `run_error` with its phase,
-message, and any available source path, line and column. Runtime logs go to
+message, and any available source path, line and column. When the JVM runner
+catches an exception, `run_error.exception` carries the root class and message.
+This includes incomplete runs caused by fixture setup or teardown. Runtime logs go to
 stderr. The exit status has the same meaning in both formats.
 An error before the runner starts is reported in the `launch` phase. A JVM
 that exits before the running suite writes results reports `execution`.
@@ -365,7 +367,8 @@ assertions with equality, simple predicates, `thrown?`, or `thrown-with-msg?`
 can report project var and arity errors. Calls inside `letfn` see all local
 function bindings. For `are`, checks cover fixed calls in the assertion
 template. Template substitution, custom assertion expansion, and test types
-remain unchecked.
+remain unchecked. Standard `use-fixtures` registrations are recognized and
+report unchecked evaluation.
 
 `:import` resolves short class names in `catch` for modeled JVM exception
 classes, including the `IOException` hierarchy. It accepts qualified names

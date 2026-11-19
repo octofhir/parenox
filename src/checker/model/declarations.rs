@@ -666,6 +666,12 @@ fn known_unsupported_declaration(qualified: &str, items: &[Form]) -> bool {
                 .is_some_and(|bindings| bindings.len().is_multiple_of(2));
         }
         "clojure.core/require" | "clojure.test/testing" => return items.len() >= 2,
+        "clojure.test/use-fixtures" => {
+            return matches!(
+                items.get(1).and_then(Form::keyword),
+                Some(":once" | ":each")
+            );
+        }
         "clojure.core/extend" => return items.len() >= 2 && items.len().is_multiple_of(2),
         _ => {}
     }

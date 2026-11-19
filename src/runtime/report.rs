@@ -38,6 +38,8 @@ pub(super) struct RunError {
     line: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exception: Option<Box<TestException>>,
 }
 
 #[derive(Serialize)]
@@ -86,7 +88,7 @@ impl TestReport {
             return None;
         };
         let fields = summary.vector()?;
-        if let [marker, phase, message, path, line, column] = fields
+        if let [marker, phase, message, path, line, column, exception] = fields
             && marker.keyword() == Some(":run-error")
         {
             let phase = match phase.keyword()? {
@@ -101,6 +103,7 @@ impl TestReport {
                 path: optional_text(path)?,
                 line: optional_count(source, line)?,
                 column: optional_count(source, column)?,
+                exception: read_exception(exception)?.map(Box::new),
             }));
         }
         let [tests, assertions, failures, errors, findings] = fields else {
@@ -134,6 +137,7 @@ impl RunError {
             path: None,
             line: None,
             column: None,
+            exception: None,
         }
     }
 
@@ -166,17 +170,6 @@ impl TestFinding {
         let [kind, test, path, line, message, expected, actual, exception] = form.vector()? else {
             return None;
         };
-        let exception = if matches!(exception.kind, Kind::Nil) {
-            None
-        } else {
-            let [class, message] = exception.vector()? else {
-                return None;
-            };
-            Some(TestException {
-                class: optional_text(class)??,
-                message: optional_text(message)?,
-            })
-        };
         Some(Self {
             kind: match kind.keyword()? {
                 ":fail" => "fail",
@@ -189,9 +182,22 @@ impl TestFinding {
             message: optional_text(message)?,
             expected: optional_text(expected)?,
             actual: optional_text(actual)?,
-            exception,
+            exception: read_exception(exception)?,
         })
     }
+}
+
+fn read_exception(form: &Form) -> Option<Option<TestException>> {
+    if matches!(form.kind, Kind::Nil) {
+        return Some(None);
+    }
+    let [class, message] = form.vector()? else {
+        return None;
+    };
+    Some(Some(TestException {
+        class: optional_text(class)??,
+        message: optional_text(message)?,
+    }))
 }
 
 fn optional_count(source: &str, form: &Form) -> Option<Option<usize>> {

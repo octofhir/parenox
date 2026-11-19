@@ -315,11 +315,23 @@ fn project_jvm_pass_failure_and_load_error() {
             .contains("missing-function")
     );
 
-    fs::write(
-        fixture.0.join("test/demo/focused_test.clj"),
-        include_str!("fixtures/focused_test.clj"),
-    )
-    .unwrap();
+    let focused_path = "test/demo/focused_test.clj";
+    let focused = include_str!("fixtures/focused_test.clj");
+    fs::write(fixture.0.join(focused_path), focused).unwrap();
+    let checked = Command::new(env!("CARGO_BIN_EXE_parenox"))
+        .current_dir(&fixture.0)
+        .args([
+            "check",
+            "--allow-incomplete",
+            "--format",
+            "json",
+            focused_path,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(checked.status.code(), Some(0), "{checked:?}");
+    let report: Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(report["complete"], false);
     let first = "demo.focused-test/passes";
     let second = "demo.focused-test/private-pass";
     let output = fixture.run(
@@ -352,4 +364,22 @@ fn project_jvm_pass_failure_and_load_error() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("Expected a clojure.test var"));
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["run_error"]["phase"], "selection");
+
+    let broken_fixture = focused.replace(
+        "(println \"once fixture\")",
+        "(throw (ex-info \"setup wrapper\" {} (IllegalStateException. \"setup failed\")))",
+    );
+    fs::write(fixture.0.join(focused_path), broken_fixture).unwrap();
+    let output = fixture.run(&["--var", first], &["--format", "json"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let error = &result["run_error"];
+    assert_eq!(error["phase"], "execution");
+    assert_eq!(error["path"], focused_path);
+    assert_eq!(error["line"], 7);
+    assert_eq!(
+        error["exception"]["class"],
+        "java.lang.IllegalStateException"
+    );
+    assert_eq!(error["exception"]["message"], "setup failed");
 }
