@@ -64,17 +64,36 @@
     (stack-location root (.getStackTrace (Thread/currentThread))
                     #(same-file-line? % file line))))
 
-(defn- reporter [report findings]
+(defn- bounded-text [^String text]
+  (when text
+    (let [limit 4096]
+      (if (> (.length text) limit)
+        (let [end (if (Character/isHighSurrogate (.charAt text (dec limit))) (dec limit) limit)]
+          (str (.substring text 0 end) "…"))
+        text))))
+
+(defn- display-value [value]
+  (try
+    (binding [*print-length* 20 *print-level* 6 *print-meta* false *print-dup* false *print-readably* true]
+      (bounded-text (pr-str value)))
+    (catch Throwable _ nil)))
+
+(defn- reporter [report findings details?]
   (let [root (.toPath (.getCanonicalFile (io/file ".")))]
-    (fn [{:keys [type actual message] :as event}]
+    (fn [{:keys [type expected actual message] :as event}]
       (when (#{:fail :error} type)
         (let [{:keys [ns name] :as metadata} (meta (first t/*testing-vars*))
-              [file line] (or (when (and (= type :error) (instance? Throwable actual))
-                                (error-location root actual))
+              error (when (and (= type :error) (instance? Throwable actual)) actual)
+              [file line] (or (when error (error-location root error))
                               (test-location root event metadata)
                               (when (= type :fail) (assertion-location root event)))
-              test (when ns (str (ns-name ns) "/" name))]
-          (swap! findings conj [type test (some-> file str) line (when (string? message) message)])
+              test (when ns (str (ns-name ns) "/" name))
+              expected (when (and details? (contains? event :expected)) (display-value expected))
+              actual (when (and details? (nil? error) (contains? event :actual)) (display-value actual))
+              exception (when (and details? error)
+                          [(.getName (class error)) (bounded-text (.getMessage ^Throwable error))])]
+          (swap! findings conj [type test (some-> file str) line (when (string? message) message)
+                                expected actual exception])
           (when file
             (t/with-test-out
               (println (str file ":" line ": " (clojure.core/name type)
@@ -121,7 +140,7 @@
     (.printStackTrace error)
     [:run-error phase message (some-> file str) line column]))
 
-(let [[result mode & names] *command-line-args*
+(let [[result mode format & names] *command-line-args*
       names (distinct (map symbol names))
       vars? (= mode "vars")
       namespaces (if vars? (distinct (map (comp symbol namespace) names)) names)
@@ -133,7 +152,7 @@
                       findings (atom [])]
                   (vreset! phase :execution)
                   (let [{:keys [test pass fail error]}
-                        (binding [t/report (reporter t/report findings)]
+                        (binding [t/report (reporter t/report findings (= format "json"))]
                           (if vars?
                             (run-vars namespaces vars)
                             (apply t/run-tests namespaces)))]

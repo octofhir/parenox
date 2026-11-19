@@ -137,6 +137,22 @@ fn jvm_locations_follow_assertion_helpers_and_type_methods() {
         assert_eq!(finding["test"], format!("demo.location-test/{name}"));
         assert_eq!(finding["path"], helper);
         assert_eq!(finding["line"], line);
+        if kind == "error" {
+            assert_eq!(
+                finding["exception"]["class"],
+                "java.lang.StringIndexOutOfBoundsException"
+            );
+            assert!(
+                finding["exception"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("10")
+            );
+        } else {
+            assert_eq!(finding["expected"], "(= :ready value)");
+            let actual = finding["actual"].as_str().unwrap();
+            assert!(actual.ends_with('…') && actual.chars().count() == 4097);
+        }
     }
 }
 
@@ -231,7 +247,8 @@ fn project_jvm_pass_failure_and_load_error() {
         result,
         json!({
             "version":1,"ok":false,"tests":2,"assertions":3,"failures":1,"errors":0,
-            "findings":[{"kind":"fail","test":"demo.routing-test/route-status","path":TEST_PATH,"line":7}]
+            "findings":[{"kind":"fail","test":"demo.routing-test/route-status","path":TEST_PATH,"line":7,
+                "expected":"(= :missing (routing/status {:route nil}))", "actual":"(not (= :missing :found))"}]
         })
     );
 

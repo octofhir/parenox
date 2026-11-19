@@ -3,7 +3,7 @@
             [demo.location-helper :as helper]))
 
 (deftest assertion-in-helper
-  (helper/assert-value :pending))
+  (helper/assert-value (apply str (repeat 5000 "x"))))
 
 (deftest error-in-type
   (is (= :ready (.readValue (helper/->BrokenReader)))))

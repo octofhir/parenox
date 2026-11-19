@@ -99,7 +99,9 @@ left background worker threads running.
 
 With `--format json`, stdout contains one report. Completed runs include
 test and assertion counts, failures, errors, and source locations where
-available. An incomplete run includes a `run_error` with its phase,
+available. Assertion findings include bounded `expected` and `actual` display
+strings when available. Exceptions carry their JVM class and message.
+An incomplete run includes a `run_error` with its phase,
 message, and any available source path, line and column. Runtime logs go to
 stderr. The exit status has the same meaning in both formats.
 

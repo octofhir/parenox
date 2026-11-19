@@ -51,6 +51,19 @@ struct TestFinding {
     line: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exception: Option<TestException>,
+}
+
+#[derive(Serialize)]
+struct TestException {
+    class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 impl TestReport {
@@ -150,8 +163,19 @@ impl fmt::Display for RunError {
 
 impl TestFinding {
     fn read(source: &str, form: &Form) -> Option<Self> {
-        let [kind, test, path, line, message] = form.vector()? else {
+        let [kind, test, path, line, message, expected, actual, exception] = form.vector()? else {
             return None;
+        };
+        let exception = if matches!(exception.kind, Kind::Nil) {
+            None
+        } else {
+            let [class, message] = exception.vector()? else {
+                return None;
+            };
+            Some(TestException {
+                class: optional_text(class)??,
+                message: optional_text(message)?,
+            })
         };
         Some(Self {
             kind: match kind.keyword()? {
@@ -163,6 +187,9 @@ impl TestFinding {
             path: optional_text(path)?,
             line: optional_count(source, line)?,
             message: optional_text(message)?,
+            expected: optional_text(expected)?,
+            actual: optional_text(actual)?,
+            exception,
         })
     }
 }

@@ -103,6 +103,11 @@ fn execute_tests(options: TestOptions) -> Result<TestReport, RunError> {
         .arg(script)
         .arg(&result)
         .arg(mode)
+        .arg(if options.format == TestFormat::Json {
+            "json"
+        } else {
+            "text"
+        })
         .args(selectors);
     if options.format == TestFormat::Json {
         command.stdout(Stdio::piped());
