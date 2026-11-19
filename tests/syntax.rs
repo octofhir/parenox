@@ -335,6 +335,24 @@ fn explicit_namespace_maps_qualify_keys_in_both_readers_and_keep_spelling() {
 }
 
 #[test]
+fn auto_namespaced_maps_keep_the_raw_prefix_until_source_context_exists() {
+    let source = "#::payload {:value 1} #:: {:value 2}";
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_lossless(source, &parsed);
+    assert!(
+        matches!(&parsed.forms[0].kind, Kind::AutoNamespacedMap { alias: Some(alias), entries }
+        if alias == "payload" && entries[0].keyword() == Some(":value"))
+    );
+    assert!(matches!(
+        &parsed.forms[1].kind,
+        Kind::AutoNamespacedMap { alias: None, .. }
+    ));
+    assert!(reader::validate_edn(source).is_err());
+    assert!(reader::read("#:: payload {:value 1}").is_err());
+}
+
+#[test]
 fn malformed_and_unsupported_reader_syntax_is_lossless_and_terminates() {
     for source in [
         "#_",

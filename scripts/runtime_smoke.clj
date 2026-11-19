@@ -1213,3 +1213,8 @@
              (read "#:stock {:sku \"id\" :_/category :input :vendor/price 1 code 7 _/raw 9}")))
   (assert (try (read "#:stock{:sku 1 :stock/sku 2}") false (catch RuntimeException _ true))))
 (println "Clojure/JVM and EDN namespaced maps: 4 assertions passed")
+
+(load-file "examples/namespaced_keys.cljc")
+(assert (= "A-1" (demo.namespaced-keys/sku)))
+(assert (= :public (demo.namespaced-keys/access-level)))
+(println "Clojure/JVM auto-resolved namespaced maps: 2 assertions passed")

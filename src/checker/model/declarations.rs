@@ -1,4 +1,6 @@
 //! Source declarations and the namespace context used to read them.
+mod reader_names;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Globals;
@@ -6,7 +8,7 @@ use super::contracts::function_parts;
 use super::require::ExplicitReferral;
 use crate::Diagnostic;
 use crate::checker::function_forms::function_clauses;
-use crate::reader::{Form, Kind, ReadError, Span};
+use crate::reader::{Form, Kind, Span};
 use crate::types::Arity;
 
 pub(super) enum SourceDeclaration<'a> {
@@ -333,24 +335,6 @@ impl Declarations {
             }
         }
         model
-    }
-
-    pub fn validate_keyword_aliases(&self, source: &str, spans: &[Span]) -> Result<(), ReadError> {
-        for &span in spans {
-            let token = &source[span.start.offset..span.end.offset];
-            if let Some((alias, _)) = token[2..].split_once('/')
-                && (self.namespace_end.is_none_or(|end| span.start.offset < end)
-                    || !self.names.aliases.contains_key(alias))
-            {
-                return Err(ReadError {
-                    span,
-                    message: format!(
-                        "No namespace alias {alias} for auto-resolved keyword {token}"
-                    ),
-                });
-            }
-        }
-        Ok(())
     }
 
     fn read_ns(&mut self, xs: &[Form], span: Span, globals: Option<&Globals>) {

@@ -174,17 +174,19 @@ impl FileCache {
         let parsed = match read_error {
             Some(error) => Err(error),
             None if kind == FileKind::Source => {
-                let declarations = Declarations::read(&read.forms);
-                declarations
-                    .validate_keyword_aliases(source, &read.auto_keywords)
-                    .map(|()| Some(declarations))
+                Declarations::read_source(source, &mut read).map(Some)
             }
-            None => read.auto_keywords.first().map_or(Ok(None), |&span| {
-                Err(reader::ReadError {
-                    span,
+            None => match read.namespace_tokens.first() {
+                Some(reader::NamespaceToken::Keyword(span)) => Err(reader::ReadError {
+                    span: *span,
                     message: "Auto-resolved keywords are invalid in EDN externs".into(),
-                })
-            }),
+                }),
+                Some(reader::NamespaceToken::Map { marker, .. }) => Err(reader::ReadError {
+                    span: *marker,
+                    message: "Auto-resolved maps are invalid in EDN externs".into(),
+                }),
+                None => Ok(None),
+            },
         };
         match parsed {
             Ok(declarations) => {

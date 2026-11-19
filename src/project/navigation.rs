@@ -112,7 +112,10 @@ fn symbol_at(forms: &[Form], offset: usize) -> Option<&str> {
         {
             symbol_at(items, offset)
         }
-        Kind::Vector(items) | Kind::Map(items) | Kind::Set(items) => symbol_at(items, offset),
+        Kind::Vector(items)
+        | Kind::Map(items)
+        | Kind::Set(items)
+        | Kind::AutoNamespacedMap { entries: items, .. } => symbol_at(items, offset),
         Kind::AnonymousFunction(function) => symbol_at(&function.body, offset),
         _ => None,
     }

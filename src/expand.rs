@@ -80,7 +80,11 @@ pub fn temporary(forms: &[Form], is_bound: impl Fn(&str) -> bool) -> String {
                     names.insert(local);
                 }
             }
-            Kind::List(forms) | Kind::Vector(forms) | Kind::Map(forms) | Kind::Set(forms) => {
+            Kind::List(forms)
+            | Kind::Vector(forms)
+            | Kind::Map(forms)
+            | Kind::Set(forms)
+            | Kind::AutoNamespacedMap { entries: forms, .. } => {
                 for form in forms {
                     symbols(form, names);
                 }

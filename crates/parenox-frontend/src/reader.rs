@@ -4,6 +4,8 @@ mod numbers;
 mod uniqueness;
 
 pub use edn::{read_edn, validate_edn};
+#[doc(hidden)]
+pub use namespace_map::qualify_namespaced_entries;
 
 use crate::syntax::{Builder, SyntaxKind, SyntaxNode};
 
@@ -49,6 +51,10 @@ pub enum Kind {
     AnonymousFunction(AnonymousFunction),
     Vector(Vec<Form>),
     Map(Vec<Form>),
+    AutoNamespacedMap {
+        alias: Option<String>,
+        entries: Vec<Form>,
+    },
     Set(Vec<Form>),
     Quote(Box<Form>),
     SyntaxQuote(Box<Form>),
@@ -185,8 +191,14 @@ pub fn read_with(source: &str, conditionals: Conditionals<'_>) -> Result<Vec<For
 #[doc(hidden)]
 pub struct CheckRead {
     pub forms: Vec<Form>,
-    pub auto_keywords: Vec<Span>,
+    pub namespace_tokens: Vec<NamespaceToken>,
     pub comments: Vec<LineComment>,
+}
+
+#[doc(hidden)]
+pub enum NamespaceToken {
+    Keyword(Span),
+    Map { marker: Span, alias: Option<Span> },
 }
 
 #[doc(hidden)]
@@ -207,7 +219,7 @@ pub fn read_for_check(
     comment_marker: Option<&'static str>,
 ) -> (CheckRead, Option<ReadError>) {
     let mut reader = Reader::new(source, false, conditionals);
-    reader.auto_keywords = Some(Vec::new());
+    reader.namespace_tokens = Some(Vec::new());
     reader.comment_capture = comment_marker.map(|marker| CommentCapture {
         marker,
         comments: Vec::new(),
@@ -216,7 +228,7 @@ pub fn read_for_check(
     (
         CheckRead {
             forms,
-            auto_keywords: reader.auto_keywords.unwrap(),
+            namespace_tokens: reader.namespace_tokens.unwrap(),
             comments: reader
                 .comment_capture
                 .map_or_else(Vec::new, |capture| capture.comments),
@@ -280,7 +292,7 @@ struct Reader<'a> {
     pos: Position,
     depth: usize,
     arguments: Option<AnonymousFunction>,
-    auto_keywords: Option<Vec<Span>>,
+    namespace_tokens: Option<Vec<NamespaceToken>>,
     comment_capture: Option<CommentCapture>,
     tree: Option<Builder<'a>>,
     conditionals: Conditionals<'a>,
@@ -304,7 +316,7 @@ impl<'a> Reader<'a> {
             },
             depth: 0,
             arguments: None,
-            auto_keywords: None,
+            namespace_tokens: None,
             comment_capture: None,
             tree: capture.then(|| Builder::new(source)),
             conditionals,
@@ -542,6 +554,7 @@ impl<'a> Reader<'a> {
                                     SyntaxKind::NamespacedMap
                                 }
                                 Kind::Map(_) => SyntaxKind::Map,
+                                Kind::AutoNamespacedMap { .. } => SyntaxKind::NamespacedMap,
                                 Kind::Set(_) => SyntaxKind::Set,
                                 Kind::Quote(_) => SyntaxKind::Quote,
                                 Kind::SyntaxQuote(_) => SyntaxKind::SyntaxQuote,
@@ -721,12 +734,12 @@ impl<'a> Reader<'a> {
                     return Err(self.error(start, "Auto-resolved keywords are unavailable in EDN"));
                 }
                 if s.starts_with("::")
-                    && let Some(spans) = &mut self.auto_keywords
+                    && let Some(tokens) = &mut self.namespace_tokens
                 {
-                    spans.push(Span {
+                    tokens.push(NamespaceToken::Keyword(Span {
                         start,
                         end: self.pos,
-                    });
+                    }));
                 }
                 Kind::Keyword(s.to_string())
             }
@@ -877,6 +890,7 @@ impl<'a> Reader<'a> {
                 | Kind::List(_)
                 | Kind::Vector(_)
                 | Kind::Map(_)
+                | Kind::AutoNamespacedMap { .. }
                 | Kind::Set(_)
                 | Kind::Quote(_)
                 | Kind::SyntaxQuote(_)

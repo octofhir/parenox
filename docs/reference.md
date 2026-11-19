@@ -472,6 +472,9 @@ and the checker gives such values the general string type.
 Explicit namespaced maps such as `#:stock{:sku "id" :_/source "api"}`
 qualify their unqualified keyword and symbol keys and remove the `_`
 namespace. The same reader handles the namespaced maps in project EDN.
+In Clojure source, `#::{...}` uses the current namespace and
+`#::alias{...}` uses its declared alias. Alias names are checked in
+discarded forms and inactive reader branches. [Namespaced map example](../examples/namespaced_keys.cljc)
 
 Regex literals and `re-pattern` produce a JVM `java.util.regex.Pattern`,
 which can appear in a contract. `clojure.string/split` returns a vector
