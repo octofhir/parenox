@@ -6,6 +6,55 @@ fn check(body: &str) -> Report {
 }
 
 #[test]
+fn checks_lsp_change_maps_with_tuple_entry_specs() {
+    let source = r#"
+(s/def ::edits (s/coll-of string? :kind vector?))
+(s/def ::changes (s/coll-of (s/tuple string? ::edits) :kind map?))
+(defn accept {:t/sig '[::changes :-> number?]} [changes] (count changes))
+(defn edits {:t/sig '[::changes :-> ::edits]} [changes]
+  (get changes "file" []))
+(defn send {:t/sig '[:-> number?]} [] (accept {}) (accept {"file" ["edit"]}))
+"#;
+    let report = check(source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for bad in [
+        r#"{"file" [1]}"#,
+        r#"{:file ["edit"]}"#,
+        r#"[["file" ["edit"]]]"#,
+        "nil",
+    ] {
+        let report = check(&source.replace(r#"{"file" ["edit"]}"#, bad));
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{bad}: {report:#?}")
+        };
+        assert!(report.complete, "{bad}: {report:#?}");
+        assert_eq!(finding.code, "PNX2322", "{bad}: {finding:#?}");
+    }
+}
+
+#[test]
+fn leaves_custom_map_kinds_and_other_entry_specs_unchecked() {
+    for (kind, predicate, entry) in [
+        ("map?", "", "(s/tuple string?)"),
+        (
+            "map?",
+            "(defn map? {:t/sig '[string? :-> boolean?]} [x] true)",
+            "(s/tuple string? number?)",
+        ),
+    ] {
+        let report = check(&format!(
+            "{predicate} (defn accept {{:t/sig '[(s/coll-of {entry} :kind {kind}) :-> number?]}} [x] 0)"
+        ));
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}")
+        };
+        assert!(!report.complete, "{report:#?}");
+        assert_eq!(finding.code, "PNX9001");
+    }
+}
+
+#[test]
 fn iteration_and_updates_respect_dictionary_contracts() {
     let mut session = Session::default();
     let example = session.check(

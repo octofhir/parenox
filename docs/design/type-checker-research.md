@@ -73,8 +73,9 @@ Crabjure informs lexical binding identity, declarative macro scopes and lazy dep
 
 ### Crate boundaries and dependency budget
 
-- Keep the `parenox` package as the public library and binary entry point. Use modules for boundaries that currently share the same consumers. A new workspace crate should enforce a dependency direction that matters to a real consumer or show a measurable build benefit.
-- `parenox-frontend` owns source locations, forms, the reader and optional Rowan capture. Standalone builds use Rowan, with Serde available as an opt-in feature. Project sessions and checking live in `parenox`. The LSP adapter uses the existing session and JSON stack. Explicit runtime invocations can start as process adapters using the standard library.
+- `parenox` provides the public library and binary entry points and wires CLI, disk projects and runtime adapters. It re-exports the library API.
+- `parenox-lsp` owns protocol framing, UTF-16 positions, completion, refactoring edits and editor features.
+- `parenox-frontend` owns source locations, forms, the reader and optional Rowan capture. `parenox-analysis` uses it with Serde to expose checking, project sessions and externs. `parenox-formatter` uses it with Rowan for standalone formatting. Formatting and analysis can build independently.
 - For each new external dependency, record the needed capability, reuse options and the minimal Cargo features. Compare `cargo tree --locked -e normal,build` before and after. Measure clean and representative incremental builds on the same toolchain and machine, and record default release binary size. Measure the default CLI build as well as any opt-in integration. Include transitive features in the review because workspace feature unification can pull optional code back into a build.
 
 Local baseline for `34ed757` on macOS arm64 with Rust 1.100.0. A locked, offline release build took 30.17 s with an empty target directory and an existing Cargo package cache. The immediate rebuild without source edits took 0.05 s. The binary was 4,309,056 bytes. Cargo reported 27 distinct dependency packages in the normal and build graph, excluding Parenox itself.
@@ -97,6 +98,7 @@ before claiming it can replace Clojure LSP. The tooling preview is not that
 milestone. Match the behavior users rely on, not necessarily the implementation
 or command names. Use the pinned [local Clojure LSP pilot](../reference.md#local-clojure-lsp-pilot)
 to compare both servers on the same files and unsaved edits in RustRover.
+Track current gaps and the comparison command in the [parity matrix](lsp-parity.md).
 
 | Slice | Workflows to compare |
 |---|---|
@@ -120,8 +122,8 @@ as separate benchmarks. Keep project settings in one `parenox.edn` shared by
 the CLI and editor. Compare lint findings on the same sources with real bugs
 reported separately from analysis gaps. For formatting, compare the actual
 edits as well as whether they preserve syntax, comments, and all reader
-branches. Whole-file indentation and spacing are available now; range
-formatting, line wrapping, and richer macro indentation are not.
+branches. Whole-file and selected-line indentation and spacing are
+available. Line wrapping and richer macro indentation remain open.
 
 ### First pilot project
 
@@ -368,3 +370,156 @@ In 15 alternating fresh processes per release binary, median pilot CLI
 time was 52.82 ms before and 52.35 ms after. The clinic edit scenario
 still found and fixed all three planted errors. The checkout was not
 modified.
+
+## Fixed-precision integer predicate
+
+The fixture in `tests/fixtures/spec-int-conformer.clj` checks the
+[`:error/code` declaration in lsp4clj 2.0.1](https://github.com/clojure-lsp/lsp4clj/blob/1ff6c687f4e2af214d30df0d50749ea4a15b42c8/src/lsp4clj/coercer.clj#L17-L18)
+on the Clojure/JVM version pinned in `deps.edn` (`1.13.0-alpha11`).
+
+| Value | JVM class | `integer?` | `int?` | `s/conform :error/code` |
+|---|---|---|---|---|
+| `2147483648` | `Long` | true | true | `2147483648` |
+| `1N` | `clojure.lang.BigInt` | true | false | invalid |
+| `(biginteger 1)` | `java.math.BigInteger` | true | false | invalid |
+| `:failed` | `clojure.lang.Keyword` | false | false | `:failed` |
+| `"failed"` | `String` | false | false | invalid |
+| `1/2` | `clojure.lang.Ratio` | false | false | invalid |
+
+The checker tracks the fixed-precision class and numeric range separately.
+For example, the reader reduces `2/2` to a `Long`, while
+`9223372036854775808/9223372036854775808` produces a `BigInt` with the
+same numeric value. A successful `(s/conform ::line 1N)` produces an
+`Integer` that satisfies `int?`. A successful `s/valid?` check of
+`::line` on its own proves the input range and preserves any existing
+class evidence. A shadowed `int?` is checked as an ordinary call and
+provides no built-in narrowing.
+
+### Pilot results
+
+Baseline `fd2410f` and the updated build use the same pinned Clojure LSP
+checkout. The second run adds the upstream `coercer.clj` through
+`:dependency-sources` in a temporary `parenox.edn`.
+
+| Run | `PNX9001` errors | `PNX9001` warnings | `PNX9002` warnings | Checker time (ms) | Median CLI time (ms) |
+|---|---:|---:|---:|---:|---:|
+| `just pilot-check json` | 1 → 1 | 864 → 864 | 1,359 → 1,359 | 53.52 → 53.26 | 65.71 → 65.86 |
+| Pilot with `coercer.clj` | 5 → 4 | 970 → 969 | 1,359 → 1,359 | 56.46 → 54.27 | 66.65 → 66.95 |
+
+Checker time comes from the JSON reports. The median CLI time includes
+process startup and JSON output over 15 alternating fresh processes per
+release binary on an Apple M1. Both pilots still exit 1 for remaining errors.
+The dependency run removes the `Unsupported type int?` error in
+`:error/code` and the custom-predicate warning on the `int?` stage of
+`:file-event/type`.
+
+- **Confirmed type errors.** A separate caller using the same dependency
+  source accepted `:failed`, `2147483648` and `(s/conform ::wire/line 1N)`.
+  Passing `1N`, `"failed"` or `1/2` to the typed function produced a
+  `PNX2322` error at each argument.
+- **Incomplete checks.** Passing a general `integer?` argument produced
+  `PNX9004` (error severity) because its class could not be verified.
+  The enum map predicate and conformer stages of `:file-event/type` still
+  report `PNX9001`. The input shape of `:error/code` is supported.
+  Direct `s/conform` on that spec and arbitrary conformers remain unchecked.
+
+`just verify` and the pinned JVM fixture passed. `just agent-loop` found
+and fixed all three deliberate clinic errors. In the 100 warm requests,
+median round-trip time was 33.3 → 25.9 µs and p95 was 119.6 → 41.0 µs
+in the sampled runs.
+
+### Workspace build measurements
+
+With Rust 1.100.0 on the same machine, a clean locked release build took
+31.28 → 38.46 s across the combined feature and crate split. The baseline
+also took 36.29 s in a second source directory. After touching only
+`src/output.rs`, a warm release rebuild took 21.25 → 5.36 s. Cargo
+rebuilt the root package alone after the split. The release binary grew
+from 6,140,176 to 6,175,456 bytes. `cargo tree --locked -e normal,build`
+showed the same third-party packages.
+
+## Literal enum map conformer
+
+[`:file-event/type` in lsp4clj 2.0.1](https://github.com/clojure-lsp/lsp4clj/blob/1ff6c687f4e2af214d30df0d50749ea4a15b42c8/src/lsp4clj/coercer.clj#L9-L13)
+uses `int?` followed by two lookups in the same map. The predicate lookup
+checks truthiness. The conformer returns the corresponding keyword.
+On the pinned JVM, the map alone finds `:created` for both `1` and `1N`,
+while the spec rejects `1N` at `int?`. Missing keys, false, nil and
+`:clojure.spec.alpha/invalid` map results all fail conformance.
+
+Parenox proves the input set `1 | 2 | 3`, narrows the true branch of
+`s/valid?` to possible input keys, and infers the corresponding result of
+a direct `s/conform` on the named spec or its alias. The project cache
+rechecks consumers if an enum key or result changes, including a result
+edit that leaves the accepted keys and source spans unchanged. Decimal
+integer keys also work in ordinary literal maps and direct lookups.
+
+The pattern requires a unique, earlier literal map in the same file,
+with at most 32 decimal keys in the signed 32-bit range. The reader may
+prove an integer's class and range without proving its exact value for a
+radix or ratio spelling. Such a value remains unproven at a typed enum
+call. Computed maps, different predicate and conformer maps, direct
+conformation of a whole event map, and export of finite integer domains
+remain outside this slice.
+
+| Pilot | Errors | `PNX9001` warnings | `PNX9002` warnings | Median CLI time (ms) |
+|---|---:|---:|---:|---:|
+| `just pilot-check json` | 1 → 1 | 864 → 864 | 1,359 → 1,359 | 66.10 → 61.97 |
+| With upstream `coercer.clj` | 4 → 4 | 969 → 964 | 1,359 → 1,359 | 68.43 → 64.90 |
+
+The median covers 15 alternating fresh processes per release binary on
+an Apple M1. The ordinary pilot kept the same codes, severities and source
+spans. The dependency run removed three warnings on the literal map's
+integer keys and two on the enum stages of `:file-event/type`.
+
+A typed caller using the upstream `::file-event` accepts codes 1, 2 and 3.
+It reports `PNX2322` at inputs with code 4, `1N` or `"1"`, and
+`PNX9004` when only `int?` is known for the code. A direct scalar
+`(s/conform :file-event/type 1)` satisfies a `:created` result contract.
+
+`just verify` passed 643 tests, and both conformer fixtures passed on
+the pinned JVM. `just agent-loop` fixed all three deliberate clinic
+errors. Across five alternating clinic runs of 100 warm requests each,
+the median of the run p50 values was 26.3 → 27.7 µs, and the median of the
+run p95 values was 35.0 → 39.0 µs.
+
+## Signature help and LSP data contracts
+
+Parenox and Clojure LSP 2026.05.05-12.58.26 returned identical signature
+help for the call to `get-active-parameter-index` in a temporary copy of
+the pinned project's `signature_help.clj`. The integration test covers
+overloads, variadic arguments, aliases, lexical shadowing and an unsaved
+call missing its closing delimiters. Core built-ins and externs without
+source declarations remain outside this slice. [Clojure LSP signature help](https://clojure-lsp.io/features/#signature-help)
+
+The dependency pilot removed the `:kind map?` and repeated `:message`
+errors, leaving two errors and 2,322 warnings. A typed caller using the
+real specs rejects a keyword key in `::changes` and a missing `:message`
+in `::diagnostic`. The upstream `::edits` element collection still lacks
+`:kind`, and the upstream `::message` value spec is absent.
+
+Across 15 alternating release runs, median CLI time was 61.76 → 65.33 ms
+for the ordinary pilot and 63.37 → 66.98 ms with dependency source.
+The clinic scenario fixed all three planted errors. The median warm p95
+across five clinic runs was 42.3 → 40.8 µs. `just verify` passed 647
+tests and `just pilot-navigation-smoke` passed.
+
+## Range formatting and the identity predicate
+
+On a misindented line in a temporary copy of the pinned
+`signature_help.clj`, applying either server's range edits produced the
+same file. Clojure LSP returned an edit for the enclosing form. Parenox
+returned one insertion on the selected line. A sweep of 744 selections
+across 248 pilot files preserved unselected bytes and was idempotent.
+
+The pinned JVM fixture confirms that `identity` accepts `0`, empty
+strings and empty collections in spec, while nil, false and the spec
+invalid marker fail. The dependency pilot removed `Unsupported type
+identity` and retains the `any?` error. The ordinary pilot kept identical
+diagnostics. The source `:error` arm of `::any-or-error` still has an
+unchecked conformer, so a typed caller passing false reports `PNX9004`.
+
+Median CLI time over 15 alternating runs was 64.92 → 65.03 ms on the
+ordinary pilot and 66.94 → 66.62 ms with dependency source. Clinic warm
+p95 was 37.8 → 39.2 µs across five runs. `just verify` passed 653 tests,
+and the clinic scenario fixed all three deliberate errors.

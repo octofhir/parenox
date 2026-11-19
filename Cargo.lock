@@ -109,9 +109,27 @@ version = "0.1.0"
 dependencies = [
  "annotate-snippets",
  "clap",
+ "parenox-analysis",
+ "parenox-formatter",
+ "parenox-lsp",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "parenox-analysis"
+version = "0.1.0"
+dependencies = [
  "parenox-frontend",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "parenox-formatter"
+version = "0.1.0"
+dependencies = [
+ "parenox-frontend",
 ]
 
 [[package]]
@@ -120,6 +138,15 @@ version = "0.1.0"
 dependencies = [
  "rowan",
  "serde",
+]
+
+[[package]]
+name = "parenox-lsp"
+version = "0.1.0"
+dependencies = [
+ "parenox-analysis",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,19 +1,16 @@
 //! Editor-facing LSP requests over stdin and stdout.
-mod completion;
 mod projects;
-mod protocol;
-mod symbols;
-mod text;
 mod workspace;
 
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use parenox_lsp::{completion, protocol, semantic, symbols, text};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use self::projects::Projects;
+use self::projects::{ClientFeatures, Projects};
 use self::protocol::{read_message, write_message};
 use self::text::file_path;
 use crate::cli::ProjectOptions;
@@ -166,24 +163,46 @@ fn request(
             .pointer("/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
             .and_then(Value::as_bool)
             == Some(true);
+        let folding = init
+            .capabilities
+            .pointer("/textDocument/foldingRange")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        let test_tree = init
+            .capabilities
+            .pointer("/experimental/testTree")
+            .and_then(Value::as_bool)
+            == Some(true);
         *workspace = Some(Projects::load(
             root,
             options,
             watch,
-            versioned_edits,
-            snippets,
-            hierarchical_symbols,
+            ClientFeatures {
+                versioned_edits,
+                snippets,
+                hierarchical_symbols,
+                folding,
+                test_tree,
+            },
         ));
         return result(
             output,
             id,
             json!({"capabilities": {
             "positionEncoding":"utf-16", "textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},
-            "definitionProvider":true, "hoverProvider":true, "documentFormattingProvider":true,
+            "definitionProvider":true, "declarationProvider":true, "implementationProvider":true,
+            "hoverProvider":true, "documentFormattingProvider":true,
+            "documentRangeFormattingProvider":true,
+            "foldingRangeProvider":true, "selectionRangeProvider":true,
+            "renameProvider":{"prepareProvider":true},"linkedEditingRangeProvider":true,
+            "callHierarchyProvider":true,"semanticTokensProvider":semantic::capability(),
             "referencesProvider":true,"documentHighlightProvider":true,
+            "codeLensProvider":{"resolveProvider":true},
             "documentSymbolProvider":true,"workspaceSymbolProvider":true,
-            "completionProvider":{"triggerCharacters":["/"]},
-            "codeActionProvider":{"codeActionKinds":["refactor.rewrite"]}
+            "completionProvider":{"resolveProvider":true,"triggerCharacters":[":","/"]},
+            "signatureHelpProvider":{"triggerCharacters":[" "],"retriggerCharacters":[")"]},
+            "codeActionProvider":{"codeActionKinds":["refactor.rewrite"]},
+            "experimental":{"testTree":true}
         }, "serverInfo":{"name":"parenox", "version":env!("CARGO_PKG_VERSION")}}),
         );
     }
@@ -198,7 +217,27 @@ fn request(
         let matches = projects.workspace_symbols(&search.query, output)?;
         return result(output, id, json!(matches));
     }
-    let workspace = projects.for_document(document_uri(&params));
+    let document = document_uri(&params);
+    if matches!(
+        method,
+        "textDocument/foldingRange"
+            | "textDocument/declaration"
+            | "textDocument/implementation"
+            | "textDocument/prepareRename"
+            | "textDocument/rename"
+            | "textDocument/linkedEditingRange"
+            | "textDocument/prepareCallHierarchy"
+            | "callHierarchy/incomingCalls"
+            | "callHierarchy/outgoingCalls"
+            | "textDocument/semanticTokens/full"
+            | "textDocument/semanticTokens/range"
+            | "textDocument/codeLens"
+            | "codeLens/resolve"
+            | "completionItem/resolve"
+    ) {
+        projects.for_document_mut(document).ensure_index(output)?;
+    }
+    let workspace = projects.for_document(document);
     let value = match method {
         "shutdown" => {
             *shutdown = true;
@@ -206,6 +245,14 @@ fn request(
         }
         "textDocument/definition" => match serde_json::from_value(params) {
             Ok(params) => workspace.definition(params).unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/declaration" => match serde_json::from_value(params) {
+            Ok(params) => workspace.declaration(params).unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/implementation" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.implementations(params).unwrap_or_default()),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         "textDocument/references" => match serde_json::from_value(params) {
@@ -222,8 +269,71 @@ fn request(
             }
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
+        "textDocument/foldingRange" => match serde_json::from_value(params) {
+            Ok(params) => json!(
+                workspace
+                    .folding_ranges(params, projects.folding())
+                    .unwrap_or_default()
+            ),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/selectionRange" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.selection_ranges(params).unwrap_or_default()),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/prepareRename" => match serde_json::from_value(params) {
+            Ok(params) => workspace.prepare_rename(params).unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/rename" => match serde_json::from_value(params) {
+            Ok(params) => match workspace.rename(params) {
+                Ok(edit) => edit,
+                Err(error) => return send_error(output, id, -32602, &error),
+            },
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/linkedEditingRange" => match serde_json::from_value(params) {
+            Ok(params) => workspace.linked_editing(params).unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/prepareCallHierarchy" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.prepare_call_hierarchy(params)),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "callHierarchy/incomingCalls" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.incoming_calls(params)),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "callHierarchy/outgoingCalls" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.outgoing_calls(params)),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/semanticTokens/full" => match serde_json::from_value(params) {
+            Ok(params) => workspace
+                .semantic_tokens_full(params)
+                .unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/semanticTokens/range" => match serde_json::from_value(params) {
+            Ok(params) => workspace
+                .semantic_tokens_range(params)
+                .unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/codeLens" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.code_lenses(params).unwrap_or_default()),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "codeLens/resolve" => match serde_json::from_value(params.clone()) {
+            Ok(query) => workspace.resolve_code_lens(query).unwrap_or(params),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
         "textDocument/hover" => match serde_json::from_value(params) {
             Ok(params) => workspace.hover(params).unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/signatureHelp" => match serde_json::from_value(params) {
+            Ok(params) => workspace.signature_help(params).unwrap_or(Value::Null),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         "textDocument/completion" => match serde_json::from_value(params) {
@@ -232,6 +342,7 @@ fn request(
                 .unwrap_or(Value::Null),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
+        "completionItem/resolve" => workspace.resolve_completion(params),
         "textDocument/codeAction" => match serde_json::from_value(params) {
             Ok(params) => json!(workspace.code_actions(params)),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
@@ -240,6 +351,10 @@ fn request(
             Ok(params) => workspace
                 .format_document(params)
                 .unwrap_or_else(|| json!([])),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/rangeFormatting" => match serde_json::from_value(params) {
+            Ok(params) => workspace.format_range(params).unwrap_or_else(|| json!([])),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         _ => return send_error(output, id, -32601, "Method not found"),
@@ -295,7 +410,12 @@ fn notification(
 }
 
 fn document_uri(params: &Value) -> Option<&str> {
-    params.pointer("/textDocument/uri")?.as_str()
+    params
+        .pointer("/textDocument/uri")
+        .or_else(|| params.pointer("/item/uri"))
+        .or_else(|| params.pointer("/data/parenoxSource/uri"))
+        .or_else(|| params.pointer("/data/0"))?
+        .as_str()
 }
 
 fn result(output: &mut impl Write, id: Value, value: Value) -> io::Result<()> {

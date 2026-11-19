@@ -189,6 +189,47 @@ fn keys_check_required_presence_without_a_registered_value_spec() {
 }
 
 #[test]
+fn repeating_the_same_spec_key_preserves_required_presence_and_value_checks() {
+    for keys in [
+        ":req-un [::range ::message] :opt-un [::severity ::message]",
+        ":opt-un [::severity ::message] :req-un [::range ::message]",
+        ":req-un [::range ::message ::message] :opt-un [::severity]",
+    ] {
+        let source = format!(
+            r#"(ns wire (:require [clojure.spec.alpha :as s]))
+(s/def ::range string?)
+(s/def ::message string?)
+(s/def ::severity number?)
+(s/def ::diagnostic (s/keys {keys}))
+(defn diagnostic {{:t/sig '[:-> ::diagnostic]}} []
+  {{:range "here" :message "details"}})
+"#
+        );
+        let mut session = Session::default();
+        let good = session.check("wire.clj", &source);
+        assert!(good.ok && good.complete, "{good:#?}");
+
+        let reference = source.rfind("::message").unwrap();
+        let definition = session.definition("wire.clj", reference).unwrap();
+        assert_eq!(
+            definition.span.start.offset,
+            source.find("::message").unwrap()
+        );
+
+        for edit in ["", ":message nil", ":message 42"] {
+            let source = source.replace(r#":message "details""#, edit);
+            let bad = session.check("wire.clj", &source);
+            assert!(!bad.ok && bad.complete, "{bad:#?}");
+            let [finding] = bad.diagnostics.as_slice() else {
+                panic!("{bad:#?}")
+            };
+            assert_eq!(finding.code, "PNX2322");
+            assert!(finding.message.contains(":message"), "{finding:#?}");
+        }
+    }
+}
+
+#[test]
 fn registering_a_value_spec_checks_previously_unconstrained_keys() {
     let app = Source {
         path: "app.clj",

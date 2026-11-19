@@ -50,6 +50,10 @@ pilot-format-smoke project="playground/clojure-lsp":
 pilot-navigation-smoke project="playground/clojure-lsp":
     PARENOX_LSP_PILOT={{quote(project)}} cargo test --locked --release --test lsp clojure_lsp_pilot_navigation -- --ignored --nocapture
 
+# Report advertised Clojure LSP capabilities and commands missing in Parenox.
+lsp-parity reference="clojure-lsp" mode="report":
+    PARENOX_REFERENCE_LSP={{quote(reference)}} PARENOX_LSP_PARITY={{quote(mode)}} cargo test --locked --release --test lsp compares_advertised_lsp_capabilities -- --ignored --nocapture
+
 # Check a file or directory: just check path [pretty|plain|json] [auto|always|never].
 check path="examples/good.clj" format="pretty" color="auto": build
     @./target/release/parenox check {{quote(path)}} --format {{quote(format)}} --color {{quote(color)}}

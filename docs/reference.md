@@ -151,6 +151,12 @@ require a signature.
   unknown field type still reports incomplete coverage. A missing spec
   referenced directly is an error. Named specs resolve across source files
   and via declared aliases, including `:as-alias`.
+- Repeating a field with the same spec in `s/keys` preserves its type and
+  required presence. Different unqualified specs that resolve to the same
+  field still report a collision.
+- `(s/coll-of (s/tuple K V) :kind map?)` checks map entries using `K`
+  for keys and `V` for values. Collection specs without `:kind` remain
+  incomplete.
 - `s/fspec` uses `s/cat` and `:ret` for callback contracts. Direct
   fixed-arity calls can supply types to `fn` and `#()` arguments.
   General callback and variadic inference remain limited.
@@ -167,15 +173,36 @@ map shapes in the true branch. The false branch does not exclude that shape.
 An approximate map shape does not prove the runtime predicate returns true.
 Recursive specs, dynamic spec names, and unsupported projections report gaps.
 
+As a spec predicate, core `identity` accepts truthy values and excludes
+`:clojure.spec.alpha/invalid`. For a named scalar spec defined directly
+with `identity`, `s/conform` returns the input on success and `s/valid?`
+can narrow the input in the true branch.
+
+Use `int?` in source contracts and conditions to check for a JVM `Byte`,
+`Short`, `Integer`, or `Long`. For example, `2147483648` satisfies
+`int?` and `1N` satisfies only `integer?`. Parenox reports `PNX9004`
+when an argument's class is required by a contract and cannot be proven.
+
 For `(s/and integer? (s/conformer int))` with the core functions,
 `integer?` accepts Clojure integers, including BigInt. A successful input
-must fit a signed 32-bit integer. The normal result is a JVM `Integer`;
-Parenox represents its value range as `Int32`, not its boxed class.
+must fit a signed 32-bit integer and can have any integral storage class.
+The normal result is a JVM `Integer` and satisfies `int?`.
 In a direct `s/conform` on this named scalar spec, a non-integer returns
 `:clojure.spec.alpha/invalid` and overflow throws. `s/valid?` distinguishes
 true, false, and an exception. Map conformation, arbitrary conformers, and
 user predicates are not executed or generally inferred. See the
 [JVM fixture](../tests/fixtures/spec-int-conformer.clj).
+
+Named specs can use the same literal enum map as a predicate and a
+conformer. In `(s/and int? event-types (s/conformer event-types))`,
+`event-types` must be a uniquely defined, non-dynamic map declared earlier
+in the same file. The checker supports up to 32 signed 32-bit decimal
+keys and keyword, nil or false values. A mapped keyword other than
+`:clojure.spec.alpha/invalid` is a successful result. On a successful
+`s/valid?`, the original value narrows to one of the accepted integer
+keys. Direct `s/conform` returns the mapped keyword or the invalid marker.
+Exporting these finite integer contracts as standalone EDN is currently
+unsupported.
 
 ### EDN externs
 
@@ -289,6 +316,21 @@ project, a buffer has no project context.
   highlights, document outline, and workspace symbols. Hover shows checked
   signatures and origins when available. Closed source files can contribute
   declarations and usages. Opaque macro expansions are not indexed.
+- **Signature Help** shows parameters, docstrings, overloads and the active
+  argument for calls to source `defn` and `defn-` functions. It works in an
+  unsaved call with missing closing delimiters at the end of the file.
+- **Go to Declaration** opens the local alias or refer clause for a source
+  usage. **Go to Definition** opens the provider. **Go to Implementation**
+  opens source `defmethod` registrations for a resolved `defmulti`.
+- **Rename** returns versioned workspace edits when the client supports
+  them. It covers ordinary source vars and lexical bindings. Linked editing
+  covers proven lexical bindings within one file.
+- **Call Hierarchy** groups source calls by resolved caller or callee.
+  **Code Lens** resolves reference counts on source var declarations.
+- Semantic tokens work for the whole file or a specified range. Folding
+  follows multi-line declarations, and selection expansion follows the
+  syntax tree. Clients that opt into `experimental.testTree` get source
+  `clojure.test` trees for open buffers.
 - **Go to Definition** on a named spec in `:t/sig`, `s/fdef`, `s/def`, or a
   supported direct `s/valid?` call opens its source `s/def`. It follows
   qualified keys and aliases. Ordinary keyword values and ambiguous declarations
@@ -296,9 +338,11 @@ project, a buffer has no project context.
 - **Generate s/fdef** works on supported top-level, single-arity `.clj`
   functions. Unknown types produce a commented draft for review; existing
   contracts are not replaced.
-- **Reformat Code** formats the whole unsaved document with project settings.
-  Invalid syntax produces no edits. Open `.edn` buffers also report
-  reader diagnostics. Incremental LSP positions are UTF-16.
+- **Reformat Code** uses project settings for the whole unsaved document
+  or the physical lines touched by a selection. Range formatting uses the
+  surrounding indentation and preserves unselected lines. Invalid syntax
+  produces no edits. Open `.edn` buffers also report reader diagnostics.
+  Incremental LSP positions are UTF-16.
 
 Watch events from the editor can refresh closed files and configuration.
 A failed project reload preserves the last valid project snapshot.
@@ -400,12 +444,17 @@ reuses unaffected results on edits; there is no on-disk cache.
 
 ## Performance and development
 
+- `parenox-frontend` owns the reader, forms and CST. `parenox-analysis`
+  owns contracts, type checking and project sessions. `parenox-formatter`
+  uses the frontend's CST. `parenox-lsp` owns protocol, text coordinates
+  and editor features. The root package wires the CLI and disk projects.
 - `just verify` runs formatting checks, Clippy, and tests.
 - `just agent-loop` measures the clinic edit scenario; `just bench` runs a
   synthetic workload. `parenox bench FILE` measures in-process checks.
 - `just runtime-smoke` uses Clojure/JVM. Run
-  `clojure -M tests/fixtures/spec-int-conformer.clj` to verify the integer
-  conformer against the pinned JVM reference.
+  `clojure -M tests/fixtures/spec-int-conformer.clj` and
+  `clojure -M tests/fixtures/spec-enum-conformer.clj` to verify the
+  conformers against the pinned JVM reference.
 
 See [research and pilot results](design/type-checker-research.md),
 [benchmarks](../benchmarks), and the [next development prompt](next-prompt.md).

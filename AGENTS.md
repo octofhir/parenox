@@ -2,7 +2,7 @@
 
 - Use Rust for implementation, developer tools and performance scenarios. Do not add Python.
 - Use `justfile` for common commands and Clojure/EDN for language fixtures and contracts.
-- Keep one crate until a concrete need justifies splitting it.
+- Keep the workspace split by responsibility. Put the reader and CST in `parenox-frontend`, checking and project sessions in `parenox-analysis`, formatting in `parenox-formatter`, and editor protocol and language features in `parenox-lsp`. Keep CLI entry points and disk project wiring in `parenox`.
 - Organize checker code by responsibility. Extend its existing model, binding, flow, call or map modules as appropriate.
 - Prefer small, maintainable code and few dependencies. Measure performance changes.
 - Add tests for meaningful behavior and regressions; avoid tests that mirror implementation.

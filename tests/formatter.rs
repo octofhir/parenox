@@ -106,6 +106,25 @@ fn preserves_distinct_line_breaks_in_a_mixed_endings_file() {
 }
 
 #[test]
+fn formats_selected_lines_without_merging_breaks_or_rewriting_literals() {
+    let source = "  (list \"first\r\n   second\"\r\t  \n  :tail)\r\n(def   untouched 1)";
+    let next_line = source.find("\r\t").unwrap() + 1;
+    let unselected = source.find("(def").unwrap();
+    let options = FormatOptions::default();
+    let formatted =
+        formatter::format_lines(source, Language::Clojure, &options, next_line..unselected)
+            .unwrap();
+    assert_eq!(
+        formatted,
+        "  (list \"first\r\n   second\"\r \n        :tail)\r\n(def   untouched 1)"
+    );
+    assert_eq!(
+        shape(source, Language::Clojure),
+        shape(&formatted, Language::Clojure)
+    );
+}
+
+#[test]
 #[ignore = "requires a local Clojure project checkout"]
 fn pilot_formatting_is_lossless_and_idempotent() {
     fn visit(path: &Path, files: &mut Vec<PathBuf>) {

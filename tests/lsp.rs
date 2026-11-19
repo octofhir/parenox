@@ -102,6 +102,138 @@ fn transcript(messages: &[Value]) -> Vec<Value> {
 }
 
 #[test]
+#[ignore = "requires a Clojure LSP executable"]
+fn compares_advertised_lsp_capabilities() {
+    use std::collections::BTreeSet;
+
+    let fixture = Fixture::new("capability comparison");
+    let reference =
+        std::env::var_os("PARENOX_REFERENCE_LSP").unwrap_or_else(|| "clojure-lsp".into());
+    let candidate = std::env::var_os("PARENOX_LSP_CANDIDATE")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_parenox").into());
+    let capabilities = |mut command: Command| {
+        use parenox_lsp::protocol;
+        let mut child = command
+            .current_dir(&fixture.0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        let mut message = Vec::new();
+        let mut exchange = |id, method, params| {
+            protocol::write_message(
+                &mut input,
+                &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
+            )
+            .unwrap();
+            loop {
+                assert!(protocol::read_message(&mut output, &mut message).unwrap());
+                let response: Value = serde_json::from_slice(&message).unwrap();
+                if response["id"] == id && response.get("method").is_none() {
+                    assert!(response["error"].is_null(), "{response}");
+                    break response["result"].clone();
+                }
+                if let (Some(id), Some(_)) = (response.get("id"), response.get("method")) {
+                    protocol::write_message(
+                        &mut input,
+                        &json!({"jsonrpc":"2.0","id":id,"result":null}),
+                    )
+                    .unwrap();
+                }
+            }
+        };
+        let initialized = exchange(
+            1,
+            "initialize",
+            json!({
+                "rootUri":uri(&fixture.0),
+                "capabilities":{
+                    "workspace":{"applyEdit":true,"fileOperations":{"willRename":true,"didRename":true}},
+                    "textDocument":{"rename":{"prepareSupport":true},"codeAction":{"resolveSupport":{"properties":["edit"]}}}
+                }
+            }),
+        );
+        exchange(2, "shutdown", Value::Null);
+        protocol::write_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"})).unwrap();
+        drop(input);
+        assert!(child.wait().unwrap().success());
+        initialized["capabilities"].clone()
+    };
+    let mut reference = Command::new(reference);
+    reference.arg("listen");
+    let mut candidate = Command::new(candidate);
+    candidate.arg("lsp");
+    let reference = capabilities(reference);
+    let candidate = capabilities(candidate);
+
+    let features = |capabilities: &Value| {
+        let mut features = BTreeSet::new();
+        for (name, value) in capabilities.as_object().expect("server capabilities") {
+            if name.ends_with("Provider") && !matches!(value, Value::Null | Value::Bool(false)) {
+                features.insert(name.clone());
+            }
+        }
+        for path in ["/experimental", "/workspace/fileOperations"] {
+            if let Some(options) = capabilities.pointer(path).and_then(Value::as_object) {
+                for (name, value) in options {
+                    if !matches!(value, Value::Null | Value::Bool(false)) {
+                        features.insert(format!("{path}/{name}"));
+                    }
+                }
+            }
+        }
+        for path in [
+            "/codeActionProvider/resolveProvider",
+            "/codeLensProvider/resolveProvider",
+            "/completionProvider/resolveProvider",
+            "/renameProvider/prepareProvider",
+            "/semanticTokensProvider/full",
+            "/semanticTokensProvider/range",
+        ] {
+            if capabilities
+                .pointer(path)
+                .is_some_and(|value| !matches!(value, Value::Null | Value::Bool(false)))
+            {
+                features.insert(path.into());
+            }
+        }
+        features
+    };
+    let commands = |capabilities: &Value| -> BTreeSet<String> {
+        capabilities["executeCommandProvider"]["commands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    let reference_features = features(&reference);
+    let candidate_features = features(&candidate);
+    let reference_commands = commands(&reference);
+    let candidate_commands = commands(&candidate);
+    let missing: Vec<_> = reference_features.difference(&candidate_features).collect();
+    let missing_commands: Vec<_> = reference_commands.difference(&candidate_commands).collect();
+    println!(
+        "{}",
+        json!({
+            "reference_features":reference_features.len(),
+            "matching_advertisements":reference_features.intersection(&candidate_features).count(),
+            "missing_advertisements":missing,
+            "missing_commands":missing_commands,
+        })
+    );
+    if std::env::var("PARENOX_LSP_PARITY").as_deref() == Ok("strict") {
+        assert!(
+            missing.is_empty() && missing_commands.is_empty(),
+            "LSP capability gaps"
+        );
+    }
+}
+
+#[test]
 fn formats_unsaved_buffers_with_the_project_profile_and_leaves_invalid_text_alone() {
     let fixture = Fixture::new("formatting");
     let path = fixture.0.join("src/demo.clj");
@@ -156,6 +288,385 @@ fn formats_unsaved_buffers_with_the_project_profile_and_leaves_invalid_text_alon
     assert_eq!(response(3), &json!([]));
     assert_eq!(response(4), &json!([]));
     assert_eq!(fs::read_to_string(path).unwrap(), saved);
+}
+
+#[test]
+fn range_formatting_preserves_unselected_context_and_tracks_utf16() {
+    let fixture = Fixture::new("range formatting");
+    let path = fixture.0.join("src/demo.clj");
+    fs::write(
+        fixture.0.join("parenox.edn"),
+        "{:format {:indent-width 4 :indent-rules {my/wrap :block}}}",
+    )
+    .unwrap();
+    let saved = "(ns saved)";
+    fs::write(&path, saved).unwrap();
+    let file = uri(&path);
+    let text = "   (my/wrap  :label\r\n  (println :indent)\r\n       (str \"🦊\"  :ok))\r\n(def   later  1)";
+    let formatted = text
+        .replace("  (println", "       (println")
+        .replace("\"🦊\"  :ok", "\"🦊\" :ok");
+    let query = |id, start, end| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/rangeFormatting","params":{
+            "textDocument":{"uri":file},"range":{"start":start,"end":end},
+            "options":{"tabSize":8,"insertSpaces":false}
+        }})
+    };
+    let change = |version, text| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let pos = |line, character| json!({"line":line,"character":character});
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"version":1,"languageId":"clojure","text":text}
+        }}),
+        query(2, pos(1, 3), pos(3, 0)),
+        query(3, pos(2, 16), pos(2, 17)),
+        query(4, pos(2, 14), pos(2, 17)), // Inside the emoji's UTF-16 surrogate pair.
+        query(5, pos(3, 0), pos(1, 0)),
+        change(2, &formatted),
+        query(6, pos(1, 3), pos(3, 0)),
+        query(7, pos(3, 4), pos(3, 4)),
+        change(3, &format!("{formatted}\r\n(defn unfinished")),
+        query(8, pos(1, 3), pos(3, 0)),
+        json!({"jsonrpc":"2.0","id":9,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    assert_eq!(
+        response(1)["capabilities"]["documentRangeFormattingProvider"],
+        true
+    );
+    let edit = json!({"range":{"start":pos(2, 17),"end":pos(2, 18)},"newText":""});
+    assert_eq!(
+        response(2),
+        &json!([
+            {"range":{"start":pos(1, 2),"end":pos(1, 2)},"newText":"     "},
+            edit
+        ])
+    );
+    assert_eq!(response(3), &json!([edit]));
+    for id in [4, 5, 6, 8] {
+        assert_eq!(response(id), &json!([]), "response {id}");
+    }
+    assert_eq!(
+        response(7),
+        &json!([{"range":{"start":pos(3, 5),"end":pos(3, 13)},"newText":"later"}])
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), saved);
+}
+
+#[test]
+fn structural_navigation_folds_declarations_and_expands_each_selection() {
+    let fixture = Fixture::new("structural navigation");
+    let path = fixture.0.join("src/demo.clj");
+    let file = uri(&path);
+    let row = "  (vector \"🦀\" [x :tag]))";
+    let source = format!("(ns demo)\n(defn first-fn [x]\n{row}\n(defn next-fn []\n  0)\n");
+    fs::write(&path, &source).unwrap();
+    let character = row[..row.find("[x").unwrap() + 1].encode_utf16().count();
+    let tag = row[..row.find(":tag").unwrap()].encode_utf16().count();
+    let position = |line, character| json!({"line":line,"character":character});
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),
+            "capabilities":{"textDocument":{"foldingRange":{"lineFoldingOnly":true,"rangeLimit":1}}}
+        }}),
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/foldingRange","params":{
+            "textDocument":{"uri":file}
+        }}),
+        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/selectionRange","params":{
+            "textDocument":{"uri":file},"positions":[position(2,character),position(2,tag)]
+        }}),
+        json!({"jsonrpc":"2.0","id":4,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|message| message["id"] == id).unwrap()["result"];
+    assert_eq!(response(1)["capabilities"]["foldingRangeProvider"], true);
+    assert_eq!(response(1)["capabilities"]["selectionRangeProvider"], true);
+    assert_eq!(
+        response(2),
+        &json!([{"startLine":1,"endLine":2,"kind":"region"}])
+    );
+    let ranges = response(3).as_array().unwrap();
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(
+        ranges[0]["range"],
+        json!({"start":position(2,character),"end":position(2,character+1)})
+    );
+    assert_eq!(
+        ranges[1]["range"],
+        json!({"start":position(2,tag),"end":position(2,tag+4)})
+    );
+    let mut outer = &ranges[0];
+    while let Some(parent) = outer.get("parent") {
+        outer = parent;
+    }
+    assert_eq!(outer["range"]["start"], position(1, 0));
+    assert_eq!(
+        outer["range"]["end"],
+        position(2, row.encode_utf16().count())
+    );
+}
+
+#[test]
+fn range_formatting_accepts_an_unsaved_cljs_buffer() {
+    let fixture = Fixture::new("cljs formatting");
+    let path = fixture.0.join("src/demo.cljs");
+    let file = uri(&path);
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"languageId":"clojurescript","version":1,"text":"(ns demo)\n(defn f []\n(+ 1 2))"}
+        }}),
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/rangeFormatting","params":{
+            "textDocument":{"uri":file},
+            "range":{"start":{"line":2,"character":0},"end":{"line":2,"character":3}},
+            "options":{"tabSize":2,"insertSpaces":true}
+        }}),
+        json!({"jsonrpc":"2.0","id":3,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = messages.iter().find(|message| message["id"] == 2).unwrap();
+    assert_eq!(
+        response["result"],
+        json!([
+            {"range":{"start":{"line":2,"character":0},"end":{"line":2,"character":0}},"newText":"  "}
+        ])
+    );
+}
+
+#[test]
+fn code_lenses_resolve_reference_counts_in_closed_source_files() {
+    let fixture = Fixture::new("reference lenses");
+    let provider = fixture.0.join("src/provider.clj");
+    let caller = fixture.0.join("src/caller.clj");
+    let file = uri(&provider);
+    fs::write(&provider, "(ns provider)\n(defn shared [x] x)\n").unwrap();
+    fs::write(
+        &caller,
+        "(ns caller (:require [provider :as p]))\n(defn call [] (p/shared 1))\n",
+    )
+    .unwrap();
+    let lens = json!({
+        "range":{"start":{"line":1,"character":6},"end":{"line":1,"character":12}},
+        "data":[file,2,7]
+    });
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/codeLens","params":{
+            "textDocument":{"uri":file}
+        }}),
+        json!({"jsonrpc":"2.0","id":3,"method":"codeLens/resolve","params":lens}),
+        json!({"jsonrpc":"2.0","id":4,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|message| message["id"] == id).unwrap()["result"];
+    assert_eq!(
+        response(1)["capabilities"]["codeLensProvider"]["resolveProvider"],
+        true
+    );
+    assert_eq!(response(2), &json!([lens]));
+    assert_eq!(
+        response(3)["command"],
+        json!({"title":"1 reference","command":"code-lens-references","arguments":[file,2,7]})
+    );
+}
+
+#[test]
+fn rename_refuses_a_target_from_dependency_only_sources() {
+    let fixture = Fixture::new("read only rename target");
+    let source = fixture.0.join("src/caller.clj");
+    let dependency = fixture.0.join("vendor");
+    fs::create_dir(&dependency).unwrap();
+    fs::write(
+        dependency.join("provider.clj"),
+        "(ns provider) (defn run [] nil)",
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("parenox.edn"),
+        "{:paths [\"src\"] :dependency-sources [\"vendor\"]}",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "(ns caller (:require [provider :as p]))\n(defn main [] (p/run))",
+    )
+    .unwrap();
+    let params = json!({
+        "textDocument":{"uri":uri(&source)},
+        "position":{"line":1,"character":20}
+    });
+    let mut rename = params.clone();
+    rename["newName"] = "invoke".into();
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/prepareRename","params":params}),
+        json!({"jsonrpc":"2.0","id":3,"method":"textDocument/rename","params":rename}),
+        json!({"jsonrpc":"2.0","id":4,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| messages.iter().find(|message| message["id"] == id).unwrap();
+    assert!(response(2)["result"].is_null(), "{messages:#?}");
+    assert_eq!(response(3)["error"]["code"], -32602, "{messages:#?}");
+}
+
+#[test]
+fn go_to_implementation_finds_source_methods_through_an_alias() {
+    let fixture = Fixture::new("multimethod navigation");
+    let provider = fixture.0.join("src/provider.clj");
+    let methods = fixture.0.join("src/methods.clj");
+    fs::write(&provider, "(ns provider)\n(defmulti render identity)\n").unwrap();
+    fs::write(
+        &methods,
+        "(ns methods (:require [provider :as p]))\n(defmethod p/render :a [_] :a)\n",
+    )
+    .unwrap();
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/implementation","params":{
+            "textDocument":{"uri":uri(&provider)},"position":{"line":1,"character":12}
+        }}),
+        json!({"jsonrpc":"2.0","id":3,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| messages.iter().find(|message| message["id"] == id).unwrap();
+    assert_eq!(
+        response(1)["result"]["capabilities"]["implementationProvider"],
+        true
+    );
+    assert_eq!(
+        response(2)["result"],
+        json!([{
+            "uri":uri(&methods),
+            "range":{"start":{"line":1,"character":11},"end":{"line":1,"character":19}}
+        }])
+    );
+}
+
+#[test]
+fn semantic_tokens_follow_lexical_bindings_in_unsaved_edits() {
+    let fixture = Fixture::new("semantic tokens");
+    let path = fixture.0.join("src/demo.clj");
+    let source = "(ns demo)\n(defn target [x] x)\n(defn call [x] (target x))";
+    let edited = source.replace("[x] (target x)", "[target] (target 1)");
+    fs::write(&path, source).unwrap();
+    let document_uri = uri(&path);
+    let query = |id, source: &str| {
+        let call = source.lines().nth(2).unwrap();
+        let start = call.rfind("target").unwrap();
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/semanticTokens/range","params":{
+            "textDocument":{"uri":document_uri},
+            "range":{"start":{"line":2,"character":start + 1},"end":{"line":2,"character":start + 3}}
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document_uri,"version":1,"languageId":"clojure","text":source
+        }}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/semanticTokens/full","params":{
+            "textDocument":{"uri":document_uri}
+        }}),
+        query(3, source),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document_uri,"version":2},"contentChanges":[{"text":edited}]
+        }}),
+        query(4, &edited),
+        json!({"jsonrpc":"2.0","id":5,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    let provider = &response(1)["capabilities"]["semanticTokensProvider"];
+    assert_eq!(provider["full"], true);
+    assert_eq!(provider["range"], true);
+    assert_eq!(provider["legend"]["tokenTypes"][2], "function");
+    assert_eq!(provider["legend"]["tokenTypes"][6], "variable");
+    assert!(response(2)["data"].as_array().unwrap().len() > 5);
+    let expected = |text: &str, kind| {
+        let start = text.lines().nth(2).unwrap().rfind("target").unwrap();
+        json!({"data":[2,start,6,kind,0]})
+    };
+    assert_eq!(response(3), &expected(source, 2));
+    assert_eq!(response(4), &expected(&edited, 6));
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
+fn completion_resolve_reads_source_docs_without_changing_the_edit() {
+    let fixture = Fixture::new("completion resolve");
+    fs::create_dir(fixture.0.join("src/lib")).unwrap();
+    fs::write(
+        fixture.0.join("src/lib/main.clj"),
+        r#"(ns lib.main)
+(defn greet "Display a caller ID." {:t/sig '[number? :-> string?]} [id] (str id))"#,
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("src/lib/other.clj"),
+        r#"(ns lib.other) (defn greet "Unrelated." [value] value)"#,
+    )
+    .unwrap();
+    let app = fixture.0.join("src/app.clj");
+    let document_uri = uri(&app);
+    let source = "(ns app (:require [lib.main :as lib]))\n(lib/gre)";
+    let edited = source.replace("lib.main", "lib.other");
+    fs::write(&app, source).unwrap();
+    let position = |character| json!({"line":1,"character":character});
+    let original = json!({
+        "label":"lib/greet","kind":6,
+        "textEdit":{"range":{"start":position(1),"end":position(8)},"newText":"lib/greet"},
+        "data":{"parenoxSource":{"uri":document_uri,"label":"lib/greet","namespace":"lib.main"}}
+    });
+    let resolve = |id, item: &Value| json!({"jsonrpc":"2.0","id":id,"method":"completionItem/resolve","params":item});
+    let unknown = json!({"label":"unknown","data":{"otherServer":true}});
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document_uri,"version":1,"languageId":"clojure","text":source
+        }}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/completion","params":{
+            "textDocument":{"uri":document_uri},"position":position(8)
+        }}),
+        resolve(3, &original),
+        resolve(4, &unknown),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document_uri,"version":2},"contentChanges":[{"text":edited}]
+        }}),
+        resolve(5, &original),
+        json!({"jsonrpc":"2.0","id":6,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    assert_eq!(
+        response(1)["capabilities"]["completionProvider"]["resolveProvider"],
+        true
+    );
+    assert_eq!(response(2)["items"], json!([original]));
+    let mut resolved = response(3).clone();
+    let documentation = resolved
+        .as_object_mut()
+        .unwrap()
+        .remove("documentation")
+        .unwrap();
+    assert_eq!(resolved, original);
+    assert_eq!(documentation["kind"], "plaintext");
+    let doc = documentation["value"].as_str().unwrap();
+    for fact in [
+        "lib.main/greet",
+        "(greet [id])",
+        "Display a caller ID.",
+        "[Number -> String]",
+    ] {
+        assert!(doc.contains(fact), "{doc}");
+    }
+    assert_eq!(response(4), &unknown);
+    assert_eq!(response(5), &original);
+    assert_eq!(fs::read_to_string(app).unwrap(), source);
 }
 
 #[test]
@@ -657,6 +1168,220 @@ fn editor_applies_ordered_utf16_edits_atomically() {
     );
     assert_eq!(messages[3]["params"]["version"], 3);
     assert_eq!(messages[3]["params"]["diagnostics"], json!([]));
+    assert_eq!(fs::read_to_string(caller).unwrap(), source);
+}
+
+#[test]
+fn declaration_links_to_local_import_sites() {
+    let fixture = Fixture::new("declaration");
+    let api = fixture.0.join("src/api.clj");
+    let caller = fixture.0.join("src/caller.clj");
+    let api_text = "(ns api)\n(defn read! [] nil)\n(defn local [] nil)\n";
+    let caller_text = concat!(
+        "(ns caller \"🦀\" (:require [api :as source :refer :all]))\n",
+        "(defn read-all [] (do (source/read!) (local)))\n",
+    );
+    fs::write(&api, api_text).unwrap();
+    fs::write(&caller, caller_text).unwrap();
+    let range = |text: &str, line: usize, name: &str| {
+        let row = text.lines().nth(line).unwrap();
+        let column = row[..row.find(name).unwrap()].encode_utf16().count();
+        json!({"start":{"line":line,"character":column},
+               "end":{"line":line,"character":column+name.len()}})
+    };
+    let query = |id, method, symbol| {
+        json!({"jsonrpc":"2.0","id":id,"method":method,"params":{
+            "textDocument":{"uri":uri(&caller)},"position":range(caller_text,1,symbol)["start"]
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        query(2, "textDocument/declaration", "source/read!"),
+        query(3, "textDocument/declaration", "local"),
+        query(4, "textDocument/definition", "source/read!"),
+        json!({"jsonrpc":"2.0","id":5,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let result = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    assert_eq!(result(1)["capabilities"]["declarationProvider"], true);
+    assert_eq!(
+        result(2),
+        &json!({"uri":uri(&caller),"range":range(caller_text,0,"source")})
+    );
+    assert_eq!(
+        result(3),
+        &json!({"uri":uri(&caller),"range":range(caller_text,0,"api")})
+    );
+    assert_eq!(
+        result(4),
+        &json!({"uri":uri(&api),"range":range(api_text,1,"read!")})
+    );
+}
+
+#[test]
+fn call_hierarchy_groups_source_calls_and_tracks_unsaved_edits() {
+    let fixture = Fixture::new("call hierarchy");
+    let provider = fixture.0.join("src/provider.clj");
+    let caller = fixture.0.join("src/caller.clj");
+    let provider_text = concat!(
+        "(ns provider)\n",
+        "(defn title [x] x)\n",
+        "(defn wrap [] (title \"local\"))\n",
+    );
+    let caller_text = concat!(
+        "(ns caller (:require [provider :as p :refer [title] :rename {title renamed-title}]))\n",
+        "(defn main [] (str \"🦀\" (p/title \"one\") (-> \"two\" renamed-title)))\n",
+        "(defn values [] [p/title '(p/title \"quoted\")])\n",
+        "(defn shadowed [] (let [renamed-title identity] (renamed-title \"local\")))\n",
+        "(defn opaque [] (mystery (p/title \"macro data\")))\n",
+    );
+    fs::write(&provider, provider_text).unwrap();
+    fs::write(&caller, caller_text).unwrap();
+    let site = |source: &str, line: usize, needle: &str| {
+        let text = source.lines().nth(line).unwrap();
+        let start = text[..text.find(needle).unwrap()].encode_utf16().count();
+        json!({"start":{"line":line,"character":start},
+               "end":{"line":line,"character":start + needle.encode_utf16().count()}})
+    };
+    let request =
+        |id, method, params| json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
+    let prepare = |id, path: &Path, range: &Value| {
+        request(
+            id,
+            "textDocument/prepareCallHierarchy",
+            json!({"textDocument":{"uri":uri(path)},"position":range["start"]}),
+        )
+    };
+    let target_range = site(provider_text, 1, "title");
+    let caller_range = site(caller_text, 1, "main");
+    let direct = site(caller_text, 1, "p/title");
+    let thread = site(caller_text, 1, "renamed-title");
+    let target = json!({"name":"title","uri":uri(&provider), "selectionRange":target_range});
+    let origin = json!({"name":"main","uri":uri(&caller), "selectionRange":caller_range});
+    let changed = caller_text.replace("(p/title \"one\") ", "");
+    let messages = transcript(&[
+        request(1, "initialize", json!({"rootUri":uri(&fixture.0)})),
+        prepare(2, &caller, &direct),
+        request(3, "callHierarchy/incomingCalls", json!({"item":target})),
+        request(4, "callHierarchy/outgoingCalls", json!({"item":origin})),
+        prepare(5, &caller, &site(caller_text, 4, "p/title")),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":uri(&caller),"languageId":"clojure","version":1,"text":changed
+        }}}),
+        request(6, "callHierarchy/outgoingCalls", json!({"item":origin})),
+        request(7, "shutdown", Value::Null),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let result = |id| &messages.iter().find(|m| m["id"] == id).unwrap()["result"];
+    assert_eq!(result(1)["capabilities"]["callHierarchyProvider"], true);
+    let item = &result(2)[0];
+    assert_eq!(item["name"], "title");
+    assert_eq!(item["detail"], "provider");
+    assert_eq!(item["uri"], uri(&provider));
+    assert_eq!(item["selectionRange"], target_range);
+    let incoming = result(3).as_array().unwrap();
+    assert_eq!(incoming.len(), 2, "{incoming:#?}");
+    assert_eq!(incoming[0]["from"]["name"], "main");
+    assert_eq!(incoming[0]["fromRanges"], json!([direct, thread]));
+    assert_eq!(incoming[1]["from"]["name"], "wrap");
+    assert_eq!(
+        incoming[1]["fromRanges"],
+        json!([site(provider_text, 2, "title")])
+    );
+    assert_eq!(
+        result(4),
+        &json!([{"to":item,"fromRanges":[direct,thread]}])
+    );
+    assert!(result(5).is_null());
+    let after = result(6).as_array().unwrap();
+    assert_eq!(after.len(), 1, "{after:#?}");
+    assert_eq!(after[0]["fromRanges"].as_array().unwrap().len(), 1);
+    assert_eq!(fs::read_to_string(&caller).unwrap(), caller_text);
+}
+
+#[test]
+fn signature_help_tracks_source_arities_and_unsaved_argument_positions() {
+    let fixture = Fixture::new("signature help");
+    let provider = fixture.0.join("src/provider.clj");
+    let caller = fixture.0.join("src/caller.clj");
+    fs::write(
+        &provider,
+        concat!(
+            "(ns provider)\n",
+            "(defn run \"Run a command.\" ([id] id) ([id opts] id) ([id opts & more] id))\n",
+            "(defn inner [{:keys [value]}] value)\n",
+            "(defn defaults [] nil)\n",
+        ),
+    )
+    .unwrap();
+    let source = concat!(
+        "(ns caller (:require [provider :as p :refer [run]]))\n",
+        "(defn execute [] (p/run \"🦀\" (p/inner {:value 9}) 3 4))\n",
+        "(run 10)\n",
+        "(p/defaults  )\n",
+        "(defn local [] (let [run identity] (run 100)))\n",
+        "'(p/run 101)\n",
+    );
+    fs::write(&caller, source).unwrap();
+    let query = |id, text: &str, line, needle| {
+        let text = text.lines().nth(line).unwrap();
+        let column = text[..text.find(needle).unwrap()].encode_utf16().count();
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/signatureHelp","params":{
+            "textDocument":{"uri":uri(&caller)}, "position":{"line":line,"character":column}
+        }})
+    };
+    let unfinished = format!("{source}(defn later [] (p/run 1 ");
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0),"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":uri(&caller),"languageId":"clojure","version":1,"text":source
+        }}}),
+        query(2, source, 1, "{:value"),
+        query(3, source, 1, "4))"),
+        query(4, source, 2, "10"),
+        query(5, source, 3, " )"),
+        query(6, source, 4, "100"),
+        query(7, source, 5, "101"),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":uri(&caller),"version":2}, "contentChanges":[{"text":unfinished}]
+        }}),
+        json!({"jsonrpc":"2.0","id":8,"method":"textDocument/signatureHelp","params":{
+            "textDocument":{"uri":uri(&caller)}, "position":{"line":6,"character":unfinished.lines().last().unwrap().len()}
+        }}),
+        json!({"jsonrpc":"2.0","id":9,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let result = |id| {
+        messages
+            .iter()
+            .find(|message| message["id"] == id)
+            .unwrap()
+            .get("result")
+            .unwrap()
+    };
+    assert!(result(1)["capabilities"]["signatureHelpProvider"].is_object());
+    assert_eq!(
+        result(2),
+        &json!({"signatures":[{"label":"(inner [{:keys [value]}])",
+            "parameters":[{"label":"{:keys [value]}"}]}],"activeSignature":0,"activeParameter":0})
+    );
+    let signatures = json!([
+        {"label":"(run [id])","parameters":[{"label":"id"}],"documentation":"Run a command."},
+        {"label":"(run [id opts])","parameters":[{"label":"id"},{"label":"opts"}],"documentation":"Run a command."},
+        {"label":"(run [id opts & more])","parameters":[{"label":"id"},{"label":"opts"},{"label":"& more"}],"documentation":"Run a command."}
+    ]);
+    assert_eq!(result(3)["signatures"], signatures);
+    assert_eq!(result(3)["activeSignature"], 2);
+    assert_eq!(result(3)["activeParameter"], 2);
+    assert_eq!(result(4)["activeSignature"], 0);
+    assert_eq!(result(4)["activeParameter"], 0);
+    assert_eq!(result(5)["signatures"][0]["label"], "(defaults [])");
+    assert!(result(5).get("activeParameter").is_none());
+    assert!(result(6).is_null());
+    assert!(result(7).is_null());
+    assert_eq!(result(8)["signatures"], signatures);
+    assert_eq!(result(8)["activeSignature"], 1);
+    assert_eq!(result(8)["activeParameter"], 1);
     assert_eq!(fs::read_to_string(caller).unwrap(), source);
 }
 
@@ -2062,6 +2787,223 @@ fn assert_cli_diagnostics(root: &Path, relative: &Path, diagnostics: &[Value]) {
             cli["span"]["start"]["column"].as_u64().unwrap() - 1
         );
     }
+}
+
+#[test]
+fn rename_tracks_cross_file_vars_and_lexical_bindings_without_capture() {
+    let fixture = Fixture::new("safe rename");
+    let provider = fixture.0.join("src/provider.clj");
+    let caller = fixture.0.join("src/caller.clj");
+    let provider_source = concat!(
+        "(ns provider (:require [clojure.spec.alpha :as s]))\n",
+        "(declare run)\n",
+        "(s/fdef run :args (s/cat :x string?) :ret string?)\n",
+        "(defn again [x] (run x))\n",
+        "(defn run [x] x)\n",
+    );
+    let source = concat!(
+        "(ns caller (:require [provider :as p :refer [run]]))\n",
+        "(defn call [] [(p/run \"🦊\") (run \"yay\") (let [run 2] run)])\n",
+        "(defn lexical [value]\n",
+        "  [(let [value :shadow] value) (let [conflict 0] [conflict value]) 'value])\n",
+        "(defn keyed [{:keys [total]}] total)\n",
+        "(defn opaque [blocked] (unmodeled/macro blocked))\n",
+    );
+    fs::write(&provider, provider_source).unwrap();
+    fs::write(&caller, source).unwrap();
+    let pos = |source: &str, line: usize, needle: &str| {
+        let line_text = source.lines().nth(line).unwrap();
+        let start = line_text.find(needle).unwrap();
+        json!({"line":line,"character":line_text[..start].encode_utf16().count()})
+    };
+    let query = |id, method, position, name: Option<&str>| {
+        let mut params = json!({"textDocument":{"uri":uri(&caller)},"position":position});
+        if let Some(name) = name {
+            params["newName"] = json!(name);
+        }
+        json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+    };
+    let qualified = pos(source, 1, "run \"🦊\"");
+    let lexical = pos(source, 2, "value");
+    let initial = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "rootUri":uri(&fixture.0),"capabilities":{"workspace":{"workspaceEdit":{"documentChanges":true}}}
+    }});
+    let open = json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+        "textDocument":{"uri":uri(&caller),"version":7,"languageId":"clojure","text":source}
+    }});
+    let messages = transcript(&[
+        initial,
+        open,
+        query(2, "textDocument/prepareRename", qualified.clone(), None),
+        query(3, "textDocument/rename", qualified, Some("invoke")),
+        query(4, "textDocument/rename", lexical.clone(), Some("renamed")),
+        query(5, "textDocument/rename", lexical.clone(), Some("conflict")),
+        query(
+            6,
+            "textDocument/rename",
+            lexical.clone(),
+            Some("ns/invalid"),
+        ),
+        query(7, "textDocument/linkedEditingRange", lexical, None),
+        query(
+            8,
+            "textDocument/prepareRename",
+            pos(source, 4, "total"),
+            None,
+        ),
+        query(
+            9,
+            "textDocument/prepareRename",
+            pos(source, 5, "blocked"),
+            None,
+        ),
+        json!({"jsonrpc":"2.0","id":10,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| messages.iter().find(|message| message["id"] == id).unwrap();
+    assert_eq!(
+        response(1)["result"]["capabilities"]["renameProvider"]["prepareProvider"],
+        true
+    );
+    let range = |source: &str, line: usize, needle: &str, len: usize| {
+        let start = pos(source, line, needle);
+        json!({"start":start,"end":{"line":line,"character":start["character"].as_u64().unwrap() + len as u64}})
+    };
+    assert_eq!(
+        response(2)["result"],
+        json!({
+            "placeholder":"run","range":range(source, 1, "run \"🦊\"", 3)
+        })
+    );
+    let edit = |source, line, needle, len, new| json!({"range":range(source, line, needle, len),"newText":new});
+    assert_eq!(
+        response(3)["result"],
+        json!({"documentChanges":[
+            {"textDocument":{"uri":uri(&caller),"version":7},"edits":[
+                edit(source, 0, "run", 3, "invoke"),
+                edit(source, 1, "run \"🦊\"", 3, "invoke"),
+                edit(source, 1, "run \"yay\"", 3, "invoke")
+            ]},
+            {"textDocument":{"uri":uri(&provider),"version":null},"edits":[
+                edit(provider_source, 1, "run", 3, "invoke"),
+            edit(provider_source, 2, "run", 3, "invoke"),
+            edit(provider_source, 3, "run x", 3, "invoke"),
+            edit(provider_source, 4, "run", 3, "invoke")
+            ]}
+        ]})
+    );
+    assert_eq!(
+        response(4)["result"],
+        json!({"documentChanges":[
+            {"textDocument":{"uri":uri(&caller),"version":7},"edits":[
+                edit(source, 2, "value", 5, "renamed"),
+                edit(source, 3, "value])", 5, "renamed")
+            ]}
+        ]})
+    );
+    for id in [5, 6] {
+        assert_eq!(response(id)["error"]["code"], -32602);
+    }
+    assert_eq!(
+        response(7)["result"],
+        json!({"ranges":[
+            range(source, 2, "value", 5),
+            range(source, 3, "value])", 5)
+        ]})
+    );
+    assert!(response(8)["result"].is_null());
+    assert!(response(9)["result"].is_null());
+    assert_eq!(fs::read_to_string(&caller).unwrap(), source);
+    assert_eq!(fs::read_to_string(&provider).unwrap(), provider_source);
+}
+
+#[test]
+fn test_tree_notifications_follow_the_opted_in_buffer_and_resolved_test_scopes() {
+    let fixture = Fixture::new("test tree");
+    let path = fixture.0.join("src/example.clj");
+    let file = uri(&path);
+    let source = concat!(
+        "(ns example (:require [clojure.test :as t :refer [deftest testing]]))\n",
+        "(deftest smoke\n",
+        "  (testing \"🦊 outer\" (t/testing \"inner\" 1))\n",
+        "  (let [testing identity] (testing \"shadow\"))\n",
+        "  '(testing \"quoted\"))\n",
+        "(t/deftest empty-test)\n",
+    );
+    fs::write(&path, source).unwrap();
+    let edited = source.replace("🦊 outer", "🦊 revised");
+    let init = |enabled| {
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),"capabilities":{"experimental":{"testTree":enabled}}
+        }})
+    };
+    let open = json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+        "uri":file,"languageId":"clojure","version":1,"text":source
+    }}});
+    let shutdown = json!({"jsonrpc":"2.0","id":8,"method":"shutdown"});
+    let exit = json!({"jsonrpc":"2.0","method":"exit"});
+    let messages = transcript(&[
+        init(true),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        open.clone(),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":2},"contentChanges":[{"text":edited}]
+        }}),
+        shutdown.clone(),
+        exit.clone(),
+    ]);
+    assert_eq!(
+        messages[0]["result"]["capabilities"]["experimental"]["testTree"],
+        true
+    );
+    let trees: Vec<_> = messages
+        .iter()
+        .filter(|message| message["method"] == "clojure/textDocument/testTree")
+        .map(|message| &message["params"])
+        .collect();
+    assert!(trees.len() >= 2, "{messages:#?}");
+    let first = trees
+        .iter()
+        .find(|params| params["tree"]["children"][0]["children"][0]["name"] == "🦊 outer")
+        .unwrap();
+    assert_eq!(first["uri"], file);
+    let tree = &first["tree"];
+    assert_eq!(tree["name"], "example");
+    assert_eq!(tree["kind"], 1);
+    assert_eq!(
+        tree["nameRange"],
+        json!({"start":{"line":0,"character":4},"end":{"line":0,"character":11}})
+    );
+    let test = &tree["children"][0];
+    assert_eq!(test["name"], "smoke");
+    assert_eq!(test["kind"], 2);
+    assert_eq!(test["children"].as_array().unwrap().len(), 1);
+    let outer = &test["children"][0];
+    assert_eq!(outer["kind"], 3);
+    assert_eq!(outer["children"][0]["name"], "inner");
+    assert_eq!(outer["children"][0]["kind"], 3);
+    assert!(outer["children"][0].get("children").is_none());
+    let text = source.lines().nth(2).unwrap();
+    let column = text[..text.find("t/testing").unwrap()]
+        .encode_utf16()
+        .count();
+    assert_eq!(
+        outer["children"][0]["nameRange"],
+        json!({"start":{"line":2,"character":column},"end":{"line":2,"character":column+9}})
+    );
+    assert_eq!(tree["children"][1]["name"], "empty-test");
+    assert_eq!(tree["children"][1]["children"], json!([]));
+    assert_eq!(
+        trees.last().unwrap()["tree"]["children"][0]["children"][0]["name"],
+        "🦊 revised"
+    );
+    let silent = transcript(&[init(false), open, shutdown, exit]);
+    assert!(
+        silent
+            .iter()
+            .all(|message| message["method"] != "clojure/textDocument/testTree")
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
 }
 
 fn copy_sources(from: &Path, to: &Path, relative: &Path) {

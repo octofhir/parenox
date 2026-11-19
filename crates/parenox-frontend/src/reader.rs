@@ -6,7 +6,9 @@ mod uniqueness;
 pub use edn::{read_edn, validate_edn};
 #[doc(hidden)]
 pub use namespace_map::qualify_namespaced_entries;
-pub use numbers::{NumericLiteral, classify_number};
+pub use numbers::{
+    IntegerLiteralClass, NumericLiteral, classify_number, classify_number_with_class,
+};
 
 use crate::syntax::{Builder, SyntaxKind, SyntaxNode};
 

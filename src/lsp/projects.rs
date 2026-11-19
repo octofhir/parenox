@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use parenox_lsp::structural::FoldingOptions;
 use serde_json::Value;
 
 use super::symbols;
@@ -15,9 +16,15 @@ pub(super) struct Projects {
     primary: Workspace,
     nested: BTreeMap<PathBuf, Workspace>,
     owners: BTreeMap<PathBuf, PathBuf>,
-    versioned_edits: bool,
-    snippets: bool,
-    hierarchical_symbols: bool,
+    client: ClientFeatures,
+}
+
+pub(super) struct ClientFeatures {
+    pub versioned_edits: bool,
+    pub snippets: bool,
+    pub hierarchical_symbols: bool,
+    pub folding: FoldingOptions,
+    pub test_tree: bool,
 }
 
 impl Projects {
@@ -25,28 +32,34 @@ impl Projects {
         root: PathBuf,
         options: &ProjectOptions,
         watch: bool,
-        versioned_edits: bool,
-        snippets: bool,
-        hierarchical_symbols: bool,
+        client: ClientFeatures,
     ) -> Self {
         let root = normalize(&root);
         Self {
-            primary: Workspace::load(root.clone(), options, watch, versioned_edits),
+            primary: Workspace::load(
+                root.clone(),
+                options,
+                watch,
+                client.versioned_edits,
+                client.test_tree,
+            ),
             root,
             nested: BTreeMap::new(),
             owners: BTreeMap::new(),
-            versioned_edits,
-            snippets,
-            hierarchical_symbols,
+            client,
         }
     }
 
     pub fn snippets(&self) -> bool {
-        self.snippets
+        self.client.snippets
     }
 
     pub fn hierarchical_symbols(&self) -> bool {
-        self.hierarchical_symbols
+        self.client.hierarchical_symbols
+    }
+
+    pub fn folding(&self) -> &FoldingOptions {
+        &self.client.folding
     }
 
     pub fn workspace_symbols(
@@ -102,7 +115,13 @@ impl Projects {
             return Ok(());
         };
         if !self.nested.contains_key(&root) {
-            let mut project = Workspace::load(root.clone(), &options, false, self.versioned_edits);
+            let mut project = Workspace::load(
+                root.clone(),
+                &options,
+                false,
+                self.client.versioned_edits,
+                self.client.test_tree,
+            );
             project.initialized(output)?;
             self.nested.insert(root.clone(), project);
         }

@@ -10,6 +10,12 @@ pub enum NumericLiteral {
     Unclassified,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegerLiteralClass {
+    Long,
+    BigInt,
+}
+
 pub(super) fn starts_number(text: &str) -> bool {
     let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
     unsigned.as_bytes().first().is_some_and(u8::is_ascii_digit)
@@ -32,30 +38,57 @@ pub(super) fn valid_number(token: &str) -> bool {
 /// Oversized ratio operands remain unclassified rather than approximating
 /// divisibility with a lossy floating-point calculation.
 pub fn classify_number(token: &str) -> NumericLiteral {
+    classify_number_with_class(token).0
+}
+
+/// Return JVM storage evidence for reader-validated integer literals.
+pub fn classify_number_with_class(token: &str) -> (NumericLiteral, Option<IntegerLiteralClass>) {
+    use IntegerLiteralClass::{BigInt, Long};
     let unsigned = token.strip_prefix(['+', '-']).unwrap_or(token);
     let negative = token.starts_with('-');
     if let Some((value, radix)) = integer_parts(unsigned) {
-        return match u128::from_str_radix(value, radix) {
+        let number = match u128::from_str_radix(value, radix) {
             Ok(magnitude) => bounded_integer(negative, magnitude),
             Err(error) if *error.kind() == IntErrorKind::PosOverflow => {
                 NumericLiteral::IntegerOutsideI64
             }
             Err(_) => NumericLiteral::Unclassified,
         };
+        let class = match number {
+            NumericLiteral::Integer(_)
+                if !unsigned.contains(['r', 'R']) && unsigned.ends_with('N') =>
+            {
+                Some(BigInt)
+            }
+            NumericLiteral::Integer(_) => Some(Long),
+            NumericLiteral::IntegerOutsideI64 => Some(BigInt),
+            _ => None,
+        };
+        return (number, class);
     }
     if let Some((numerator, denominator)) = unsigned.split_once('/') {
         return match (numerator.parse::<u128>(), denominator.parse::<u128>()) {
             (Ok(numerator), Ok(denominator)) if denominator != 0 => {
                 if numerator.is_multiple_of(denominator) {
-                    bounded_integer(negative, numerator / denominator)
+                    // LispReader divides through Numbers. Even integral ratios
+                    // take its BigInt path with oversized operands or Long/MIN_VALUE.
+                    let class = if numerator > i64::MAX as u128 || denominator > i64::MAX as u128 {
+                        BigInt
+                    } else {
+                        Long
+                    };
+                    (
+                        bounded_integer(negative, numerator / denominator),
+                        Some(class),
+                    )
                 } else {
-                    NumericLiteral::NonInteger
+                    (NumericLiteral::NonInteger, None)
                 }
             }
-            _ => NumericLiteral::Unclassified,
+            _ => (NumericLiteral::Unclassified, None),
         };
     }
-    NumericLiteral::NonInteger
+    (NumericLiteral::NonInteger, None)
 }
 
 fn bounded_integer(negative: bool, magnitude: u128) -> NumericLiteral {

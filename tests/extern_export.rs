@@ -16,6 +16,53 @@ fn export(sources: &[Source<'_>]) -> String {
 }
 
 #[test]
+fn exported_int_predicates_preserve_class_and_range_constraints() {
+    let source = Source {
+        path: "wire.clj",
+        source: r#"(ns wire (:require [clojure.spec.alpha :as s]))
+(s/def ::bounded (s/and int? (s/and integer? (s/conformer int))))
+(defn accept {:t/sig '[int? :-> boolean?]} [x] true)
+(defn accept-bounded {:t/sig '[::bounded :-> boolean?]} [x] true)
+"#,
+    };
+    let edn = export(&[source]);
+    let externs = [Source {
+        path: "wire.edn",
+        source: &edn,
+    }];
+    let client = r#"(ns client (:require [wire :as wire]))
+(defn use-wire {:t/sig '[:-> boolean?]} []
+  (wire/accept 2147483648)
+  (wire/accept-bounded 1))
+"#;
+    let check = |source: &str| {
+        Session::default().check_project_with_externs(
+            &[Source {
+                path: "client.clj",
+                source,
+            }],
+            &externs,
+        )
+    };
+    let valid = check(client);
+    assert!(valid.ok && valid.complete, "{valid:#?}");
+    for bad in [
+        client.replace("(wire/accept 2147483648)", "(wire/accept 1N)"),
+        client.replace(
+            "(wire/accept-bounded 1)",
+            "(wire/accept-bounded 2147483648)",
+        ),
+        client.replace("(wire/accept-bounded 1)", "(wire/accept-bounded 1N)"),
+    ] {
+        let invalid = check(&bad);
+        let [finding] = invalid.files[0].diagnostics.as_slice() else {
+            panic!("{invalid:#?}")
+        };
+        assert_eq!(finding.code, "PNX2322");
+    }
+}
+
+#[test]
 fn exported_showcase_checks_a_consumer_without_library_sources_or_named_specs() {
     let edn = export(&[SHOWCASE]);
     assert!(!edn.contains("::") && !edn.contains("demo.showcase/require-tenant"));

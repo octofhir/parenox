@@ -23,6 +23,131 @@ const NS: &str =
     "(ns adapter (:require [clojure.spec.alpha :as s] [lsp4clj.coercer :as-alias wire]))";
 
 #[test]
+fn checks_the_lsp_error_code_spec_at_typed_calls() {
+    let source = format!(
+        r#"{NS}
+(s/fdef accept :args (s/cat :code :error/code) :ret keyword?)
+(defn accept [code] :accepted)
+(defn forward {{:t/sig '[:-> keyword?]}} []
+  (accept 2147483648)
+  (accept :failed)
+  (accept 2/2)
+  (accept 36r1N)
+  (accept (s/conform ::wire/line 1N)))
+"#
+    );
+    let report = check(&source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for input in [
+        "1N",
+        "\"failed\"",
+        "1/2",
+        "9223372036854775808/9223372036854775808",
+    ] {
+        let bad = source.replace("2147483648", input);
+        let report = check(&bad);
+        let [finding] = report.files[1].diagnostics.as_slice() else {
+            panic!("{input}: {report:#?}")
+        };
+        assert_eq!(
+            (finding.code.as_str(), finding.severity),
+            ("PNX2322", "error")
+        );
+        assert_eq!(
+            &bad[finding.span.start.offset..finding.span.end.offset],
+            input
+        );
+    }
+}
+
+#[test]
+fn class_unknown_is_unproven_even_with_a_proven_range() {
+    let source = format!(
+        r#"{NS}
+(defn accept {{:t/sig '[:error/code :-> keyword?]}} [x] :accepted)
+(defn from-integer {{:t/sig '[integer? :-> keyword?]}} [x] (accept x))
+(defn from-int-range {{:t/sig '[::wire/line :-> keyword?]}} [x] (accept x))
+"#
+    );
+    let report = check(&source);
+    assert!(!report.complete, "{report:#?}");
+    let findings = &report.files[1].diagnostics;
+    assert_eq!(findings.len(), 2, "{report:#?}");
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.code == "PNX9004" && finding.severity == "error"),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn int_predicate_narrows_conditions_without_losing_a_known_range() {
+    let source = format!(
+        r#"{NS}
+(defn guarded {{:t/sig '[integer? :-> :error/code]}} [x]
+  (if (int? x) x :failed))
+(defn guarded-in-range {{:t/sig '[::wire/line :-> ::wire/line]}} [x]
+  (if (int? x) x 0))
+(defn checked-spec {{:t/sig '[number? :-> :error/code]}} [x]
+  (if (s/valid? :error/code x) x :failed))
+(defn wide {{:t/sig '[:-> #{{true}}]}} [] (int? 2147483648))
+(defn arbitrary {{:t/sig '[:-> #{{false}}]}} [] (int? 1N))
+(defn general {{:t/sig '[integer? :-> boolean?]}} [x] (int? x))
+(defn converted {{:t/sig '[:-> #{{true}}]}} [] (int? (s/conform ::wire/line 1N)))
+"#
+    );
+    let report = check(&source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (old, new, function) in [
+        (
+            "[integer? :-> boolean?]",
+            "[integer? :-> #{false}]",
+            "general",
+        ),
+        (
+            "(if (int? x) x 0)",
+            "(if (int? x) \"bad\" 0)",
+            "guarded-in-range",
+        ),
+    ] {
+        let report = check(&source.replace(old, new));
+        let [finding] = report.files[1].diagnostics.as_slice() else {
+            panic!("{report:#?}")
+        };
+        assert_eq!(finding.code, "PNX2322", "{report:#?}");
+        assert!(finding.message.contains(function), "{finding:#?}");
+    }
+}
+
+#[test]
+fn shadowed_int_predicates_do_not_refine_conditions_or_contracts() {
+    let source = r#"(ns adapter (:require [clojure.spec.alpha :as s]))
+(defn int? {:t/sig '[string? :-> boolean?]} [x] true)
+(s/def ::shadowed int?)
+(s/def ::fixed clojure.core/int?)
+(defn check {:t/sig '[string? :-> ::fixed]} [x]
+  (if (int? x) x 1))
+(defn lexical {:t/sig '[(s/fspec :args (s/cat :x string?) :ret boolean?) string? :-> ::fixed]}
+  [int? x] (if (int? x) x 1))
+"#;
+    let report = Session::default().check("adapter.clj", source);
+    let codes: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| finding.code.as_str())
+        .collect();
+    assert_eq!(codes, ["PNX9001", "PNX2322", "PNX2322"], "{report:#?}");
+    assert!(
+        report.diagnostics[0]
+            .message
+            .contains("Source predicate int? is unchecked")
+    );
+}
+
+#[test]
 fn checks_nested_lsp_ranges_across_namespaces() {
     let source = format!(
         r#"{NS}

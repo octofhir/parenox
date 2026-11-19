@@ -35,10 +35,7 @@ pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: 
     let renderer = renderer(color);
     let mut output = String::new();
     for diagnostic in diagnostics {
-        let title = diagnostic
-            .headline
-            .as_deref()
-            .unwrap_or(&diagnostic.message);
+        let title = diagnostic.title();
         let mut annotation =
             AnnotationKind::Primary.span(diagnostic.span.start.offset..diagnostic.span.end.offset);
         if let (Some(expected), Some(actual)) = (&diagnostic.expected, &diagnostic.actual) {

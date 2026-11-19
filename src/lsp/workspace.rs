@@ -1,4 +1,7 @@
 //! One workspace and its in-memory editor overlays.
+#[path = "call_hierarchy.rs"]
+mod call_hierarchy;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
@@ -8,6 +11,8 @@ use parenox::formatter::{self, FormatOptions, Language};
 use parenox::{
     Definition, Diagnostic, Session, Source, output::contract_note, reader::validate_edn,
 };
+use parenox_lsp::structural::{self, FoldingOptions};
+use parenox_lsp::{lenses, rename, semantic, test_tree};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -23,9 +28,11 @@ pub(super) struct Workspace {
     root: PathBuf,
     options: ProjectOptions,
     source_roots: Vec<PathBuf>,
+    editable_roots: Vec<PathBuf>,
     source_aliases: Vec<(PathBuf, PathBuf)>,
     register_watches: bool,
     versioned_edits: bool,
+    test_tree: bool,
     format_options: FormatOptions,
     documents: BTreeMap<String, Document>,
     externs: Vec<FileSnapshot>,
@@ -45,6 +52,7 @@ struct Editor {
     uri: String,
     version: i64,
     published: Option<Vec<Value>>,
+    test_tree: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +99,20 @@ pub(super) struct DocumentParams {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SelectionQuery {
+    text_document: DocumentUri,
+    positions: Vec<Position>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FormatRangeQuery {
+    text_document: DocumentUri,
+    range: Range,
+}
+
+#[derive(Deserialize)]
 pub(super) struct WatchedFiles {
     changes: Vec<FileEvent>,
 }
@@ -107,6 +129,14 @@ struct FileEvent {
 pub(super) struct TextQuery {
     text_document: DocumentUri,
     position: Position,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RenameQuery {
+    #[serde(flatten)]
+    query: TextQuery,
+    new_name: String,
 }
 
 #[derive(Deserialize)]
@@ -141,14 +171,17 @@ impl Workspace {
         options: &ProjectOptions,
         register_watches: bool,
         versioned_edits: bool,
+        test_tree: bool,
     ) -> Self {
         let mut workspace = Self {
             root,
             options: options.clone(),
             source_roots: Vec::new(),
+            editable_roots: Vec::new(),
             source_aliases: Vec::new(),
             register_watches,
             versioned_edits,
+            test_tree,
             format_options: FormatOptions::default(),
             documents: BTreeMap::new(),
             externs: Vec::new(),
@@ -184,6 +217,11 @@ impl Workspace {
     fn reload(&mut self) -> Result<(), String> {
         let settings = self.options.load_for_format(&self.root)?;
         let format_options = settings.format.clone();
+        let editable_roots = settings
+            .paths
+            .iter()
+            .map(|path| normalize(Path::new(path)))
+            .collect();
         let source_roots: Vec<_> = settings
             .analysis_paths()
             .map(|path| normalize(Path::new(path)))
@@ -245,6 +283,7 @@ impl Workspace {
         }
         self.documents = documents;
         self.source_roots = source_roots;
+        self.editable_roots = editable_roots;
         self.source_aliases = source_aliases;
         self.externs = project.externs;
         self.format_options = format_options;
@@ -275,6 +314,7 @@ impl Workspace {
                     uri,
                     version,
                     published: None,
+                    test_tree: None,
                 }),
             },
         );
@@ -397,6 +437,19 @@ impl Workspace {
                 for (path, document) in &mut self.documents {
                     document.check_standalone(path, output)?;
                 }
+                if self.test_tree {
+                    let paths: Vec<_> = self
+                        .documents
+                        .iter()
+                        .filter(|(path, document)| {
+                            document.editor.is_some() && is_clojure_source(Path::new(path))
+                        })
+                        .map(|(path, _)| path.clone())
+                        .collect();
+                    for path in paths {
+                        self.publish_test_tree(&path, output)?;
+                    }
+                }
                 Ok(())
             }
             Err(message) => log_load_error(output, &message),
@@ -423,7 +476,7 @@ impl Workspace {
             self.session.forget_file(&path);
         }
         publish(output, json!({"uri":editor.uri, "diagnostics":[]}))?;
-        if standalone || is_edn(Path::new(&path)) {
+        if standalone || !is_clojure_source(Path::new(&path)) {
             Ok(())
         } else {
             self.check(output)
@@ -433,10 +486,30 @@ impl Workspace {
     pub fn definition(&self, params: TextQuery) -> Option<Value> {
         let (path, offset) = self.query_offset(params)?;
         let target = self.session_for(&path)?.definition(&path, offset)?;
+        self.location(&target)
+    }
+
+    pub fn declaration(&self, params: TextQuery) -> Option<Value> {
+        let (path, offset) = self.query_offset(params)?;
+        let target = self.session_for(&path)?.declaration(&path, offset)?;
+        self.location(&target)
+    }
+
+    pub fn implementations(&self, params: TextQuery) -> Option<Vec<Value>> {
+        let (path, offset) = self.query_offset(params)?;
+        Some(
+            self.session_for(&path)?
+                .implementations(&path, offset)
+                .iter()
+                .filter_map(|target| self.location(target))
+                .collect(),
+        )
+    }
+
+    fn location(&self, target: &Definition) -> Option<Value> {
         let document = self.documents.get(&target.path)?;
         let range = Lines::new(&document.source).range(target.span)?;
-        let uri = document.uri(&target.path);
-        Some(json!({"uri": uri, "range": range}))
+        Some(json!({"uri":document.uri(&target.path),"range":range}))
     }
 
     pub fn references(&self, params: ReferenceQuery) -> Vec<Value> {
@@ -475,6 +548,52 @@ impl Workspace {
         )
     }
 
+    pub fn prepare_rename(&self, params: TextQuery) -> Option<Value> {
+        let (path, offset) = self.query_offset(params)?;
+        let session = self.session_for(&path)?;
+        let target = session.definition(&path, offset);
+        self.rename_document(target.as_ref().map_or(path.as_str(), |item| &item.path))?;
+        rename::prepare(session, &path, offset, &self.documents.get(&path)?.source)
+    }
+
+    pub fn rename(&self, params: RenameQuery) -> Result<Value, String> {
+        let (path, offset) = self
+            .query_offset(params.query)
+            .ok_or("No source at the rename position")?;
+        let session = self.session_for(&path).ok_or("No source project")?;
+        rename::edits(
+            session,
+            &path,
+            offset,
+            &params.new_name,
+            self.versioned_edits,
+            |file| self.rename_document(file),
+        )
+    }
+
+    pub fn linked_editing(&self, params: TextQuery) -> Option<Value> {
+        let (path, offset) = self.query_offset(params)?;
+        let document = self.rename_document(&path)?;
+        rename::linked(self.session_for(&path)?, &path, offset, document.source)
+    }
+
+    fn rename_document(&self, path: &str) -> Option<rename::Document<'_>> {
+        let document = self.documents.get(path)?;
+        if document.standalone.is_none()
+            && !self
+                .editable_roots
+                .iter()
+                .any(|root| visible_under(Path::new(path), root))
+        {
+            return None;
+        }
+        Some(rename::Document {
+            source: &document.source,
+            uri: document.uri(path),
+            version: document.editor.as_ref().map(|editor| editor.version),
+        })
+    }
+
     pub fn document_symbols(
         &self,
         params: DocumentParams,
@@ -489,6 +608,75 @@ impl Workspace {
             &document.uri(&path),
             &document.source,
             hierarchical,
+        ))
+    }
+
+    pub fn folding_ranges(
+        &self,
+        params: DocumentParams,
+        options: &FoldingOptions,
+    ) -> Option<Vec<Value>> {
+        let path = self.document_key(&params.text_document.uri)?;
+        let document = self.documents.get(&path)?;
+        let (_, symbols) = self.session_for(&path)?.document_symbols(&path)?;
+        Some(structural::folding_ranges(
+            &document.source,
+            symbols,
+            options,
+        ))
+    }
+
+    pub fn selection_ranges(&self, params: SelectionQuery) -> Option<Vec<Value>> {
+        let path = self.document_key(&params.text_document.uri)?;
+        let document = self.documents.get(&path)?;
+        let language = Language::for_path(Path::new(&path))?;
+        Some(structural::selection_ranges(
+            &document.source,
+            language == Language::Edn,
+            &params.positions,
+        ))
+    }
+
+    pub fn semantic_tokens_full(&self, params: DocumentParams) -> Option<Value> {
+        self.semantic_tokens(&params.text_document.uri, None)
+    }
+
+    pub fn code_lenses(&self, params: DocumentParams) -> Option<Vec<Value>> {
+        let path = self.document_key(&params.text_document.uri)?;
+        let document = self.documents.get(&path)?;
+        lenses::list(
+            self.session_for(&path)?,
+            &path,
+            &document.source,
+            &document.uri(&path),
+        )
+    }
+
+    pub fn resolve_code_lens(&self, query: lenses::Query) -> Option<Value> {
+        let path = self.document_key(&query.data.0)?;
+        let document = self.documents.get(&path)?;
+        lenses::resolve(self.session_for(&path)?, &path, &document.source, query)
+    }
+
+    pub fn semantic_tokens_range(&self, params: FormatRangeQuery) -> Option<Value> {
+        self.semantic_tokens(&params.text_document.uri, Some(params.range))
+    }
+
+    fn semantic_tokens(&self, uri: &str, range: Option<Range>) -> Option<Value> {
+        let path = self.document_key(uri)?;
+        if !is_clojure_source(Path::new(&path)) {
+            return None;
+        }
+        let document = self.documents.get(&path)?;
+        let bytes = match range {
+            Some(range) => Some(Lines::new(&document.source).byte_range(range)?),
+            None => None,
+        };
+        Some(semantic::tokens(
+            &document.source,
+            self.session_for(&path)?,
+            &path,
+            bytes,
         ))
     }
 
@@ -527,6 +715,35 @@ impl Workspace {
         Some(json!({"contents":{"kind":"plaintext","value":lines.join("\n")}}))
     }
 
+    pub fn signature_help(&self, params: TextQuery) -> Option<Value> {
+        let (path, offset) = self.query_offset(params)?;
+        let info = self.session_for(&path)?.call_signatures(&path, offset)?;
+        let signatures: Vec<_> = info
+            .signatures
+            .iter()
+            .map(|signature| {
+                let parameters: Vec<_> = signature
+                    .parameters
+                    .iter()
+                    .map(|label| json!({"label":label}))
+                    .collect();
+                let mut item = json!({
+                    "label":format!("({} [{}])", info.name, signature.parameters.join(" ")),
+                    "parameters":parameters,
+                });
+                if let Some(documentation) = &info.documentation {
+                    item["documentation"] = json!(documentation);
+                }
+                item
+            })
+            .collect();
+        let mut help = json!({"signatures":signatures,"activeSignature":info.active_signature});
+        if let Some(active) = info.active_parameter {
+            help["activeParameter"] = json!(active);
+        }
+        Some(help)
+    }
+
     pub fn completion(&self, params: TextQuery, snippets: bool) -> Option<Value> {
         let path = self.document_key(&params.text_document.uri)?;
         if !is_clojure_source(Path::new(&path)) {
@@ -538,6 +755,7 @@ impl Workspace {
         completion::complete(
             self.session_for(&path)?,
             &path,
+            &params.text_document.uri,
             &document.source,
             &lines,
             lines.offset(params.position)?,
@@ -545,16 +763,46 @@ impl Workspace {
         )
     }
 
+    pub fn resolve_completion(&self, item: Value) -> Value {
+        let Some(path) = completion::resolve_uri(&item).and_then(|uri| self.document_key(uri))
+        else {
+            return item;
+        };
+        match self.session_for(&path) {
+            Some(session) => completion::resolve(session, &path, item),
+            None => item,
+        }
+    }
+
     pub fn format_document(&self, params: DocumentParams) -> Option<Value> {
-        let path = self.document_key(&params.text_document.uri)?;
+        self.format(&params.text_document.uri, None)
+    }
+
+    pub fn format_range(&self, params: FormatRangeQuery) -> Option<Value> {
+        self.format(&params.text_document.uri, Some(params.range))
+    }
+
+    fn format(&self, uri: &str, range: Option<Range>) -> Option<Value> {
+        let path = self.document_key(uri)?;
         let language = Language::for_path(Path::new(&path))?;
         let document = self.documents.get(&path)?;
         document.editor.as_ref()?;
-        let text = formatter::format(&document.source, language, &self.format_options).ok()?;
+        let lines = Lines::new(&document.source);
+        let text = if let Some(range) = range {
+            formatter::format_lines(
+                &document.source,
+                language,
+                &self.format_options,
+                lines.line_selection(range)?,
+            )
+        } else {
+            formatter::format(&document.source, language, &self.format_options)
+        }
+        .ok()?;
         if text == document.source {
             return None;
         }
-        Some(json!(Lines::new(&document.source).formatting_edits(&text)))
+        Some(json!(lines.formatting_edits(&text)))
     }
 
     pub fn code_actions(&self, params: CodeActionQuery) -> Vec<Value> {
@@ -632,12 +880,41 @@ impl Workspace {
         let document = self.documents.get_mut(path).unwrap();
         if is_edn(Path::new(path)) {
             let diagnostic = validate_edn(&document.source).err().map(Diagnostic::from);
-            document.publish(diagnostic.as_slice(), output)
+            return document.publish(diagnostic.as_slice(), output);
+        } else if !is_clojure_source(Path::new(path)) {
+            return Ok(());
         } else if document.standalone.is_some() {
-            document.check_standalone(path, output)
+            document.check_standalone(path, output)?;
         } else {
-            self.check(output)
+            self.check(output)?;
         }
+        self.publish_test_tree(path, output)
+    }
+
+    fn publish_test_tree(&mut self, path: &str, output: &mut impl Write) -> io::Result<()> {
+        if !self.test_tree {
+            return Ok(());
+        }
+        let Some(document) = self.documents.get_mut(path) else {
+            return Ok(());
+        };
+        let Some(editor) = &mut document.editor else {
+            return Ok(());
+        };
+        let session = document.standalone.as_deref().unwrap_or(&self.session);
+        let tree = test_tree::params(session, path, &editor.uri, &document.source);
+        if tree != editor.test_tree {
+            if let Some(params) = &tree {
+                write_message(
+                    output,
+                    &json!({
+                        "jsonrpc":"2.0","method":"clojure/textDocument/testTree","params":params
+                    }),
+                )?;
+            }
+            editor.test_tree = tree;
+        }
+        Ok(())
     }
 
     fn check(&mut self, output: &mut impl Write) -> io::Result<()> {
@@ -755,7 +1032,8 @@ fn is_edn(path: &Path) -> bool {
 
 fn document_path(uri: &str) -> Option<String> {
     let path = file_path(uri)?;
-    (is_clojure_source(&path) || is_edn(&path)).then(|| path.to_string_lossy().into_owned())
+    Language::for_path(&path)?;
+    Some(path.to_string_lossy().into_owned())
 }
 
 fn publish(output: &mut impl Write, params: Value) -> io::Result<()> {
