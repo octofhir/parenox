@@ -92,6 +92,9 @@ The first implementation slice is `deps.edn` source-root and alias support wired
 
 ### First pilot project
 
+The [first product iteration](first-product-iteration.md) records the final
+RustRover workflow, JVM test results, and measurements on the pinned pilots.
+
 Use [lambdaisland/uri at `e439c2ca`](https://github.com/lambdaisland/uri/tree/e439c2ca068849df620e1c9275466cb1e8171aaa). It has a small source tree, a `deps.edn` test alias, `.cljc` reader conditionals, a URI record and a JVM-specific namespace for encoding operations. Keep the pinned checkout in a temporary test workspace. Parenox's Cargo dependency graph stays independent of the pilot. [Project configuration](https://github.com/lambdaisland/uri/blob/e439c2ca068849df620e1c9275466cb1e8171aaa/deps.edn), [Upstream tests](https://github.com/lambdaisland/uri/blob/e439c2ca068849df620e1c9275466cb1e8171aaa/test/lambdaisland/uri_test.cljc)
 
 1. Open the project with the `:test` alias and resolve `normalize/percent-decode` from `lambdaisland.uri` to its definition in `lambdaisland.uri.normalize`.

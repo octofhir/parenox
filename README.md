@@ -72,14 +72,17 @@ For RustRover and other JetBrains IDEs, import the supplied LSP4IJ template.
   unsaved edits over JSON Lines, then query the same project state.
 
 Parenox is an independent preview targeting Clojure 1.13. Static analysis runs
-without a JVM and reports gaps in coverage explicitly. Public type checks require
-a supported contract. [Supported language forms](docs/reference.md#current-scope)
+without a JVM and reports gaps in coverage explicitly. Unannotated code can
+receive project var, arity, and selected string input diagnostics. Supported
+contracts extend checking to call and return types.
+[Supported language forms](docs/reference.md#current-scope)
 
 ## Documentation
 
 - [Command and language reference](docs/reference.md)
 - [Clinic example](examples/clinic)
 - [Tooling roadmap](docs/design/type-checker-research.md)
+- [First product iteration and pilot measurements](docs/design/first-product-iteration.md)
 
 For development, run `just verify` for formatting, Clippy, and tests.
 `just agent-loop` exercises the clinic edit-and-check workflow.
