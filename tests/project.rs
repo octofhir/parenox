@@ -4,6 +4,65 @@ use std::collections::BTreeMap;
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
 #[test]
+fn typed_callers_report_the_gap_at_unchecked_source_calls() {
+    let app = Source {
+        path: "app.cljc",
+        source: "(ns app (:require [labels :as l]))
+                 (defn display {:t/sig '[string? :-> string?]} [id] (l/title id))",
+    };
+    let labels = Source {
+        path: "labels.clj",
+        source: "(ns labels) (defn title [id] (str id))",
+    };
+    let mut session = Session::default();
+    let initial = session.check_project(&[app, labels], None);
+    let [gap] = initial.files[0].diagnostics.as_slice() else {
+        panic!("{initial:#?}")
+    };
+    assert_eq!(gap.code, "PNX9002");
+    assert_eq!(gap.severity, "warning");
+    assert_eq!(
+        &app.source[gap.span.start.offset..gap.span.end.offset],
+        "l/title"
+    );
+
+    let externs = Source {
+        path: "api.edn",
+        source: "{labels/title [string? :-> string?]}",
+    };
+    let trusted = session.check_project_with_externs(&[app, labels], &[externs]);
+    assert!(trusted.files[0].diagnostics.is_empty(), "{trusted:#?}");
+
+    for (provider, code) in [
+        (
+            "(ns labels) (defn title [id mode] (str id mode))",
+            "PNX2554",
+        ),
+        (
+            "(ns labels) (defn title {:t/sig '[number? :-> string?]} [id] (str id))",
+            "PNX2322",
+        ),
+        ("(ns labels)", "PNX2304"),
+    ] {
+        let report = session.check_project(
+            &[
+                app,
+                Source {
+                    source: provider,
+                    ..labels
+                },
+            ],
+            None,
+        );
+        let [finding] = report.files[0].diagnostics.as_slice() else {
+            panic!("{report:#?}")
+        };
+        assert_eq!(finding.code, code);
+        assert_eq!(finding.severity, "error");
+    }
+}
+
+#[test]
 fn known_source_macro_expansions_report_coverage_and_follow_provider_edits() {
     let app = Source {
         path: "app.cljc",

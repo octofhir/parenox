@@ -382,6 +382,7 @@ impl Checker<'_> {
                             }).collect(),
                         ),
                         DeclaredValue::Function(contract) => Value::from_contract(contract),
+                        DeclaredValue::UncheckedFunction(_) => self.unchecked_function(s, form.span),
                         DeclaredValue::Macro(scope) => self.macro_gap(
                             scope, form.span, format!("Macro {} is not a function value", scope.origin().name)
                         ),

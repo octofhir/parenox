@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::{
-    Contract, DeclaredValue, Function, Globals, LiteralVar, Model, Names,
+    Contract, DeclaredValue, Function, Globals, LiteralVar, Model, Names, UncheckedFunction,
     declarations::symbols_match,
     externs::{ExternalDeclaration, ExternalDeclarations},
 };
@@ -15,6 +15,7 @@ pub(super) type Contracts = BTreeMap<String, Contract>;
 pub(super) struct Exports {
     pub functions: Contracts,
     pub literals: BTreeMap<String, Type>,
+    unchecked_functions: BTreeMap<String, UncheckedFunction>,
     private_vars: BTreeSet<String>,
 }
 
@@ -23,6 +24,7 @@ impl Exports {
         self.functions
             .keys()
             .chain(self.literals.keys())
+            .chain(self.unchecked_functions.keys())
             .map(|qualified| qualified.split_once('/').unwrap().1)
     }
 }
@@ -43,13 +45,19 @@ pub(super) fn visible_value<'a>(
             return None;
         }
     }
-    Some(match externs()?.get(name)? {
-        ExternalDeclaration::Function(contract) => DeclaredValue::Function(contract),
-        ExternalDeclaration::Macro(scope) => DeclaredValue::Macro(scope),
-        ExternalDeclaration::Literal(literal) => {
-            DeclaredValue::ExternLiteral(&literal.ty, &literal.origin)
-        }
-    })
+    if let Some(declaration) = externs().and_then(|table| table.get(name)) {
+        return Some(match declaration {
+            ExternalDeclaration::Function(contract) => DeclaredValue::Function(contract),
+            ExternalDeclaration::Macro(scope) => DeclaredValue::Macro(scope),
+            ExternalDeclaration::Literal(literal) => {
+                DeclaredValue::ExternLiteral(&literal.ty, &literal.origin)
+            }
+        });
+    }
+    source?
+        .unchecked_functions
+        .get(name)
+        .map(DeclaredValue::UncheckedFunction)
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -59,6 +67,7 @@ pub(super) struct LocalInterface {
     specs: Arc<BTreeMap<String, Type>>,
     literals: BTreeMap<String, LiteralVar>,
     functions: BTreeMap<String, LocalFunction>,
+    unchecked_functions: BTreeMap<String, UncheckedFunction>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -190,6 +199,8 @@ impl InterfaceChanges<'_> {
                 old.functions.get(&qualified),
                 allow_binder_renames,
             ) && current.literals.get(&qualified) == old.literals.get(&qualified)
+                && current.unchecked_functions.get(&qualified)
+                    == old.unchecked_functions.get(&qualified)
         }) && external.is_none_or(|(current, old)| {
             current.in_project == old.in_project
                 && same_visible_value(
@@ -257,6 +268,15 @@ impl Model {
                 exports.literals.insert(name.clone(), value.ty.clone());
             }
         }
+        for (name, function) in &self.unchecked_functions {
+            if function.private {
+                exports.private_vars.insert(name.clone());
+            } else {
+                exports
+                    .unchecked_functions
+                    .insert(name.clone(), function.clone());
+            }
+        }
         self.exports = Arc::new(exports);
         self.local_interface = Arc::new(LocalInterface {
             names: self.names.clone(),
@@ -264,6 +284,7 @@ impl Model {
             specs,
             literals: self.literals.clone(),
             functions,
+            unchecked_functions: self.unchecked_functions.clone(),
         });
     }
 

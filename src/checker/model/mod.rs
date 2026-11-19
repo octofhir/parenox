@@ -87,11 +87,18 @@ pub(crate) struct FunctionArity {
     pub span: Span,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct UncheckedFunction {
+    pub arities: Option<Arc<[Arity]>>,
+    private: bool,
+}
+
 #[derive(PartialEq, Eq)]
 pub(super) enum DeclaredValue<'a> {
     Literal(&'a Type),
     ExternLiteral(&'a Type, &'a ContractOrigin),
     Function(&'a Contract),
+    UncheckedFunction(&'a UncheckedFunction),
     Macro(&'a MacroScope),
 }
 
@@ -136,6 +143,7 @@ pub(crate) struct Model {
     path: String,
     externs: Option<Arc<ExternFile>>,
     literals: BTreeMap<String, LiteralVar>,
+    unchecked_functions: BTreeMap<String, UncheckedFunction>,
     exports: Arc<Exports>,
     local_interface: Arc<LocalInterface>,
     external_specs: BTreeMap<String, Option<Type>>,
@@ -203,16 +211,26 @@ impl Model {
         }
         let mut fdefs = model.collect_fdefs(&declarations.fdefs, forms);
         let mut guards = BTreeMap::new();
+        let source_arities_known = declarations.has_known_var_surface(forms);
         for &index in &declarations.functions {
             let form = &forms[index];
             let Kind::List(xs) = &form.without_metadata().kind else {
                 unreachable!()
             };
-            model.read_function(xs, form.span, globals, &mut fdefs, &mut guards);
+            model.read_function(
+                xs,
+                form.span,
+                globals,
+                &mut fdefs,
+                &mut guards,
+                source_arities_known,
+            );
         }
         for (local, var) in &declarations.forward_vars {
             let qualified = format!("{}/{local}", model.namespace());
-            if !model.literals.contains_key(&qualified) && !model.functions.contains_key(&qualified)
+            if !model.literals.contains_key(&qualified)
+                && !model.functions.contains_key(&qualified)
+                && !model.unchecked_functions.contains_key(&qualified)
             {
                 model.names.refers.remove(local);
                 model.literals.insert(
@@ -429,8 +447,13 @@ impl Model {
         if let Some(function) = self.functions.get(&qualified) {
             return function.contract.as_ref().map(DeclaredValue::Function);
         }
+        let local = self.unchecked_functions.get(&qualified);
+        if let Some(function) = local.filter(|function| function.private) {
+            return Some(DeclaredValue::UncheckedFunction(function));
+        }
         globals
             .declared_value(&qualified)
+            .or_else(|| local.map(DeclaredValue::UncheckedFunction))
             .or_else(|| globals.declared_value(&self.resolve(name)))
     }
 }

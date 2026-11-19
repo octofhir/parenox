@@ -777,6 +777,11 @@ lookups, and conditions. For example, the second value from destructuring
 that the value passed to `str/replace` is a string. Unknown inputs and opaque
 expressions retain incomplete coverage.
 
+A checked function can call a source function that has no contract yet. The
+call reports a `PNX9002` coverage warning, and explicit source arities still
+apply. A supported source signature or a trusted extern supplies typing for
+the call. The source declaration still reports its own coverage status.
+
 At calls and returns, an unknown type does not hide a mismatch in a different
 part of the value. If missing type information prevents checking the contract
 and there is no local diagnostic yet, Parenox reports `PNX9004` and marks the

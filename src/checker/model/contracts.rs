@@ -62,6 +62,7 @@ impl Model {
         globals: &Globals,
         fdefs: &mut BTreeMap<String, &[Form]>,
         guards: &mut BTreeMap<String, &'a Form>,
+        source_arities_known: bool,
     ) {
         let Some(symbol) = xs.get(1).and_then(Form::symbol) else {
             self.error("PNX9001", span, "defn requires a function name");
@@ -107,14 +108,17 @@ impl Model {
             default_private
         };
         let metadata = |key| attribute(key).or_else(|| xs[1].metadata(key));
-        let signature = metadata(":t/sig");
-        let guard = metadata(":t/guard").filter(|guard| {
-            // An inline expansion or a dynamic var can bypass the verified body.
-            if [":dynamic", ":inline", ":macro"].iter().any(|key| {
+        let opaque_callable = || {
+            [":dynamic", ":inline", ":macro"].iter().any(|key| {
                 metadata(key).is_some_and(|form| {
                     !matches!(form.without_metadata().kind, Kind::Nil | Kind::Bool(false))
                 })
-            }) {
+            })
+        };
+        let signature = metadata(":t/sig");
+        let guard = metadata(":t/guard").filter(|guard| {
+            // An inline expansion or a dynamic var can bypass the verified body.
+            if opaque_callable() {
                 self.error(
                     "PNX9008",
                     guard.span,
@@ -133,12 +137,23 @@ impl Model {
                 return;
             }
         };
-        if inferred && !private {
-            self.error(
-                "PNX9002",
-                span,
-                format!("Public function {name} needs a :t/sig or s/fdef signature"),
-            );
+        if inferred && (!private || clauses.len() > 1) {
+            let message = if private {
+                format!("Multi-arity private function {name} needs a :t/sig annotation")
+            } else {
+                format!("Public function {name} needs a :t/sig or s/fdef signature")
+            };
+            let arities = (source_arities_known && !opaque_callable())
+                .then(|| clauses.keys().copied().collect());
+            self.unchecked_functions
+                .entry(name)
+                .and_modify(|function| {
+                    function.arities = None;
+                    function.private |= private;
+                })
+                .or_insert(super::UncheckedFunction { arities, private });
+            self.names.refers.remove(symbol);
+            self.error("PNX9002", span, message);
             return;
         }
         let arities: BTreeMap<_, _> = clauses
@@ -154,14 +169,6 @@ impl Model {
                 )
             })
             .collect();
-        if inferred && arities.len() > 1 {
-            self.error(
-                "PNX9002",
-                span,
-                format!("Multi-arity private function {name} needs a :t/sig annotation"),
-            );
-            return;
-        }
         let declared = if let Some(signature) = signature {
             if !matches!(signature.without_metadata().kind, Kind::Quote(_)) {
                 self.error("PNX9001", signature.span, ":t/sig must be quoted data");

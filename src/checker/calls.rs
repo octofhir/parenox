@@ -202,6 +202,31 @@ impl<'model> Checker<'model> {
                 Some(DeclaredValue::Macro(scope)) => {
                     return self.macro_scope(scope, &xs[1..], span, env);
                 }
+                Some(DeclaredValue::UncheckedFunction(function)) => {
+                    if let Some(arities) = &function.arities {
+                        if self
+                            .eval_args(&xs[1..], env, true)
+                            .last()
+                            .is_some_and(|(arg, _)| arg.known == Type::Never)
+                        {
+                            return Value::new(Type::Never);
+                        }
+                        let count = xs.len() - 1;
+                        if !arities.iter().any(|arity| arity.accepts(count)) {
+                            self.error(
+                                "PNX2554",
+                                xs[0].span,
+                                format!(
+                                    "{name} expects {} arguments, got {count}",
+                                    arity_counts(arities.iter().copied())
+                                ),
+                            );
+                            self.may_throw();
+                            return Value::new(Type::Unknown);
+                        }
+                    }
+                    return self.unchecked_function(name, xs[0].span);
+                }
                 None => {
                     let resolved = self.model.resolve(name);
                     if resolved == "clojure.core/deref" {
@@ -230,6 +255,16 @@ impl<'model> Checker<'model> {
         let function = self.infer(&xs[0], env);
         let args = self.call_args(&function, &xs[1..], span, env);
         self.call_value(&function, &args, xs[0].span, span)
+    }
+
+    pub(super) fn unchecked_function(&mut self, name: &str, span: Span) -> Value {
+        self.may_throw();
+        self.diagnostics.push(Diagnostic::analysis_gap(
+            "PNX9002",
+            span,
+            format!("No checked signature for source function {name}"),
+        ));
+        Value::new(Type::Unknown)
     }
 
     fn deref_call(&mut self, args: &[Form], span: Span, env: &Env) -> Value {
