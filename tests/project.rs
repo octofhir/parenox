@@ -4,6 +4,51 @@ use std::collections::{BTreeMap, BTreeSet};
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
 #[test]
+fn protocol_methods_navigate_to_their_declaration_with_unchecked_dispatch() {
+    let provider = Source {
+        path: "notice.cljc",
+        source: r#"(ns notice)
+          (defprotocol ^:private Notice "Text notices" :extend-via-metadata true
+            (^:private mention [this])
+            (speak [this] [this tone] "Speak with an optional tone"))"#,
+    };
+    let app = Source {
+        path: "app.cljc",
+        source: "(ns app (:require [notice :as n]))
+            (defn greet {:t/sig '[string? :-> string?]} [x] (n/speak x :soft))
+            (defn visible [] [n/Notice n/mention])",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app, provider], None);
+    let target = session
+        .definition(app.path, app.source.find("n/speak").unwrap())
+        .unwrap();
+    assert_eq!(target.path, provider.path);
+    assert_eq!(target.span.start.line, 4);
+    for hidden in ["n/Notice", "n/mention"] {
+        assert!(
+            session
+                .definition(app.path, app.source.find(hidden).unwrap())
+                .is_none()
+        );
+    }
+    assert!(
+        report
+            .files
+            .iter()
+            .flat_map(|file| &file.diagnostics)
+            .all(|d| d.severity == "warning"),
+        "{report:#?}"
+    );
+    assert!(
+        report.files[0]
+            .diagnostics
+            .iter()
+            .any(|d| { d.message == "No checked signature for source function n/speak" })
+    );
+}
+
+#[test]
 fn unqualified_uses_navigate_to_private_and_forward_namespace_vars() {
     let source = "(ns demo)\n\
         (defn- helper {:t/sig '[:-> string?]} [] \"ok\")\n\

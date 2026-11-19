@@ -795,6 +795,8 @@ Top-level `let`, `require`, and `clojure.test/testing` report incomplete
 coverage. Vars and imports created by those expressions depend on runtime
 evaluation. Direct `defn` and `defn-` forms inside a top-level `let` provide
 source navigation and keep their captured values and call types unchecked.
+`defprotocol` provides navigation to the protocol var and its method vars.
+Protocol dispatch and method signatures remain unchecked.
 
 Supported string operations can also report input mismatches in a function
 without a contract. This analysis follows supported local bindings, map

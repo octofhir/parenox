@@ -62,7 +62,9 @@ impl Declarations {
             return ProjectCall::Missing;
         }
         let expected_arity = match declaration {
-            SourceDeclaration::Value(_) => return ProjectCall::Unknown,
+            SourceDeclaration::Value(_) | SourceDeclaration::Protocol(_) => {
+                return ProjectCall::Unknown;
+            }
             SourceDeclaration::RecordFactory { arity, .. } => {
                 (!arity.accepts(actual)).then(|| arity.to_string())
             }
@@ -190,6 +192,10 @@ impl Declarations {
             .chain(
                 self.scoped_functions(forms)
                     .filter_map(|items| items[1].symbol()),
+            )
+            .chain(
+                self.protocol_vars(forms)
+                    .filter_map(|var| var.name.symbol()),
             )
             .collect()
     }

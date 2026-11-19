@@ -101,9 +101,7 @@ impl Model {
         self.insert_literal(symbol, name, ty, private, name_form.span);
     }
 
-    pub(super) fn read_unchecked_var(&mut self, xs: &[Form], private: bool) {
-        let op = xs[0].symbol().unwrap();
-        let name_form = &xs[1];
+    pub(super) fn read_unchecked_var(&mut self, name_form: &Form, op: &str, private: bool) {
         let symbol = name_form.symbol().unwrap();
         if let Some(name) = self.definition_name(symbol, name_form.span, op) {
             self.insert_literal(symbol, name, Type::Unknown, private, name_form.span);

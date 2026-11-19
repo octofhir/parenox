@@ -207,7 +207,11 @@ impl Model {
             let Kind::List(xs) = &forms[index].without_metadata().kind else {
                 unreachable!()
             };
-            model.read_unchecked_var(xs, declarations.private_var(xs));
+            model.read_unchecked_var(
+                &xs[1],
+                xs[0].symbol().unwrap(),
+                declarations.private_var(xs),
+            );
         }
         let mut fdefs = model.collect_fdefs(&declarations.fdefs, forms);
         let mut guards = BTreeMap::new();
@@ -227,7 +231,14 @@ impl Model {
             );
         }
         for items in declarations.scoped_functions(forms) {
-            model.read_scoped_function(items, declarations.private_var(items));
+            model.read_unchecked_function(&items[1], "defn", declarations.private_var(items));
+        }
+        for var in declarations.protocol_vars(forms) {
+            if var.method {
+                model.read_unchecked_function(var.name, "defprotocol", var.private());
+            } else {
+                model.read_unchecked_var(var.name, "defprotocol", var.private());
+            }
         }
         for (local, var) in &declarations.forward_vars {
             let qualified = format!("{}/{local}", model.namespace());
@@ -255,7 +266,7 @@ impl Model {
                 model.diagnostics.push(Diagnostic::analysis_gap(
                     "PNX9001",
                     parts[1].span,
-                    format!("s/fdef body checks are unavailable for scoped function {name}"),
+                    format!("s/fdef body checks are unavailable for source function {name}"),
                 ));
             } else {
                 model.error(

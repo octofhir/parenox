@@ -230,9 +230,9 @@ impl Model {
         }
     }
 
-    pub(super) fn read_scoped_function(&mut self, items: &[Form], private: bool) {
-        let symbol = items[1].symbol().unwrap();
-        if let Some(name) = self.definition_name(symbol, items[1].span, "defn") {
+    pub(super) fn read_unchecked_function(&mut self, name_form: &Form, op: &str, private: bool) {
+        let symbol = name_form.symbol().unwrap();
+        if let Some(name) = self.definition_name(symbol, name_form.span, op) {
             self.remember_unchecked_function(
                 name,
                 symbol,

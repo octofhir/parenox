@@ -54,6 +54,11 @@ impl Model {
                     .scoped_functions(forms)
                     .filter_map(|items| items[1].symbol()),
             )
+            .chain(
+                declarations
+                    .protocol_vars(forms)
+                    .filter_map(|var| var.name.symbol()),
+            )
             .collect();
         for (name, claim) in claims {
             match prove(self, &self.functions[&name], claim, &local_vars) {

@@ -16,6 +16,20 @@ pub(super) enum SourceDeclaration<'a> {
     Function(&'a [Form]),
     Value(&'a [Form]),
     RecordFactory { name: &'a Form, arity: Arity },
+    Protocol(ProtocolVar<'a>),
+}
+
+pub(super) struct ProtocolVar<'a> {
+    pub name: &'a Form,
+    pub method: bool,
+}
+
+impl ProtocolVar<'_> {
+    pub fn private(&self) -> bool {
+        self.name.metadata(":private").is_some_and(|value| {
+            !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
+        })
+    }
 }
 
 struct ScopedFunction {
@@ -108,6 +122,7 @@ pub(crate) struct Declarations {
     unmodeled_calls: Vec<usize>,
     pub(super) forward_vars: BTreeMap<String, DeclaredVar>,
     records: Vec<usize>,
+    protocols: Vec<usize>,
     pub(super) opaque_var_surface: bool,
     pub(super) diagnostics: Vec<Diagnostic>,
 }
@@ -149,6 +164,7 @@ impl Declarations {
         let name = match declaration {
             SourceDeclaration::Function(items) | SourceDeclaration::Value(items) => &items[1],
             SourceDeclaration::RecordFactory { name, .. } => name,
+            SourceDeclaration::Protocol(var) => var.name,
         };
         Some(name.without_metadata().span)
     }
@@ -221,7 +237,38 @@ impl Declarations {
             .scoped_functions(forms)
             .filter(move |items| items[1].symbol() == Some(local))
             .map(SourceDeclaration::Function);
-        named.chain(factories).chain(scoped)
+        let protocols = self
+            .protocol_vars(forms)
+            .filter(move |var| var.name.symbol() == Some(local))
+            .map(SourceDeclaration::Protocol);
+        named.chain(factories).chain(scoped).chain(protocols)
+    }
+
+    pub(super) fn protocol_vars<'a>(
+        &'a self,
+        forms: &'a [Form],
+    ) -> impl Iterator<Item = ProtocolVar<'a>> {
+        self.protocols.iter().flat_map(move |&index| {
+            let Kind::List(items) = &forms[index].without_metadata().kind else {
+                unreachable!();
+            };
+            let protocol = ProtocolVar {
+                name: &items[1],
+                method: false,
+            };
+            let methods = protocol_methods(&items[2..]).iter().filter_map(|form| {
+                let Kind::List(items) = &form.without_metadata().kind else {
+                    return None;
+                };
+                let [name, params, ..] = items.as_slice() else {
+                    return None;
+                };
+                (name.symbol().is_some_and(unqualified)
+                    && params.vector().is_some_and(|args| !args.is_empty()))
+                .then_some(ProtocolVar { name, method: true })
+            });
+            std::iter::once(protocol).chain(methods)
+        })
     }
 
     pub(super) fn scoped_functions<'a>(
@@ -245,6 +292,7 @@ impl Declarations {
                 self.private_var(items)
             }
             SourceDeclaration::RecordFactory { .. } => false,
+            SourceDeclaration::Protocol(var) => var.private(),
         }
     }
 
@@ -416,6 +464,10 @@ impl Declarations {
                 qualified if known_unsupported_declaration(qualified, xs) => {
                     match qualified {
                         "clojure.core/defrecord" => model.records.push(index),
+                        "clojure.core/defprotocol" => {
+                            model.protocols.push(index);
+                            model.opaque_var_surface = true;
+                        }
                         "clojure.core/defmethod" => {}
                         "clojure.core/let" => {
                             if op.contains('/')
@@ -674,6 +726,16 @@ fn multimethod_parts(tail: &[Form]) -> (&[Form], &[Form]) {
     match tail.split_first() {
         Some((first, rest)) if first.map().is_some() => (first.map().unwrap(), rest),
         _ => (&[], tail),
+    }
+}
+
+fn protocol_methods(mut tail: &[Form]) -> &[Form] {
+    loop {
+        match tail {
+            [head, rest @ ..] if head.is_string() => tail = rest,
+            [head, _, rest @ ..] if head.keyword().is_some() => tail = rest,
+            _ => return tail,
+        }
     }
 }
 
