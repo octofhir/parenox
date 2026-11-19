@@ -792,8 +792,8 @@ source navigation and keep their captured values and call types unchecked.
 
 Supported string operations can also report input mismatches in a function
 without a contract. This analysis follows supported local bindings, map
-lookups, and conditions. For example, the second value from destructuring
-`str/split` can be nil when the separator is absent. A guard can establish
+lookups, conditions, and arguments to known functions. The second value from
+destructuring `str/split` can be nil when the separator is absent. A guard can establish
 that the value passed to `str/replace` is a string. Unknown inputs and opaque
 expressions retain incomplete coverage.
 

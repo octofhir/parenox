@@ -500,12 +500,20 @@ fn uri_untyped_nil(root: &Path) {
     let relative = Path::new("src/lambdaisland/uri.cljc");
     let caller = root.join(relative);
     let source = fs::read_to_string(&caller).unwrap();
-    let replacement = r##"(str/replace v #"\+" " ")"##;
-    let edited = source.replace(replacement, "escaped").replace(
-        "(str/split param #\"=\" 2)]",
-        &format!("(str/split param #\"=\" 2)\n        escaped {replacement}]"),
+    let edited = source.replacen(
+        "(if v (normalize/percent-decode (str/replace",
+        "(if true (normalize/percent-decode (str/replace",
+        1,
     );
     assert_ne!(edited, source);
+    let line = 134;
+    let character = edited
+        .lines()
+        .nth(line)
+        .unwrap()
+        .find("str/replace v")
+        .unwrap()
+        + "str/replace ".len();
     let document = uri(&caller);
     let change = |version, text| {
         json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
@@ -529,7 +537,7 @@ fn uri_untyped_nil(root: &Path) {
         .unwrap();
     assert_eq!(
         mismatch["range"]["start"],
-        json!({"line":133,"character":29})
+        json!({"line":line,"character":character})
     );
     assert!(
         mismatch["message"]

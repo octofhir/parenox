@@ -1,6 +1,6 @@
 //! Type findings from selected built-in calls in bodies that have no contract.
 use super::contracts::function_parts;
-use super::{Declarations, Globals, Model};
+use super::{Declarations, DeclaredValue, Globals, Model};
 use crate::Diagnostic;
 use crate::checker::{Checker, Env, Value, function_forms::function_clauses};
 use crate::reader::{Form, Kind};
@@ -88,11 +88,8 @@ impl Checker<'_> {
         if matches!(name, "if" | "do" | "quote") || env.contains_key(name) {
             return true;
         }
-        if shadowed.contains(name) {
-            return false;
-        }
         let resolved = self.model.resolve(name);
-        partial_string_operator(&resolved)
+        let modeled = partial_string_operator(&resolved)
             || matches!(
                 resolved.strip_prefix("clojure.core/"),
                 Some(
@@ -116,7 +113,15 @@ impl Checker<'_> {
                         | "some->"
                         | "some->>"
                 )
-            )
+            );
+        if modeled && !shadowed.contains(name) {
+            return true;
+        }
+        match self.model.declared_value(name, self.globals) {
+            Some(DeclaredValue::Function(_)) => true,
+            Some(DeclaredValue::UncheckedFunction(function)) => function.arities.is_some(),
+            _ => false,
+        }
     }
 }
 

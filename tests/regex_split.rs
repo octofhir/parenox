@@ -94,6 +94,38 @@ fn pattern_contract_survives_export_and_checks_consumers() {
 }
 
 #[test]
+fn known_project_calls_allow_checking_string_operations_in_their_arguments() {
+    let app = Source {
+        path: "app.cljc",
+        source: "(ns app (:require [catalog :as c] [clojure.string :as str]))\n\
+            (defn label [] (c/keep (str/trim nil)))",
+    };
+    let catalog = Source {
+        path: "catalog.clj",
+        source: "(ns catalog) (defn keep [value] value)",
+    };
+    let mut session = Session::default();
+    let plain = session.check_project(&[app, catalog], None);
+    assert!(
+        plain.files[0]
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX2322")
+    );
+    let dynamic = Source {
+        source: "(ns catalog) (defn ^:dynamic keep [value] value)",
+        ..catalog
+    };
+    let unchecked = session.check_project(&[app, dynamic], None);
+    assert!(
+        unchecked.files[0]
+            .diagnostics
+            .iter()
+            .all(|finding| finding.severity == "warning")
+    );
+}
+
+#[test]
 fn blank_string_guards_narrow_optional_map_fields_before_replacement() {
     let mut session = Session::default();
     assert!(session.check("regex_split.cljc", SOURCE).ok);
