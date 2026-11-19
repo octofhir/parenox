@@ -35,6 +35,28 @@ pub(super) fn valid_number(token: &str) -> bool {
     decimal(unsigned)
 }
 
+pub(super) fn integer_key(token: &str) -> Option<(bool, u128)> {
+    let unsigned = token.strip_prefix(['+', '-']).unwrap_or(token);
+    let (digits, radix) = if let Some((base, value)) = unsigned.split_once(['r', 'R']) {
+        let base = base.parse().ok().filter(|base| (2..=36).contains(base))?;
+        (value, base)
+    } else {
+        let integer = unsigned.strip_suffix('N').unwrap_or(unsigned);
+        if let Some(hex) = integer
+            .strip_prefix("0x")
+            .or_else(|| integer.strip_prefix("0X"))
+        {
+            (hex, 16)
+        } else if integer.starts_with('0') {
+            (integer, 8)
+        } else {
+            (integer, 10)
+        }
+    };
+    let magnitude = u128::from_str_radix(digits, radix).ok()?;
+    Some((token.starts_with('-') && magnitude != 0, magnitude))
+}
+
 fn digits(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|digit| digit.is_ascii_digit())
 }

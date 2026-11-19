@@ -1,6 +1,7 @@
 //! Detect reader-level duplicates whose equality is known from inert syntax.
 use std::collections::BTreeSet;
 
+use super::numbers::integer_key;
 use super::{Form, Kind, ReadError, SymbolicNumber};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -8,6 +9,7 @@ enum Atom<'a> {
     Nil,
     Bool(bool),
     Character(char),
+    Integer(bool, u128),
     Number(&'a str),
     SymbolicNumber(SymbolicNumber),
     String(&'a str),
@@ -43,7 +45,12 @@ fn check<'a>(
             Kind::Nil => Atom::Nil,
             Kind::Bool(value) => Atom::Bool(*value),
             Kind::Character(value) => Atom::Character(*value),
-            Kind::Number => Atom::Number(&source[value.span.start.offset..value.span.end.offset]),
+            Kind::Number => {
+                let spelling = &source[value.span.start.offset..value.span.end.offset];
+                integer_key(spelling).map_or(Atom::Number(spelling), |(negative, magnitude)| {
+                    Atom::Integer(negative, magnitude)
+                })
+            }
             Kind::SymbolicNumber(value) => Atom::SymbolicNumber(*value),
             Kind::String(value) => Atom::String(value),
             Kind::Utf16String(value) => Atom::Utf16String(value),

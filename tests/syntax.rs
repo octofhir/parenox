@@ -308,6 +308,34 @@ fn duplicate_map_keys_report_the_second_spelling_and_preserve_recovery() {
 }
 
 #[test]
+fn literal_uniqueness_compares_integer_values_across_reader_spellings() {
+    for (source, duplicate) in [
+        ("#{1 01}", "01"),
+        ("#{-0N 0}", "0"),
+        ("#{0xffN 16rFF}", "16rFF"),
+        ("#{59 36r1N}", "36r1N"),
+        ("{-10 :first -0xAN :second}", "-0xAN"),
+        (
+            "{123456789012345678901234567890N :first 123456789012345678901234567890 :second}",
+            "123456789012345678901234567890",
+        ),
+    ] {
+        for read in [reader::read, reader::read_edn] {
+            let error = read(source).unwrap_err();
+            assert!(error.message.starts_with("Duplicate"));
+            assert_eq!(
+                &source[error.span.start.offset..error.span.end.offset],
+                duplicate
+            );
+        }
+    }
+    for read in [reader::read, reader::read_edn] {
+        assert!(read("#{1 1.0 1M -1}").is_ok());
+        assert!(read("[0xFF 255N 16rFF]").is_ok());
+    }
+}
+
+#[test]
 fn explicit_namespace_maps_qualify_keys_in_both_readers_and_keep_spelling() {
     let source = r#"#:stock {:sku "id" :_/category :input :vendor/price 1 code 7 _/raw 9}"#;
     let parsed = reader::parse(source);

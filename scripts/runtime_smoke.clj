@@ -1212,6 +1212,13 @@
 (assert (try (clojure.string/join \/ 42) false (catch IllegalArgumentException _ true)))
 (println "Clojure/JVM join inputs: 4 assertions passed")
 
+(doseq [read [read-string clojure.edn/read-string]]
+  (assert (= 4 (count (read "#{1 1.0 1M -1}"))))
+  (assert (try (read "#{0xffN 16rFF}") false (catch RuntimeException _ true)))
+  (assert (try (read "#{59 36r1N}") false (catch RuntimeException _ true)))
+  (assert (try (read "{-10 :first -0xAN :second}") false (catch RuntimeException _ true))))
+(println "Clojure/JVM and EDN integer equality: 8 assertions passed")
+
 (assert (= "" (demo.query-string/normalized-value {})))
 (assert (= "" (demo.query-string/normalized-value {:value nil})))
 (assert (= "" (demo.query-string/normalized-value {:value " \t"})))

@@ -483,8 +483,10 @@ var while their values and dispatch behavior remain unchecked.
 [JVM declarations example](../examples/jvm_forms.clj)
 
 Repeated simple values in set literals and repeated map keys report a reader
-error at the repeated form. This check compares decoded strings and characters, symbols, keywords,
-booleans, nil, symbolic numbers and identical ordinary numeric spellings.
+error at the repeated form. This check compares decoded strings and characters,
+symbols, keywords, booleans, nil and symbolic numbers. Integers with a magnitude
+that fits in 128 bits compare across decimal, octal, hexadecimal and radix
+spellings. Other ordinary numeric literals compare by spelling.
 Clojure and EDN support `##Inf`, `##-Inf` and `##NaN`. String escapes include
 octal spellings such as `\033` and preserve JVM UTF-16. Unpaired surrogates retain their code units for literal export,
 and the checker gives such values the general string type.
