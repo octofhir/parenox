@@ -714,6 +714,87 @@ fn latencies(mut samples: Vec<u128>) -> Value {
     json!({"p50":samples[(count - 1) / 2],"p95":samples[(95 * count).div_ceil(100) - 1],"max":samples[count - 1]})
 }
 
+#[test]
+#[ignore = "requires the pinned metosin/malli checkout"]
+fn malli_pilot_editor_benchmark() {
+    let root =
+        PathBuf::from(std::env::var_os("PARENOX_MALLI_PILOT").expect("set PARENOX_MALLI_PILOT"));
+    let binary = std::env::var_os("PARENOX_LSP_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_parenox")));
+    let caller = root.join("test/malli/destructure_test.cljc");
+    let source = fs::read_to_string(&caller).unwrap();
+    let edited = source.replacen(
+        r#""map destructuring""#,
+        r#""map destructuring example""#,
+        1,
+    );
+    assert_ne!(edited, source);
+    let document = uri(&caller);
+    let started = Instant::now();
+    let mut child = lsp_server_with(&binary);
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |message: &Value| {
+        let started = Instant::now();
+        send_message(&mut input, message);
+        let response = read_message(&mut output).expect("language server produced no message");
+        (response, started.elapsed().as_micros())
+    };
+    let (initialize, _) = exchange(
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&root),"capabilities":{}
+        }}),
+    );
+    let initialize_us = started.elapsed().as_micros();
+    assert_eq!(initialize["result"]["serverInfo"]["name"], "parenox");
+    let (opened, open_us) = exchange(
+        &json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
+        }}),
+    );
+    let base = opened["params"]["diagnostics"].as_array().unwrap();
+    assert!(!base.is_empty());
+    let mut edits = Vec::with_capacity(100);
+    for version in 2..102 {
+        let (published, elapsed) = exchange(
+            &json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+                "textDocument":{"uri":document,"version":version},
+                "contentChanges":[{"text":if version % 2 == 0 { &edited } else { &source }}]
+            }}),
+        );
+        assert_eq!(published["params"]["version"], version);
+        let diagnostics = published["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), base.len());
+        assert!(base.iter().zip(diagnostics).all(|(old, new)| {
+            ["code", "severity", "message"]
+                .iter()
+                .all(|key| old[*key] == new[*key])
+        }));
+        edits.push(elapsed);
+    }
+    let rss_kib = resident_kib(child.id());
+    assert_eq!(
+        exchange(&json!({"jsonrpc":"2.0","id":102,"method":"shutdown"})).0["result"],
+        Value::Null
+    );
+    send_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"}));
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    println!(
+        "{}",
+        json!({
+            "binary": binary,
+            "samples": edits.len(),
+            "diagnostics_per_edit": base.len(),
+            "initialize_us": initialize_us,
+            "first_open_us": open_us,
+            "warm_edit_us": latencies(edits),
+            "rss_kib_after_edits": rss_kib
+        })
+    );
+}
+
 fn resident_kib(pid: u32) -> Option<u32> {
     let output = Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])

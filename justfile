@@ -65,6 +65,10 @@ uri-editor-smoke project:
 uri-editor-bench project binary="target/release/parenox": build
     PARENOX_URI_PILOT={{quote(project)}} PARENOX_LSP_BINARY={{quote(binary)}} cargo test --locked --release --test lsp uri_pilot_editor_benchmark -- --ignored --nocapture
 
+# Measure checked edits with the full Malli deps.edn workspace open.
+malli-editor-bench project binary="target/release/parenox": build
+    PARENOX_MALLI_PILOT={{quote(project)}} PARENOX_LSP_BINARY={{quote(binary)}} cargo test --locked --release --test lsp malli_pilot_editor_benchmark -- --ignored --nocapture
+
 # Exercise passing, failing and unloadable tests on Clojure/JVM (optional).
 jvm-test-smoke:
     cargo test --locked --test runtime_cli -- --ignored
