@@ -512,8 +512,10 @@ dot-method spellings. String length and offsets count UTF-16 code units.
 `subs` uses the same UTF-16 offsets. Known bounds can identify an invalid
 index or a reversed range. A literal slice retains its exact value when the
 slice is valid Unicode.
-Analysis checks nil receivers and numeric index arguments. Bounds are enforced
-by the JVM. [String member example](../examples/jvm_strings.cljc)
+Analysis checks nil receivers and numeric index arguments. For `charAt`, a
+known out-of-bounds index is diagnosed in checked and unannotated functions.
+An exact character is preserved when the UTF-16 unit is a Unicode scalar.
+[String member example](../examples/jvm_strings.cljc)
 
 Design references include [clojure-reader](https://github.com/Grinkers/clojure-reader)
 for data reading, [Crabjure](https://github.com/ribelo/crabjure) for static analysis,

@@ -14,6 +14,7 @@ const STRING_OPERATORS: &[&str] = &[
     "replace",
     "split",
 ];
+const STRING_MEMBERS: &[&str] = &["charAt", "length"];
 
 impl Declarations {
     pub(crate) fn check_untyped_strings(
@@ -27,7 +28,8 @@ impl Declarations {
             .dependencies
             .iter()
             .any(|name| name == "clojure.string");
-        if (!string_namespace && !source.contains("subs"))
+        let jvm_string = STRING_MEMBERS.iter().any(|member| source.contains(member));
+        if (!string_namespace && !source.contains("subs") && !jvm_string)
             || !self.all_refers.is_empty()
             || ["clojure.core", "clojure.string"]
                 .iter()
@@ -44,6 +46,7 @@ impl Declarations {
             .iter()
             .copied()
             .filter(|_| string_namespace)
+            .chain(STRING_MEMBERS.iter().copied().filter(|_| jvm_string))
             .chain(["subs"])
             .chain(model.names.refers.iter().filter_map(|(local, target)| {
                 partial_string_operator(target).then_some(local.as_str())
@@ -88,7 +91,12 @@ impl Checker<'_> {
         let Some(name) = head.symbol() else {
             return head.keyword().is_some();
         };
-        if matches!(name, "if" | "do" | "quote") || env.contains_key(name) {
+        if matches!(name, "if" | "do" | "quote" | ".")
+            || name
+                .strip_prefix('.')
+                .is_some_and(|member| STRING_MEMBERS.contains(&member))
+            || env.contains_key(name)
+        {
             return true;
         }
         let resolved = self.model.resolve(name);
@@ -110,6 +118,7 @@ impl Checker<'_> {
                         | "some?"
                         | "="
                         | "str"
+                        | "long"
                         | "re-pattern"
                         | "re-find"
                         | "re-matches"
@@ -133,4 +142,7 @@ fn partial_string_operator(name: &str) -> bool {
         || name
             .strip_prefix("clojure.string/")
             .is_some_and(|operator| STRING_OPERATORS.contains(&operator))
+        || name
+            .strip_prefix("java.lang.String/")
+            .is_some_and(|method| STRING_MEMBERS.contains(&method))
 }

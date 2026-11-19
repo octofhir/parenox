@@ -119,10 +119,32 @@ impl Checker<'_> {
                 _ => Type::Number,
             },
             StringMethod::CharAt => {
-                self.expect(&args[0].0, &Type::Number, args[0].1, "String.charAt index");
-                self.may_throw();
-                Type::Character
+                let (index, span) = &args[0];
+                self.string_char_at(&receiver.known, index, *span)
             }
+        }
+    }
+
+    fn string_char_at(&mut self, text: &Type, index: &Value, span: Span) -> Type {
+        self.expect(index, &Type::Number, span, "String.charAt index");
+        self.may_throw();
+        let Type::Integer(index) = index.known else {
+            return Type::Character;
+        };
+        let unit = match (text, usize::try_from(index)) {
+            (_, Err(_)) => None,
+            (Type::Str(text), Ok(index)) => text.encode_utf16().nth(index),
+            _ => return Type::Character,
+        };
+        if let Some(unit) = unit {
+            char::from_u32(u32::from(unit)).map_or(Type::Character, Type::Char)
+        } else {
+            self.error(
+                "PNX2801",
+                span,
+                format!("String.charAt index {index} is out of bounds"),
+            );
+            Type::Never
         }
     }
 }

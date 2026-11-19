@@ -3,6 +3,34 @@ use parenox::Session;
 const SOURCE: &str = include_str!("../examples/jvm_strings.cljc");
 
 #[test]
+fn char_at_checks_utf16_bounds_in_unannotated_bodies() {
+    let source = r#"(ns members)
+        (defn exact {:t/sig '[:-> #{\a}]} [] (. "😀a" (charAt 2)))
+        (defn surrogate {:t/sig '[:-> char?]} [] (.charAt "😀" 0))
+        (defn negative {:t/sig '[string? :-> char?]} [text] (.charAt text -1))
+        (defn outside [] (long (.charAt "😀" 2)))
+        (defn guarded [arg] (when arg (.charAt arg 2)))"#;
+    let report = Session::default().check("members.cljc", source);
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .collect();
+    assert_eq!(errors.len(), 2, "{report:#?}");
+    for (error, text) in errors.into_iter().zip(["-1", "2"]) {
+        assert_eq!(error.code, "PNX2801");
+        assert_eq!(
+            error.contract.as_ref().unwrap().name,
+            "java.lang.String/charAt"
+        );
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            text
+        );
+    }
+}
+
+#[test]
 fn substring_uses_utf16_bounds_and_marks_the_invalid_index() {
     let source = r#"(ns captures)
         (defn suffix {:t/sig '[:-> #{"a"}]} [] (subs "😀a" 2))
