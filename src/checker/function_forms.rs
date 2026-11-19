@@ -28,6 +28,10 @@ impl<'a> Clause<'a> {
             Cow::Borrowed(self.params)
         }
     }
+
+    pub fn parameters(&self) -> impl Iterator<Item = &'a Form> {
+        self.params.iter().chain(self.rest)
+    }
 }
 
 pub(super) fn function_clauses(

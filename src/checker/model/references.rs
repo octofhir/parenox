@@ -2,9 +2,10 @@
 use std::collections::BTreeSet;
 
 use crate::Diagnostic;
+use crate::checker::bindings::binding_names;
 use crate::checker::calls::arity_counts;
-use crate::checker::function_forms::function_clauses;
-use crate::reader::{Form, Kind};
+use crate::checker::function_forms::{Clause, function_clauses};
+use crate::reader::{Form, Kind, Span};
 
 use super::contracts::function_parts;
 use super::declarations::{SourceDeclaration, symbols_match};
@@ -100,26 +101,20 @@ impl Declarations {
         if unchecked.is_empty() && self.test_forms.is_empty() {
             return Vec::new();
         }
-        let top_level_names = forms.iter().filter_map(|form| {
-            let Kind::List(items) = &form.without_metadata().kind else {
-                return None;
-            };
-            items.get(1).and_then(Form::symbol)
-        });
-        let shadowed_let = top_level_names.clone().any(|name| name == "let");
-        let test_names = if self.test_forms.is_empty() {
-            BTreeSet::new()
-        } else {
-            top_level_names.collect()
-        };
-        let core_let = self.all_refers.is_empty()
-            && model.names.resolve_parts("let").0 == "clojure.core"
-            && !shadowed_let;
+        let top_level_names = forms
+            .iter()
+            .filter_map(|form| {
+                let Kind::List(items) = &form.without_metadata().kind else {
+                    return None;
+                };
+                items.get(1).and_then(Form::symbol)
+            })
+            .collect();
         let mut diagnostics = Vec::new();
         let mut visit = References {
             names: self,
-            core_let,
-            test_names: &test_names,
+            top_level_names: &top_level_names,
+            locals: Vec::new(),
             inside_test: false,
             resolve: &mut resolve,
             diagnostics: &mut diagnostics,
@@ -132,7 +127,7 @@ impl Declarations {
                 && let Ok(clauses) = function_clauses(function_parts(tail).0, form.span)
             {
                 for clause in clauses.values() {
-                    visit.forms(clause.body);
+                    visit.clause(clause);
                 }
             }
         }
@@ -148,15 +143,24 @@ impl Declarations {
 
 struct References<'a, F> {
     names: &'a Declarations,
-    core_let: bool,
-    test_names: &'a BTreeSet<&'a str>,
+    top_level_names: &'a BTreeSet<&'a str>,
+    locals: Vec<(&'a str, Span)>,
     inside_test: bool,
     resolve: &'a mut F,
     diagnostics: &'a mut Vec<Diagnostic>,
 }
 
-impl<F: FnMut(&str, &str, usize) -> ProjectCall> References<'_, F> {
-    fn forms(&mut self, forms: &[Form]) {
+impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, F> {
+    fn clause(&mut self, clause: &Clause<'a>) {
+        let scope = self.locals.len();
+        for parameter in clause.parameters() {
+            binding_names(parameter, &mut self.locals);
+        }
+        self.forms(clause.body);
+        self.locals.truncate(scope);
+    }
+
+    fn forms(&mut self, forms: &'a [Form]) {
         for form in forms {
             match &form.without_metadata().kind {
                 Kind::List(items) => self.call(items),
@@ -167,53 +171,81 @@ impl<F: FnMut(&str, &str, usize) -> ProjectCall> References<'_, F> {
         }
     }
 
-    fn call(&mut self, items: &[Form]) {
+    fn call(&mut self, items: &'a [Form]) {
         let Some((head, args)) = items.split_first() else {
             return;
         };
         let Some(symbol) = head.symbol() else { return };
+        match symbol {
+            "if" | "do" | "recur" => return self.forms(args),
+            "let*" | "loop*" => return self.bindings(args),
+            "fn*" => return self.function(args, head.span),
+            _ => {}
+        }
+        if self.is_local(symbol) {
+            self.forms(args);
+            return;
+        }
         if self.inside_test && self.test_macro(symbol, args) {
             return;
         }
-        match symbol {
-            "if" | "do" => self.forms(args),
-            "let*" | "clojure.core/let" => self.bindings(args),
-            "let" if self.core_let => self.bindings(args),
-            _ => {
-                if let Some((alias, _)) = symbol.split_once('/')
-                    && self.names.names.aliases.contains_key(alias)
-                    && let Some((namespace, local)) = self.names.qualified_reference(symbol)
-                    && namespace != self.names.namespace()
-                {
-                    let span = head.without_metadata().span;
-                    match (self.resolve)(namespace, local, args.len()) {
-                        ProjectCall::Unknown => {}
-                        ProjectCall::Missing => self.diagnostics.push(Diagnostic::new(
-                            "PNX2304",
-                            span,
-                            format!("Unresolved or private project var {symbol}"),
-                        )),
-                        ProjectCall::Function { expected_arity } => {
-                            if let Some(expected) = expected_arity {
-                                self.diagnostics.push(Diagnostic::new(
-                                    "PNX2554",
-                                    span,
-                                    format!(
-                                        "{symbol} expects {expected} arguments, got {}",
-                                        args.len()
-                                    ),
-                                ));
-                            }
-                            self.forms(args);
-                        }
-                    }
+        let qualified = self.names.qualified_reference(symbol);
+        let (namespace, local) = self.names.names.resolve_parts(symbol);
+        if self.trusted_core(symbol, namespace) {
+            match local {
+                "let" | "loop" => return self.bindings(args),
+                "fn" => return self.function(args, head.span),
+                "when" | "when-not" | "if-not" | "and" | "or" | "cond" | "=" | "not=" | "<"
+                | "<=" | ">" | ">=" | "+" | "-" | "*" | "inc" | "dec" | "not" | "nil?"
+                | "some?" | "str" | "vector" | "list" | "hash-map" | "set" | "get"
+                | "contains?" | "assoc" | "conj" | "map" | "mapv" | "filter" | "reduce"
+                | "apply" | "subs" | "first" | "next" | "rest" | "count" => {
+                    return self.forms(args);
                 }
+                _ => {}
             }
+        }
+        if namespace == self.names.namespace()
+            || (qualified.is_none()
+                && (self.top_level_names.contains(symbol)
+                    || !self.names.names.refers.contains_key(symbol)))
+        {
+            return;
+        }
+        let span = head.without_metadata().span;
+        match (self.resolve)(namespace, local, args.len()) {
+            // Missing explicit imports already have a finding on the declaration.
+            ProjectCall::Missing if qualified.is_some() => self.diagnostics.push(Diagnostic::new(
+                "PNX2304",
+                span,
+                format!("Unresolved or private project var {symbol}"),
+            )),
+            ProjectCall::Function { expected_arity } => {
+                if let Some(expected) = expected_arity {
+                    self.diagnostics.push(Diagnostic::new(
+                        "PNX2554",
+                        span,
+                        format!("{symbol} expects {expected} arguments, got {}", args.len()),
+                    ));
+                }
+                self.forms(args);
+            }
+            _ => {}
         }
     }
 
-    fn test_macro(&mut self, symbol: &str, args: &[Form]) -> bool {
-        if !symbol.contains('/') && self.test_names.contains(symbol) {
+    fn is_local(&self, symbol: &str) -> bool {
+        self.locals.iter().rev().any(|(name, _)| *name == symbol)
+    }
+
+    fn trusted_core(&self, symbol: &str, namespace: &str) -> bool {
+        namespace == "clojure.core"
+            && (symbol.contains('/')
+                || (self.names.all_refers.is_empty() && !self.top_level_names.contains(symbol)))
+    }
+
+    fn test_macro(&mut self, symbol: &str, args: &'a [Form]) -> bool {
+        if !symbol.contains('/') && self.top_level_names.contains(symbol) {
             return false;
         }
         match self.names.names.resolve_parts(symbol) {
@@ -223,7 +255,8 @@ impl<F: FnMut(&str, &str, usize) -> ProjectCall> References<'_, F> {
                     if let Kind::List(items) = &assertion.without_metadata().kind {
                         if let Some((head, values)) = items.split_first()
                             && let Some(name) = head.symbol()
-                            && (name.contains('/') || !self.test_names.contains(name))
+                            && (name.contains('/')
+                                || (!self.top_level_names.contains(name) && !self.is_local(name)))
                             && matches!(
                                 self.names.names.resolve_parts(name),
                                 ("clojure.core", "=" | "nil?" | "some?" | "true?" | "false?")
@@ -242,15 +275,36 @@ impl<F: FnMut(&str, &str, usize) -> ProjectCall> References<'_, F> {
         true
     }
 
-    fn bindings(&mut self, args: &[Form]) {
+    fn function(&mut self, args: &'a [Form], span: Span) {
+        let scope = self.locals.len();
+        let clauses = if let Some((name, tail)) = args.split_first()
+            && let Some(symbol) = name.symbol()
+        {
+            self.locals.push((symbol, name.without_metadata().span));
+            tail
+        } else {
+            args
+        };
+        if let Ok(clauses) = function_clauses(clauses, span) {
+            for clause in clauses.values() {
+                self.clause(clause);
+            }
+        }
+        self.locals.truncate(scope);
+    }
+
+    fn bindings(&mut self, args: &'a [Form]) {
         if let Some((bindings, body)) = args.split_first()
             && let Some(bindings) = bindings.vector()
             && let (pairs, []) = bindings.as_chunks::<2>()
         {
-            for [_, value] in pairs {
+            let scope = self.locals.len();
+            for [pattern, value] in pairs {
                 self.forms(std::slice::from_ref(value));
+                binding_names(pattern, &mut self.locals);
             }
             self.forms(body);
+            self.locals.truncate(scope);
         }
     }
 }

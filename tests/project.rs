@@ -226,6 +226,38 @@ fn checks_source_arities_and_record_factories_without_contracts() {
 }
 
 #[test]
+fn checks_referred_source_arities_through_scoped_core_forms() {
+    let app = Source {
+        path: "app.cljc",
+        source: r#"(ns app (:require [catalog :refer [size] :rename {size size-of}]))
+          (defn scan [input]
+            (loop [i 0]
+              (if (>= i (size-of input :extra)) i (recur (inc i)))))
+          (defn sequential [] (let [size-of (size-of "" :extra)] (size-of)))
+          (defn qualified [] (catalog/size))
+          (defn shadowed [{:keys [some.namespace/size-of]}] (size-of :local :local))
+          (defn named [] (fn size-of [& xs] (size-of :local :local)))
+          (defn unsupported [] (unknown-macro (size-of :macro-data :macro-data)))
+          (defn quoted [] '(size-of :data :data))"#,
+    };
+    let library = Source {
+        path: "catalog.clj",
+        source: "(ns catalog) (defn size [value] (count value))",
+    };
+    let report = Session::default().check_project(&[app, library], None);
+    let errors: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .collect();
+    assert_eq!(errors.len(), 3, "{report:#?}");
+    for (diagnostic, line) in errors.into_iter().zip([4, 5, 6]) {
+        assert_eq!(diagnostic.code, "PNX2554");
+        assert_eq!(diagnostic.span.start.line, line);
+    }
+}
+
+#[test]
 fn checks_project_calls_in_standard_test_assertions() {
     let source = r#"
         (ns shop-test (:require [clojure.test :refer :all] [catalog :as catalog]))

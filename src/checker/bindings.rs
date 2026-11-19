@@ -7,6 +7,56 @@ use super::{Checker, Env, Value};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
+/// Collect the names introduced by a binding without evaluating defaults or selectors.
+pub(super) fn binding_names<'a>(form: &'a Form, names: &mut Vec<(&'a str, Span)>) {
+    let form = form.without_metadata();
+    match &form.kind {
+        Kind::Symbol(name) | Kind::AnonymousArgument(name) if name != "&" => {
+            names.push((name, form.span));
+        }
+        Kind::Vector(items) => {
+            for item in items {
+                binding_names(item, names);
+            }
+        }
+        Kind::Map(entries) => map_binding_names(entries, names),
+        _ => {}
+    }
+}
+
+fn map_binding_names<'a>(entries: &'a [Form], names: &mut Vec<(&'a str, Span)>) {
+    for [binding, value] in entries.as_chunks::<2>().0 {
+        match binding.keyword() {
+            Some(":as" | ":all" | ":excess" | ":missing" | ":select") => {
+                binding_names(value, names);
+            }
+            Some(":or" | ":defaults") => {}
+            Some(":req!") => {
+                if let Some(required) = value.map() {
+                    map_binding_names(required, names);
+                }
+            }
+            Some(_) => {
+                if let Some(items) = value.vector() {
+                    for item in items.iter().take_while(|item| item.symbol() != Some("&")) {
+                        map_binding_name(item, names);
+                    }
+                }
+            }
+            None => map_binding_name(binding, names),
+        }
+    }
+}
+
+fn map_binding_name<'a>(form: &'a Form, names: &mut Vec<(&'a str, Span)>) {
+    if let Some(name) = form.symbol().or_else(|| form.keyword()) {
+        let local = name.trim_start_matches(':').rsplit('/').next().unwrap();
+        names.push((local, form.without_metadata().span));
+    } else {
+        binding_names(form, names);
+    }
+}
+
 #[derive(Default)]
 struct Defaults {
     locals: BTreeMap<String, (Value, Span)>,
