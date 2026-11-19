@@ -562,6 +562,12 @@ fn uri_explicit_referral(root: &Path) {
     let line = source.lines().nth(4).unwrap();
     let column = line.find("hex->byte").unwrap();
     let inside = source.lines().nth(53).unwrap().find("str-len").unwrap();
+    let same_namespace = source
+        .lines()
+        .nth(56)
+        .unwrap()
+        .find("high-surrogate?")
+        .unwrap();
     let edited = source.replacen("hex->byte", "hex->byet", 1);
     let document = uri(&caller);
     let definition = |id, line, character| {
@@ -576,18 +582,21 @@ fn uri_explicit_referral(root: &Path) {
         }}),
         definition(2, 4, column),
         definition(3, 53, inside),
+        definition(4, 56, same_namespace),
         json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
             "textDocument":{"uri":document,"version":2},"contentChanges":[{"text":edited}]
         }}),
-        json!({"jsonrpc":"2.0","id":4,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","id":5,"method":"shutdown"}),
         json!({"jsonrpc":"2.0","method":"exit"}),
     ]);
     assert_eq!(messages[2]["result"]["uri"], uri(&provider));
     assert_eq!(messages[2]["result"]["range"]["start"]["line"], 8);
     assert_eq!(messages[3]["result"]["uri"], uri(&provider));
     assert_eq!(messages[3]["result"]["range"]["start"]["line"], 19);
+    assert_eq!(messages[4]["result"]["uri"], uri(&caller));
+    assert_eq!(messages[4]["result"]["range"]["start"]["line"], 42);
     assert!(
-        messages[4]["params"]["diagnostics"]
+        messages[5]["params"]["diagnostics"]
             .as_array()
             .unwrap()
             .iter()

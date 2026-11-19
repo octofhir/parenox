@@ -4,6 +4,30 @@ use std::collections::{BTreeMap, BTreeSet};
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
 #[test]
+fn unqualified_uses_navigate_to_private_and_forward_namespace_vars() {
+    let source = "(ns demo)\n\
+        (defn- helper {:t/sig '[:-> string?]} [] \"ok\")\n\
+        (declare promised)\n\
+        (defn run [] [(helper) (promised) (not-yet-defined)])\n\
+        (defn promised [] :yes)\n\
+        (defn not-yet-defined [] :yes)";
+    let mut session = Session::default();
+    session.check("app.cljc", source);
+    for (symbol, line) in [("helper", 2), ("promised", 5)] {
+        let use_site = source.find(&format!("({symbol})")).unwrap() + 1;
+        let target = session.definition("app.cljc", use_site).unwrap();
+        assert_eq!(target.path, "app.cljc");
+        assert_eq!(target.span.start.line, line);
+        assert_eq!(
+            session.var_at("app.cljc", use_site).unwrap().name,
+            format!("demo/{symbol}")
+        );
+    }
+    let absent = source.find("(not-yet-defined)").unwrap() + 1;
+    assert!(session.definition("app.cljc", absent).is_none());
+}
+
+#[test]
 fn top_level_let_exposes_direct_functions_without_trusting_the_closure() {
     let provider = Source {
         path: "captured.cljc",

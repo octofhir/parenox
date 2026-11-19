@@ -20,6 +20,7 @@ pub(crate) enum ProjectCall {
 pub(crate) enum ScopedReference<'a> {
     Local(Span),
     Referred(&'a str, &'a str),
+    InNamespace(&'a str),
 }
 
 impl Declarations {
@@ -342,12 +343,17 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                     (*name == symbol).then_some(ScopedReference::Local(*binding))
                 })
                 .or_else(|| {
-                    if self.top_level_names.contains(symbol) {
-                        return None;
+                    if !self.top_level_names.contains(symbol)
+                        && let Some((namespace, local)) = self
+                            .names
+                            .names
+                            .refers
+                            .get(symbol)
+                            .and_then(|target| target.split_once('/'))
+                    {
+                        return Some(ScopedReference::Referred(namespace, local));
                     }
-                    let (namespace, local) =
-                        self.names.names.refers.get(symbol)?.split_once('/')?;
-                    Some(ScopedReference::Referred(namespace, local))
+                    Some(ScopedReference::InNamespace(symbol))
                 });
         }
     }

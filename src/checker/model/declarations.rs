@@ -153,6 +153,21 @@ impl Declarations {
         Some(name.without_metadata().span)
     }
 
+    pub(crate) fn source_var_before(
+        &self,
+        forms: &[Form],
+        local: &str,
+        offset: usize,
+    ) -> Option<Span> {
+        let target = self.source_var(forms, local, false)?;
+        (target.start.offset < offset
+            || self
+                .forward_vars
+                .get(local)
+                .is_some_and(|var| var.span.start.offset < offset))
+        .then_some(target)
+    }
+
     pub(crate) fn missing_public_var(&self, forms: &[Form], local: &str) -> bool {
         let mut definitions = self.source_declarations(forms, local).peekable();
         if definitions.peek().is_some() {

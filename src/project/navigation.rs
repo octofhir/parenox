@@ -87,8 +87,8 @@ impl Session {
         let qualified = declarations
             .referral_at(offset)
             .or_else(|| declarations.qualified_reference(symbol_at(forms, offset)?));
-        let (namespace, local) = match qualified {
-            Some(target) => target,
+        let (namespace, local, before) = match qualified {
+            Some((namespace, local)) => (namespace, local, None),
             None => match declarations.scoped_reference_at(
                 forms,
                 offset,
@@ -105,12 +105,19 @@ impl Session {
                         })
                 },
             )? {
-                ScopedReference::Referred(namespace, local) => (namespace, local),
+                ScopedReference::Referred(namespace, local) => (namespace, local, None),
+                ScopedReference::InNamespace(local) => {
+                    (declarations.namespace(), local, Some(offset))
+                }
                 ScopedReference::Local(span) => return Some(SourceTarget::Local(span)),
             },
         };
         let (target_path, candidate, provider, forms) = self.navigation_provider(namespace)?;
-        let span = provider.source_var(forms, local, target_path != path)?;
+        let span = if let Some(offset) = before {
+            provider.source_var_before(forms, local, offset)
+        } else {
+            provider.source_var(forms, local, target_path != path)
+        }?;
         Some(SourceTarget::Var(ResolvedVar {
             namespace,
             name: local,
