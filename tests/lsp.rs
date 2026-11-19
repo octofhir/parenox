@@ -493,6 +493,7 @@ fn uri_pilot_editor_workflow() {
     copy_sources(&root, &checkout.0, Path::new("test"));
     fs::copy(root.join("deps.edn"), checkout.0.join("deps.edn")).unwrap();
     uri_untyped_nil(&checkout.0);
+    uri_assertion_template(&checkout.0);
     uri_closed_provider_edit(&checkout.0);
 }
 
@@ -514,6 +515,43 @@ fn uri_untyped_nil(root: &Path) {
         .find("str/replace v")
         .unwrap()
         + "str/replace ".len();
+    assert_overlay_finding(
+        root,
+        relative,
+        &source,
+        &edited,
+        ("PNX2322", line, character, "Nil | String"),
+    );
+}
+
+fn uri_assertion_template(root: &Path) {
+    let relative = Path::new("test/lambdaisland/uri/normalize_test.cljc");
+    let source = fs::read_to_string(root.join(relative)).unwrap();
+    let edited = source.replacen("(n/percent-decode in)", "(n/percent-decoed in)", 1);
+    let line = 47;
+    let character = edited
+        .lines()
+        .nth(line)
+        .unwrap()
+        .find("n/percent-decoed")
+        .unwrap();
+    assert_overlay_finding(
+        root,
+        relative,
+        &source,
+        &edited,
+        ("PNX2304", line, character, "n/percent-decoed"),
+    );
+}
+
+fn assert_overlay_finding(
+    root: &Path,
+    relative: &Path,
+    source: &str,
+    edited: &str,
+    (code, line, character, message): (&str, usize, usize, &str),
+) {
+    let caller = root.join(relative);
     let document = uri(&caller);
     let change = |version, text| {
         json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
@@ -525,26 +563,21 @@ fn uri_untyped_nil(root: &Path) {
         json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
             "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
         }}),
-        change(2, &edited),
-        change(3, &source),
+        change(2, edited),
+        change(3, source),
         json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
         json!({"jsonrpc":"2.0","method":"exit"}),
     ]);
     let diagnostics = messages[2]["params"]["diagnostics"].as_array().unwrap();
     let mismatch = diagnostics
         .iter()
-        .find(|diagnostic| diagnostic["code"] == "PNX2322")
+        .find(|diagnostic| diagnostic["code"] == code)
         .unwrap();
     assert_eq!(
         mismatch["range"]["start"],
         json!({"line":line,"character":character})
     );
-    assert!(
-        mismatch["message"]
-            .as_str()
-            .unwrap()
-            .contains("Nil | String")
-    );
+    assert!(mismatch["message"].as_str().unwrap().contains(message));
     assert_eq!(
         messages[1]["params"]["diagnostics"],
         messages[3]["params"]["diagnostics"]

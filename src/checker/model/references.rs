@@ -110,6 +110,7 @@ impl Declarations {
             top_level_names: &top_level_names,
             locals: Vec::new(),
             inside_test: false,
+            template_scope: None,
             resolve: &mut resolve,
             purpose: Purpose::Check(&mut diagnostics),
         };
@@ -161,6 +162,7 @@ impl Declarations {
             top_level_names: &top_level_names,
             locals: Vec::new(),
             inside_test,
+            template_scope: None,
             resolve: &mut resolve,
             purpose: Purpose::Navigate {
                 offset,
@@ -214,6 +216,7 @@ struct References<'source, 'query, F> {
     top_level_names: &'query BTreeSet<&'source str>,
     locals: Vec<(&'source str, Span)>,
     inside_test: bool,
+    template_scope: Option<usize>,
     resolve: &'query mut F,
     purpose: Purpose<'source, 'query>,
 }
@@ -263,13 +266,20 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         let Some(symbol) = head.symbol() else {
             return self.forms(items);
         };
+        let span = head.without_metadata().span;
+        if let Some(scope) = self.template_scope
+            && self.locals[scope..].iter().any(|(name, _)| *name == symbol)
+        {
+            // Substitution may turn an operator into a macro or special form.
+            self.select_reference(symbol, span);
+            return;
+        }
         match symbol {
             "if" | "do" | "recur" => return self.forms(args),
             "let*" | "loop*" => return self.bindings(args),
             "fn*" => return self.function(args, head.span),
             _ => {}
         }
-        let span = head.without_metadata().span;
         self.select_reference(symbol, span);
         if matches!(
             self.purpose,
@@ -382,30 +392,68 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             ("clojure.test", "testing") => self.forms(args),
             ("clojure.test", "is") => {
                 if let Some(assertion) = args.first() {
-                    if let Kind::List(items) = &assertion.without_metadata().kind {
-                        if let Some((head, values)) = items.split_first()
-                            && let Some(name) = head.symbol()
-                            && (name.contains('/')
-                                || (!self.top_level_names.contains(name) && !self.is_local(name)))
-                            && matches!(
-                                self.names.names.resolve_parts(name),
-                                ("clojure.core", "=" | "nil?" | "some?" | "true?" | "false?")
-                            )
-                        {
-                            self.forms(values);
-                        }
-                        // Other assertion forms can have user-defined expansion.
-                    } else {
-                        self.forms(std::slice::from_ref(assertion));
-                    }
+                    self.assertion(assertion);
                 }
+            }
+            ("clojure.test", "are") if self.template_scope.is_none() => {
+                self.assertion_template(args)
             }
             _ => return false,
         }
         true
     }
 
+    fn assertion(&mut self, assertion: &'a Form) {
+        let Kind::List(items) = &assertion.without_metadata().kind else {
+            return self.forms(std::slice::from_ref(assertion));
+        };
+        if let Some((head, values)) = items.split_first()
+            && let Some(name) = head.symbol()
+            && (name.contains('/')
+                || (!self.top_level_names.contains(name) && !self.is_local(name)))
+            && matches!(
+                self.names.names.resolve_parts(name),
+                ("clojure.core", "=" | "nil?" | "some?" | "true?" | "false?")
+            )
+        {
+            self.forms(values);
+        }
+        // Other assertion forms can have user-defined expansion.
+    }
+
+    fn assertion_template(&mut self, args: &'a [Form]) {
+        let [parameters, assertion, rows @ ..] = args else {
+            return;
+        };
+        let Some(parameters) = parameters.vector() else {
+            return;
+        };
+        if parameters.is_empty() || rows.is_empty() || !rows.len().is_multiple_of(parameters.len())
+        {
+            return;
+        }
+        let scope = self.locals.len();
+        for parameter in parameters {
+            let Some(name) = parameter
+                .symbol()
+                .filter(|name| !name.contains('/') || *name == "/")
+            else {
+                self.locals.truncate(scope);
+                return;
+            };
+            self.locals.push((name, parameter.without_metadata().span));
+        }
+        self.template_scope = Some(scope);
+        self.assertion(assertion);
+        self.template_scope = None;
+        self.locals.truncate(scope);
+    }
+
     fn function(&mut self, args: &'a [Form], span: Span) {
+        // Template substitution can change the names of lexical binders.
+        if self.template_scope.is_some() {
+            return;
+        }
         let scope = self.locals.len();
         let clauses = if let Some((name, tail)) = args.split_first()
             && let Some(symbol) = name.symbol()
@@ -424,6 +472,9 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
     }
 
     fn bindings(&mut self, args: &'a [Form]) {
+        if self.template_scope.is_some() {
+            return;
+        }
         if let Some((bindings, body)) = args.split_first()
             && let Some(bindings) = bindings.vector()
             && let (pairs, []) = bindings.as_chunks::<2>()

@@ -648,6 +648,59 @@ fn checks_project_calls_in_standard_test_assertions() {
     );
 }
 
+#[test]
+fn checks_fixed_calls_in_are_templates_and_preserves_placeholder_scope() {
+    let source = r#"(ns cases (:require [clojure.test :as t] [catalog :as c :refer [label]]))
+        (t/deftest examples
+          (t/are [seen] (= "ok" (c/label seen)) "ok")
+          (t/are [arg answer] (= (c/lable arg) answer) "a" "A" "b" "B")
+          (t/are [arg] (= (c/label arg :extra) arg) 0 1)
+          (t/are [label] (= "ok" (label)) (constantly "ok"))
+          (t/are [if] (= '(c/quoted-data) (if (c/quoted-data))) quote)
+          (t/are [slot] (= 0 (let [slot (fn [] 0)] (label))) label)
+          (t/are [item] (= 0 (c/quoted-data)) (c/quoted-data) 0))"#;
+    let mut session = Session::default();
+    let report = session.check_project(
+        &[
+            Source {
+                path: "cases.cljc",
+                source,
+            },
+            Source {
+                path: "catalog.clj",
+                source: "(ns catalog) (defn label [x] x)",
+            },
+        ],
+        None,
+    );
+    let findings: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &source[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2304", "c/lable"),
+            ("PNX2554", "c/label"),
+            ("PNX2304", "c/quoted-data")
+        ],
+        "{report:#?}"
+    );
+    let reference = source.find("c/label seen").unwrap() + "c/label ".len();
+    let binding = session.definition("cases.cljc", reference).unwrap();
+    assert_eq!(
+        binding.span.start.offset,
+        source.find("[seen]").unwrap() + 1
+    );
+}
+
 fn clinic() -> BTreeMap<&'static str, String> {
     [
         (
