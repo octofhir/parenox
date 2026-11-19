@@ -763,6 +763,13 @@ arguments to known functions. Local bindings shadow referred vars. Unknown
 macros and ambiguous declarations limit how far Parenox can follow calls.
 The report still marks type coverage as incomplete.
 
+Supported string operations can also report input mismatches in a function
+without a contract. This analysis follows supported local bindings, map
+lookups, and conditions. For example, the second value from destructuring
+`str/split` can be nil when the separator is absent. A guard can establish
+that the value passed to `str/replace` is a string. Unknown inputs and opaque
+expressions retain incomplete coverage.
+
 At calls and returns, an unknown type does not hide a mismatch in a different
 part of the value. If missing type information prevents checking the contract
 and there is no local diagnostic yet, Parenox reports `PNX9004` and marks the

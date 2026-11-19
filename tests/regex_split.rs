@@ -102,3 +102,70 @@ fn replacement_dispatch_checks_character_and_string_pairs_and_marks_callback_gap
         "{report:#?}"
     );
 }
+
+#[test]
+fn unannotated_code_reports_known_nil_inputs_and_keeps_type_coverage_partial() {
+    let source = r##"(ns query (:require [clojure.string :as str :refer [trim]]))
+        (defn field [query]
+          (let [[k v] (str/split query #"=" 2)]
+            (if v (str/replace v #"\+" " ") k)))
+        (defn value [] (str/trim (:name {:name "Ada"})))
+        (defn unknown [s] (str/trim s))
+        (defn shadowed [trim] (trim nil))
+        (defn nil? [_] false)
+        (defn shadowed-guard [input] (when (nil? input) (str/trim input)))
+        (defn opaque [] (foreign-macro (trim nil)))
+        (defn quoted [] '(trim nil))"##;
+    let mut session = Session::default();
+    let report = session.check("query.cljc", source);
+    assert!(!report.complete);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == "warning")
+    );
+
+    let edited = source
+        .replace("(if v ", "(if true ")
+        .replace(":name {:name", ":other {:name");
+    let report = session.check("query.cljc", &edited);
+    let mismatches: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "PNX2322")
+        .collect();
+    assert_eq!(mismatches.len(), 2, "{report:#?}");
+    for (diagnostic, (query, actual)) in mismatches
+        .into_iter()
+        .zip([("v", "Nil | String"), ("(:other {:name \"Ada\"})", "Nil")])
+    {
+        assert_eq!(diagnostic.actual.as_deref(), Some(actual));
+        assert_eq!(diagnostic.expected.as_deref(), Some("String"));
+        assert_eq!(
+            &edited[diagnostic.span.start.offset..diagnostic.span.end.offset],
+            query
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(session.check("query.cljc", &edited).diagnostics).unwrap(),
+        serde_json::to_value(report.diagnostics).unwrap()
+    );
+    let restored = session.check("query.cljc", source);
+    assert!(
+        restored
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity == "warning")
+    );
+
+    let renamed = "(ns names (:require [clojure.string :refer [trim] :rename {trim clean}]))
+        (defn read-name [] (clean nil))";
+    let report = session.check("query.cljc", renamed);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "PNX2322")
+    );
+}

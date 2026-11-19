@@ -437,7 +437,59 @@ fn uri_pilot_editor_workflow() {
     copy_sources(&root, &checkout.0, Path::new("src"));
     copy_sources(&root, &checkout.0, Path::new("test"));
     fs::copy(root.join("deps.edn"), checkout.0.join("deps.edn")).unwrap();
+    uri_untyped_nil(&checkout.0);
     uri_closed_provider_edit(&checkout.0);
+}
+
+fn uri_untyped_nil(root: &Path) {
+    let relative = Path::new("src/lambdaisland/uri.cljc");
+    let caller = root.join(relative);
+    let source = fs::read_to_string(&caller).unwrap();
+    let replacement = r##"(str/replace v #"\+" " ")"##;
+    let edited = source.replace(replacement, "escaped").replace(
+        "(str/split param #\"=\" 2)]",
+        &format!("(str/split param #\"=\" 2)\n        escaped {replacement}]"),
+    );
+    assert_ne!(edited, source);
+    let document = uri(&caller);
+    let change = |version, text| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(root),"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
+        }}),
+        change(2, &edited),
+        change(3, &source),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let diagnostics = messages[2]["params"]["diagnostics"].as_array().unwrap();
+    let mismatch = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "PNX2322")
+        .unwrap();
+    assert_eq!(
+        mismatch["range"]["start"],
+        json!({"line":133,"character":29})
+    );
+    assert!(
+        mismatch["message"]
+            .as_str()
+            .unwrap()
+            .contains("Nil | String")
+    );
+    assert_eq!(
+        messages[1]["params"]["diagnostics"],
+        messages[3]["params"]["diagnostics"]
+    );
+    assert_eq!(fs::read_to_string(&caller).unwrap(), source);
+    fs::write(&caller, edited).unwrap();
+    assert_cli_diagnostics(root, relative, diagnostics);
+    fs::write(&caller, source).unwrap();
 }
 
 fn uri_explicit_referral(root: &Path) {
@@ -741,9 +793,20 @@ fn change_call(root: &Path, caller: &Path, provider: &Path, call_line: usize, ta
     let relative = caller.strip_prefix(root).unwrap();
     let cli_caller = fixture.0.join(relative);
     fs::write(&cli_caller, broken).unwrap();
+    assert_cli_diagnostics(&fixture.0, relative, diagnostics);
+}
+
+fn assert_cli_diagnostics(root: &Path, relative: &Path, diagnostics: &[Value]) {
     let checked = Command::new(env!("CARGO_BIN_EXE_parenox"))
-        .current_dir(&fixture.0)
-        .args(["check", "--alias", "test", "--format", "json"])
+        .current_dir(root)
+        .args([
+            "check",
+            "--alias",
+            "test",
+            "--allow-incomplete",
+            "--format",
+            "json",
+        ])
         .output()
         .unwrap();
     assert_eq!(checked.status.code(), Some(1));

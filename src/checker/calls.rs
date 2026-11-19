@@ -158,6 +158,9 @@ impl<'model> Checker<'model> {
     }
 
     pub(super) fn list(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
+        if !self.allows_partial_call(&xs[0], env) {
+            return Value::new(Type::Unknown);
+        }
         match xs[0].symbol() {
             Some("recur") => return self.recur_form(&xs[1..], span, env, tail),
             Some("loop*") => return self.loop_form(xs, span, env, true),

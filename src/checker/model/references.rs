@@ -96,14 +96,8 @@ impl Declarations {
         model: &Model,
         mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Vec<Diagnostic> {
-        // A PNX9002 at the definition means no typed root checks this body.
-        let unchecked: BTreeSet<_> = model
-            .diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.code == "PNX9002")
-            .map(|diagnostic| diagnostic.span.start.offset)
-            .collect();
-        if unchecked.is_empty() && self.test_forms.is_empty() {
+        let mut unchecked = self.unchecked_definitions(forms, model).peekable();
+        if unchecked.peek().is_none() && self.test_forms.is_empty() {
             return Vec::new();
         }
         let top_level_names = top_level_names(forms);
@@ -116,11 +110,8 @@ impl Declarations {
             resolve: &mut resolve,
             purpose: Purpose::Check(&mut diagnostics),
         };
-        for &index in &self.functions {
-            let form = &forms[index];
-            if unchecked.contains(&form.span.start.offset) {
-                visit.definition(form);
-            }
+        for form in unchecked {
+            visit.definition(form);
         }
         visit.inside_test = true;
         for &index in &self.test_forms {
@@ -129,6 +120,24 @@ impl Declarations {
             }
         }
         diagnostics
+    }
+
+    pub(super) fn unchecked_definitions<'a>(
+        &'a self,
+        forms: &'a [Form],
+        model: &Model,
+    ) -> impl Iterator<Item = &'a Form> {
+        // A PNX9002 at the definition means no typed root checks this body.
+        let unchecked: BTreeSet<_> = model
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "PNX9002")
+            .map(|diagnostic| diagnostic.span.start.offset)
+            .collect();
+        self.functions
+            .iter()
+            .map(|&index| &forms[index])
+            .filter(move |form| unchecked.contains(&form.span.start.offset))
     }
 
     pub(crate) fn scoped_reference_at<'a>(
@@ -169,7 +178,7 @@ impl Declarations {
     }
 }
 
-fn top_level_names(forms: &[Form]) -> BTreeSet<&str> {
+pub(super) fn top_level_names(forms: &[Form]) -> BTreeSet<&str> {
     forms
         .iter()
         .filter_map(|form| {

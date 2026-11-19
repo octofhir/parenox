@@ -1,0 +1,123 @@
+//! Type findings from selected built-in calls in bodies that have no contract.
+use super::contracts::function_parts;
+use super::references::top_level_names;
+use super::{Declarations, Globals, Model};
+use crate::Diagnostic;
+use crate::checker::{Checker, Env, Value, function_forms::function_clauses};
+use crate::reader::{Form, Kind};
+use crate::types::Type;
+
+const STRING_OPERATORS: &[&str] = &[
+    "upper-case",
+    "lower-case",
+    "trim",
+    "blank?",
+    "replace",
+    "split",
+];
+
+impl Declarations {
+    pub(crate) fn check_untyped_strings(
+        &self,
+        forms: &[Form],
+        model: &Model,
+        globals: &Globals,
+        source: &str,
+    ) -> Vec<Diagnostic> {
+        if !self
+            .dependencies
+            .iter()
+            .any(|name| name == "clojure.string")
+            || !self.all_refers.is_empty()
+            || ["clojure.core", "clojure.string"]
+                .iter()
+                .any(|namespace| globals.project_namespaces.contains(*namespace))
+        {
+            return Vec::new();
+        }
+        let mut definitions = self.unchecked_definitions(forms, model).peekable();
+        if definitions.peek().is_none() || !self.has_known_var_surface(forms) {
+            return Vec::new();
+        }
+        let shadowed = top_level_names(forms);
+        let operators: Vec<_> = STRING_OPERATORS
+            .iter()
+            .copied()
+            .chain(model.names.refers.iter().filter_map(|(local, target)| {
+                partial_string_operator(target).then_some(local.as_str())
+            }))
+            .collect();
+        let mut diagnostics = Vec::new();
+        for form in definitions {
+            let text = &source[form.span.start.offset..form.span.end.offset];
+            if !operators.iter().any(|&operator| text.contains(operator)) {
+                continue;
+            }
+            let Kind::List(items) = &form.without_metadata().kind else {
+                continue;
+            };
+            let Ok(clauses) = function_clauses(function_parts(&items[2..]).0, form.span) else {
+                continue;
+            };
+            let mut checker = Checker::new(model, globals, source);
+            checker.partial_scope = Some(&shadowed);
+            for clause in clauses.values() {
+                let params = clause.bindings();
+                let args = vec![Value::new(Type::Unknown); params.len()];
+                checker.function_body(&params, clause.body, args, &Env::new(), clause.span);
+            }
+            diagnostics.extend(checker.diagnostics.into_iter().filter(|diagnostic| {
+                diagnostic.code == "PNX2322"
+                    && diagnostic
+                        .contract
+                        .as_ref()
+                        .is_some_and(|origin| partial_string_operator(&origin.name))
+            }));
+        }
+        diagnostics
+    }
+}
+
+impl Checker<'_> {
+    pub(in crate::checker) fn allows_partial_call(&self, head: &Form, env: &Env) -> bool {
+        let Some(shadowed) = self.partial_scope else {
+            return true;
+        };
+        let Some(name) = head.symbol() else {
+            return head.keyword().is_some();
+        };
+        if matches!(name, "if" | "do" | "quote") || env.contains_key(name) {
+            return true;
+        }
+        if shadowed.contains(name) {
+            return false;
+        }
+        let resolved = self.model.resolve(name);
+        partial_string_operator(&resolved)
+            || matches!(
+                resolved.strip_prefix("clojure.core/"),
+                Some(
+                    "let"
+                        | "if-not"
+                        | "when"
+                        | "when-not"
+                        | "or"
+                        | "and"
+                        | "get"
+                        | "get-in"
+                        | "contains?"
+                        | "identity"
+                        | "nil?"
+                        | "some?"
+                        | "="
+                        | "str"
+                        | "re-pattern"
+                )
+            )
+    }
+}
+
+fn partial_string_operator(name: &str) -> bool {
+    name.strip_prefix("clojure.string/")
+        .is_some_and(|operator| STRING_OPERATORS.contains(&operator))
+}

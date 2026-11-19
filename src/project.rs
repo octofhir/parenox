@@ -104,6 +104,7 @@ struct FileCache {
     interface: Option<InterfaceKey>,
     checked_source: Arc<str>,
     functions: BTreeMap<String, CheckedFunction>,
+    partial_diagnostics: Option<Vec<Diagnostic>>,
 }
 
 struct CheckedFunction {
@@ -156,6 +157,7 @@ impl FileCache {
         self.parsed = true;
         self.kind = kind;
         self.model = None;
+        self.partial_diagnostics = None;
         self.parse_error = None;
         self.suppressions = Suppressions::default();
         self.declarations = None;
@@ -600,11 +602,33 @@ impl Session {
                     .interface
                     .as_ref()
                     .map(|previous| interface.changes(previous));
-                if !changed
+                let unchanged = !changed
                     && changes
                         .as_ref()
-                        .is_some_and(|changes| changes.is_unchanged())
+                        .is_some_and(|changes| changes.is_unchanged());
+                if !unchanged {
+                    cache.partial_diagnostics = None;
+                }
+                if mode == SnapshotMode::Check
+                    && index < count
+                    && let Some(declarations) = &cache.declarations
                 {
+                    report.diagnostics.extend(
+                        cache
+                            .partial_diagnostics
+                            .get_or_insert_with(|| {
+                                declarations.check_untyped_strings(
+                                    &cache.forms,
+                                    model,
+                                    &globals,
+                                    source.source,
+                                )
+                            })
+                            .iter()
+                            .cloned(),
+                    );
+                }
+                if unchanged {
                     report.stats.reused_functions = cache.functions.len();
                     report.diagnostics.extend(
                         cache

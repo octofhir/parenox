@@ -600,7 +600,8 @@ impl Checker<'_> {
     fn unshadowed_operation(&self, head: &Form, env: &Env) -> Option<String> {
         let op = head.symbol()?;
         // Locals and project functions may shadow core predicates.
-        if env.contains_key(op)
+        if !self.allows_partial_call(head, env)
+            || env.contains_key(op)
             || self.model.local_function(op).is_some()
             || self.model.declared_value(op, self.globals).is_some()
         {
@@ -625,6 +626,9 @@ impl Checker<'_> {
         let Some((head, args)) = xs.split_first() else {
             return;
         };
+        if !self.allows_partial_call(head, env) {
+            return;
+        }
         let Some(op) = self.unshadowed_operation(head, env) else {
             if head.keyword().is_some() {
                 self.narrow_subject(test, env, truthy);

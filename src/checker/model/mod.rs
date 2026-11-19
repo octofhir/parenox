@@ -6,6 +6,7 @@ mod fdefs;
 mod guards;
 mod imports;
 mod interfaces;
+mod partial;
 mod references;
 mod require;
 mod specs;

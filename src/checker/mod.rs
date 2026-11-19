@@ -147,6 +147,7 @@ struct Checker<'a> {
     model: &'a Model,
     globals: &'a Globals,
     source: &'a str,
+    partial_scope: Option<&'a BTreeSet<&'a str>>,
     diagnostics: Vec<Diagnostic>,
     active_helpers: Vec<String>,
     thread_depth: usize,
@@ -166,6 +167,7 @@ impl<'a> Checker<'a> {
             model,
             globals,
             source,
+            partial_scope: None,
             diagnostics: Vec::new(),
             active_helpers: Vec::new(),
             thread_depth: 0,
@@ -218,6 +220,9 @@ impl Checker<'_> {
     }
 
     fn expect(&mut self, actual: &Value, expected: &Type, span: Span, context: &str) {
+        if self.partial_scope.is_some() && actual.known.contains_unknown() {
+            return;
+        }
         let compatibility = actual.known.compatibility(expected);
         if compatibility == Compatibility::Unproven {
             // Unknown types often result from an error already reported for this function or
@@ -381,6 +386,8 @@ impl Checker<'_> {
                             scope, form.span, format!("Macro {} is not a function value", scope.origin().name)
                         ),
                     }
+                } else if self.partial_scope.is_some() {
+                    Value::new(Type::Unknown)
                 } else {
                     let qualified = self.model.function_name(s);
                     let external = qualified.split_once('/').is_some_and(|(namespace, _)| {
