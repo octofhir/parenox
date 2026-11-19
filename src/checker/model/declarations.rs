@@ -7,6 +7,7 @@ use super::Globals;
 use super::contracts::function_parts;
 use super::require::ExplicitReferral;
 use crate::Diagnostic;
+use crate::checker::bindings::binding_names;
 use crate::checker::function_forms::function_clauses;
 use crate::reader::{Form, Kind, Span};
 use crate::types::Arity;
@@ -15,6 +16,11 @@ pub(super) enum SourceDeclaration<'a> {
     Function(&'a [Form]),
     Value(&'a [Form]),
     RecordFactory { name: &'a Form, arity: Arity },
+}
+
+struct ScopedFunction {
+    enclosing: usize,
+    definition: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -97,6 +103,7 @@ pub(crate) struct Declarations {
     pub(super) test_forms: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
     pub(super) unchecked_vars: Vec<usize>,
+    scoped_functions: Vec<ScopedFunction>,
     macros: Vec<usize>,
     unmodeled_calls: Vec<usize>,
     pub(super) forward_vars: BTreeMap<String, DeclaredVar>,
@@ -195,7 +202,26 @@ impl Declarations {
             };
             Some(SourceDeclaration::RecordFactory { name, arity })
         });
-        named.chain(factories)
+        let scoped = self
+            .scoped_functions(forms)
+            .filter(move |items| items[1].symbol() == Some(local))
+            .map(SourceDeclaration::Function);
+        named.chain(factories).chain(scoped)
+    }
+
+    pub(super) fn scoped_functions<'a>(
+        &'a self,
+        forms: &'a [Form],
+    ) -> impl Iterator<Item = &'a [Form]> {
+        self.scoped_functions.iter().map(|var| {
+            let Kind::List(enclosing) = &forms[var.enclosing].without_metadata().kind else {
+                unreachable!();
+            };
+            let Kind::List(items) = &enclosing[var.definition].without_metadata().kind else {
+                unreachable!();
+            };
+            items.as_slice()
+        })
     }
 
     pub(super) fn source_private(&self, declaration: &SourceDeclaration<'_>) -> bool {
@@ -376,6 +402,15 @@ impl Declarations {
                     match qualified {
                         "clojure.core/defrecord" => model.records.push(index),
                         "clojure.core/defmethod" => {}
+                        "clojure.core/let" => {
+                            if op.contains('/')
+                                || (model.all_refers.is_empty()
+                                    && model.source_declarations(forms, op).next().is_none())
+                            {
+                                model.read_scoped_functions(forms, index, xs);
+                            }
+                            model.opaque_var_surface = true;
+                        }
                         "clojure.core/defmacro" => {
                             model.macros.push(index);
                             model.opaque_var_surface = true;
@@ -411,6 +446,47 @@ impl Declarations {
             }
         }
         model
+    }
+
+    fn read_scoped_functions(&mut self, forms: &[Form], enclosing: usize, items: &[Form]) {
+        let bindings = items[1].vector().unwrap();
+        let mut locals = Vec::new();
+        for [binding, _] in bindings.as_chunks::<2>().0 {
+            binding_names(binding, &mut locals);
+        }
+        for (definition, form) in items.iter().enumerate().skip(2) {
+            let Kind::List(parts) = &form.without_metadata().kind else {
+                continue;
+            };
+            let [head, name, tail @ ..] = parts.as_slice() else {
+                continue;
+            };
+            let (Some(op), Some(_)) = (
+                head.symbol(),
+                name.symbol().filter(|name| unqualified(name)),
+            ) else {
+                continue;
+            };
+            if !matches!(
+                self.names.resolve_parts(op),
+                ("clojure.core", "defn" | "defn-")
+            ) {
+                continue;
+            }
+            let shadowed = !op.contains('/')
+                && (!self.all_refers.is_empty()
+                    || locals.iter().any(|(local, _)| *local == op)
+                    || self.source_declarations(forms, op).next().is_some());
+            if !shadowed
+                && !function_clauses(function_parts(tail).0, form.span)
+                    .is_err_and(|diagnostic| diagnostic.severity == "error")
+            {
+                self.scoped_functions.push(ScopedFunction {
+                    enclosing,
+                    definition,
+                });
+            }
+        }
     }
 
     fn read_ns(&mut self, xs: &[Form], span: Span, globals: Option<&Globals>) {

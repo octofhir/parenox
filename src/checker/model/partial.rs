@@ -1,6 +1,5 @@
 //! Type findings from selected built-in calls in bodies that have no contract.
 use super::contracts::function_parts;
-use super::references::top_level_names;
 use super::{Declarations, Globals, Model};
 use crate::Diagnostic;
 use crate::checker::{Checker, Env, Value, function_forms::function_clauses};
@@ -39,7 +38,7 @@ impl Declarations {
         if definitions.peek().is_none() || !self.has_known_var_surface(forms) {
             return Vec::new();
         }
-        let shadowed = top_level_names(forms);
+        let shadowed = self.top_level_names(forms);
         let operators: Vec<_> = STRING_OPERATORS
             .iter()
             .copied()

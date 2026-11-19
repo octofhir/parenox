@@ -787,7 +787,8 @@ remain outside the source model.
 
 Top-level `let`, `require`, and `clojure.test/testing` report incomplete
 coverage. Vars and imports created by those expressions depend on runtime
-evaluation.
+evaluation. Direct `defn` and `defn-` forms inside a top-level `let` provide
+source navigation and keep their captured values and call types unchecked.
 
 Supported string operations can also report input mismatches in a function
 without a contract. This analysis follows supported local bindings, map

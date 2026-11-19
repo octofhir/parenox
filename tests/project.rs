@@ -4,6 +4,51 @@ use std::collections::{BTreeMap, BTreeSet};
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
 #[test]
+fn top_level_let_exposes_direct_functions_without_trusting_the_closure() {
+    let provider = Source {
+        path: "captured.cljc",
+        source: r#"(ns captured)
+          (let [prefix "Hello "]
+            (defn message [name] (str prefix name))
+            (defn- helper [] prefix))
+          (let [defn (fn [& _] nil) discarded :data]
+            (defn discarded [] :data))"#,
+    };
+    let app = Source {
+        path: "app.cljc",
+        source: "(ns app (:require [captured :as c]))
+            (defn greet {:t/sig '[string? :-> string?]} [name] (c/message name))
+            (defn probes [] [c/helper c/discarded])",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app, provider], None);
+    assert!(
+        report
+            .files
+            .iter()
+            .all(|file| file.diagnostics.iter().all(|d| d.severity == "warning"))
+    );
+    assert!(
+        report.files[0]
+            .diagnostics
+            .iter()
+            .any(|d| { d.message == "No checked signature for source function c/message" })
+    );
+    let target = session
+        .definition(app.path, app.source.find("c/message").unwrap())
+        .unwrap();
+    assert_eq!(target.path, provider.path);
+    assert_eq!(target.span.start.line, 3);
+    for hidden in ["c/helper", "c/discarded"] {
+        assert!(
+            session
+                .definition(app.path, app.source.find(hidden).unwrap())
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn editor_projection_keeps_resolution_and_checks_newly_opened_bodies() {
     let caller = Source {
         path: "app.cljc",

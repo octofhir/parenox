@@ -145,14 +145,11 @@ impl Model {
             };
             let arities = (source_arities_known && !opaque_callable())
                 .then(|| clauses.keys().copied().collect());
-            self.unchecked_functions
-                .entry(name)
-                .and_modify(|function| {
-                    function.arities = None;
-                    function.private |= private;
-                })
-                .or_insert(super::UncheckedFunction { arities, private });
-            self.names.refers.remove(symbol);
+            self.remember_unchecked_function(
+                name,
+                symbol,
+                super::UncheckedFunction { arities, private },
+            );
             self.error("PNX9002", span, message);
             return;
         }
@@ -231,6 +228,36 @@ impl Model {
         if self.functions.insert(name.clone(), function).is_some() {
             self.error("PNX2790", span, format!("Duplicate function {name}"));
         }
+    }
+
+    pub(super) fn read_scoped_function(&mut self, items: &[Form], private: bool) {
+        let symbol = items[1].symbol().unwrap();
+        if let Some(name) = self.definition_name(symbol, items[1].span, "defn") {
+            self.remember_unchecked_function(
+                name,
+                symbol,
+                super::UncheckedFunction {
+                    arities: None,
+                    private,
+                },
+            );
+        }
+    }
+
+    fn remember_unchecked_function(
+        &mut self,
+        name: String,
+        symbol: &str,
+        value: super::UncheckedFunction,
+    ) {
+        self.names.refers.remove(symbol);
+        self.unchecked_functions
+            .entry(name)
+            .and_modify(|function| {
+                function.arities = None;
+                function.private |= value.private;
+            })
+            .or_insert(value);
     }
 
     pub(super) fn parse_signatures(

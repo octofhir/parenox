@@ -49,6 +49,11 @@ impl Model {
                 Kind::List(parts) => parts.get(1).and_then(Form::symbol),
                 _ => None,
             })
+            .chain(
+                declarations
+                    .scoped_functions(forms)
+                    .filter_map(|items| items[1].symbol()),
+            )
             .collect();
         for (name, claim) in claims {
             match prove(self, &self.functions[&name], claim, &local_vars) {

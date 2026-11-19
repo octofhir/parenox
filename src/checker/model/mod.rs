@@ -226,6 +226,9 @@ impl Model {
                 source_arities_known,
             );
         }
+        for items in declarations.scoped_functions(forms) {
+            model.read_scoped_function(items, declarations.private_var(items));
+        }
         for (local, var) in &declarations.forward_vars {
             let qualified = format!("{}/{local}", model.namespace());
             if !model.literals.contains_key(&qualified)
@@ -248,11 +251,19 @@ impl Model {
             }
         }
         for (name, parts) in fdefs {
-            model.error(
-                "PNX9001",
-                parts[1].span,
-                format!("s/fdef has no supported function definition for {name}"),
-            );
+            if model.unchecked_functions.contains_key(&name) {
+                model.diagnostics.push(Diagnostic::analysis_gap(
+                    "PNX9001",
+                    parts[1].span,
+                    format!("s/fdef body checks are unavailable for scoped function {name}"),
+                ));
+            } else {
+                model.error(
+                    "PNX9001",
+                    parts[1].span,
+                    format!("s/fdef has no supported function definition for {name}"),
+                );
+            }
         }
         model.verify_guards(guards, declarations, forms, globals);
         model.collect_helpers();

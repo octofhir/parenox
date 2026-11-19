@@ -100,7 +100,7 @@ impl Declarations {
         if unchecked.peek().is_none() && self.test_forms.is_empty() {
             return Vec::new();
         }
-        let top_level_names = top_level_names(forms);
+        let top_level_names = self.top_level_names(forms);
         let mut diagnostics = Vec::new();
         let mut visit = References {
             names: self,
@@ -152,7 +152,7 @@ impl Declarations {
         if !inside_test && self.functions.binary_search(&index).is_err() {
             return None;
         }
-        let top_level_names = top_level_names(forms);
+        let top_level_names = self.top_level_names(forms);
         let mut visit = References {
             names: self,
             top_level_names: &top_level_names,
@@ -176,18 +176,22 @@ impl Declarations {
             Purpose::Check(_) => unreachable!(),
         }
     }
-}
 
-pub(super) fn top_level_names(forms: &[Form]) -> BTreeSet<&str> {
-    forms
-        .iter()
-        .filter_map(|form| {
-            let Kind::List(items) = &form.without_metadata().kind else {
-                return None;
-            };
-            items.get(1).and_then(Form::symbol)
-        })
-        .collect()
+    pub(super) fn top_level_names<'a>(&'a self, forms: &'a [Form]) -> BTreeSet<&'a str> {
+        forms
+            .iter()
+            .filter_map(|form| {
+                let Kind::List(items) = &form.without_metadata().kind else {
+                    return None;
+                };
+                items.get(1).and_then(Form::symbol)
+            })
+            .chain(
+                self.scoped_functions(forms)
+                    .filter_map(|items| items[1].symbol()),
+            )
+            .collect()
+    }
 }
 
 enum Purpose<'source, 'query> {
