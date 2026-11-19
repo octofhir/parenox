@@ -4,6 +4,8 @@
             [clojure.test :as t])
   (:import (clojure.lang Compiler$CompilerException)))
 
+(spit (first *command-line-args*) ":started")
+
 (defn- local-file [source]
   (let [file (io/file source)]
     (if (.isAbsolute file)

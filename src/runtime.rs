@@ -134,10 +134,12 @@ fn execute_tests(options: TestOptions) -> Result<TestReport, RunError> {
         )
     })?;
     if !status.success() {
-        return Err(RunError::new(
-            Phase::Execution,
-            format!("Clojure test run did not complete ({status})"),
-        ));
+        let (phase, message) = if result.is_file() {
+            (Phase::Execution, "Clojure test run did not complete")
+        } else {
+            (Phase::Launch, "Clojure CLI did not start the test runner")
+        };
+        return Err(RunError::new(phase, format!("{message} ({status})")));
     }
     let result = fs::read_to_string(result).map_err(|error| {
         RunError::new(
@@ -145,6 +147,12 @@ fn execute_tests(options: TestOptions) -> Result<TestReport, RunError> {
             format!("Clojure exited without a test result ({error})"),
         )
     })?;
+    if result == ":started" {
+        return Err(RunError::new(
+            Phase::Execution,
+            "Clojure exited before reporting test results",
+        ));
+    }
     let report = TestReport::read(&result)
         .ok_or_else(|| RunError::new(Phase::Report, "Clojure returned an invalid test report"))?;
     if report.tests == 0 && report.run_error.is_none() {

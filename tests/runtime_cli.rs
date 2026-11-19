@@ -70,6 +70,29 @@ fn rejects_unqualified_test_var_selectors() {
 }
 
 #[test]
+#[ignore = "requires the Clojure CLI and JVM"]
+fn distinguishes_startup_errors_from_early_jvm_exit() {
+    let fixture = Fixture::new("incomplete JVM");
+    fs::write(fixture.0.join("deps.edn"), "{:paths [\"src\"}").unwrap();
+    let launch = fixture.run(&["demo.routing-test"], &["--format", "json"]);
+    assert_eq!(launch.status.code(), Some(2), "{launch:?}");
+    let report: Value = serde_json::from_slice(&launch.stdout).unwrap();
+    assert_eq!(report["run_error"]["phase"], "launch");
+
+    fs::write(fixture.0.join("deps.edn"), MANIFEST).unwrap();
+    fs::write(
+        fixture.0.join(TEST_PATH),
+        "(ns demo.routing-test (:require [clojure.test :refer [deftest]]))
+         (deftest exits (System/exit 0))",
+    )
+    .unwrap();
+    let execution = fixture.run(&["demo.routing-test"], &["--format", "json"]);
+    assert_eq!(execution.status.code(), Some(2), "{execution:?}");
+    let report: Value = serde_json::from_slice(&execution.stdout).unwrap();
+    assert_eq!(report["run_error"]["phase"], "execution");
+}
+
+#[test]
 fn discovery_reports_a_broken_namespace_before_starting_clojure() {
     let fixture = Fixture::new("broken discovered namespace");
     fs::write(

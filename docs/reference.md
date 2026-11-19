@@ -104,6 +104,8 @@ strings when available. Exceptions carry their JVM class and message.
 An incomplete run includes a `run_error` with its phase,
 message, and any available source path, line and column. Runtime logs go to
 stderr. The exit status has the same meaning in both formats.
+An error before the runner starts is reported in the `launch` phase. A JVM
+that exits before the running suite writes results reports `execution`.
 
 For a library release, keep the public snapshot from the previous version
 and run the following commands in CI:
