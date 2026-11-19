@@ -135,6 +135,27 @@ fn string_escapes_preserve_jvm_utf16_values_and_original_text() {
 }
 
 #[test]
+fn octal_string_escapes_match_clojure_and_edn_token_boundaries() {
+    let source = r#"["\033[38;5;" "\377" "\1;"]"#;
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_lossless(source, &parsed);
+    for forms in [parsed.forms, reader::read_edn(source).unwrap()] {
+        let values = forms[0].vector().unwrap();
+        for (form, expected) in values.iter().zip(["\u{1b}[38;5;", "\u{ff}", "\u{1};"]) {
+            assert!(matches!(&form.kind, Kind::String(text) if text == expected));
+        }
+    }
+    for bad in [r#""\400""#, r#""\08""#, r#""\1a""#] {
+        assert!(reader::read(bad).is_err(), "{bad}");
+        assert!(reader::read_edn(bad).is_err(), "{bad}");
+    }
+    let reader_quote_mark = r#""\1'abc""#;
+    assert!(reader::read(reader_quote_mark).is_ok());
+    assert!(reader::read_edn(reader_quote_mark).is_err());
+}
+
+#[test]
 fn symbolic_numbers_use_the_same_reader_in_code_and_edn() {
     let source = "[##Inf ##-Inf ## ; comment\n #_discard NaN]";
     let parsed = reader::parse(source);

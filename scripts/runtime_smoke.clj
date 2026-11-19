@@ -1218,3 +1218,9 @@
 (assert (= "A-1" (demo.namespaced-keys/sku)))
 (assert (= :public (demo.namespaced-keys/access-level)))
 (println "Clojure/JVM auto-resolved namespaced maps: 2 assertions passed")
+
+(doseq [read [read-string edn/read-string]]
+  (assert (= [27 91 51 56 59 53 59] (mapv int (read "\"\\033[38;5;\""))))
+  (assert (= [255] (mapv int (read "\"\\377\""))))
+  (assert (try (read "\"\\400\"") false (catch RuntimeException _ true))))
+(println "Clojure/JVM and EDN octal string escapes: 6 assertions passed")

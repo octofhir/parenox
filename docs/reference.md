@@ -466,8 +466,8 @@ incomplete coverage. [JVM declarations example](../examples/jvm_forms.clj)
 Repeated simple values in set literals and repeated map keys report a reader
 error at the repeated form. This check compares decoded strings and characters, symbols, keywords,
 booleans, nil, symbolic numbers and identical ordinary numeric spellings.
-Clojure and EDN support `##Inf`, `##-Inf` and `##NaN`. String escapes preserve
-JVM UTF-16. Unpaired surrogates retain their code units for literal export,
+Clojure and EDN support `##Inf`, `##-Inf` and `##NaN`. String escapes include
+octal spellings such as `\033` and preserve JVM UTF-16. Unpaired surrogates retain their code units for literal export,
 and the checker gives such values the general string type.
 Explicit namespaced maps such as `#:stock{:sku "id" :_/source "api"}`
 qualify their unqualified keyword and symbol keys and remove the `_`

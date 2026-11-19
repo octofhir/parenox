@@ -1127,6 +1127,7 @@ impl<'a> Reader<'a> {
                     Some('f') => '\u{000c}',
                     Some('"') => '"',
                     Some('\\') => '\\',
+                    Some(digit @ '0'..='9') => self.octal_escape(digit, start)?,
                     Some('u') => {
                         let unit = self.unicode_escape(start)?;
                         let Some(ch) = char::from_u32(unit.into()) else {
@@ -1163,5 +1164,28 @@ impl<'a> Reader<'a> {
             unit = unit * 16 + digit as u16;
         }
         Ok(unit)
+    }
+
+    fn octal_escape(&mut self, first: char, start: Position) -> Result<char, ReadError> {
+        let digit = |ch: char| ch.to_digit(8);
+        let mut value = digit(first).ok_or_else(|| self.error(start, "Invalid octal escape"))?;
+        for _ in 1..3 {
+            let Some(ch) = self.peek() else {
+                break;
+            };
+            if ch.is_whitespace()
+                || ",()[]{}\";\\^#".contains(ch)
+                || (!self.edn && "'@`~%".contains(ch))
+            {
+                break;
+            }
+            let next = digit(ch).ok_or_else(|| self.error(start, "Invalid octal escape"))?;
+            self.bump();
+            value = value * 8 + next;
+        }
+        if value > 0xff {
+            return Err(self.error(start, "Octal escape must be in range 0 to 377"));
+        }
+        Ok(char::from(value as u8))
     }
 }
