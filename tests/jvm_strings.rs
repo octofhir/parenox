@@ -3,6 +3,33 @@ use parenox::Session;
 const SOURCE: &str = include_str!("../examples/jvm_strings.cljc");
 
 #[test]
+fn join_accepts_seqable_values_and_reports_the_invalid_collection_input() {
+    let source = r#"(ns labels (:require [clojure.string :as str] [clojure.spec.alpha :as s]))
+        (defn entries {:t/sig '[map? :-> string?]} [m] (str/join :entry m))
+        (defn characters {:t/sig '[string? :-> string?]} [text] (str/join \/ text))
+        (defn no-items {:t/sig '[:-> string?]} [] (str/join nil))
+        (defn maybe-items {:t/sig '[(s/nilable number?) :-> string?]} [value] (str/join value))
+        (defn without-types [] (str/join \/ 42))"#;
+    let report = Session::default().check("labels.cljc", source);
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .collect();
+    assert_eq!(errors.len(), 2, "{report:#?}");
+    for (error, target) in errors.into_iter().zip(["value", "42"]) {
+        assert_eq!(error.code, "PNX2322");
+        assert_eq!(error.expected.as_deref(), Some("Seqable or Nil"));
+        assert_eq!(error.actual.as_deref(), Some("Number"));
+        assert_eq!(error.contract.as_ref().unwrap().name, "clojure.string/join");
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            target
+        );
+    }
+}
+
+#[test]
 fn char_at_checks_utf16_bounds_in_unannotated_bodies() {
     let source = r#"(ns members)
         (defn exact {:t/sig '[:-> #{\a}]} [] (. "😀a" (charAt 2)))

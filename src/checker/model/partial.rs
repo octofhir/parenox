@@ -11,6 +11,7 @@ const STRING_OPERATORS: &[&str] = &[
     "lower-case",
     "trim",
     "blank?",
+    "join",
     "replace",
     "split",
 ];

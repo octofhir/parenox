@@ -628,6 +628,7 @@ impl<'model> Checker<'model> {
                 Type::String
             }
             "clojure.string/blank?" => self.blank_string(&args[0]),
+            "clojure.string/join" => self.join_string(args.last().unwrap()),
             "clojure.string/replace" => self.replace_string(args, span),
             "clojure.core/re-pattern" => {
                 self.expect(
@@ -753,6 +754,7 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
             &[Arity::Fixed(2), Arity::Fixed(3)]
         }
         "clojure.string/replace" => &[Arity::Fixed(3)],
+        "clojure.string/join" => &[Arity::Fixed(1), Arity::Fixed(2)],
         "clojure.core/cons"
         | "clojure.core/find"
         | "clojure.core/select-keys"
@@ -893,6 +895,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.string/blank?"
             | "clojure.string/replace"
             | "clojure.string/split"
+            | "clojure.string/join"
     ) || predicate_type(name).is_some()
 }
 

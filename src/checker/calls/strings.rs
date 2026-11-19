@@ -148,6 +148,30 @@ impl Checker<'_> {
         }
     }
 
+    pub(super) fn join_string(&mut self, (value, span): &(Value, Span)) -> Type {
+        let start = self.diagnostics.len();
+        let returns = self.join_input(&value.known, *span);
+        self.dedup_diagnostics(start);
+        if returns { Type::String } else { Type::Never }
+    }
+
+    fn join_input(&mut self, ty: &Type, span: Span) -> bool {
+        match ty {
+            Type::Map(_) => true,
+            Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
+                self.join_input(upper, span)
+            }
+            Type::Union(parts) => {
+                let mut returns = false;
+                for part in parts {
+                    returns |= self.join_input(part, span);
+                }
+                returns
+            }
+            _ => self.seq_type(ty, "clojure.string/join", span) != Type::Never,
+        }
+    }
+
     pub(super) fn replace_string(&mut self, args: &[(Value, Span)], span: Span) -> Type {
         let [
             (text, text_span),

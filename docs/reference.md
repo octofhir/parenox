@@ -506,6 +506,8 @@ capture layout uses the union of the possible shapes. The stateful
 
 `clojure.string/replace` checks character pairs, string pairs and a regex
 with a string replacement. Regex callback type checking remains incomplete.
+`clojure.string/join` accepts nil and seqable inputs, including map entries
+and strings. It stringifies its elements and optional separator.
 A false result from `clojure.string/blank?` excludes nil from the tested
 value, including a stable lookup of an optional map field.
 

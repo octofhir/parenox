@@ -1198,11 +1198,20 @@
 (assert (= "a" (subs "😀a" 2)))
 (assert (= "😀" (subs "😀a" 0 2)))
 (assert (Character/isHighSurrogate (.charAt (subs "😀a" 0 1) 0)))
+(assert (try (subs "😀" 3) false (catch StringIndexOutOfBoundsException _ true)))
+(println "Clojure/JVM substring bounds: 4 assertions passed")
+
 (assert (= \a (. "😀a" (charAt 2))))
 (assert (Character/isHighSurrogate (.charAt "😀" 0)))
 (assert (try (.charAt "😀" 2) false (catch StringIndexOutOfBoundsException _ true)))
-(assert (try (subs "😀" 3) false (catch StringIndexOutOfBoundsException _ true)))
-(println "Clojure/JVM substring bounds: 4 assertions passed")
+(println "Clojure/JVM charAt bounds: 3 assertions passed")
+
+(assert (= "" (clojure.string/join nil)))
+(assert (= ",b" (clojure.string/join \, [nil "b"])))
+(assert (= "a:sep:b" (clojure.string/join :sep ["a" ":b"])))
+(assert (try (clojure.string/join \/ 42) false (catch IllegalArgumentException _ true)))
+(println "Clojure/JVM join inputs: 4 assertions passed")
+
 (assert (= "" (demo.query-string/normalized-value {})))
 (assert (= "" (demo.query-string/normalized-value {:value nil})))
 (assert (= "" (demo.query-string/normalized-value {:value " \t"})))
