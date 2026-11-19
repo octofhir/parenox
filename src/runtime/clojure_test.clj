@@ -141,4 +141,6 @@
                 (catch Throwable error (incomplete @phase error)))]
   (binding [*print-length* nil *print-level* nil *print-readably* true]
     (spit result (pr-str summary)))
-  (shutdown-agents))
+  (shutdown-agents)
+  ;; The report is complete even if a test left non-daemon threads running.
+  (System/exit 0))

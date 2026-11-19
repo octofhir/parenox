@@ -121,8 +121,10 @@ fn jvm_locations_follow_assertion_helpers_and_type_methods() {
     let output = fixture.run(&["demo.location-test"], &["--format", "json"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["tests"], 3);
     assert_eq!(result["failures"], 1);
     assert_eq!(result["errors"], 1);
+    assert!(!fixture.0.join("worker-finished").exists());
     let findings = result["findings"].as_array().unwrap();
     for (kind, name, line) in [
         ("fail", "assertion-in-helper", 5),

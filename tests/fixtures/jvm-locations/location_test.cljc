@@ -7,3 +7,13 @@
 
 (deftest error-in-type
   (is (= :ready (.readValue (helper/->BrokenReader)))))
+
+(deftest leaves-worker-running
+  (let [started (promise)
+        worker (Thread. (fn []
+                          (deliver started true)
+                          (Thread/sleep 10000)
+                          (spit "worker-finished" "finished")))]
+    (.setDaemon worker false)
+    (.start worker)
+    (is (deref started 10000 false))))
