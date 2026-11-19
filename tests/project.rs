@@ -4,6 +4,58 @@ use std::collections::BTreeMap;
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
 #[test]
+fn known_source_macro_expansions_report_coverage_and_follow_provider_edits() {
+    let app = Source {
+        path: "app.cljc",
+        source: "(ns app (:require [schema :as s :refer [install] :rename {install register}]))
+                 (s/install first-name)
+                 (register second-name)
+                 (s/internal third-name)
+                 (missing)
+                 (defmacro local [] nil)
+                 (local)",
+    };
+    let schema = Source {
+        path: "schema.clj",
+        source: "(ns schema)\n(defmacro install [symbol] `(def ~symbol 1))\n(defmacro ^:private internal [symbol] nil)",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app, schema], None);
+    assert!(!report.complete);
+    let diagnostics = &report.files[0].diagnostics;
+    let severity = |diagnostics: &[parenox::Diagnostic], line| {
+        diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.span.start.line == line)
+            .map(|diagnostic| diagnostic.severity)
+    };
+    for line in [2, 3, 7] {
+        assert_eq!(severity(diagnostics, line), Some("warning"), "{report:#?}");
+    }
+    for line in [4, 5] {
+        assert_eq!(severity(diagnostics, line), Some("error"), "{report:#?}");
+    }
+    let target = session
+        .definition(app.path, app.source.find("s/install").unwrap())
+        .unwrap();
+    assert_eq!(target.path, schema.path);
+    assert_eq!(target.span.start.line, 2);
+
+    let removed = Source {
+        source: "(ns schema)",
+        ..schema
+    };
+    let report = session.check_project(&[app, removed], None);
+    assert_eq!(
+        severity(&report.files[0].diagnostics, 2),
+        Some("error"),
+        "{report:#?}"
+    );
+    let restored = session.check_project(&[app, schema], None);
+    assert_eq!(severity(&restored.files[0].diagnostics, 2), Some("warning"));
+}
+
+#[test]
 fn navigates_unchecked_named_jvm_vars_and_respects_metadata() {
     let provider = Source {
         path: "provider.clj",

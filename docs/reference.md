@@ -763,6 +763,11 @@ arguments to known functions. Local bindings shadow referred vars. Unknown
 macros and ambiguous declarations limit how far Parenox can follow calls.
 The report still marks type coverage as incomplete.
 
+Source `defmacro` declarations provide navigation. When a top-level call
+targets a defined source macro, Parenox reports the unchecked expansion as
+a coverage warning. Any declarations and contracts produced by the expansion
+remain outside the source model.
+
 Supported string operations can also report input mismatches in a function
 without a contract. This analysis follows supported local bindings, map
 lookups, and conditions. For example, the second value from destructuring

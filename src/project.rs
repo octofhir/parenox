@@ -521,21 +521,32 @@ impl Session {
             self.externs
                 .publish_dependencies(&trusted_paths, &mut globals);
         }
+        let mut macro_gaps = BTreeMap::new();
         if mode == SnapshotMode::Check {
-            let known_provider = |namespace: &str| {
+            let provider = |namespace: &str| {
                 let &index = namespaces.get(namespace)?;
                 let (_, file, _) = &entries[index];
                 let declarations = file.declarations.as_ref()?;
-                (built[index]
-                    && file.snapshot == self.snapshot
-                    && !ambiguous.contains(namespace)
-                    && *file
+                (built[index] && file.snapshot == self.snapshot && !ambiguous.contains(namespace))
+                    .then_some((file, declarations))
+            };
+            let known_provider = |namespace: &str| {
+                provider(namespace).filter(|(file, declarations)| {
+                    *file
                         .known_var_surface
-                        .get_or_init(|| declarations.has_known_var_surface(&file.forms)))
-                .then_some((file, declarations))
+                        .get_or_init(|| declarations.has_known_var_surface(&file.forms))
+                })
             };
             for (index, (_, file, _)) in entries[..count].iter().enumerate() {
                 if let (Some(declarations), Some(model)) = (&file.declarations, &file.model) {
+                    let gaps = declarations.macro_expansion_gaps(&file.forms, |namespace, name| {
+                        provider(namespace).is_some_and(|(provider, declarations)| {
+                            declarations.source_macro(&provider.forms, name, None)
+                        })
+                    });
+                    if !gaps.is_empty() {
+                        macro_gaps.insert(index, gaps);
+                    }
                     reports[index]
                         .diagnostics
                         .extend(declarations.check_referrals(|namespace, local| {
@@ -581,7 +592,18 @@ impl Session {
                 if let Some(diagnostics) = self.specs.diagnostics.get(source.path) {
                     report.diagnostics.extend(diagnostics.iter().cloned());
                 }
-                report.diagnostics.extend(model.diagnostics.iter().cloned());
+                let gaps = macro_gaps.get(&index);
+                report
+                    .diagnostics
+                    .extend(model.diagnostics.iter().map(|diagnostic| {
+                        if diagnostic.code == "PNX9001"
+                            && let Some(gap) =
+                                gaps.and_then(|gaps| gaps.get(&diagnostic.span.start.offset))
+                        {
+                            return gap.clone();
+                        }
+                        diagnostic.clone()
+                    }));
                 if index >= count {
                     report
                         .diagnostics

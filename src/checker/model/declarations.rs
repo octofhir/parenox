@@ -97,6 +97,8 @@ pub(crate) struct Declarations {
     pub(super) test_forms: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
     pub(super) unchecked_vars: Vec<usize>,
+    macros: Vec<usize>,
+    unmodeled_calls: Vec<usize>,
     pub(super) forward_vars: BTreeMap<String, DeclaredVar>,
     records: Vec<usize>,
     pub(super) opaque_var_surface: bool,
@@ -164,6 +166,7 @@ impl Declarations {
             .map(|index| (index, true))
             .chain(self.literal_vars.iter().map(|index| (index, false)))
             .chain(self.unchecked_vars.iter().map(|index| (index, false)))
+            .chain(self.macros.iter().map(|index| (index, false)))
             .filter_map(move |(&index, function)| {
                 let Kind::List(items) = &forms[index].without_metadata().kind else {
                     return None;
@@ -202,6 +205,55 @@ impl Declarations {
             }
             SourceDeclaration::RecordFactory { .. } => false,
         }
+    }
+
+    pub(crate) fn source_macro(&self, forms: &[Form], name: &str, before: Option<usize>) -> bool {
+        let mut declarations = self.source_declarations(forms, name);
+        let Some(declaration @ SourceDeclaration::Value(items)) = declarations.next() else {
+            return false;
+        };
+        declarations.next().is_none()
+            && self.names.resolve_parts(items[0].symbol().unwrap()) == ("clojure.core", "defmacro")
+            && match before {
+                Some(offset) => items[0].span.start.offset < offset,
+                None => !self.source_private(&declaration),
+            }
+    }
+
+    pub(crate) fn macro_expansion_gaps(
+        &self,
+        forms: &[Form],
+        mut public_macro: impl FnMut(&str, &str) -> bool,
+    ) -> BTreeMap<usize, Diagnostic> {
+        self.unmodeled_calls
+            .iter()
+            .filter_map(|&index| {
+                let form = &forms[index];
+                let Kind::List(items) = &form.without_metadata().kind else {
+                    return None;
+                };
+                let op = items[0].symbol()?;
+                let (namespace, name) = self.names.resolve_parts(op);
+                let offset = form.span.start.offset;
+                let local = namespace == self.namespace()
+                    || (!op.contains('/') && !self.names.refers.contains_key(op));
+                let found = if local && self.source_macro(forms, name, Some(offset)) {
+                    true
+                } else {
+                    namespace != self.namespace() && public_macro(namespace, name)
+                };
+                found.then(|| {
+                    (
+                        offset,
+                        Diagnostic::analysis_gap(
+                            "PNX9001",
+                            items[0].without_metadata().span,
+                            format!("Expansion of source macro {op} is unchecked"),
+                        ),
+                    )
+                })
+            })
+            .collect()
     }
 
     pub(super) fn private_var(&self, items: &[Form]) -> bool {
@@ -324,6 +376,10 @@ impl Declarations {
                     match qualified {
                         "clojure.core/defrecord" => model.records.push(index),
                         "clojure.core/defmethod" => {}
+                        "clojure.core/defmacro" => {
+                            model.macros.push(index);
+                            model.opaque_var_surface = true;
+                        }
                         "clojure.core/defonce" | "clojure.core/defmulti" => {
                             model.unchecked_vars.push(index);
                             model.opaque_var_surface = true;
@@ -344,11 +400,14 @@ impl Declarations {
                         .diagnostics
                         .push(Diagnostic::analysis_gap("PNX9001", xs[0].span, message));
                 }
-                _ => model.error(
-                    "PNX9001",
-                    form.span,
-                    format!("Unsupported top-level declaration {op}"),
-                ),
+                _ => {
+                    model.unmodeled_calls.push(index);
+                    model.error(
+                        "PNX9001",
+                        form.span,
+                        format!("Unsupported top-level declaration {op}"),
+                    );
+                }
             }
         }
         model
