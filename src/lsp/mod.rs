@@ -153,7 +153,7 @@ fn request(
             output,
             id,
             json!({"capabilities": {
-            "positionEncoding":"utf-16", "textDocumentSync":{"openClose":true,"change":1,"save":{"includeText":false}},
+            "positionEncoding":"utf-16", "textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},
             "definitionProvider":true, "hoverProvider":true
         }, "serverInfo":{"name":"parenox", "version":env!("CARGO_PKG_VERSION")}}),
         );

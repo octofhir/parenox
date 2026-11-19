@@ -1,5 +1,6 @@
 //! File URI and UTF-16 position conversion at the protocol boundary.
 use std::fmt::Write;
+use std::ops;
 use std::path::{Component, Path, PathBuf};
 
 use parenox::reader::Span;
@@ -11,7 +12,7 @@ pub(super) struct Position {
     character: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub(super) struct Range {
     start: Position,
     end: Position,
@@ -80,6 +81,12 @@ impl<'a> Lines<'a> {
             start: self.position(span.start.offset)?,
             end: self.position(span.end.offset)?,
         })
+    }
+
+    pub fn byte_range(&self, range: Range) -> Option<ops::Range<usize>> {
+        let start = self.offset(range.start)?;
+        let end = self.offset(range.end)?;
+        (start <= end).then_some(start..end)
     }
 }
 

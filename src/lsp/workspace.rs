@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::WATCH_REQUEST_ID;
 use super::protocol::write_message;
-use super::text::{Lines, Position, file_path, file_uri, normalize};
+use super::text::{Lines, Position, Range, file_path, file_uri, normalize};
 use crate::cli::ProjectOptions;
 use crate::workspace::{DiskProject, FileSnapshot, is_clojure_source};
 
@@ -55,7 +55,7 @@ struct OpenDocument {
 #[serde(rename_all = "camelCase")]
 pub(super) struct Change {
     text_document: VersionedUri,
-    content_changes: Vec<FullChange>,
+    content_changes: Vec<ContentChange>,
 }
 
 #[derive(Deserialize)]
@@ -65,9 +65,9 @@ struct VersionedUri {
 }
 
 #[derive(Deserialize)]
-struct FullChange {
+struct ContentChange {
     text: String,
-    range: Option<Value>,
+    range: Option<Range>,
 }
 
 #[derive(Deserialize)]
@@ -234,14 +234,26 @@ impl Workspace {
         let Some(editor) = &mut document.editor else {
             return Ok(());
         };
-        if version <= editor.version || params.content_changes.len() != 1 {
+        if version <= editor.version {
             return Ok(());
         }
-        let change = params.content_changes.into_iter().next().unwrap();
-        if change.range.is_some() {
-            return Ok(());
+        // Each range refers to the source after the preceding change in this batch.
+        let mut snapshot = None;
+        for change in params.content_changes {
+            if let Some(range) = change.range {
+                let source = snapshot.get_or_insert_with(|| document.source.clone());
+                let Some(bytes) = Lines::new(source).byte_range(range) else {
+                    return Ok(());
+                };
+                source.replace_range(bytes, &change.text);
+            } else {
+                snapshot = Some(change.text);
+            }
         }
-        document.source = change.text;
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        document.source = snapshot;
         editor.version = version;
         editor.published = None;
         self.check_document(&path, output)

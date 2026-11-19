@@ -157,6 +157,57 @@ fn editor_merges_physical_buffers_with_linked_source_roots() {
 }
 
 #[test]
+fn editor_applies_ordered_utf16_edits_atomically() {
+    let fixture = Fixture::new("incremental source");
+    let caller = fixture.0.join("src/demo.cljc");
+    let body = r#"(defn label {:t/sig '[:-> string?]} [] (do "🦀" (s/trim "ok")))"#;
+    let source = format!("(ns demo (:require [clojure.string :as s]))\r\n{body}\r\n");
+    fs::write(&caller, &source).unwrap();
+    let document = uri(&caller);
+    let crab = body[..body.find('🦀').unwrap()].encode_utf16().count();
+    let original_arg = body[..body.find("\"ok\"").unwrap()].encode_utf16().count();
+    let edited_arg = original_arg - 2;
+    let ranged = |start, end, text| json!({"range":{"start":{"line":1,"character":start},"end":{"line":1,"character":end}},"text":text});
+    let change = |version, changes| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":version},"contentChanges":changes
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0),"capabilities":{}}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
+        }}),
+        change(
+            2,
+            json!([
+                ranged(crab, crab + 2, ""),
+                ranged(edited_arg, edited_arg + 4, "42")
+            ]),
+        ),
+        change(3, json!([{"text":source}, ranged(crab + 1, crab + 2, "")])),
+        change(3, json!([ranged(edited_arg, edited_arg + 2, "\"fixed\"")])),
+        change(2, json!([{"text":"(invalid stale text"}])),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    assert_eq!(messages.len(), 5, "{messages:?}");
+    assert_eq!(messages[1]["params"]["diagnostics"], json!([]));
+    let broken = &messages[2]["params"];
+    assert_eq!(broken["version"], 2);
+    assert_eq!(broken["diagnostics"][0]["code"], "PNX2322");
+    assert_eq!(
+        broken["diagnostics"][0]["range"],
+        json!({
+            "start":{"line":1,"character":edited_arg},"end":{"line":1,"character":edited_arg + 2}
+        })
+    );
+    assert_eq!(messages[3]["params"]["version"], 3);
+    assert_eq!(messages[3]["params"]["diagnostics"], json!([]));
+    assert_eq!(fs::read_to_string(caller).unwrap(), source);
+}
+
+#[test]
 fn editor_uses_aliases_overlays_and_utf16_ranges() {
     let fixture = Fixture::new("source");
     let provider = fixture.0.join("src/shop store.clj");
@@ -214,7 +265,7 @@ fn editor_uses_aliases_overlays_and_utf16_ranges() {
     assert_eq!(capabilities["definitionProvider"], true);
     assert_eq!(capabilities["hoverProvider"], true);
     assert_eq!(capabilities["positionEncoding"], "utf-16");
-    assert_eq!(capabilities["textDocumentSync"]["change"], 1);
+    assert_eq!(capabilities["textDocumentSync"]["change"], 2);
     let reported = &messages[2]["params"];
     assert_eq!(reported["version"], 1);
     assert_eq!(reported["diagnostics"][0]["code"], "PNX2322");
@@ -553,9 +604,14 @@ fn assert_overlay_finding(
 ) {
     let caller = root.join(relative);
     let document = uri(&caller);
-    let change = |version, text| {
+    let change = |version, before: &str, after: &str| {
+        let before = before.lines().nth(line).unwrap();
+        let after = after.lines().nth(line).unwrap();
         json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
-            "textDocument":{"uri":document,"version":version},"contentChanges":[{"text":text}]
+            "textDocument":{"uri":document,"version":version},"contentChanges":[{
+                "text":after,"range":{"start":{"line":line,"character":0},
+                    "end":{"line":line,"character":before.encode_utf16().count()}}
+            }]
         }})
     };
     let messages = transcript(&[
@@ -563,8 +619,8 @@ fn assert_overlay_finding(
         json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
             "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
         }}),
-        change(2, edited),
-        change(3, source),
+        change(2, source, edited),
+        change(3, edited, source),
         json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
         json!({"jsonrpc":"2.0","method":"exit"}),
     ]);
@@ -827,14 +883,28 @@ fn malli_pilot_editor_benchmark() {
     let binary = std::env::var_os("PARENOX_LSP_BINARY")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_parenox")));
-    let caller = root.join("test/malli/destructure_test.cljc");
+    let transport = std::env::var("PARENOX_LSP_TRANSPORT").unwrap_or_else(|_| "full".into());
+    assert!(matches!(transport.as_str(), "full" | "range"));
+    let selection = std::env::var("PARENOX_MALLI_DOCUMENT").unwrap_or_else(|_| "assertions".into());
+    let (file, before, after) = match selection.as_str() {
+        "assertions" => (
+            "test/malli/destructure_test.cljc",
+            r#""map destructuring""#,
+            r#""map destructuring example""#,
+        ),
+        "core" => (
+            "src/malli/core.cljc",
+            "returns type of the schema",
+            "returns type of the schema value",
+        ),
+        _ => panic!("invalid Malli benchmark document {selection}"),
+    };
+    let caller = root.join(file);
     let source = fs::read_to_string(&caller).unwrap();
-    let edited = source.replacen(
-        r#""map destructuring""#,
-        r#""map destructuring example""#,
-        1,
-    );
-    assert_ne!(edited, source);
+    let prefix = &source[..source.find(before).unwrap()];
+    let line = prefix.bytes().filter(|&byte| byte == b'\n').count();
+    let character = prefix.rsplit('\n').next().unwrap().encode_utf16().count();
+    let edited = source.replacen(before, after, 1);
     let document = uri(&caller);
     let started = Instant::now();
     let mut child = lsp_server_with(&binary);
@@ -861,13 +931,28 @@ fn malli_pilot_editor_benchmark() {
     let base = opened["params"]["diagnostics"].as_array().unwrap();
     assert!(!base.is_empty());
     let mut edits = Vec::with_capacity(100);
+    let mut first_edit_bytes = None;
     for version in 2..102 {
-        let (published, elapsed) = exchange(
-            &json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
-                "textDocument":{"uri":document,"version":version},
-                "contentChanges":[{"text":if version % 2 == 0 { &edited } else { &source }}]
-            }}),
-        );
+        let forward = version % 2 == 0;
+        let change = if transport == "range" {
+            let (old, new) = if forward {
+                (before, after)
+            } else {
+                (after, before)
+            };
+            let end = character + old.encode_utf16().count();
+            json!({"text":new,"range":{
+                "start":{"line":line,"character":character},
+                "end":{"line":line,"character":end}
+            }})
+        } else {
+            json!({"text":if forward { &edited } else { &source }})
+        };
+        let notification = json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":version},"contentChanges":[change]
+        }});
+        let (published, elapsed) = exchange(&notification);
+        first_edit_bytes.get_or_insert_with(|| notification.to_string().len());
         assert_eq!(published["params"]["version"], version);
         let diagnostics = published["params"]["diagnostics"].as_array().unwrap();
         assert_eq!(diagnostics.len(), base.len());
@@ -890,7 +975,10 @@ fn malli_pilot_editor_benchmark() {
         "{}",
         json!({
             "binary": binary,
+            "file": file,
+            "transport": transport,
             "samples": edits.len(),
+            "first_edit_json_bytes": first_edit_bytes,
             "diagnostics_per_edit": base.len(),
             "initialize_us": initialize_us,
             "first_open_us": open_us,

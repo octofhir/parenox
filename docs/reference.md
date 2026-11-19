@@ -544,7 +544,9 @@ and its contract source. Unsaved buffers participate in checks and navigation.
 The workspace supplies declarations for all sources. Editor requests check
 and publish diagnostics for open source documents.
 Completed top-level forms before a reader error remain available for navigation.
-Positions use UTF-16 and the server requests full document synchronization.
+The server requests incremental synchronization. It applies UTF-16 range
+edits in order and also accepts full document replacements. See the
+[LSP document change specification](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_didChange).
 
 Open `.edn` files receive syntax diagnostics from the data reader. Tagged
 values are read as inert data. Clojure navigation is available for `.clj` and
