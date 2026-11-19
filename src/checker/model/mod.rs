@@ -23,7 +23,7 @@ use externs::{ExternFile, Externs};
 pub(super) use guards::VerifiedGuard;
 pub(crate) use interfaces::InterfaceKey;
 use interfaces::{Exports, LocalInterface, visible_value};
-pub(crate) use references::ProjectCall;
+pub(crate) use references::{ProjectCall, ScopedReference};
 pub(crate) use specs::{SpecCache, SpecFingerprint, SpecSource};
 use vars::LiteralVar;
 

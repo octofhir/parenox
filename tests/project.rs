@@ -258,6 +258,44 @@ fn checks_referred_source_arities_through_scoped_core_forms() {
 }
 
 #[test]
+fn navigates_referred_uses_and_lexically_shadowing_locals() {
+    let app = Source {
+        path: "app.cljc",
+        source: r#"(ns app (:require [catalog :refer [size] :rename {size size-of}]))
+          (defn measure [input]
+            (let [length (size-of (:name input))
+                  {:keys [custom/size-of]} input]
+              [(size-of length) '(size-of length)]))"#,
+    };
+    let library = Source {
+        path: "catalog.clj",
+        source: "(ns catalog)\n(defn size {:t/sig '[string? :-> number?]} [text] (count text))",
+    };
+    let mut session = Session::default();
+    session.check_project(&[app, library], None);
+    let imported = app.source.find("(size-of (:name input)").unwrap() + 1;
+    let provider = session.definition(app.path, imported).unwrap();
+    assert_eq!(provider.path, library.path);
+    assert_eq!(provider.span.start.line, 2);
+    let var = session.var_at(app.path, imported).unwrap();
+    assert_eq!(var.name, "catalog/size");
+    assert_eq!(var.signatures.len(), 1);
+
+    for (use_prefix, declaration) in [("(:name ", "input"), ("[(", "custom/size-of")] {
+        let offset = app.source.find(use_prefix).unwrap() + use_prefix.len();
+        let target = session.definition(app.path, offset).unwrap();
+        assert_eq!(target.path, app.path);
+        assert_eq!(
+            &app.source[target.span.start.offset..target.span.end.offset],
+            declaration
+        );
+        assert!(session.var_at(app.path, offset).is_none());
+    }
+    let quoted = app.source.rfind("'(size-of").unwrap() + 2;
+    assert!(session.definition(app.path, quoted).is_none());
+}
+
+#[test]
 fn checks_project_calls_in_standard_test_assertions() {
     let source = r#"
         (ns shop-test (:require [clojure.test :refer :all] [catalog :as catalog]))

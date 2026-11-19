@@ -514,8 +514,9 @@ loads one workspace using the same `parenox.edn` and `deps.edn` settings as
 The server publishes Parenox diagnostics for open `.clj` and `.cljc` files and
 supports go-to-definition for qualified source vars, including namespace aliases.
 Named referrals in `:require`, `:use` and their renamings also link to source
-declarations. Parenox reports missing or private referral targets when it can
-determine the providing namespace's public vars.
+declarations. Within supported function and test scopes, referred uses and
+local bindings link to their declarations. Parenox reports missing or private
+referral targets when it can determine the providing namespace's public vars.
 Hover on those references shows the checked function signature when available
 and its contract source. Unsaved buffers participate in checks and navigation.
 Completed top-level forms before a reader error remain available for navigation.
@@ -632,7 +633,7 @@ saved even when it produces diagnostics. Single-file and complete-snapshot
 requests work independently of the tracked project.
 
 Query a source var after `open` or `update` with a zero-based UTF-8 byte
-offset inside a qualified reference or an explicit namespace referral:
+offset inside a reference or a namespace referral:
 
 ```json
 {"id":6,"op":"definition","path":"src/app.clj","offset":105}
@@ -640,9 +641,8 @@ offset inside a qualified reference or an explicit namespace referral:
 ```
 
 The definition response contains the target `path` and `span`, or a `null` result when no
-unique source definition can be resolved. The query supports qualified `def`
-and `defn` references, including namespace aliases and functions without type
-annotations. For a file-backed query, run
+unique source definition can be resolved. It supports qualified and referred
+project vars as well as local bindings in supported scopes. For a file-backed query, run
 `parenox definition --file src/app.clj --offset 105` with the same project path
 options as `check`.
 

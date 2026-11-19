@@ -16,7 +16,7 @@ use exceptions::Throws;
 use model::{Contract, DeclaredValue, Function, VerifiedGuard};
 pub(crate) use model::{
     Declarations, EncodeError, ExternCache, Globals, InterfaceKey, Model, ProjectCall,
-    SnapshotWriter, SpecCache, SpecFingerprint, SpecSource,
+    ScopedReference, SnapshotWriter, SpecCache, SpecFingerprint, SpecSource,
 };
 use recur::RecurTarget;
 

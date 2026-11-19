@@ -23,7 +23,7 @@ pub(crate) enum Command {
     },
     /// Run clojure.test namespaces on the project's JVM.
     Test(TestOptions),
-    /// Find the definition of a qualified source var.
+    /// Find a source var or local binding definition.
     Definition(DefinitionOptions),
     /// Check library bodies and validate the extern promises they ship.
     ValidateExterns(CheckOptions),
