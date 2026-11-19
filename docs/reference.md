@@ -481,6 +481,11 @@ with a string replacement. Regex callback type checking remains incomplete.
 A false result from `clojure.string/blank?` excludes nil from the tested
 value, including a stable lookup of an optional map field.
 
+The checked JVM string members are `length` and `charAt`, with the usual
+dot-method spellings. String length and offsets count UTF-16 code units.
+Analysis checks nil receivers and numeric index arguments. Bounds are enforced
+by the JVM. [String member example](../examples/jvm_strings.cljc)
+
 Design references include [clojure-reader](https://github.com/Grinkers/clojure-reader)
 for data reading, [Crabjure](https://github.com/ribelo/crabjure) for static analysis,
 and [clojurust](https://github.com/csm/clojurust) for future reader/expansion/runtime

@@ -1201,3 +1201,9 @@
            (try (demo.json-fields/required-name {"name" "Ada"})
                 (catch Exception e (.getMessage e)))))
 (println "Clojure/JVM destructuring string keys: 4 assertions passed")
+
+(load-file "examples/jvm_strings.cljc")
+(assert (= "pair" (demo.jvm-strings/supplementary-length)))
+(assert (= 0xD83D (demo.jvm-strings/maybe-code-unit {"name" "🙂"} 0)))
+(assert (nil? (demo.jvm-strings/maybe-code-unit {"name" nil} 0)))
+(println "Clojure/JVM String member calls: 3 assertions passed")

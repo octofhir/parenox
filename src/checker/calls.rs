@@ -4,6 +4,7 @@ mod forms;
 mod generics;
 mod indexing;
 mod inline;
+mod interop;
 mod macro_scopes;
 mod reduction;
 mod sequences;
@@ -174,6 +175,11 @@ impl<'model> Checker<'model> {
             }
             Some("throw") => return self.throw_form(&xs[1..], span, env),
             Some("try") => return self.try_form(&xs[1..], env, tail),
+            Some(name) if name.starts_with('.') => {
+                if let Some(value) = self.jvm_string_call(name, &xs[1..], span, env) {
+                    return value;
+                }
+            }
             _ => {}
         }
         if let Some(name) = xs[0].symbol()
@@ -567,6 +573,15 @@ impl<'model> Checker<'model> {
                 }
                 Type::Number
             }
+            "clojure.core/long" => {
+                self.expect(
+                    &args[0].0,
+                    &Type::union([Type::Number, Type::Character]),
+                    args[0].1,
+                    name,
+                );
+                Type::Number
+            }
             "clojure.string/upper-case" | "clojure.string/lower-case" | "clojure.string/trim" => {
                 self.expect(&args[0].0, &Type::String, args[0].1, name);
                 Type::String
@@ -797,6 +812,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/*"
             | "clojure.core/inc"
             | "clojure.core/dec"
+            | "clojure.core/long"
             | "clojure.core/str"
             | "clojure.core/identity"
             | "clojure.core/nil?"
