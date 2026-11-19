@@ -107,7 +107,7 @@ fn invalid_descriptions_and_invocations_report_their_own_spans() {
         ("{clojure.core/let {:macro :let-like}}", "PNX2790"),
         (
             "{vendor/m {:macro :let-like} vendor/m [:-> number?]}",
-            "PNX2790",
+            "PNX9000",
         ),
     ] {
         let report = Session::default().check_project(&[], Some(Source { source, ..EXTERNS }));

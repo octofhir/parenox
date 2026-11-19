@@ -570,18 +570,7 @@ impl<'a> Reader<'a> {
                 self.token(SyntaxKind::OpenBracket, start);
                 Kind::Vector(self.collection(']', start)?)
             }
-            Some('{') => {
-                self.token(SyntaxKind::OpenBrace, start);
-                let xs = self.collection('}', start)?;
-                if xs.len() % 2 != 0
-                    && !xs
-                        .iter()
-                        .any(|form| matches!(form.kind, Kind::Conditional { .. }))
-                {
-                    return Err(self.error(start, "Map literal requires an even number of forms"));
-                }
-                Kind::Map(xs)
-            }
+            Some('{') => self.map(start)?,
             Some('"') => self.string(start)?,
             Some('\\') => Kind::Character(self.character(start)?),
             Some('^') => {
@@ -661,6 +650,22 @@ impl<'a> Reader<'a> {
         let values = self.collection('}', start)?;
         uniqueness::check_set(&values, self.source)?;
         Ok(self.form_item(start, Kind::Set(values)))
+    }
+
+    fn map(&mut self, start: Position) -> Result<Kind, ReadError> {
+        self.token(SyntaxKind::OpenBrace, start);
+        let entries = self.collection('}', start)?;
+        let unresolved = matches!(self.conditionals, Conditionals::Preserve)
+            && entries
+                .iter()
+                .any(|form| matches!(form.kind, Kind::Conditional { .. }));
+        if !unresolved {
+            if !entries.len().is_multiple_of(2) {
+                return Err(self.error(start, "Map literal requires an even number of forms"));
+            }
+            uniqueness::check_map(&entries, self.source)?;
+        }
+        Ok(Kind::Map(entries))
     }
 
     fn symbolic_number(&mut self, start: Position) -> Result<Kind, ReadError> {

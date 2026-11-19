@@ -463,8 +463,8 @@ Namespaces with `definterface`, `deftype`, `defprotocol` and `extend` can be
 checked for supported declarations. The JVM declarations themselves report
 incomplete coverage. [JVM declarations example](../examples/jvm_forms.clj)
 
-Repeated simple values in set literals report a reader error at the repeated
-element. This check compares decoded strings and characters, symbols, keywords,
+Repeated simple values in set literals and repeated map keys report a reader
+error at the repeated form. This check compares decoded strings and characters, symbols, keywords,
 booleans, nil, symbolic numbers and identical ordinary numeric spellings.
 Clojure and EDN support `##Inf`, `##-Inf` and `##NaN`. String escapes preserve
 JVM UTF-16. Unpaired surrogates retain their code units for literal export,

@@ -2,7 +2,6 @@
 mod classpath;
 mod deps;
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -87,7 +86,6 @@ impl ProjectConfig {
         let entries = read_map(path)?;
         let parent = path.parent().unwrap_or_else(|| Path::new(""));
         let mut config = Self::default();
-        let mut seen = BTreeSet::new();
         for [key, value] in entries.as_chunks::<2>().0 {
             let Kind::Keyword(name) = &key.kind else {
                 return Err(invalid(
@@ -108,13 +106,6 @@ impl ProjectConfig {
                     ));
                 }
             };
-            if !seen.insert(name) {
-                return Err(invalid(
-                    path,
-                    key.span,
-                    &format!("duplicate configuration key {name}"),
-                ));
-            }
             let Kind::Vector(values) = &value.kind else {
                 return Err(invalid(
                     path,

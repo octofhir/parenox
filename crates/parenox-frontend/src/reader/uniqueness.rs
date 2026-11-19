@@ -17,9 +17,25 @@ enum Atom<'a> {
 }
 
 pub(super) fn check_set(values: &[Form], source: &str) -> Result<(), ReadError> {
-    if values.len() < 2 {
-        return Ok(());
+    if values.len() >= 2 {
+        check(values.iter(), source, "Duplicate element in set literal")?;
     }
+    Ok(())
+}
+
+pub(super) fn check_map(entries: &[Form], source: &str) -> Result<(), ReadError> {
+    if entries.len() >= 4 {
+        let keys = entries.as_chunks::<2>().0.iter().map(|[key, _]| key);
+        check(keys, source, "Duplicate key in map literal")?;
+    }
+    Ok(())
+}
+
+fn check<'a>(
+    values: impl Iterator<Item = &'a Form>,
+    source: &'a str,
+    message: &'static str,
+) -> Result<(), ReadError> {
     let mut seen = BTreeSet::new();
     for value in values {
         let value = value.without_metadata();
@@ -38,7 +54,7 @@ pub(super) fn check_set(values: &[Form], source: &str) -> Result<(), ReadError> 
         if !seen.insert(atom) {
             return Err(ReadError {
                 span: value.span,
-                message: "Duplicate element in set literal".into(),
+                message: message.into(),
             });
         }
     }

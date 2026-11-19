@@ -113,13 +113,6 @@ fn preserves_fixed_string_fields_and_tracks_possible_dynamic_overwrites() {
             Some("PNX2322"),
         ),
         ("string?", "[k]", "#{false}", "(contains? {} k)", None),
-        (
-            "",
-            "[]",
-            "number?",
-            r#"(count {"x" 1 "x" 2})"#,
-            Some("PNX2790"),
-        ),
     ] {
         let report = check(&format!(
             "(defn f {{:t/sig '[{args} :-> {ret}]}} {params} {expression})"
@@ -128,4 +121,7 @@ fn preserves_fixed_string_fields_and_tracks_possible_dynamic_overwrites() {
         let codes: Vec<_> = report.diagnostics.iter().map(|d| d.code.as_str()).collect();
         assert_eq!(codes, expected.as_slice(), "{expression}: {report:#?}");
     }
+    let duplicate = check(r#"(defn f {:t/sig '[:-> number?]} [] (count {"x" 1 "x" 2}))"#);
+    assert!(!duplicate.ok && !duplicate.complete, "{duplicate:#?}");
+    assert_eq!(duplicate.diagnostics[0].code, "PNX9000");
 }

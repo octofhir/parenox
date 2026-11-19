@@ -314,10 +314,7 @@ fn invalid_configurations_report_the_failing_key_or_value() {
     let path = dir.0.join("parenox.edn");
     for (source, message) in [
         ("{\n :typo []}", "unknown configuration key :typo"),
-        (
-            "{:paths [] :paths []}",
-            "duplicate configuration key :paths",
-        ),
+        ("{:paths [] :paths []}", "Duplicate key in map literal"),
         ("{:paths \"src\"}", ":paths must be a vector of paths"),
         (
             "{:paths [#example \"src\"]}",

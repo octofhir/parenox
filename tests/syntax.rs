@@ -262,6 +262,31 @@ fn duplicate_atomic_set_members_point_to_the_repeated_value() {
 }
 
 #[test]
+fn duplicate_map_keys_report_the_second_spelling_and_preserve_recovery() {
+    let source = r#"{:enabled true "name" 1 "n\u0061me" 2} :after"#;
+    let parsed = reader::parse(source);
+    assert_lossless(source, &parsed);
+    let [error] = parsed.errors.as_slice() else {
+        panic!("{:?}", parsed.errors);
+    };
+    assert_eq!(error.message, "Duplicate key in map literal");
+    assert_eq!(
+        &source[error.span.start.offset..error.span.end.offset],
+        r#""n\u0061me""#
+    );
+    assert_eq!(parsed.forms[0].keyword(), Some(":after"));
+    assert!(reader::validate_edn(source).is_err());
+    assert!(reader::read(r#"{:name 1 "name" 2 "other" 2}"#).is_ok());
+    assert!(
+        reader::read_with(
+            "{:name 1 #?@(:clj [:name 2] :cljs [:other 3])}",
+            reader::Conditionals::Select(":clj"),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn malformed_and_unsupported_reader_syntax_is_lossless_and_terminates() {
     for source in [
         "#_",

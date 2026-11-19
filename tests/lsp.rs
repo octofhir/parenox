@@ -205,10 +205,18 @@ fn edn_buffers_get_reader_diagnostics_and_clear_on_edit() {
             "textDocument":{"uri":document,"version":2},
             "contentChanges":[{"text":"#:config{:match #vendor/tag [\"x\" ##Inf]}"}]
         }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":3},
+            "contentChanges":[{"text":"{:paths [] :paths [\"src\"]}"}]
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":4},
+            "contentChanges":[{"text":"{:paths [\"src\"]}"}]
+        }}),
         json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
         json!({"jsonrpc":"2.0","method":"exit"}),
     ]);
-    assert_eq!(responses.len(), 4, "{responses:?}");
+    assert_eq!(responses.len(), 6, "{responses:?}");
     assert_eq!(responses[1]["params"]["diagnostics"][0]["code"], "PNX9000");
     assert_eq!(
         responses[1]["params"]["diagnostics"][0]["range"]["start"],
@@ -216,6 +224,15 @@ fn edn_buffers_get_reader_diagnostics_and_clear_on_edit() {
     );
     assert_eq!(responses[2]["params"]["version"], 2);
     assert_eq!(responses[2]["params"]["diagnostics"], json!([]));
+    let duplicate = &responses[3]["params"]["diagnostics"][0];
+    assert_eq!(duplicate["code"], "PNX9000");
+    assert_eq!(
+        duplicate["range"],
+        json!({
+            "start":{"line":0,"character":11},"end":{"line":0,"character":17}
+        })
+    );
+    assert_eq!(responses[4]["params"]["diagnostics"], json!([]));
 }
 
 #[test]
