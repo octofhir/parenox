@@ -1,5 +1,5 @@
 {:paths ["src"]
- :deps {org.clojure/clojure {:mvn/version "1.13.0-alpha11"}}
+ :deps {org.clojure/clojure #:mvn{:version "1.13.0-alpha11"}}
  :aliases {:test {:extra-paths ["test"]
                   :jvm-opts ["-Dparenox.test.flag=from-alias"]
                   :main-opts ["-e" "(throw (Exception. \"unexpected main opts\"))"]}}}

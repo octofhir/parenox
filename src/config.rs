@@ -133,7 +133,8 @@ impl ProjectConfig {
 
 fn read_map(path: &Path) -> Result<Vec<Form>, String> {
     let source = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let mut forms = reader::read(&source).map_err(|err| invalid(path, err.span, &err.message))?;
+    let mut forms =
+        reader::read_edn(&source).map_err(|err| invalid(path, err.span, &err.message))?;
     if forms.len() == 1
         && let Kind::Map(entries) = forms.remove(0).kind
     {

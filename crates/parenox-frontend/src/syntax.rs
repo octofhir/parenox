@@ -53,6 +53,8 @@ pub enum SyntaxKind {
     SyntaxQuoteMark,
     UnquoteMark,
     UnquoteSplicingMark,
+    NamespacedMap,
+    NamespacedMapMark,
     ErrorToken,
 }
 
@@ -77,6 +79,7 @@ impl SyntaxKind {
                 | Self::SyntaxQuote
                 | Self::Unquote
                 | Self::UnquoteSplicing
+                | Self::NamespacedMap
                 | Self::Error
         )
     }

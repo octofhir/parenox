@@ -1,8 +1,9 @@
 mod edn;
+mod namespace_map;
 mod numbers;
 mod uniqueness;
 
-pub use edn::validate_edn;
+pub use edn::{read_edn, validate_edn};
 
 use crate::syntax::{Builder, SyntaxKind, SyntaxNode};
 
@@ -397,6 +398,24 @@ impl<'a> Reader<'a> {
         )
     }
 
+    fn skip_space(&mut self) -> bool {
+        let start = self.pos;
+        match self.peek() {
+            Some(c) if c.is_whitespace() => {
+                while self.peek().is_some_and(char::is_whitespace) {
+                    self.bump();
+                }
+                self.token(SyntaxKind::Whitespace, start);
+            }
+            Some(',') => {
+                self.bump();
+                self.token(SyntaxKind::Comma, start);
+            }
+            _ => return false,
+        }
+        true
+    }
+
     // Discards remain syntax in a CST and disappear from semantic forms.
     fn skip(&mut self) -> Result<(), ReadError> {
         let first_comment = self
@@ -404,18 +423,11 @@ impl<'a> Reader<'a> {
             .as_ref()
             .map_or(0, |capture| capture.comments.len());
         loop {
+            if self.skip_space() {
+                continue;
+            }
             let start = self.pos;
             match self.peek() {
-                Some(c) if c.is_whitespace() => {
-                    while self.peek().is_some_and(char::is_whitespace) {
-                        self.bump();
-                    }
-                    self.token(SyntaxKind::Whitespace, start);
-                }
-                Some(',') => {
-                    self.bump();
-                    self.token(SyntaxKind::Comma, start);
-                }
                 Some(';') => {
                     while self.peek().is_some_and(|c| c != '\n') {
                         self.bump();
@@ -526,6 +538,9 @@ impl<'a> Reader<'a> {
                                 Kind::List(_) => SyntaxKind::List,
                                 Kind::AnonymousFunction(_) => SyntaxKind::AnonymousFunction,
                                 Kind::Vector(_) => SyntaxKind::Vector,
+                                Kind::Map(_) if spelling.starts_with("#:") => {
+                                    SyntaxKind::NamespacedMap
+                                }
                                 Kind::Map(_) => SyntaxKind::Map,
                                 Kind::Set(_) => SyntaxKind::Set,
                                 Kind::Quote(_) => SyntaxKind::Quote,
@@ -591,6 +606,7 @@ impl<'a> Reader<'a> {
                 return self.prefix_call(start, SyntaxKind::VarQuoteMark, "var");
             }
             Some('#') if self.peek() == Some('#') => self.symbolic_number(start)?,
+            Some('#') if self.peek() == Some(':') => self.namespaced_map(start)?,
             Some('#') if self.peek() == Some('(') => self.anonymous_function(start)?,
             Some('#') if self.peek() == Some('"') => {
                 self.bump();
@@ -655,17 +671,20 @@ impl<'a> Reader<'a> {
     fn map(&mut self, start: Position) -> Result<Kind, ReadError> {
         self.token(SyntaxKind::OpenBrace, start);
         let entries = self.collection('}', start)?;
-        let unresolved = matches!(self.conditionals, Conditionals::Preserve)
-            && entries
-                .iter()
-                .any(|form| matches!(form.kind, Kind::Conditional { .. }));
-        if !unresolved {
+        if !self.preserves_map_entries(&entries) {
             if !entries.len().is_multiple_of(2) {
                 return Err(self.error(start, "Map literal requires an even number of forms"));
             }
             uniqueness::check_map(&entries, self.source)?;
         }
         Ok(Kind::Map(entries))
+    }
+
+    fn preserves_map_entries(&self, entries: &[Form]) -> bool {
+        matches!(self.conditionals, Conditionals::Preserve)
+            && entries
+                .iter()
+                .any(|form| matches!(form.kind, Kind::Conditional { .. }))
     }
 
     fn symbolic_number(&mut self, start: Position) -> Result<Kind, ReadError> {

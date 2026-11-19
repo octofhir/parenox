@@ -287,6 +287,54 @@ fn duplicate_map_keys_report_the_second_spelling_and_preserve_recovery() {
 }
 
 #[test]
+fn explicit_namespace_maps_qualify_keys_in_both_readers_and_keep_spelling() {
+    let source = r#"#:stock {:sku "id" :_/category :input :vendor/price 1 code 7 _/raw 9}"#;
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_lossless(source, &parsed);
+    assert_eq!(
+        parsed.syntax().children().next().unwrap().kind(),
+        SyntaxKind::NamespacedMap
+    );
+    for forms in [parsed.forms, reader::read_edn(source).unwrap()] {
+        let entries = forms[0].map().unwrap();
+        let keys: Vec<_> = entries
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[key, _]| key.keyword().or_else(|| key.symbol()).unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ":stock/sku",
+                ":category",
+                ":vendor/price",
+                "stock/code",
+                "raw"
+            ]
+        );
+        assert_eq!(
+            &source[entries[0].span.start.offset..entries[0].span.end.offset],
+            ":sku"
+        );
+    }
+    for read in [reader::read, reader::read_edn] {
+        assert!(read("#:stock{:sku 1 :stock/sku 2}").is_err());
+        assert!(read("#:stock/item{:sku 1}").is_err());
+        assert!(read("#:stock ; comment\n{:sku 1}").is_err());
+    }
+    assert!(reader::read_edn("#: stock {:sku 1}").is_ok());
+    assert!(reader::read("#: stock {:sku 1}").is_err());
+    let selected = reader::read_with(
+        "#:stock{#?@(:clj [:sku 1] :cljs [:other 2])}",
+        reader::Conditionals::Select(":clj"),
+    )
+    .unwrap();
+    assert_eq!(selected[0].map().unwrap()[0].keyword(), Some(":stock/sku"));
+}
+
+#[test]
 fn malformed_and_unsupported_reader_syntax_is_lossless_and_terminates() {
     for source in [
         "#_",

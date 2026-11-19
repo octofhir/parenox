@@ -1207,3 +1207,9 @@
 (assert (= 0xD83D (demo.jvm-strings/maybe-code-unit {"name" "🙂"} 0)))
 (assert (nil? (demo.jvm-strings/maybe-code-unit {"name" nil} 0)))
 (println "Clojure/JVM String member calls: 3 assertions passed")
+
+(doseq [read [read-string edn/read-string]]
+  (assert (= (assoc {:stock/sku "id" :category :input :vendor/price 1} 'stock/code 7 'raw 9)
+             (read "#:stock {:sku \"id\" :_/category :input :vendor/price 1 code 7 _/raw 9}")))
+  (assert (try (read "#:stock{:sku 1 :stock/sku 2}") false (catch RuntimeException _ true))))
+(println "Clojure/JVM and EDN namespaced maps: 4 assertions passed")
