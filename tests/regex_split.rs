@@ -3,6 +3,43 @@ use parenox::{Session, Source};
 const SOURCE: &str = include_str!("../examples/regex_split.cljc");
 
 #[test]
+fn regex_matches_preserve_absence_and_optional_capture_groups() {
+    let source = r##"(ns matches (:require [clojure.string :as str] [clojure.spec.alpha :as s]))
+        (defn prefix {:t/sig '[string? :-> (s/nilable string?)]} [text]
+          (re-find #"\A.*/" text))
+        (defn groups {:t/sig '[string? :-> (s/nilable (s/tuple string? (s/nilable string?) (s/nilable string?)))]} [text]
+          (re-matches #"(a)(b)?" text))
+        (defn cleaned [text] (some-> (re-find #"[a-z]+" text) str/trim))"##;
+    let mut session = Session::default();
+    let report = session.check("matches.cljc", source);
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(report.diagnostics[0].severity, "warning");
+
+    let edited = source.replace(
+        "(some-> (re-find #\"[a-z]+\" text) str/trim)",
+        "(str/trim (re-find #\"[a-z]+\" text))",
+    );
+    let report = session.check("matches.cljc", &edited);
+    let mismatch = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PNX2322")
+        .unwrap();
+    assert_eq!(mismatch.actual.as_deref(), Some("Nil | String"));
+    assert_eq!(
+        mismatch.contract.as_ref().unwrap().name,
+        "clojure.string/trim"
+    );
+
+    let matcher = r##"(ns matches)
+        (defn query {:t/sig '[:-> string?]} [] (re-find (re-matcher #"a" "a")))"##;
+    let report = session.check("matches.cljc", matcher);
+    assert!(!report.complete);
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(report.diagnostics[0].severity, "warning");
+}
+
+#[test]
 fn split_produces_string_vectors_and_nullable_destructuring() {
     let mut session = Session::default();
     let report = session.check("regex_split.cljc", SOURCE);

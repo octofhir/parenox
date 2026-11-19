@@ -1188,6 +1188,12 @@
 (assert (= "" (demo.query-string/field-value "a=")))
 (assert (= "b=c" (demo.query-string/field-value "a=b=c")))
 (println "Clojure/JVM regex split: 4 assertions passed")
+
+(assert (= "a/" (re-find #"\A.*/" "a/b")))
+(assert (nil? (re-find #"\A.*/" "ab")))
+(assert (= ["a" "a" nil] (re-matches #"(a)(b)?" "a")))
+(assert (= "a" (re-find (re-matcher #"a" "ab"))))
+(println "Clojure/JVM regex matching: 4 assertions passed")
 (assert (= "" (demo.query-string/normalized-value {})))
 (assert (= "" (demo.query-string/normalized-value {:value nil})))
 (assert (= "" (demo.query-string/normalized-value {:value " \t"})))

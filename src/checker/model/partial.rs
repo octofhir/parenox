@@ -112,6 +112,10 @@ impl Checker<'_> {
                         | "="
                         | "str"
                         | "re-pattern"
+                        | "re-find"
+                        | "re-matches"
+                        | "some->"
+                        | "some->>"
                 )
             )
     }

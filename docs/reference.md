@@ -491,6 +491,12 @@ of strings. Its length is unknown to the checker, so destructuring a
 second field preserves the possibility of nil. Java regex validation is
 performed by the JVM. [Regex split example](../examples/regex_split.cljc)
 
+`re-find` and `re-matches` preserve a nil result for a failed match. For
+simple literal patterns, Parenox distinguishes a string match from a vector
+whose first item is the match and whose later items may be nil. An opaque
+capture layout uses the union of the possible shapes. The stateful
+`re-find` overload taking a JVM matcher reports a coverage gap.
+
 `clojure.string/replace` checks character pairs, string pairs and a regex
 with a string replacement. Regex callback type checking remains incomplete.
 A false result from `clojure.string/blank?` excludes nil from the tested
