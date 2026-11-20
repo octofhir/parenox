@@ -71,6 +71,21 @@ pub(super) struct Specialization {
 pub(super) struct CallArguments<'a> {
     pub(super) values: &'a [(Value, Span)],
     pub(super) forms: &'a [Form],
+    output_gap_explained: bool,
+}
+
+struct EvaluatedArguments {
+    values: Vec<(Value, Span)>,
+    output_gap_explained: bool,
+}
+
+impl From<Vec<(Value, Span)>> for EvaluatedArguments {
+    fn from(values: Vec<(Value, Span)>) -> Self {
+        Self {
+            values,
+            output_gap_explained: false,
+        }
+    }
 }
 
 impl<'model> Checker<'model> {
@@ -286,8 +301,9 @@ impl<'model> Checker<'model> {
         self.call_value(
             &function,
             CallArguments {
-                values: &args,
+                values: &args.values,
                 forms: &xs[1..],
+                output_gap_explained: args.output_gap_explained,
             },
             xs[0].span,
             span,
@@ -331,7 +347,7 @@ impl<'model> Checker<'model> {
         forms: &[Form],
         call: Span,
         env: &Env,
-    ) -> Vec<(Value, Span)> {
+    ) -> EvaluatedArguments {
         let signature = match &function.known {
             Type::Function(signatures) => signatures
                 .iter()
@@ -349,7 +365,8 @@ impl<'model> Checker<'model> {
         }) else {
             return self
                 .eval_args(forms, env, function.known != Type::Never)
-                .collect();
+                .collect::<Vec<_>>()
+                .into();
         };
         let mut reachable = env.reachable();
         forms
@@ -371,12 +388,14 @@ impl<'model> Checker<'model> {
                             env,
                             CallbackReturn::Check,
                         )
+                        .map(|callback| callback.value)
                         .unwrap_or_else(|| checker.infer(form, env))
                 });
                 reachable = value.known != Type::Never;
                 (value, form.span)
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into()
     }
 
     fn typed_args(&mut self, args: &[Form], env: &Env) -> Vec<(Value, Span)> {
@@ -583,6 +602,7 @@ impl<'model> Checker<'model> {
                 CallArguments {
                     values: &args,
                     forms: &[],
+                    output_gap_explained: false,
                 },
                 callable.span,
                 span,

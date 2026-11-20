@@ -40,6 +40,9 @@ pub struct Diagnostic {
     pub actual: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contract: Option<ContractOrigin>,
+    /// The call contract that supplied types to an inline callback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_contract: Option<ContractOrigin>,
     /// Structural path to the failing part of a checked call argument.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mismatch_path: Vec<ExternPathStep>,
@@ -127,6 +130,7 @@ impl Diagnostic {
             expected: None,
             actual: None,
             contract: None,
+            callback_contract: None,
             mismatch_path: Vec::new(),
             notes: Vec::new(),
             help: None,

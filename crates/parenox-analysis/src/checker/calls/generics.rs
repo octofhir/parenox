@@ -1,7 +1,7 @@
 //! Infer input from an argument or a supported projection, then output from one callback.
 use std::borrow::Cow;
 
-use super::{CallArguments, inline::CallbackReturn};
+use super::{CallArguments, EvaluatedArguments, inline::CallbackReturn};
 use crate::Diagnostic;
 use crate::checker::{Checker, Env, Value};
 use crate::reader::{Form, Span};
@@ -42,7 +42,7 @@ impl Checker<'_> {
         forms: &[Form],
         call: Span,
         env: &Env,
-    ) -> Vec<(Value, Span)> {
+    ) -> EvaluatedArguments {
         let mut values = Vec::with_capacity(forms.len());
         let mut callbacks = Vec::new();
         let mut reachable = env.reachable();
@@ -65,12 +65,12 @@ impl Checker<'_> {
                 values.push((value, form.span));
             }
         }
+        let mut output_gap_explained = false;
         if !callbacks.is_empty() {
             let binders = signature.parameters.as_ref().expect("generic signature");
-            let output_callback = binders
-                .output()
-                .and_then(|(_, parameter)| signature.output_callback(parameter))
-                .map(|witness| witness.index);
+            let output_callback = binders.output().and_then(|(_, parameter)| {
+                Some((parameter, signature.output_callback(parameter)?))
+            });
             let (missing, instantiated) = {
                 let inputs = signature.input_types(binders, |index| &values[index].0.ty);
                 let missing = inputs.missing();
@@ -89,7 +89,10 @@ impl Checker<'_> {
                         !missing[index] && template.mentions_parameter(param)
                     });
                 let check_body = reachable && reachable_at_argument && has_context;
-                let mode = if Some(index) == output_callback {
+                let output = output_callback
+                    .as_ref()
+                    .filter(|(_, witness)| witness.index == index);
+                let mode = if output.is_some() {
                     CallbackReturn::Infer
                 } else {
                     CallbackReturn::Check
@@ -104,6 +107,18 @@ impl Checker<'_> {
                             env,
                             mode,
                         )
+                        .map(|callback| {
+                            if check_body && let Some((parameter, witness)) = output {
+                                output_gap_explained = callback
+                                    .rejected_return
+                                    .as_ref()
+                                    .and_then(|ty| witness.evidence(ty))
+                                    .is_some_and(|ty| {
+                                        parameter.check_bound(&ty) == Compatibility::Proven
+                                    });
+                            }
+                            callback.value
+                        })
                         .unwrap_or_else(|| checker.infer(form, env))
                 });
                 if check_body {
@@ -113,7 +128,10 @@ impl Checker<'_> {
                 // diverge. Keep the placeholder for the argument's reachability.
             }
         }
-        values
+        EvaluatedArguments {
+            values,
+            output_gap_explained,
+        }
     }
 
     pub(super) fn call_generic(
@@ -165,9 +183,10 @@ impl Checker<'_> {
                         evidence.insert(index, candidate);
                     }
                     Err(Compatibility::Mismatch) => {} // The argument check below reports it.
-                    Err(_) => {
+                    Err(_) if !arguments.output_gap_explained => {
                         self.missing_parameter(function, parameter, *span, "this callback's result")
                     }
+                    Err(_) => {}
                 }
             }
             valid &= output_valid;

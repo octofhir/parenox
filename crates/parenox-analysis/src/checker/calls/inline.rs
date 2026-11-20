@@ -42,6 +42,20 @@ pub(super) enum CallbackReturn {
     Infer,
 }
 
+pub(super) struct ContextualCallback {
+    pub value: Value,
+    pub rejected_return: Option<Type>,
+}
+
+impl ContextualCallback {
+    fn unchecked() -> Self {
+        Self {
+            value: Value::new(Type::Unknown),
+            rejected_return: None,
+        }
+    }
+}
+
 pub(super) struct Fnil<'form, 'model> {
     target: PreparedCallable<'form, 'model>,
     defaults: Vec<(Value, Span)>,
@@ -98,7 +112,7 @@ impl<'model> Checker<'model> {
         origin: Option<&ContractOrigin>,
         env: &Env,
         mode: CallbackReturn,
-    ) -> Option<Value> {
+    ) -> Option<ContextualCallback> {
         let Type::Function(signatures) = expected else {
             return None;
         };
@@ -114,7 +128,7 @@ impl<'model> Checker<'model> {
                 form.span,
                 "A contextual callback currently requires a fixed-arity s/fspec",
             );
-            return Some(Value::new(Type::Unknown));
+            return Some(ContextualCallback::unchecked());
         }
         if self.callback_depth >= MAX_CALLBACK_DEPTH {
             self.error(
@@ -122,7 +136,7 @@ impl<'model> Checker<'model> {
                 form.span,
                 format!("Contextual callback nesting limit ({MAX_CALLBACK_DEPTH}) exceeded"),
             );
-            return Some(Value::new(Type::Unknown));
+            return Some(ContextualCallback::unchecked());
         }
         let start = self.diagnostics.len();
         let arguments = signature
@@ -134,6 +148,7 @@ impl<'model> Checker<'model> {
         // Constructing a closure does not execute its body. In particular a
         // surrounding try must not catch exceptions from this speculative check.
         let enclosing_throws = self.throws.take();
+        let enclosing_unproven = std::mem::take(&mut self.has_unproven_expectation);
         self.callback_depth += 1;
         let result = self.check_inline(
             function,
@@ -152,8 +167,25 @@ impl<'model> Checker<'model> {
         );
         self.callback_depth -= 1;
         self.throws = enclosing_throws;
+        let unproven = self.has_unproven_expectation;
+        self.has_unproven_expectation |= enclosing_unproven;
+        let findings = &self.diagnostics[start..];
+        if !findings.is_empty() {
+            // The return type is evidence about a redundant inference gap,
+            // never a usable type for an invalid callback.
+            let rejected_return = (matches!(mode, CallbackReturn::Infer)
+                && !unproven
+                && findings.iter().any(|finding| finding.code == "PNX2322")
+                && findings
+                    .iter()
+                    .all(|finding| !finding.code.starts_with("PNX9")))
+            .then_some(result.known);
+            return Some(ContextualCallback {
+                value: Value::new(Type::Unknown),
+                rejected_return,
+            });
+        }
         let ty = match mode {
-            _ if self.diagnostics.len() != start => Type::Unknown,
             CallbackReturn::Check if result.known.subtype_of(&signature.ret) => expected.clone(),
             CallbackReturn::Infer => Type::Function(
                 [Signature {
@@ -164,7 +196,10 @@ impl<'model> Checker<'model> {
             ),
             CallbackReturn::Check => Type::Unknown,
         };
-        Some(Value::new(ty))
+        Some(ContextualCallback {
+            value: Value::new(ty),
+            rejected_return: None,
+        })
     }
 
     pub(super) fn call_inline(
@@ -298,6 +333,12 @@ impl<'model> Checker<'model> {
             "fn called"
         };
         for diagnostic in &mut self.diagnostics[start..] {
+            if let Some(origin) = site.callback.and_then(|callback| callback.origin)
+                && diagnostic.contract.as_ref() != Some(origin)
+                && diagnostic.callback_contract.is_none()
+            {
+                diagnostic.callback_contract = Some(origin.clone());
+            }
             diagnostic.notes.push(format!(
                 "While checking inline {context} at {}:{}",
                 site.call.start.line, site.call.start.column

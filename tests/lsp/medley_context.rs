@@ -89,10 +89,10 @@ fn infers_medley_callback_parameters_from_dictionary_keys_and_values() {
     assert!(findings(1).is_empty());
     assert!(findings(3).is_empty());
     let (line, character) = location(&broken, "(inc lib)", "lib");
-    let mismatch = findings(2)
-        .iter()
-        .find(|diagnostic| diagnostic["code"] == "PNX2322")
-        .unwrap();
+    let [mismatch] = findings(2).as_slice() else {
+        panic!("{:?}", findings(2));
+    };
+    assert_eq!(mismatch["code"], "PNX2322");
     assert_eq!(
         mismatch["range"],
         json!({
@@ -100,10 +100,13 @@ fn infers_medley_callback_parameters_from_dictionary_keys_and_values() {
             "end":{"line":line,"character":character+3}
         })
     );
-    assert_eq!(
-        mismatch["message"],
-        "clojure.core/inc: expected Number, got Symbol"
+    let message = mismatch["message"].as_str().unwrap();
+    let headline = message.lines().next().unwrap();
+    assert_eq!(headline, "clojure.core/inc: expected Number, got Symbol");
+    assert!(
+        message.contains("Callback checked with medley.core/map-kv-vals (extern declaration in ")
     );
+    assert!(message.ends_with("externs.edn)"));
     assert_eq!(fs::read_to_string(&path).unwrap(), SOURCE);
 
     let check = || {
@@ -127,22 +130,22 @@ fn infers_medley_callback_parameters_from_dictionary_keys_and_values() {
     let bad = check();
     assert_eq!(bad.status.code(), Some(1));
     let report: Value = serde_json::from_slice(&bad.stdout).unwrap();
+    assert_eq!(report["complete"], true);
     let file = report["files"]
         .as_array()
         .unwrap()
         .iter()
         .find(|file| file["path"].as_str().unwrap().ends_with("requirements.clj"))
         .unwrap();
-    let bad = file["diagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["code"] == mismatch["code"])
-        .unwrap();
-    assert_eq!(bad["message"], mismatch["message"]);
+    let [bad] = file["diagnostics"].as_array().unwrap().as_slice() else {
+        panic!("{file}");
+    };
+    assert_eq!(bad["code"], mismatch["code"]);
+    assert_eq!(bad["message"], headline);
     assert_eq!(bad["expected"], "Number");
     assert_eq!(bad["actual"], "Symbol");
     assert_eq!(bad["contract"]["name"], "clojure.core/inc");
+    assert_eq!(bad["callback_contract"]["name"], "medley.core/map-kv-vals");
     assert_eq!(bad["span"]["start"]["line"], line + 1);
     assert_eq!(bad["span"]["start"]["column"], character + 1);
     assert_eq!(fs::read_to_string(&externs).unwrap(), EXTERNS);

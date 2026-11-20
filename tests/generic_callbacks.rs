@@ -183,28 +183,41 @@ fn rigid_input_and_output_are_not_interchangeable_even_in_a_recursive_call() {
 }
 
 #[test]
-fn missing_callback_result_is_reported_at_the_callback_without_masking_its_errors() {
+fn a_rejected_callback_with_a_checked_result_has_one_type_error() {
     let body = "#(inc (str %))";
     let source = format!("{EXAMPLE}\n(defn bad {{:t/sig '[:-> number?]}} [] (convert {body} 1))");
     let report = Session::default().check("generics.clj", &source);
-    assert!(!report.complete);
-    assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "PNX2322" && d.message.contains("inc"))
-    );
-    let gap = report
-        .diagnostics
-        .iter()
-        .find(|d| d.code == "PNX9010")
-        .expect("missing result gap");
-    assert!(gap.message.contains("parameter b"));
+    assert!(report.complete);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.contract.as_ref().unwrap().name, "clojure.core/inc");
     assert_eq!(
-        gap.contract.as_ref().unwrap().name,
+        error.callback_contract.as_ref().unwrap().name,
         "demo.generic-callbacks/convert"
     );
-    assert_eq!(&source[gap.span.start.offset..gap.span.end.offset], body);
+    assert_eq!(
+        &source[error.span.start.offset..error.span.end.offset],
+        "(str %)"
+    );
+}
+
+#[test]
+fn an_independent_coverage_gap_survives_a_callback_type_error() {
+    let report = check(
+        "(defn erased {:t/sig '[number? :-> t/any]} [n] n)
+         (defn mixed {:t/sig '[:-> string?]} []
+           (convert (fn [n] (inc \"not a number\") (subs (erased n) 0)) 1))",
+    );
+    assert!(!report.complete);
+    let [gap, error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(gap.code, "PNX9010");
+    assert!(gap.message.contains("this callback's result"));
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.contract.as_ref().unwrap().name, "clojure.core/inc");
 }
 
 #[test]

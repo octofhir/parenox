@@ -9,6 +9,18 @@ use annotate_snippets::renderer::{AnsiColor, Effects, Style};
 use crate::{ContractKind, ContractOrigin, Diagnostic, ProjectReport, Report, Stats};
 
 pub fn contract_note(origin: &ContractOrigin) -> String {
+    format!("Contract for {}: {}", origin.name, contract_source(origin))
+}
+
+pub fn callback_contract_note(origin: &ContractOrigin) -> String {
+    format!(
+        "Callback checked with {} ({})",
+        origin.name,
+        contract_source(origin)
+    )
+}
+
+fn contract_source(origin: &ContractOrigin) -> String {
     let kind = match origin.kind {
         ContractKind::TSig => ":t/sig",
         ContractKind::SFdef => "s/fdef",
@@ -18,8 +30,8 @@ pub fn contract_note(origin: &ContractOrigin) -> String {
         ContractKind::MacroScope => "macro scope declaration",
     };
     match &origin.path {
-        Some(path) => format!("Contract for {}: {kind} in {path}", origin.name),
-        None => format!("Contract for {}: {kind}", origin.name),
+        Some(path) => format!("{kind} in {path}"),
+        None => kind.into(),
     }
 }
 
@@ -54,6 +66,9 @@ pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: 
         );
         if let Some(contract) = &diagnostic.contract {
             primary = primary.element(Level::NOTE.message(contract_note(contract)));
+        }
+        if let Some(contract) = &diagnostic.callback_contract {
+            primary = primary.element(Level::NOTE.message(callback_contract_note(contract)));
         }
         for note in &diagnostic.notes {
             primary = primary.element(Level::NOTE.message(note));
@@ -236,6 +251,9 @@ pub fn plain(report: &Report) -> String {
         .unwrap();
         if let Some(contract) = &diagnostic.contract {
             writeln!(output, "  note: {}", contract_note(contract)).unwrap();
+        }
+        if let Some(contract) = &diagnostic.callback_contract {
+            writeln!(output, "  note: {}", callback_contract_note(contract)).unwrap();
         }
         for note in &diagnostic.notes {
             writeln!(output, "  note: {note}").unwrap();

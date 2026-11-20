@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use parenox::formatter::{self, FormatOptions, Language};
 use parenox::{
-    Definition, Diagnostic, DocumentHover, Session, Source, output::contract_note,
+    Definition, Diagnostic, DocumentHover, Session, Source,
+    output::{callback_contract_note, contract_note},
     reader::validate_edn,
 };
 use parenox_lsp::structural::{self, FoldingOptions};
@@ -1128,7 +1129,10 @@ impl Document {
 }
 
 fn diagnostic_message(diagnostic: &Diagnostic) -> Cow<'_, str> {
-    if diagnostic.mismatch_path.is_empty() {
+    if diagnostic.mismatch_path.is_empty()
+        && diagnostic.callback_contract.is_none()
+        && diagnostic.code != "PNX9010"
+    {
         return Cow::Borrowed(&diagnostic.message);
     }
     let mut message = diagnostic.message.clone();
@@ -1139,6 +1143,10 @@ fn diagnostic_message(diagnostic: &Diagnostic) -> Cow<'_, str> {
     if let Some(origin) = &diagnostic.contract {
         message.push('\n');
         message.push_str(&contract_note(origin));
+    }
+    if let Some(origin) = &diagnostic.callback_contract {
+        message.push('\n');
+        message.push_str(&callback_contract_note(origin));
     }
     Cow::Owned(message)
 }

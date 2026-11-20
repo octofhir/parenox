@@ -31,6 +31,9 @@ Each diagnostic has a stable rule `code` and an opaque occurrence `id`. IDs
 can change when the source span or path changes. The optional `contract`
 object gives the origin's qualified `name`, `kind`, and file `path` when
 available. The primary span remains at the use being checked.
+When a separate contract supplied the argument types of an inline callback,
+`callback_contract` gives that origin alongside the contract for the failing
+operation inside the callback.
 For a nested argument mismatch, `mismatch_path` describes the failing field
 or element. Literal maps and vectors can locate the exact value in source.
 Computed arguments retain their range and report the failing path in a note.
