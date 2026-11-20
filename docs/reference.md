@@ -38,6 +38,11 @@ For a nested argument mismatch, `mismatch_path` describes the failing field
 or element. Literal maps and vectors can locate the exact value in source.
 Computed arguments retain their range and report the failing path in a note.
 
+A function body without a checked signature can still report a proved
+argument mismatch at a call to a required library with an EDN extern.
+The body retains its coverage warning. Unresolved macros and aliases
+that do not load a library do not establish an evaluated call.
+
 ### Targeted suppressions
 
 Write `;; parenox-ignore PNX2322: reason` before the next form. The reason

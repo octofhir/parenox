@@ -559,13 +559,15 @@ impl Checker<'_> {
                 } else if let Some(value) = self.model.declared_value(s, self.globals) {
                     match value {
                         DeclaredValue::Literal(ty) => Value::new(ty.clone()),
-                        DeclaredValue::ExternLiteral(ty, origin) => Value::with_notes(
+                        DeclaredValue::ExternLiteral(ty, origin) if self.partial_contract_visible(origin) => Value::with_notes(
                             ty.clone(),
                             origin.path.iter().map(|path| {
                                 format!("Literal {} is declared in {path}.", origin.name)
                             }).collect(),
                         ),
-                        DeclaredValue::Function(contract) => Value::from_contract(contract),
+                        DeclaredValue::ExternLiteral(_, _) => Value::new(Type::Unknown),
+                        DeclaredValue::Function(contract) if self.partial_contract_visible(&contract.origin) => Value::from_contract(contract),
+                        DeclaredValue::Function(_) => Value::new(Type::Unknown),
                         DeclaredValue::UncheckedFunction(_) => self.unchecked_function(s, form.span),
                         DeclaredValue::Macro(scope) => self.macro_gap(
                             scope, form.span, format!("Macro {} is not a function value", scope.origin().name)

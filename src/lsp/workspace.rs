@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use parenox::formatter::{self, FormatOptions, Language};
 use parenox::{
-    Definition, Diagnostic, DocumentHover, Session, Source,
+    ContractKind, Definition, Diagnostic, DocumentHover, Session, Source,
     output::{callback_contract_note, contract_note},
     reader::validate_edn,
 };
@@ -1132,6 +1132,9 @@ fn diagnostic_message(diagnostic: &Diagnostic) -> Cow<'_, str> {
     if diagnostic.mismatch_path.is_empty()
         && diagnostic.callback_contract.is_none()
         && diagnostic.code != "PNX9010"
+        && !diagnostic.contract.as_ref().is_some_and(|origin| {
+            diagnostic.code == "PNX2322" && origin.kind == ContractKind::Extern
+        })
     {
         return Cow::Borrowed(&diagnostic.message);
     }

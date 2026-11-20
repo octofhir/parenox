@@ -1,10 +1,12 @@
-//! Type findings from selected built-in calls in bodies that have no contract.
+//! Definite call-site findings in function bodies without a checked signature.
 use super::contracts::function_parts;
+use super::declarations::symbols_match;
+use super::externs::ExternalDeclaration;
 use super::{Declarations, DeclaredValue, Globals, Model};
-use crate::Diagnostic;
 use crate::checker::{Checker, Env, Value, function_forms::function_clauses};
 use crate::reader::{Form, Kind};
 use crate::types::Type;
+use crate::{ContractKind, ContractOrigin, Diagnostic};
 
 const STRING_OPERATORS: &[&str] = &[
     "upper-case",
@@ -19,7 +21,7 @@ const STRING_OPERATORS: &[&str] = &[
 const STRING_MEMBERS: &[&str] = &["charAt", "length", "startsWith", "endsWith", "indexOf"];
 
 impl Declarations {
-    pub(crate) fn check_untyped_strings(
+    pub(crate) fn check_untyped_calls(
         &self,
         forms: &[Form],
         model: &Model,
@@ -31,7 +33,18 @@ impl Declarations {
             .iter()
             .any(|name| name == "clojure.string");
         let jvm_string = STRING_MEMBERS.iter().any(|member| source.contains(member));
-        if (!string_namespace && !source.contains("subs") && !jvm_string)
+        let extern_calls = globals.externs.as_ref().is_some_and(|externs| {
+            std::iter::once(model.namespace())
+                .chain(model.names.required_libraries.iter().map(String::as_str))
+                .any(|namespace| {
+                    externs.namespaces.get(namespace).is_some_and(|table| {
+                        table
+                            .values()
+                            .any(|entry| matches!(entry, ExternalDeclaration::Function(_)))
+                    })
+                })
+        });
+        if (!extern_calls && !string_namespace && !source.contains("subs") && !jvm_string)
             || !self.all_refers.is_empty()
             || ["clojure.core", "clojure.string"]
                 .iter()
@@ -57,7 +70,16 @@ impl Declarations {
         let mut diagnostics = Vec::new();
         for form in definitions {
             let text = &source[form.span.start.offset..form.span.end.offset];
-            if !operators.iter().any(|&operator| text.contains(operator)) {
+            let has_string_call = operators.iter().any(|&operator| text.contains(operator));
+            let has_extern_call = extern_calls
+                && !has_string_call
+                && !symbols_match(form, &mut |name| {
+                    !matches!(model.declared_value(name, globals),
+                        Some(DeclaredValue::Function(contract))
+                            if contract.origin.kind == ContractKind::Extern
+                                && model.partial_extern_available(globals, &contract.origin))
+                });
+            if !has_string_call && !has_extern_call {
                 continue;
             }
             let Kind::List(items) = &form.without_metadata().kind else {
@@ -81,18 +103,48 @@ impl Declarations {
                 );
             }
             diagnostics.extend(checker.diagnostics.into_iter().filter(|diagnostic| {
-                matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
-                    && diagnostic
-                        .contract
-                        .as_ref()
-                        .is_some_and(|origin| partial_string_operator(&origin.name))
+                diagnostic.contract.as_ref().is_some_and(|origin| {
+                    (matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
+                        && partial_string_operator(&origin.name))
+                        || (diagnostic.code == "PNX2322"
+                            && origin.kind == ContractKind::Extern
+                            && model.partial_extern_available(globals, origin))
+                })
             }));
         }
         diagnostics
     }
 }
 
+impl Model {
+    fn partial_extern_available(&self, globals: &Globals, origin: &ContractOrigin) -> bool {
+        let Some((namespace, _)) = origin.name.split_once('/') else {
+            return false;
+        };
+        let loaded =
+            namespace == self.namespace() || self.names.required_libraries.contains(namespace);
+        // Source must establish an ordinary call when it is in the project.
+        // An extern alone cannot make a known macro's arguments eager.
+        loaded
+            && (!globals.project_namespaces.contains(namespace)
+                || (origin.kind == ContractKind::Extern
+                    && globals
+                        .exports
+                        .get(namespace)
+                        .is_some_and(|exports| exports.has_unchecked_function(&origin.name))))
+    }
+}
+
 impl Checker<'_> {
+    pub(in crate::checker) fn partial_contract_visible(&self, origin: &ContractOrigin) -> bool {
+        self.partial_scope.is_none()
+            || !matches!(
+                origin.kind,
+                ContractKind::Extern | ContractKind::ExternLiteral
+            )
+            || self.model.partial_extern_available(self.globals, origin)
+    }
+
     pub(in crate::checker) fn allows_partial_call(&self, head: &Form, env: &Env) -> bool {
         let Some(shadowed) = self.partial_scope else {
             return true;
@@ -139,7 +191,9 @@ impl Checker<'_> {
             return true;
         }
         match self.model.declared_value(name, self.globals) {
-            Some(DeclaredValue::Function(_)) => true,
+            Some(DeclaredValue::Function(contract)) => {
+                self.partial_contract_visible(&contract.origin)
+            }
             Some(DeclaredValue::UncheckedFunction(function)) => function.arities.is_some(),
             _ => false,
         }

@@ -789,7 +789,7 @@ impl Session {
                         cache
                             .partial_diagnostics
                             .get_or_insert_with(|| {
-                                declarations.check_untyped_strings(
+                                declarations.check_untyped_calls(
                                     &cache.forms,
                                     model,
                                     &globals,

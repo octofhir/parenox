@@ -52,6 +52,8 @@ mod protocol_implementations;
 mod thread_first;
 #[path = "lsp/thread_refactoring.rs"]
 mod thread_refactoring;
+#[path = "lsp/untyped_externs.rs"]
+mod untyped_externs;
 #[path = "lsp/watch_diagnostics.rs"]
 mod watch_diagnostics;
 

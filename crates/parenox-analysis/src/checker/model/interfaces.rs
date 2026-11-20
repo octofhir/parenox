@@ -22,6 +22,12 @@ pub(super) struct Exports {
 }
 
 impl Exports {
+    pub(super) fn has_unchecked_function(&self, qualified: &str) -> bool {
+        self.unchecked_functions
+            .get(qualified)
+            .is_some_and(|function| function.arities.is_some())
+    }
+
     pub(super) fn public_var_names(&self) -> impl Iterator<Item = &str> {
         self.functions
             .keys()
