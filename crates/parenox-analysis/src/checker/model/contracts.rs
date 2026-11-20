@@ -425,7 +425,7 @@ impl Model {
             })
         {
             self.error("PNX9001", span,
-                "A type parameter can appear directly, as a vector element or map value, or in a nullable result");
+                "A type parameter can appear directly, as a vector element, a dictionary key or value, a required map field, or in a nullable result");
             return None;
         }
         let mut inputs = 0;

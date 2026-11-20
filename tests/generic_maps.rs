@@ -7,6 +7,10 @@ const EXTERNS: Source = Source {
     path: "externs.edn",
     source: include_str!("../examples/map_boundary/externs.edn"),
 };
+const MEDLEY: Source = Source {
+    path: "medley.edn",
+    source: include_str!("fixtures/medley-context/externs.edn"),
+};
 
 fn sources<'a>(response: &'a str, http: &'a str) -> [Source<'a>; 3] {
     [
@@ -204,9 +208,10 @@ fn a_callback_returning_the_wrong_shape_cannot_supply_a_record_field() {
 }
 
 #[test]
-fn generic_map_keys_nested_parameters_and_extra_record_fields_are_rejected() {
+fn nested_parameters_and_extra_record_fields_are_rejected() {
     for signature in [
-        "(t/all [a] [a :-> (s/map-of a string?)])",
+        "(t/all [a] [a :-> (s/map-of (s/coll-of a :kind vector?) string?)])",
+        "(t/all [a] [a :-> (s/map-of a (s/coll-of a :kind vector?))])",
         "(t/all [a] [a :-> {:nested {:row a}}])",
     ] {
         let report = check(&format!("(defn unsupported {{:t/sig '{signature}}} [x] x)"));
@@ -222,4 +227,112 @@ fn generic_map_keys_nested_parameters_and_extra_record_fields_are_rejected() {
         panic!("{extra:#?}")
     };
     assert_eq!(diag.code, "PNX2322");
+}
+
+#[test]
+fn dictionary_key_evidence_uses_possible_entries_and_ignores_absence_masks() {
+    let source = r#"(ns app (:require [clojure.spec.alpha :as s] [medley.core :as m]))
+(defn forward
+  {:t/sig '(t/all [k v] [(s/map-of k v) :-> (s/map-of k v)])}
+  [entries]
+  (m/map-kv-vals (fn [_ value] value) (dissoc entries :omitted)))
+(defn choose
+  {:t/sig '[boolean? :-> (s/map-of #{:required :optional} string?)]}
+  [flag]
+  (m/map-kv-vals (fn [_ value] value)
+    (if flag {:required "a" :optional "b"} {:required "a"})))
+"#;
+    let report = Session::default().check_project(
+        &[Source {
+            path: "app.clj",
+            source,
+        }],
+        Some(MEDLEY),
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn empty_and_open_dictionaries_do_not_establish_callback_types() {
+    let source = r#"(ns app (:require [medley.core :as m]))
+(defn empty-input {:t/sig '[:-> map?]} []
+  (m/map-kv-vals (fn [key value] value) {}))
+(defn open-input {:t/sig '[map? :-> map?]} [entries]
+  (m/map-kv-vals (fn [key value] value) entries))
+"#;
+    let report = Session::default().check_project(
+        &[Source {
+            path: "app.clj",
+            source,
+        }],
+        Some(MEDLEY),
+    );
+    let diagnostics = &report.files[0].diagnostics;
+    assert_eq!(diagnostics.len(), 4, "{report:#?}");
+    for (input, findings) in ["{}", "entries"]
+        .into_iter()
+        .zip(diagnostics.as_chunks::<2>().0)
+    {
+        for (part, diagnostic) in ["keys", "values"].into_iter().zip(findings) {
+            assert_eq!(diagnostic.code, "PNX9010");
+            assert!(diagnostic.message.ends_with(&format!("this map's {part}")));
+            assert_eq!(
+                &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+                input
+            );
+        }
+    }
+}
+
+#[test]
+fn exported_dictionary_contracts_specialize_without_the_provider() {
+    let provider = Source {
+        path: "catalog.clj",
+        source: r#"(ns catalog (:require [clojure.spec.alpha :as s]))
+(defn label-keys
+  {:t/sig '(t/all [(k :< string?) v] [(s/map-of k v) :-> (s/map-of k v)])}
+  [entries] entries)
+(defn same-type
+  {:t/sig '(t/all [t] [(s/map-of t t) :-> (s/map-of t t)])}
+  [entries] entries)
+"#,
+    };
+    let mut session = Session::default();
+    let export = session.export_externs(&[provider], &[]);
+    let edn = export.edn.unwrap_or_else(|| panic!("{:?}", export.report));
+    let externs = Source {
+        path: "catalog.edn",
+        source: &edn,
+    };
+    let good = r#"(ns app (:require [catalog :as c] [clojure.spec.alpha :as s]))
+(defn retain {:t/sig '[:-> (s/map-of #{"row"} nil?)]} [] (c/label-keys {"row" nil}))
+(defn same {:t/sig '[:-> (s/map-of string? string?)]} [] (c/same-type {"row" "label"}))
+"#;
+    let check = |source| {
+        Session::default().check_project(
+            &[Source {
+                path: "app.clj",
+                source,
+            }],
+            Some(externs),
+        )
+    };
+    let report = check(good);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let bad = good
+        .replace("#{\"row\"}", "keyword?")
+        .replace("{\"row\" nil}", "{:row nil}")
+        .replace("(s/map-of string? string?)", "(s/map-of number? number?)")
+        .replace("{\"row\" \"label\"}", "{\"row\" 1}");
+    let report = check(&bad);
+    let diagnostics = &report.files[0].diagnostics;
+    assert_eq!(diagnostics.len(), 2, "{report:#?}");
+    assert!(diagnostics.iter().all(|d| d.code == "PNX2322"
+        && d.contract.as_ref().and_then(|c| c.path.as_deref()) == Some("catalog.edn")));
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("Bound for type parameter k")
+    );
+    assert!(diagnostics[1].message.contains("Argument 1"));
 }

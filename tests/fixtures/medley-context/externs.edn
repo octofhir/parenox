@@ -1,0 +1,5 @@
+{medley.core/map-kv-vals
+ (t/all [k v r]
+   [(clojure.spec.alpha/fspec :args (clojure.spec.alpha/cat :key k :value v) :ret r)
+    (clojure.spec.alpha/map-of k v)
+    :-> (clojure.spec.alpha/map-of k r)])}

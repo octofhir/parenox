@@ -96,6 +96,13 @@ impl ExtraFields {
                     .zip(expected.iter())
                     .map(|(a, e)| a.compatibility(e)),
             ),
+            (Self::Typed(expected), Self::Open)
+                if expected
+                    .iter()
+                    .all(|ty| matches!(ty, Type::Any | Type::Unknown)) =>
+            {
+                Compatibility::all(expected.iter().map(|ty| Type::Any.compatibility(ty)))
+            }
             _ => Compatibility::Mismatch,
         }
     }

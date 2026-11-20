@@ -177,6 +177,8 @@ set members leave an analysis gap.
   parameters and one immediate callback result parameter. Inference uses
   arguments, not the expected return. Use `(a :< number?)` for a supported
   scalar bound. Empty collections alone do not establish an element type.
+  A dictionary can supply independent key and value types through
+  `(s/map-of k v)`, including for the parameters of an inline callback.
   See [generic callbacks](../examples/generic_callbacks.clj),
   [two-input inference](../examples/generic_zip.clj), and
   [typed map boundaries](../examples/map_boundary).

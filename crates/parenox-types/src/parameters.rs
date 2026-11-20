@@ -40,6 +40,7 @@ impl<'a> TypeArguments<'a> {
 enum ParameterSlot<'a> {
     Direct,
     VectorElement,
+    DictionaryKey,
     DictionaryValue,
     RequiredField(&'a Type),
 }
@@ -70,6 +71,7 @@ impl InputWitness<'_> {
         match self.slot {
             ParameterSlot::Direct => "this argument".into(),
             ParameterSlot::VectorElement => "this vector's elements".into(),
+            ParameterSlot::DictionaryKey => "this map's keys".into(),
             ParameterSlot::DictionaryValue => "this map's values".into(),
             ParameterSlot::RequiredField(key) => format!("required field {key} of this map"),
         }
@@ -103,18 +105,25 @@ impl ParameterSlot<'_> {
             (Self::VectorElement, Type::MapEntry(items)) => {
                 Some(Cow::Owned(Type::union(items.iter().cloned())))
             }
-            (Self::DictionaryValue, Type::Map(map)) => {
+            (Self::DictionaryKey | Self::DictionaryValue, Type::Map(map)) => {
+                let key_slot = matches!(self, Self::DictionaryKey);
                 let additional = match &map.extra {
                     ExtraFields::Open => return None,
                     ExtraFields::Closed => None,
-                    ExtraFields::Typed(types) => Some(&types[1]),
+                    ExtraFields::Typed(types) if types.contains(&Type::Never) => None,
+                    ExtraFields::Typed(types) => Some(if key_slot { &types[0] } else { &types[1] }),
                 };
                 if map.fields.is_empty() {
                     return additional
                         .map(Cow::Borrowed)
                         .or(Some(Cow::Owned(Type::Never)));
                 }
-                let types = map.fields.values().map(|field| &field.ty).chain(additional);
+                let types = map
+                    .fields
+                    .iter()
+                    .filter(|(_, field)| field.ty != Type::Never)
+                    .map(|(key, field)| if key_slot { key } else { &field.ty })
+                    .chain(additional);
                 Some(Cow::Owned(Type::union(types.cloned())))
             }
             (Self::RequiredField(key), Type::Map(map)) => match map.slot(key) {
@@ -215,10 +224,19 @@ impl Type {
             Self::Map(map) => match &map.extra {
                 ExtraFields::Typed(types)
                     if map.fields.is_empty()
-                        && !types[0].contains_parameter()
-                        && types[1].is_parameter(parameter) =>
+                        && types.iter().all(|ty| {
+                            matches!(ty, Self::Parameter(_)) || !ty.contains_parameter()
+                        }) =>
                 {
-                    Some(ParameterSlot::DictionaryValue)
+                    // A shared binder uses the value's inferred type. A closed
+                    // shape can retain a literal key when its values widen.
+                    if types[1].is_parameter(parameter) {
+                        Some(ParameterSlot::DictionaryValue)
+                    } else {
+                        types[0]
+                            .is_parameter(parameter)
+                            .then_some(ParameterSlot::DictionaryKey)
+                    }
                 }
                 ExtraFields::Closed
                     if map.fields.values().all(|field| {
@@ -258,10 +276,13 @@ impl Type {
             }
             Self::Map(map) if self.contains_parameter() => {
                 let mut map = map.clone();
-                if let ExtraFields::Typed(types) = &mut map.extra
-                    && matches!(types[1], Self::Parameter(_))
-                {
-                    types[1] = types[1].substitute(replacements);
+                if let ExtraFields::Typed(types) = &mut map.extra {
+                    for ty in types
+                        .iter_mut()
+                        .filter(|ty| matches!(ty, Self::Parameter(_)))
+                    {
+                        *ty = ty.substitute(replacements);
+                    }
                 }
                 for field in map.fields.values_mut() {
                     if matches!(field.ty, Self::Parameter(_)) {
