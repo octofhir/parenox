@@ -124,12 +124,11 @@ impl Checker<'_> {
         let provider = key
             .as_deref()
             .and_then(|key| self.globals.spec_provider(key));
-        let imported_keys = matches!(
-            provider.map(std::sync::Arc::as_ref),
-            Some(SpecProvider::ImportedKeys(_))
-        );
+        let imported = key
+            .as_deref()
+            .is_some_and(|key| self.is_imported_structure(key));
         let can_check_map = matches!(op, SpecOperation::Valid)
-            && input.literal_map
+            && input.is_literal_map()
             && provider.is_some_and(|provider| {
                 provider.standalone_registration().is_some() && self.model.loads_spec(provider)
             });
@@ -140,25 +139,39 @@ impl Checker<'_> {
         if !loaded {
             return Some(self.unchecked_form(spec.span, SPEC_LOAD_GAP));
         }
-        if imported_keys && !input.literal_map {
-            return Some(if map_predicate(&input.known) == Type::Bool(false) {
-                Value::new(op.invalid())
-            } else {
-                self.unchecked_spec_call(
+        if imported && let Some(conversion) = &conversion {
+            return Some(
+                match self.conform_proven(
+                    &input.known,
+                    conversion,
                     op,
-                    spec.span,
-                    "An s/keys extern requires a literal map for exact checking",
-                )
-            });
+                    input.literal_container.as_ref(),
+                ) {
+                    Ok(ty) => Value::new(ty),
+                    Err(reason) => self.unchecked_spec_call(op, spec.span, reason),
+                },
+            );
         }
-        if can_check_map
-            && let Type::Map(map) = &input.known
-            && let Some(fields) = conversion.as_ref().and_then(SpecConversion::bundle_fields)
+        if let Some(fields) = conversion.as_ref().and_then(SpecConversion::map_fields)
+            && can_check_map
+            && fields.values().all(|field| {
+                field
+                    .conversion
+                    .as_ref()
+                    .is_some_and(|child| !matches!(child, SpecConversion::Structured(_)))
+            })
         {
-            return Some(match self.conform_map(map, fields, op) {
-                Ok(ty) => Value::new(ty),
-                Err(reason) => self.unchecked_spec_call(op, spec.span, reason),
-            });
+            return Some(
+                match self.conform_proven_map(
+                    &input.known,
+                    fields,
+                    op,
+                    input.literal_container.as_ref(),
+                ) {
+                    Ok(ty) => Value::new(ty),
+                    Err(reason) => self.unchecked_spec_call(op, spec.span, reason),
+                },
+            );
         }
         if let Some(conversion) = conversion.filter(|conversion| {
             matches!(op, SpecOperation::Conform)
@@ -167,13 +180,13 @@ impl Checker<'_> {
                     SpecConversion::String | SpecConversion::Structured(_)
                 )
         }) {
-            if input.literal_map
+            if input.is_literal_map()
                 && let (Type::Map(map), SpecConversion::GuardedMap(projection)) =
                     (&input.known, &conversion)
             {
                 return Some(Value::new(projection::conform_literal(map, projection, op)));
             }
-            if matches!(op, SpecOperation::Conform) && input.literal_map {
+            if matches!(op, SpecOperation::Conform) && input.is_literal_map() {
                 match conversion {
                     SpecConversion::MapOrWrapField(_) => return Some(input.clone()),
                     SpecConversion::VectorWrapField(_) => return Some(Value::new(Type::Nil)),
@@ -333,8 +346,8 @@ impl Checker<'_> {
                 SpecConversion::ProjectedCollection(element) => {
                     return self.conform_projected_collection(ty, element, op);
                 }
-                SpecConversion::StringKeyedMap(values) => {
-                    return self.conform_string_keyed_map(ty, values, op);
+                SpecConversion::StringKeyedMap { values, .. } => {
+                    return self.conform_string_keyed_map(ty, values, op, None);
                 }
                 SpecConversion::Structured(spec) => {
                     return self.conform_structure(ty, spec);
@@ -378,6 +391,7 @@ impl Checker<'_> {
 
     fn convert_int32(&mut self, input: &Type, op: SpecOperation) -> Type {
         let output = Type::Integral(IntegerType::FIXED_INT32);
+        let fixed = Type::Integral(IntegerType::FIXED);
         match input {
             Type::Integral(IntegerType {
                 range: IntegerRange::ExactLong(_) | IntegerRange::OutsideInt32,
@@ -396,13 +410,21 @@ impl Checker<'_> {
             ty if ty.subtype_of(&Type::Integral(IntegerType::INT32)) => {
                 // Conversion changes the JVM number class, not the numeric
                 // value. Keep a proven in-range literal when available.
-                op.success(ty.exact_integer_value().map_or(output, Type::Integer))
+                let exact = ty.exact_integer_value();
+                if exact.is_none() && !ty.subtype_of(&fixed) {
+                    // BigInteger subclasses can override the methods used by int.
+                    self.may_throw();
+                }
+                op.success(exact.map_or(output, Type::Integer))
             }
             ty => match ty.compatibility(&Type::Integral(IntegerType::ANY)) {
                 Compatibility::Mismatch => op.invalid(),
                 other => {
                     self.arithmetic_exception();
-                    self.illegal_argument();
+                    if !ty.subtype_of(&fixed) {
+                        self.illegal_argument();
+                        self.may_throw();
+                    }
                     let result = op.success(output);
                     if other == Compatibility::Proven {
                         result
@@ -419,15 +441,55 @@ impl Checker<'_> {
         if !self.spec_load_is_known(&key) {
             return None;
         }
+        if matches!(
+            self.globals.spec_provider(&key).map(std::sync::Arc::as_ref),
+            Some(SpecProvider::Imported { .. })
+        ) && self
+            .globals
+            .spec_conversion(&key)
+            .as_ref()
+            .is_some_and(has_checked_int)
+        {
+            // int can use virtual BigInteger methods. Success guarantees a
+            // converted Integer, not a bound on the original field value.
+            return None;
+        }
         self.globals.spec(&key).filter(|ty| usable(ty))
     }
 
     fn spec_load_is_known(&self, key: &str) -> bool {
         match self.globals.spec_provider(key).map(std::sync::Arc::as_ref) {
-            Some(provider @ (SpecProvider::LoadChecked { .. } | SpecProvider::ImportedKeys(_))) => {
+            Some(provider @ (SpecProvider::LoadChecked { .. } | SpecProvider::Imported { .. })) => {
                 self.model.loads_spec(provider)
             }
             _ => true,
+        }
+    }
+
+    fn is_imported_structure(&self, key: &str) -> bool {
+        matches!(
+            self.globals.spec_provider(key).map(std::sync::Arc::as_ref),
+            Some(SpecProvider::Imported {
+                structured: true,
+                ..
+            })
+        )
+    }
+}
+
+fn has_checked_int(conversion: &SpecConversion) -> bool {
+    match conversion {
+        SpecConversion::CheckedInt32 => true,
+        SpecConversion::StringKeyedMap { values, .. } => has_checked_int(values),
+        _ => {
+            conversion
+                .portable_collection()
+                .is_some_and(|(_, element)| has_checked_int(element))
+                || conversion.map_fields().is_some_and(|fields| {
+                    fields
+                        .values()
+                        .any(|field| field.conversion.as_ref().is_some_and(has_checked_int))
+                })
         }
     }
 }

@@ -4,15 +4,23 @@ use std::collections::BTreeMap;
 
 use super::{MapWrap, SpecOperation, map_wrap};
 use crate::checker::{
-    Checker, Env, MAX_TUPLE_ITEMS, Value,
+    Checker, Env, LiteralContainer, MAX_TUPLE_ITEMS, Value,
     calls::literal_equality,
+    has_evaluated_metadata,
+    maps::map_predicate,
     model::{MapFieldConversion, SpecConversion, StructuredConversion},
     nil_part,
 };
 use crate::reader::{Form, Kind};
-use crate::types::{ExtraFields, Field, MapSlot, MapType, SPEC_INVALID, Type};
+use crate::types::{
+    ExtraFields, Field, IntegerClass, IntegerType, MapSlot, MapType, SPEC_INVALID, Type,
+};
 
 const MAP_GAP: &str = "The map spec requires a closed map with known keyword fields";
+const LITERAL_MAP_GAP: &str =
+    "An s/keys extern requires a literal map for exact checking at each nested map";
+const LITERAL_VECTOR_GAP: &str =
+    "An s/coll-of extern requires a bounded literal vector for exact checking";
 const REGISTRY_GAP: &str = "Cannot check an undeclared qualified key against the spec registry";
 const REGISTRY_CONVERSION_GAP: &str =
     "Cannot apply a supported conversion to an undeclared qualified key's registered spec";
@@ -22,6 +30,8 @@ const COLLECTION_GAP: &str = "s/conform cannot reconstruct this collection of ma
 const PROJECTION_GAP: &str = "s/conform cannot project this collection; use a known ordered or empty collection or a small hash set literal";
 const STRING_KEYED_MAP_GAP: &str =
     "s/conform requires a closed map with known keys for this map spec";
+const LITERAL_STRING_KEYED_MAP_GAP: &str =
+    "This s/coll-of map extern requires a literal map with known keys";
 const ENTRY_GAP: &str =
     "s/conform cannot prove whether this map entry preserves the identity of both elements";
 
@@ -82,6 +92,9 @@ impl Checker<'_> {
         let (_, Some(conversion)) = self.read_spec(&key) else {
             return None;
         };
+        if conversion.portable_collection().is_some() && self.is_imported_structure(&key) {
+            return None;
+        }
         let (element, projected) = match &conversion {
             SpecConversion::ProjectedCollection(element) if !has_evaluated_metadata(input) => {
                 (element.as_ref(), true)
@@ -171,7 +184,7 @@ impl Checker<'_> {
     ) -> Result<Type, &'static str> {
         match conversion {
             StructuredConversion::Map(fields) => match input {
-                Type::Map(map) => self.conform_map(map, fields, SpecOperation::Conform),
+                Type::Map(map) => self.conform_map(map, fields, SpecOperation::Conform, None),
                 Type::Any
                 | Type::Unknown
                 | Type::SpecValue
@@ -179,7 +192,9 @@ impl Checker<'_> {
                 | Type::SpecCollection(_) => Err(MAP_GAP),
                 _ => Ok(SpecOperation::Conform.invalid()),
             },
-            StructuredConversion::Collection(element) => self.conform_collection(input, element),
+            StructuredConversion::Collection { element, .. } => {
+                self.conform_collection(input, element)
+            }
         }
     }
 
@@ -214,6 +229,54 @@ impl Checker<'_> {
             | Type::List(_)
             | Type::Seq(_) => Err(COLLECTION_GAP),
             _ => Ok(SpecOperation::Conform.invalid()),
+        }
+    }
+
+    pub(super) fn conform_proven(
+        &mut self,
+        input: &Type,
+        conversion: &SpecConversion,
+        operation: SpecOperation,
+        proof: Option<&LiteralContainer>,
+    ) -> Result<Type, &'static str> {
+        match conversion {
+            SpecConversion::Structured(structure) => match structure.as_ref() {
+                StructuredConversion::Map(fields) => {
+                    self.conform_proven_map(input, fields, operation, proof)
+                }
+                StructuredConversion::Collection { element, .. } => {
+                    self.conform_proven_collection(input, element, operation, proof)
+                }
+            },
+            SpecConversion::StringKeyedMap { values, .. } => match proof {
+                Some(proof @ LiteralContainer::Map(_)) if matches!(input, Type::Map(_)) => {
+                    self.conform_string_keyed_map(input, values, operation, Some(proof))
+                }
+                Some(LiteralContainer::Vector(_)) => Ok(operation.invalid()),
+                _ if map_predicate(input) == Type::Bool(false) => Ok(operation.invalid()),
+                _ => Err(LITERAL_STRING_KEYED_MAP_GAP),
+            },
+            _ => self.convert_spec(input, conversion, operation),
+        }
+    }
+
+    fn conform_proven_collection(
+        &mut self,
+        input: &Type,
+        element: &SpecConversion,
+        operation: SpecOperation,
+        proof: Option<&LiteralContainer>,
+    ) -> Result<Type, &'static str> {
+        if let (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) = (input, proof) {
+            let outcome =
+                self.conform_ordered_values(items, Type::Tuple, |checker, index, item| {
+                    checker.conform_proven_child(item, element, vector.vector_item(index))
+                })?;
+            Ok(outcome.result_for(operation))
+        } else if definitely_not_collection(input) {
+            Ok(operation.invalid())
+        } else {
+            Err(LITERAL_VECTOR_GAP)
         }
     }
 
@@ -254,6 +317,7 @@ impl Checker<'_> {
         input: &Type,
         values: &SpecConversion,
         operation: SpecOperation,
+        proof: Option<&LiteralContainer>,
     ) -> Result<Type, &'static str> {
         let map = match input {
             Type::Map(map)
@@ -271,6 +335,9 @@ impl Checker<'_> {
             | Type::SpecValue
             | Type::SpecTruthy
             | Type::SpecCollection(_) => {
+                if proof.is_some() {
+                    return Err(LITERAL_STRING_KEYED_MAP_GAP);
+                }
                 if matches!(operation, SpecOperation::Valid) {
                     self.may_throw();
                     return Ok(Type::Boolean);
@@ -285,15 +352,34 @@ impl Checker<'_> {
         let conversions = map.fields.iter().filter_map(|(key, field)| {
             matches!(key, Type::Str(_)).then_some((key, field, Cow::Borrowed(values)))
         });
-        let outcome = self.conform_map_values(map, conversions, bad_key)?;
+        let outcome = self.conform_map_values(map, conversions, bad_key, proof)?;
         Ok(outcome.result_for(operation))
     }
 
-    pub(super) fn conform_map(
+    pub(super) fn conform_proven_map(
+        &mut self,
+        input: &Type,
+        fields: &BTreeMap<Type, MapFieldConversion>,
+        operation: SpecOperation,
+        proof: Option<&LiteralContainer>,
+    ) -> Result<Type, &'static str> {
+        if let (Type::Map(map), Some(proof @ LiteralContainer::Map(_))) = (input, proof) {
+            self.conform_map(map, fields, operation, Some(proof))
+        } else if matches!(proof, Some(LiteralContainer::Vector(_)))
+            || map_predicate(input) == Type::Bool(false)
+        {
+            Ok(operation.invalid())
+        } else {
+            Err(LITERAL_MAP_GAP)
+        }
+    }
+
+    fn conform_map(
         &mut self,
         map: &MapType,
         fields: &BTreeMap<Type, MapFieldConversion>,
         operation: SpecOperation,
+        proof: Option<&LiteralContainer>,
     ) -> Result<Type, &'static str> {
         // Required keys are tested before any of their conformers run.
         if fields
@@ -311,7 +397,7 @@ impl Checker<'_> {
             return Err(MAP_GAP);
         }
         let conversions = self.map_field_conversions(map, fields)?;
-        let outcome = self.conform_map_values(map, conversions, false)?;
+        let outcome = self.conform_map_values(map, conversions, false, proof)?;
         Ok(outcome.result_for(operation))
     }
 
@@ -320,6 +406,7 @@ impl Checker<'_> {
         map: &MapType,
         conversions: impl Iterator<Item = MapConversion<'a>>,
         mut invalid: bool,
+        proof: Option<&LiteralContainer>,
     ) -> Result<Outcome, &'static str> {
         let mut conformed = map.clone();
         let mut can_succeed = !invalid;
@@ -327,12 +414,16 @@ impl Checker<'_> {
         // different fields may both be observable.
         for (key, input, conversion) in conversions {
             let conversion = conversion.as_ref();
-            let outcome = self.conform_child(&input.ty, conversion)?;
+            let outcome = if let Some(proof) = proof {
+                self.conform_proven_child(&input.ty, conversion, proof.map_field(key))?
+            } else {
+                self.conform_child(&input.ty, conversion)?
+            };
             invalid |= outcome.invalid;
             can_succeed &= outcome.value != Type::Never;
             let canonical = match conversion {
                 SpecConversion::CheckedInt32 => {
-                    input.canonical_int() || input.ty.fits_integer_cache()
+                    input.canonical_int() || outcome.value.fits_integer_cache()
                 }
                 _ => {
                     input.canonical_int()
@@ -378,9 +469,9 @@ impl Checker<'_> {
             } else {
                 REGISTRY_GAP
             })?;
-            // A bundle needs a literal map. A field type alone cannot prove
-            // that a nested value has ordinary persistent map behavior.
-            if conversion.bundle_fields().is_some() {
+            // A field type alone cannot prove that a nested value has the
+            // ordinary persistent map or vector behavior a bundle needs.
+            if matches!(conversion, SpecConversion::Structured(_)) {
                 return Err(REGISTRY_CONVERSION_GAP);
             }
             let provider = self
@@ -432,18 +523,36 @@ impl Checker<'_> {
         element: &SpecConversion,
         rebuild: fn(Box<[Type]>) -> Type,
     ) -> Result<Type, &'static str> {
+        let outcome = self.conform_ordered_values(items, rebuild, |checker, _, item| {
+            checker.conform_child(item, element)
+        })?;
+        Ok(outcome.result_for(SpecOperation::Conform))
+    }
+
+    fn conform_ordered_values(
+        &mut self,
+        items: &[Type],
+        rebuild: fn(Box<[Type]>) -> Type,
+        mut conform: impl FnMut(&mut Self, usize, &Type) -> Result<Outcome, &'static str>,
+    ) -> Result<Outcome, &'static str> {
         let mut conformed = Vec::with_capacity(items.len());
         let mut invalid = false;
-        for item in items {
-            let outcome = self.conform_child(item, element)?;
+        for (index, item) in items.iter().enumerate() {
+            let outcome = conform(self, index, item)?;
             invalid |= outcome.invalid;
             if outcome.value == Type::Never {
                 // Later elements cannot run once this one fails.
-                return Ok(with_invalid(Type::Never, invalid));
+                return Ok(Outcome {
+                    value: Type::Never,
+                    invalid,
+                });
             }
             conformed.push(outcome.value);
         }
-        Ok(with_invalid(rebuild(conformed.into()), invalid))
+        Ok(Outcome {
+            value: rebuild(conformed.into()),
+            invalid,
+        })
     }
 
     fn conform_child(
@@ -456,6 +565,16 @@ impl Checker<'_> {
             conversion,
             SpecOperation::Conform,
         )?))
+    }
+
+    fn conform_proven_child(
+        &mut self,
+        input: &Type,
+        conversion: &SpecConversion,
+        proof: Option<&LiteralContainer>,
+    ) -> Result<Outcome, &'static str> {
+        let conformed = self.conform_proven(input, conversion, SpecOperation::Conform, proof)?;
+        Ok(Outcome::from_type(conformed))
     }
 
     /// A successful type-preserving conversion can still replace the JVM object.
@@ -502,7 +621,7 @@ impl Checker<'_> {
             SpecConversion::TaggedChoice(branches) => {
                 self.choice_identity(input, branches, canonical_int)
             }
-            SpecConversion::StringKeyedMap(values) if let Type::Map(map) = input => {
+            SpecConversion::StringKeyedMap { values, .. } if let Type::Map(map) = input => {
                 map.fields.values().fold(Identity::Same, |summary, field| {
                     summary.combine(self.identity(&field.ty, values, field.canonical_int()))
                 })
@@ -519,7 +638,7 @@ impl Checker<'_> {
                 })
             }
             SpecConversion::Structured(spec)
-                if let StructuredConversion::Collection(element) = spec.as_ref() =>
+                if let StructuredConversion::Collection { element, .. } = spec.as_ref() =>
             {
                 match input {
                     Type::Map(map) if map.emptiness() == Some(true) => Identity::Same,
@@ -567,7 +686,7 @@ impl Checker<'_> {
                 (
                     Type::Tuple(_) | Type::MapEntry(_) | Type::ListTuple(_) | Type::SeqTuple(_),
                     SpecConversion::Structured(spec),
-                ) => matches!(spec.as_ref(), StructuredConversion::Collection(_)),
+                ) => matches!(spec.as_ref(), StructuredConversion::Collection { .. }),
                 _ => false,
             })
             .map_or(Identity::Unknown, |branch| {
@@ -576,14 +695,24 @@ impl Checker<'_> {
     }
 }
 
-fn has_evaluated_metadata(form: &Form) -> bool {
-    match &form.kind {
-        Kind::Metadata(..) => true,
-        Kind::List(items) if items.first().and_then(Form::symbol) == Some("quote") => false,
-        Kind::List(items) | Kind::Vector(items) | Kind::Map(items) | Kind::Set(items) => {
-            items.iter().any(has_evaluated_metadata)
-        }
-        Kind::AnonymousFunction(function) => function.body.iter().any(has_evaluated_metadata),
+fn definitely_not_collection(ty: &Type) -> bool {
+    match ty {
+        Type::Nil
+        | Type::Bool(_)
+        | Type::Boolean
+        | Type::Key(_)
+        | Type::Keyword
+        | Type::SpecKeyword
+        | Type::Str(_)
+        | Type::String
+        | Type::Char(_)
+        | Type::Character
+        | Type::Integer(_)
+        | Type::Integral(IntegerType {
+            class: IntegerClass::Fixed,
+            ..
+        }) => true,
+        Type::Union(members) => members.iter().all(definitely_not_collection),
         _ => false,
     }
 }
@@ -606,7 +735,7 @@ fn distinct_set_members(left: &Type, right: &Type) -> bool {
 fn hash_collection_element(conversion: &SpecConversion) -> Option<&SpecConversion> {
     match conversion {
         SpecConversion::Structured(spec) => match spec.as_ref() {
-            StructuredConversion::Collection(element) => Some(element),
+            StructuredConversion::Collection { element, .. } => Some(element),
             StructuredConversion::Map(_) => None,
         },
         SpecConversion::TaggedChoice(branches) => {
@@ -618,10 +747,14 @@ fn hash_collection_element(conversion: &SpecConversion) -> Option<&SpecConversio
                 return None;
             };
             match (first.as_ref(), second.as_ref()) {
-                (StructuredConversion::Collection(element), StructuredConversion::Map(_))
-                | (StructuredConversion::Map(_), StructuredConversion::Collection(element)) => {
-                    Some(element)
-                }
+                (
+                    StructuredConversion::Collection { element, .. },
+                    StructuredConversion::Map(_),
+                )
+                | (
+                    StructuredConversion::Map(_),
+                    StructuredConversion::Collection { element, .. },
+                ) => Some(element),
                 _ => None,
             }
         }

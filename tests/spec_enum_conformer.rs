@@ -155,3 +155,110 @@ fn dynamic_or_ambiguous_enum_patterns_stay_unchecked() {
         );
     }
 }
+
+#[test]
+fn enum_proposals_do_not_capture_a_table_across_an_intervening_initializer() {
+    let selected = [":file-event/type".into()];
+    let provider = Source {
+        path: "coercer.clj",
+        source: wire(),
+    };
+    let mut session = Session::default();
+    let initial = session
+        .propose_contracts(&[provider], &[], &selected)
+        .unwrap();
+    assert!(initial.externs.unwrap().contains("1 :created"));
+
+    let replaced = provider.source.replace(
+        "(s/def :file-event/type",
+        "(def changed (.bindRoot #'file-change-type-enum {1 :renamed}))\n(s/def :file-event/type",
+    );
+    let proposal = session
+        .propose_contracts(
+            &[Source {
+                source: &replaced,
+                ..provider
+            }],
+            &[],
+            &selected,
+        )
+        .unwrap();
+    assert_eq!(proposal.externs.as_deref(), Some("{}\n"));
+}
+
+#[test]
+fn hidden_reader_forms_do_not_produce_portable_enums() {
+    let source = r#"(ns wire (:require [clojure.spec.alpha :as s]))
+(s/def :event/type (s/and int? {1 :open} (s/conformer {1 :open})))"#;
+    let mut session = Session::default();
+    let selected = [":event/type".into()];
+    let propose = |session: &mut Session, source: &str| {
+        session
+            .propose_contracts(
+                &[Source {
+                    path: "wire.clj",
+                    source,
+                }],
+                &[],
+                &selected,
+            )
+            .unwrap()
+    };
+    assert!(
+        propose(&mut session, source)
+            .externs
+            .unwrap()
+            .contains("1 :open")
+    );
+
+    for guard in [
+        "int? #_ #test/rebind nil",
+        "^{:probe #test/rebind nil} int?",
+    ] {
+        let unproven = source.replace("int?", guard);
+        let proposal = propose(&mut session, &unproven);
+        assert_eq!(proposal.externs.as_deref(), Some("{}\n"));
+    }
+}
+
+#[test]
+fn a_portable_enum_requires_equivalent_literal_tables() {
+    let provider = Source {
+        path: "enum.edn",
+        source: "",
+    };
+    let client = Source {
+        path: "client.clj",
+        source: r#"(ns client (:require [clojure.spec.alpha :as s] [wire]))
+          (defn created {:t/sig '[:-> #{:created}]} [] (s/conform :event/type 1))"#,
+    };
+    let check = |predicate: &str, conformer: &str| {
+        let source = format!(
+            "{{:event/type {{:spec (clojure.spec.alpha/and clojure.core/int? {predicate}\
+                (clojure.spec.alpha/conformer {conformer})) :ns wire}}}}"
+        );
+        Session::default().check_project_with_externs(
+            &[client],
+            &[Source {
+                source: &source,
+                ..provider
+            }],
+        )
+    };
+    let accepted = check("{1 :created 2 :changed}", "{2 :changed 1 :created}");
+    assert!(accepted.ok && accepted.complete, "{accepted:#?}");
+
+    for (predicate, conformer, code) in [
+        ("{1 :created}", "{1 :changed}", "PNX9001"),
+        ("{1 :created}", "{1 nil}", "PNX9001"),
+        ("{1 :created +1 :changed}", "{1 :created}", "PNX9000"),
+    ] {
+        let rejected = check(predicate, conformer);
+        assert!(!rejected.complete, "{rejected:#?}");
+        assert!(
+            rejected.files.iter().any(|file| file.path == provider.path
+                && file.diagnostics.iter().any(|finding| finding.code == code)),
+            "{rejected:#?}"
+        );
+    }
+}

@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use super::{super::declarations::SourceDeclaration, Names, generation_options, spec_field_key};
 use crate::checker::model::Declarations;
-use crate::checker::model::specs::{MapFieldConversion, SpecConversion, StructuredConversion};
+use crate::checker::model::specs::{
+    EnumKind, MapFieldConversion, SpecConversion, StructuredConversion,
+};
 use crate::checker::model::vars::{adjacent_literal_def, def_initializer};
 use crate::reader::{Form, Kind};
 use crate::types::{IntegerClass, IntegerType, SPEC_INVALID, Type};
@@ -520,12 +522,21 @@ pub(in crate::checker::model) fn structured_conversion(
                 && resolves(names, head, "clojure.spec.alpha", "coll-of")
                 && generation_options(options) =>
         {
-            let element = if let Some(key) = child.keyword() {
-                lookup(&names.key(key))?
+            let (element, registration) = if let Some(key) = child.keyword() {
+                let name = names.key(key);
+                let element = lookup(&name)?;
+                let registration = options
+                    .is_empty()
+                    .then(|| names.validation_key(key))
+                    .flatten();
+                (element, registration)
             } else {
-                source_conversion(names, child)?
+                (source_conversion(names, child)?, None)
             };
-            StructuredConversion::Collection(element)
+            StructuredConversion::Collection {
+                element,
+                registration,
+            }
         }
         _ => return None,
     };
@@ -565,32 +576,40 @@ fn table_conversion(
     keyword_strings: bool,
 ) -> Option<SpecConversion> {
     let names = &declarations.names;
-    let Kind::List(items) = &form.without_metadata().kind else {
-        return None;
-    };
-    let [head, predicate, lookup, stage] = items.as_slice() else {
-        return None;
-    };
-    let Kind::List(stage) = &stage.without_metadata().kind else {
-        return None;
-    };
-    let [conformer, convert] = stage.as_slice() else {
-        return None;
-    };
+    let ([predicate, lookup, convert], plain) = enum_stages(names, form)?;
     let integer_keys = resolves(names, predicate, "clojure.core", "int?");
     let inverted = resolves(names, predicate, "clojure.core", "integer?");
     let keyword_keys = resolves(names, predicate, "clojure.core", "keyword?");
     if !names.spec_core_scope_known
-        || !resolves(names, head, "clojure.spec.alpha", "and")
         || !(integer_keys || inverted || keyword_keys)
         || (keyword_strings && !keyword_keys)
-        || !resolves(names, conformer, "clojure.spec.alpha", "conformer")
     {
         return None;
+    }
+    let registration = || enum_registration(declarations, forms, source, form);
+    if integer_keys
+        && plain
+        && let Some(entries) = matching_integer_keywords(lookup, convert, source)
+        && registration().is_some()
+    {
+        return Some(fixed_integer_keywords(entries));
     }
     let local = local_var(names, lookup)?;
     if local_var(names, convert)? != local {
         return None;
+    }
+    if integer_keys
+        && plain
+        && matches!(
+            (&lookup.kind, &convert.kind),
+            (Kind::Symbol(_), Kind::Symbol(_))
+        )
+        && let Some(index) = registration()
+        && let Some((name, table)) = adjacent_literal_def(declarations, forms, source, index)
+        && name == local
+        && let Some(entries) = integer_keyword_entries(table, source)
+    {
+        return Some(fixed_integer_keywords(entries));
     }
     let initializer = prior_initializer(declarations, forms, local, form.span.start.offset)?;
     if inverted {
@@ -645,8 +664,116 @@ fn table_conversion(
             .into_iter()
             .filter_map(|(key, value)| Some((key, value?)))
             .collect(),
-        inverted: false,
+        kind: EnumKind::LocalTable,
     })
+}
+
+fn enum_stages<'a>(names: &Names, form: &'a Form) -> Option<([&'a Form; 3], bool)> {
+    let Kind::List(items) = &form.without_metadata().kind else {
+        return None;
+    };
+    let [head, predicate, lookup, stage] = items.as_slice() else {
+        return None;
+    };
+    let Kind::List(stage_items) = &stage.without_metadata().kind else {
+        return None;
+    };
+    let [conformer, convert] = stage_items.as_slice() else {
+        return None;
+    };
+    let plain = matches!(form.kind, Kind::List(_))
+        && matches!(stage.kind, Kind::List(_))
+        && [head, predicate, conformer]
+            .iter()
+            .all(|form| matches!(form.kind, Kind::Symbol(_)));
+    (resolves(names, head, "clojure.spec.alpha", "and")
+        && resolves(names, conformer, "clojure.spec.alpha", "conformer"))
+    .then_some(([predicate, lookup, convert], plain))
+}
+
+pub(in crate::checker::model) fn literal_integer_enum(
+    names: &Names,
+    form: &Form,
+    source: &str,
+) -> Option<SpecConversion> {
+    let ([predicate, lookup, convert], plain) = enum_stages(names, form)?;
+    if !plain
+        || !resolves(names, predicate, "clojure.core", "int?")
+        || has_reader_discard(form, source)
+    {
+        return None;
+    }
+    matching_integer_keywords(lookup, convert, source).map(fixed_integer_keywords)
+}
+
+fn enum_registration(
+    declarations: &Declarations,
+    forms: &[Form],
+    source: &str,
+    spec_body: &Form,
+) -> Option<usize> {
+    let index = forms.partition_point(|form| form.span.end.offset <= spec_body.span.start.offset);
+    let registration = forms.get(index)?;
+    let Kind::List(items) = &registration.kind else {
+        return None;
+    };
+    let [head, name, body] = items.as_slice() else {
+        return None;
+    };
+    (body.span == spec_body.span
+        && matches!(name.kind, Kind::Keyword(_))
+        && matches!(head.kind, Kind::Symbol(_))
+        && resolves(&declarations.names, head, "clojure.spec.alpha", "def")
+        && !has_reader_discard(registration, source))
+    .then_some(index)
+}
+
+fn has_reader_discard(form: &Form, source: &str) -> bool {
+    let text = &source[form.span.start.offset..form.span.end.offset];
+    text.contains("#_") || text.contains("#=")
+}
+
+fn matching_integer_keywords(
+    lookup: &Form,
+    convert: &Form,
+    source: &str,
+) -> Option<BTreeMap<Type, Type>> {
+    let entries = integer_keyword_entries(lookup, source)?;
+    (entries == integer_keyword_entries(convert, source)?).then_some(entries)
+}
+
+fn integer_keyword_entries(form: &Form, source: &str) -> Option<BTreeMap<Type, Type>> {
+    let Kind::Map(items) = &form.kind else {
+        return None;
+    };
+    let (pairs, unpaired) = items.as_chunks::<2>();
+    if !unpaired.is_empty() || !(1..=MAX_ENUM_ENTRIES).contains(&pairs.len()) {
+        return None;
+    }
+    let mut entries = BTreeMap::new();
+    for [key, value] in pairs {
+        if !matches!(key.kind, Kind::Number) {
+            return None;
+        }
+        let key = fixed_integer(key, source)?;
+        let Kind::Keyword(value) = &value.kind else {
+            return None;
+        };
+        if value.starts_with("::")
+            || value == SPEC_INVALID
+            || entries.insert(key, Type::Key(value.clone())).is_some()
+        {
+            return None;
+        }
+    }
+    Some(entries)
+}
+
+fn fixed_integer_keywords(entries: BTreeMap<Type, Type>) -> SpecConversion {
+    SpecConversion::Enum {
+        entries: entries.into_iter().collect(),
+        kind: EnumKind::FixedIntegerKeywords,
+    }
 }
 
 fn inverted_enum(
@@ -665,7 +792,7 @@ fn inverted_enum(
                     .then(|| (Type::exact_integer(code, IntegerClass::Any), Type::Key(key)))
             })
             .collect(),
-        inverted: true,
+        kind: EnumKind::Inverted,
     })
 }
 

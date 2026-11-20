@@ -75,4 +75,71 @@
       (assert (= invalid (outcome operation (array-map :bad-key overflow uri overflow))))
       (assert (= :arithmetic (outcome operation (array-map uri overflow :bad-key overflow)))))))
 
+(let [a (String. "file:///a")
+      b (String. "file:///b")
+      changing [(edit 2N)]
+      wide [(edit 2147483648)]
+      outside-long [(edit 9223372036854775808N)]]
+  (doseq [make-map [array-map hash-map sorted-map]]
+    (let [input (make-map b [] a (with-meta changing {::marked true}))
+          result (s/conform ::changes input)]
+      (assert (= (vec (keys input)) (vec (keys result))))
+      (assert (every? true? (map identical? (keys input) (keys result))))
+      (assert (= {::marked true} (meta (get result a))))))
+  (doseq [operation [s/conform s/valid?]]
+    (let [invalid (if (= operation s/conform) ::s/invalid false)]
+      (doseq [bad [nil false ::s/invalid]
+              input [bad {bad wide} {a bad} {a [bad]}]]
+        (assert (= invalid (outcome operation input))))
+      (assert (= invalid (outcome operation {:invalid outside-long})))
+      (assert (= :arithmetic (outcome operation (array-map a wide b outside-long))))
+      (assert (= :argument (outcome operation (array-map b outside-long a wide)))))))
+
+(defrecord ChangeMap [])
+(let [input (with-meta (assoc (->ChangeMap) "file:///record" [(edit 2N)]) {::marked true})
+      result (s/conform ::changes input)]
+  (assert (instance? ChangeMap result))
+  (assert (= (meta input) (meta result)))
+  (assert (= input result))
+  (assert (instance? Integer (get-in result ["file:///record" 0 :range :start :line])))
+  (assert (s/valid? ::changes input))
+  (assert (= ::s/invalid (s/conform ::changes (assoc input :keyword [(edit 2147483648)])))))
+
+;; Tuple key conformance still runs. By default the result map retains the original key.
+(let [visited (atom [])
+      key-spec (s/conformer (fn [value]
+                              (swap! visited conj [:key value])
+                              (if (string? value) :converted ::s/invalid)))
+      value-spec (s/conformer (fn [value] (swap! visited conj [:value value]) (inc value)))
+      by-default (s/coll-of (s/tuple key-spec value-spec) :kind map?)
+      conforming-keys (s/coll-of (s/tuple key-spec value-spec) :kind map? :conform-keys true)]
+  (assert (= ::s/invalid (s/conform by-default {:invalid 7})))
+  (assert (= [[:key :invalid]] @visited))
+  (reset! visited [])
+  (assert (= {"file:///example" 8} (s/conform by-default {"file:///example" 7})))
+  (assert (= [[:key "file:///example"] [:value 7]] @visited))
+  (assert (= {:converted 8} (s/conform conforming-keys {"file:///example" 7}))))
+
+;; An empty map does not force tuple slots. The first nonempty entry resolves both specs.
+(let [late (s/coll-of (s/tuple string? ::late-edits) :kind map?)
+      key-rejects {:invalid [(edit 2147483648)]}
+      input {"file:///example" [(edit 2N)]}
+      resolve-error (fn [f]
+                      (try (f) (catch Exception error error)))]
+  (assert (= {} (s/conform late {})))
+  (let [failure (resolve-error #(s/conform late key-rejects))]
+    (assert (instance? Exception failure))
+    (assert (= (str "Unable to resolve spec: " ::late-edits) (ex-message failure)))
+    (s/def ::late-edits ::edits)
+    (assert (identical? failure (resolve-error #(s/valid? late input))))
+    (let [fresh (s/coll-of (s/tuple string? ::late-edits) :kind map?)]
+      (assert (= ::s/invalid (s/conform fresh key-rejects)))
+      (assert (s/valid? fresh input))
+      (s/def ::late-edits string?)
+      (assert (s/valid? fresh input))
+      (assert (= ::s/invalid (s/conform fresh {"file:///example" "new registration"})))
+      (assert (s/valid? (s/coll-of (s/tuple string? ::late-edits) :kind map?)
+                        {"file:///example" "new registration"})))
+    (s/def ::late-edits nil)))
+
 (prn :workspace-changes-ok (clojure-version))

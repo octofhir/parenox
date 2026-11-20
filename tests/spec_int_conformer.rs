@@ -150,8 +150,9 @@ fn shadowed_int_predicates_do_not_refine_conditions_or_contracts() {
 
 #[test]
 fn checks_nested_lsp_ranges_across_namespaces() {
+    let imports = NS.replace(":as-alias", ":as");
     let source = format!(
-        r#"{NS}
+        r#"{imports}
 (defn line-of {{:t/sig '[::wire/range :-> ::wire/line]}} [range]
   (:line (:start range)))
 (defn largest {{:t/sig '[:-> ::wire/line]}} []
@@ -232,9 +233,43 @@ fn int_overflow_in_conform_and_valid_is_an_exception_not_invalid() {
 }
 
 #[test]
-fn does_not_treat_a_validated_map_shape_as_a_conformed_output() {
+fn a_fixed_width_integer_can_overflow_int_but_fits_long() {
+    let imports = NS.replace(":as-alias", ":as");
     let source = format!(
-        r#"{NS}
+        r#"{imports}
+(defn classify {{:t/sig '[int? :-> #{{true :overflow}}]}} [input]
+  (try (s/valid? ::wire/line input)
+       (catch ArithmeticException _ :overflow)
+       (catch IllegalArgumentException _ :out-of-long-range)))"#
+    );
+    let report = check(&source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn an_arbitrary_width_jvm_integer_can_throw_from_an_overridden_method() {
+    let imports = NS.replace(":as-alias", ":as");
+    for input in ["integer?", "::wire/line"] {
+        let source = format!(
+            r#"{imports}
+(defn classify {{:t/sig '[{input} :-> #{{true}}]}} [input]
+  (try (s/valid? ::wire/line input)
+       (catch IllegalStateException _ :custom-method)))"#
+        );
+        let report = check(&source);
+        let [finding] = report.files[1].diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(finding.code, "PNX2322");
+        assert!(finding.message.contains(":custom-method"));
+    }
+}
+
+#[test]
+fn does_not_treat_a_validated_map_shape_as_a_conformed_output() {
+    let imports = NS.replace(":as-alias", ":as");
+    let source = format!(
+        r#"{imports}
 (defn conform-range {{:t/sig '[::wire/range :-> ::wire/range]}} [range]
   (s/conform ::wire/range range))
 "#

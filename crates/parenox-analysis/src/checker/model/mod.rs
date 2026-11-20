@@ -203,7 +203,7 @@ impl Model {
             self.path == source.path || self.names.required_libraries.contains(&source.namespace)
         };
         match provider {
-            SpecProvider::Direct(source) | SpecProvider::ImportedKeys(source) => loaded(source),
+            SpecProvider::Direct(source) | SpecProvider::Imported { source, .. } => loaded(source),
             SpecProvider::LoadChecked { sources, .. } => {
                 sources.iter().all(|source| loaded(source))
             }

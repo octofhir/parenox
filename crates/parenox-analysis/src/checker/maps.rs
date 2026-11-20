@@ -7,8 +7,9 @@ mod projection;
 mod transform;
 mod zip;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use super::{Checker, Env, Value, calls::call_returns, nil_part};
+use super::{Checker, Env, LiteralContainer, Value, calls::call_returns, nil_part};
 use crate::Diagnostic;
 use crate::reader::{Form, Span};
 use crate::types::{
@@ -90,10 +91,12 @@ impl Checker<'_> {
 
     pub(super) fn map_literal(&mut self, xs: &[Form], context: MapLiteral<'_>) -> Value {
         let mut fields = BTreeMap::new();
+        let mut container_fields = BTreeMap::new();
         let mut extra_keys = Vec::new();
         let mut extra_values = Vec::new();
         let mut returns = true;
         let mut keys_known = true;
+        let mut duplicate_key = false;
         for pair in xs.as_chunks::<2>().0 {
             let value = match context {
                 MapLiteral::Expression(env) => self.infer(&pair[1], env),
@@ -108,7 +111,10 @@ impl Checker<'_> {
                     .insert(key.clone(), Field::new(value.known, true))
                     .is_some()
                 {
+                    duplicate_key = true;
                     self.error("PNX2790", pair[0].span, format!("Duplicate map key {key}"));
+                } else if let Some(container) = value.literal_container {
+                    container_fields.insert(key, container);
                 }
             } else if matches!(context, MapLiteral::Quoted) {
                 extra_keys.push(self.quoted_data(&pair[0]).known);
@@ -127,6 +133,9 @@ impl Checker<'_> {
         if !keys_known {
             return Value::new(Type::Unknown);
         }
+        let container_fields =
+            (!duplicate_key && extra_keys.is_empty() && !container_fields.is_empty())
+                .then(|| Arc::new(container_fields));
         let mut literal = Value::new(Type::Map(MapType {
             fields,
             extra: if extra_keys.is_empty() {
@@ -138,7 +147,8 @@ impl Checker<'_> {
                 ]))
             },
         }));
-        literal.literal_map = true;
+        literal.literal_container =
+            (!duplicate_key).then_some(LiteralContainer::Map(container_fields));
         literal
     }
 
@@ -211,13 +221,19 @@ impl Checker<'_> {
             Lookup::Required | Lookup::Presence => Type::Never,
         };
         let mut notes = value.notes.clone();
+        let mut literal_container = None;
         let ty = match &value.known {
             indexed
                 if let Type::Integer(index) = key
                     && let Some(item) = indexed.indexed_item(*index) =>
             {
                 match item {
-                    IndexedItem::Present(item) => item.clone(),
+                    IndexedItem::Present(item) => {
+                        literal_container = usize::try_from(*index)
+                            .ok()
+                            .and_then(|index| value.literal_container.as_ref()?.vector_item(index));
+                        item.clone()
+                    }
                     IndexedItem::Optional(item)
                         if matches!(mode, Lookup::Required | Lookup::Presence) =>
                     {
@@ -275,7 +291,13 @@ impl Checker<'_> {
                 }
             }
             Type::Map(map) => match map.slot(key) {
-                MapSlot::Present(ty) => ty.clone(),
+                MapSlot::Present(ty) => {
+                    literal_container = value
+                        .literal_container
+                        .as_ref()
+                        .and_then(|container| container.map_field(key));
+                    ty.clone()
+                }
                 MapSlot::Optional(ty) if matches!(mode, Lookup::Required | Lookup::Presence) => {
                     ty.clone()
                 }
@@ -302,7 +324,11 @@ impl Checker<'_> {
         if let Some(default) = default {
             notes.extend(default.notes.clone());
         }
-        Value::with_notes(ty, notes)
+        let mut result = Value::with_notes(ty, notes);
+        result.literal_container = literal_container
+            .filter(|container| container.matches_type(&result.known))
+            .cloned();
+        result
     }
 
     fn undeclared_key(&mut self, key: &Type, span: Span) -> Type {

@@ -83,6 +83,7 @@ fn changed(
             (old.edn != new.edn).then_some((Change::ValueChanged, None))
         }
         (Spec(old), Spec(new)) => (old.conversion != new.conversion
+            || old.alias != new.alias
             || old.registration.namespace != new.registration.namespace)
             .then_some((Change::Unproven, None)),
         _ => Some((Change::Breaking, None)),

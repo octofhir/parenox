@@ -370,19 +370,72 @@ and preserves Clojure truthiness. A root change can alter the lookup or fallback
 result, so the runtime value and exception classes remain unknown.
 
 `s/keys` with direct child specs declared in the same source file and runtime
-namespace can be exported as a bundle. Selecting the parent adds its direct
-children to the generated EDN. Generation reuses matching child contracts
+namespace can be exported as a bundle. Selecting the parent adds its referenced
+specs to the generated EDN. Generation reuses matching contracts
 from files passed with `--externs`. Pass the generated and reused files to the
 consumer. Import resolves children across all supplied EDN files. Missing or
 conflicting children prevent checking the parent. Each child must have the
 same runtime `:ns` as the parent, and the consumer must load that namespace.
 
-Imported bundles check literal maps with known keyword fields. Additional
-qualified keys use their loaded registry definitions. The checker reports
+Bundles can contain nested `s/keys` and direct keyword aliases. A source
+alias must follow its target registration in the same file. The exported
+alias keeps its target keyword, as in `{:spec :wire/position :ns wire}`.
+Import resolves the graph from all supplied entries before using it. Cycles,
+missing targets and graphs exceeding the supported bounds report a gap.
+To evaluate the forms on a JVM, register alias targets before the aliases.
+
+Imported bundles check literal maps with known keyword fields at each level.
+Additional qualified keys use their loaded registry definitions. The checker reports
 an analysis gap when the registry entry is unavailable, or when the input
 may be an opaque map implementation. Required keys are tested before
 field conversion. Child specs with unchecked inputs retain that limitation
 when the parent is used as an input type.
+
+The lsp4clj `position` bundle reuses the checked `int` conversion for `line`
+and `character`. The successful input range is signed `Int32`, and `int`
+returns a JVM `Integer`. For standard JVM integer classes, exceeding the
+signed `int` range throws `ArithmeticException` if the value fits a `long`.
+Exceeding the signed `long` range throws `IllegalArgumentException`.
+Non-integer input returns the spec invalid marker, or `false` from `s/valid?`.
+Proposal result types describe return values. The exported form retains the
+conversion and its exception behavior. Broad arbitrary-width input types
+allow additional exceptions from custom JVM numeric methods.
+For imported integer conversions, `s/valid?` alone gives no range guarantee
+about the original integers. Virtual conversion methods can return a different
+numeric value.
+
+The lsp4clj `:file-event/type` contract converts the fixed integers `1`, `2`
+and `3` to `:created`, `:changed` and `:deleted`. It preserves the `int?`
+guard, so an equal arbitrary-precision integer such as `1N` is invalid.
+The exporter supports 1 to 32 distinct decimal `Int32` keys with literal
+keyword values. Auto-resolved keywords and `:clojure.spec.alpha/invalid`
+are outside this form. The predicate and conformer must use identical
+literal tables or a single literal table from the immediately preceding
+`def`. The JVM captures the table when it registers the spec. The exported
+form inlines it in both stages and can be imported alone or inside the
+`did-change-watched-files-params` bundle.
+
+The default `s/coll-of` form with a named map spec can also be exported.
+The source element spec must be registered earlier in the same file. The
+spec on the JVM resolves the element on first use and caches the outcome.
+Parenox checks imported calls on proven literal vectors of up to 32 elements.
+It evaluates vector expressions before checking elements in encounter order.
+Conformance stops at an invalid element or an exception. The normal result
+preserves the vector shape and each converted element. Other collection
+shapes can report an analysis gap.
+This also works for a literal vector in a literal map field, such as `:edits`
+in the lsp4clj `text-document-edit` spec. At every map level the checker
+requires proof of an ordinary map and checks required keys before values.
+When traversal order is unknown, different map fields can contribute both
+an invalid result and a possible exception.
+
+The lsp4clj `changes` spec also exports the map form
+`(s/coll-of (s/tuple string? ::edits) :kind map?)`. For a literal map with
+known keys, Parenox checks each key before its value and preserves each
+URI in the output alongside its conformed vector of edits. A rejected key
+skips its own value's spec. Another entry may already have thrown an
+exception. The imported contract checks literal maps and bounded literal
+vectors. Other collection implementations can report an analysis gap.
 
 Run the lsp4clj 2.0.1 examples with the pinned `coercer.clj` source.
 
@@ -396,6 +449,13 @@ target/release/parenox propose-contracts "$coercer" \
   --spec :server-capabilities/semantic-tokens-provider \
   --spec :server-capabilities/text-document-sync \
   --spec :lsp4clj.coercer/server-capabilities \
+  --spec :lsp4clj.coercer/position \
+  --spec :lsp4clj.coercer/range \
+  --spec :lsp4clj.coercer/additional-text-edits \
+  --spec :lsp4clj.coercer/text-document-edit \
+  --spec :lsp4clj.coercer/changes \
+  --spec :file-event/type \
+  --spec :lsp4clj.coercer/did-change-watched-files-params \
   --spec :markup/kind
 just pilot-contract-smoke "$coercer"
 clojure -M tests/fixtures/spec-code-lens-provider.clj
@@ -404,6 +464,12 @@ clojure -M tests/fixtures/spec-signature-help-provider.clj
 clojure -M tests/fixtures/spec-semantic-tokens-provider.clj
 clojure -M tests/fixtures/spec-text-document-sync.clj
 clojure -M tests/fixtures/spec-server-capabilities.clj
+clojure -M tests/fixtures/spec-position.clj
+clojure -M tests/fixtures/spec-range.clj
+clojure -M tests/fixtures/spec-additional-text-edits.clj
+clojure -M tests/fixtures/spec-text-document-edit.clj
+clojure -M tests/fixtures/spec-workspace-changes.clj
+clojure -M tests/fixtures/spec-enum-conformer.clj
 ```
 
 The smoke test imports generated EDN in a consumer with no provider source.

@@ -144,7 +144,7 @@ impl Model {
             };
             let parsed = if is_spec {
                 has_specs = true;
-                Some(model.read_extern_spec(name_string, declaration, path))
+                Some(model.read_extern_spec(name_string, declaration, path, source))
             } else if let Some(entries) = declaration.map() {
                 match entries {
                     [kind, value] if kind.keyword() == Some(":value") => {

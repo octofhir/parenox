@@ -27,6 +27,9 @@ pub struct ContractProposals {
     pub externs: Option<String>,
 }
 
+type EncodedSpec<'a> = (&'a str, &'a SpecConversion, Option<&'a str>);
+type SpecGraph<'a> = BTreeMap<&'a str, EncodedSpec<'a>>;
+
 impl Session {
     /// Describe one named spec from the current checked source snapshot.
     pub fn spec_contract(&self, path: &str, name: &str) -> Option<SpecContractProposal> {
@@ -39,7 +42,7 @@ impl Session {
         path: &str,
         name: &str,
         standard_spec: bool,
-    ) -> Option<(SpecContractProposal, Option<&str>)> {
+    ) -> Option<(SpecContractProposal, Option<SpecGraph<'_>>)> {
         let file = self
             .files
             .get(path)
@@ -72,22 +75,20 @@ impl Session {
         } else {
             None
         };
-        let children_available = bundle.is_none_or(|fields| {
-            fields.values().all(|field| {
-                !self.externs.declares_spec(&field.registration)
-                    || namespace
-                        .zip(field.conversion.as_ref())
-                        .is_some_and(|expected| {
-                            self.externs.extern_spec(&field.registration) == Some(expected)
-                        })
-            })
-        });
+        let graph = namespace.and_then(|namespace| self.portable_spec_graph(name, path, namespace));
+        let collection = conversion
+            .and_then(SpecConversion::portable_collection)
+            .is_some();
+        let dictionary = conversion
+            .and_then(SpecConversion::portable_string_keyed_map)
+            .is_some();
+        let has_dependencies = bundle.is_some()
+            || collection
+            || dictionary
+            || self.specs.standalone_alias(name).is_some();
         let qualified = declarations.resolve_spec_keyword(name).as_deref() == Some(name);
-        let export_namespace = namespace.filter(|_| {
-            result.is_some()
-                && qualified
-                && children_available
-                && (input_known || partial || bundle.is_some())
+        let export_graph = graph.filter(|_| {
+            result.is_some() && qualified && (input_known || partial || has_dependencies)
         });
         let mut unknown = Vec::new();
         if !input_known {
@@ -103,11 +104,18 @@ impl Session {
         if !qualified {
             unknown.push("Qualified registration name");
         }
-        if bundle.is_some() {
+        if bundle.is_some() || collection || dictionary {
             unknown.push("Registrations for additional qualified keys");
         }
-        if !children_available {
-            unknown.push("Bundle with an extern child that does not match its source registration");
+        if collection || conversion.is_some_and(SpecConversion::has_nested_collection) {
+            unknown.push("Conformance of collections other than bounded literal vectors");
+        }
+        if dictionary {
+            unknown.push("Conformance of maps without known literal entries");
+            unknown.push("Conformance of map values other than bounded literal vectors");
+        }
+        if has_dependencies && namespace.is_some() && export_graph.is_none() {
+            unknown.push("Incomplete spec graph or an extern child that does not match its source registration");
         }
         if self.externs.declares_spec(name) && self.externs.extern_spec(name).is_none() {
             unknown.push("Existing extern could not be resolved");
@@ -145,7 +153,57 @@ impl Session {
             unknown,
             initial_table,
         };
-        Some((proposal, export_namespace))
+        Some((proposal, export_graph))
+    }
+
+    fn portable_spec_graph<'a>(
+        &'a self,
+        name: &str,
+        path: &str,
+        namespace: &'a str,
+    ) -> Option<SpecGraph<'a>> {
+        let (name, _) = self.specs.conversions.get_key_value(name)?;
+        let mut pending = vec![(name.as_str(), 0)];
+        let mut depths = BTreeMap::new();
+        let mut graph = BTreeMap::new();
+        while let Some((key, depth)) = pending.pop() {
+            if depth > SpecConversion::MAX_EXTERN_DEPTH {
+                return None;
+            }
+            if depths.get(key).is_some_and(|seen| *seen >= depth) {
+                continue;
+            }
+            depths.insert(key, depth);
+            if depths.len() > SpecConversion::MAX_EXTERN_DEPENDENCIES + 1 {
+                return None;
+            }
+            if self.specs.standalone_namespace(key, path) != Some(namespace) {
+                return None;
+            }
+            let conversion = self.specs.conversions.get(key)?;
+            let alias = self.specs.standalone_alias(key);
+            let encoded = (namespace, conversion, alias);
+            if !self.externs.declares_spec(key) {
+                graph.insert(key, encoded);
+            } else if key != name && self.externs.extern_spec(key) != Some(encoded) {
+                return None;
+            }
+            if let Some(alias) = alias {
+                pending.push((alias, depth + 1));
+            } else if let Some((element, _)) = conversion
+                .portable_collection()
+                .or_else(|| conversion.portable_string_keyed_map())
+            {
+                pending.push((element, depth + 1));
+            } else if let Some(fields) = conversion.bundle_fields() {
+                pending.extend(
+                    fields
+                        .values()
+                        .map(|field| (field.registration.as_str(), depth + 1)),
+                );
+            }
+        }
+        Some(graph)
     }
 
     /// Generate proposals and extern declarations without editing the source or
@@ -189,30 +247,15 @@ impl Session {
 
         let mut entries = BTreeMap::new();
         let mut edn = String::from("{:proposals [");
-        for (name, (proposal, namespace)) in &proposals {
+        for (name, (proposal, graph)) in &proposals {
             let status = if self.externs.declares_spec(name) {
                 if self.externs.extern_spec(name).is_some() {
                     ":existing"
                 } else {
                     "nil"
                 }
-            } else if let Some(namespace) = namespace
-                && let Some(conversion) = self.specs.conversions.get(*name)
-            {
-                entries.insert(*name, (*namespace, conversion));
-                if let Some(fields) = conversion.bundle_fields() {
-                    entries.extend(
-                        fields
-                            .values()
-                            .filter(|field| !self.externs.declares_spec(&field.registration))
-                            .filter_map(|field| {
-                                Some((
-                                    field.registration.as_str(),
-                                    (*namespace, field.conversion.as_ref()?),
-                                ))
-                            }),
-                    );
-                }
+            } else if let Some(graph) = graph {
+                entries.extend(graph.iter().map(|(&name, &encoded)| (name, encoded)));
                 ":generated"
             } else {
                 "nil"
@@ -261,17 +304,14 @@ fn display_type(ty: &Type) -> Option<String> {
     Some(ty.to_string())
 }
 
-fn encode_externs(
-    entries: &BTreeMap<&str, (&str, &SpecConversion)>,
-    existing: &ExternCache,
-) -> Result<String, String> {
+fn encode_externs(entries: &SpecGraph<'_>, existing: &ExternCache) -> Result<String, String> {
     let mut out = SnapshotWriter::new();
-    for (index, (name, (namespace, conversion))) in entries.iter().enumerate() {
+    for (index, (name, (namespace, conversion, alias))) in entries.iter().enumerate() {
         if index != 0 {
             out.write_str("\n ").map_err(|err| err.to_string())?;
         }
         write!(out, "{name} ").map_err(|err| err.to_string())?;
-        out.spec(namespace, conversion)
+        out.spec(namespace, conversion, *alias)
             .map_err(|err| format!("Cannot export spec {name}: {err}"))?;
     }
     let edn = out.finish().map_err(|err| err.to_string())?;

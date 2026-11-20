@@ -172,20 +172,26 @@ pub(crate) struct RegistrationSource {
 #[derive(PartialEq, Eq)]
 pub(crate) enum SpecProvider {
     Direct(Arc<RegistrationSource>),
-    ImportedKeys(Arc<RegistrationSource>),
+    Imported {
+        source: Arc<RegistrationSource>,
+        alias: Option<Arc<str>>,
+        structured: bool,
+    },
     LoadChecked {
         direct: bool,
         sources: Box<[Arc<RegistrationSource>]>,
+        alias: Option<Arc<str>>,
     },
 }
 
 impl SpecProvider {
     pub fn standalone_registration(&self) -> Option<&RegistrationSource> {
         match self {
-            Self::Direct(source) | Self::ImportedKeys(source) => Some(source),
+            Self::Direct(source) | Self::Imported { source, .. } => Some(source),
             Self::LoadChecked {
                 direct: true,
                 sources,
+                ..
             } => {
                 let [source] = sources.as_ref() else {
                     return None;
@@ -199,8 +205,20 @@ impl SpecProvider {
     pub fn is_self_contained(&self) -> bool {
         matches!(
             self,
-            Self::Direct(_) | Self::LoadChecked { direct: true, .. }
+            Self::Direct(_)
+                | Self::Imported {
+                    structured: false,
+                    ..
+                }
+                | Self::LoadChecked { direct: true, .. }
         )
+    }
+
+    pub fn alias(&self) -> Option<&str> {
+        match self {
+            Self::Imported { alias, .. } | Self::LoadChecked { alias, .. } => alias.as_deref(),
+            Self::Direct(_) => None,
+        }
     }
 }
 
@@ -222,19 +240,32 @@ pub(crate) enum SpecConversion {
     AnyCollection,
     Enum {
         entries: Arc<[(Type, Type)]>,
-        inverted: bool,
+        kind: EnumKind,
     },
     TaggedChoice(Arc<[SpecConversion]>),
     TaggedOr(Arc<[(String, SpecConversion)]>),
     ProjectedCollection(Arc<SpecConversion>),
-    StringKeyedMap(Arc<SpecConversion>),
+    StringKeyedMap {
+        values: Arc<SpecConversion>,
+        registration: String,
+    },
     Structured(Arc<StructuredConversion>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnumKind {
+    LocalTable,
+    Inverted,
+    FixedIntegerKeywords,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StructuredConversion {
     Map(BTreeMap<Type, MapFieldConversion>),
-    Collection(SpecConversion),
+    Collection {
+        element: SpecConversion,
+        registration: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -246,6 +277,10 @@ pub(crate) struct MapFieldConversion {
 }
 
 impl SpecConversion {
+    pub(crate) fn is_structured(&self) -> bool {
+        matches!(self, Self::Structured(_) | Self::StringKeyedMap { .. })
+    }
+
     pub fn has_unchecked_input(&self) -> bool {
         matches!(
             self,
@@ -254,7 +289,15 @@ impl SpecConversion {
     }
 
     pub fn requires_standard_core(&self) -> bool {
-        self.has_unchecked_input() || self.is_field_conformer()
+        matches!(
+            self,
+            Self::CheckedInt32
+                | Self::Enum {
+                    kind: EnumKind::FixedIntegerKeywords,
+                    ..
+                }
+        ) || self.has_unchecked_input()
+            || self.is_field_conformer()
     }
 
     pub fn is_field_conformer(&self) -> bool {
@@ -286,8 +329,8 @@ impl SpecConversion {
             Self::ProjectedCollection(child) => {
                 Type::SpecCollection(Box::new(child.success_input()))
             }
-            Self::StringKeyedMap(child) => {
-                Type::Map(MapType::dictionary(Type::String, child.success_input()))
+            Self::StringKeyedMap { values, .. } => {
+                Type::Map(MapType::dictionary(Type::String, values.success_input()))
             }
             Self::Structured(spec) => match spec.as_ref() {
                 StructuredConversion::Map(fields) => Type::Map(MapType {
@@ -303,8 +346,8 @@ impl SpecConversion {
                         .collect(),
                     extra: ExtraFields::Open,
                 }),
-                StructuredConversion::Collection(child) => {
-                    Type::SpecCollection(Box::new(child.success_input()))
+                StructuredConversion::Collection { element, .. } => {
+                    Type::SpecCollection(Box::new(element.success_input()))
                 }
             },
         }
@@ -338,6 +381,10 @@ impl SpecCache {
     pub fn standalone_namespace(&self, name: &str, path: &str) -> Option<&str> {
         let source = self.providers.get(name)?.standalone_registration()?;
         (source.path == path).then_some(source.namespace.as_str())
+    }
+
+    pub fn standalone_alias(&self, name: &str) -> Option<&str> {
+        self.providers.get(name)?.alias()
     }
 
     pub fn update(
@@ -383,7 +430,10 @@ impl SpecCache {
                             !project_set_namespace
                                 || !matches!(
                                     conversion,
-                                    SpecConversion::Enum { inverted: true, .. }
+                                    SpecConversion::Enum {
+                                        kind: EnumKind::Inverted,
+                                        ..
+                                    }
                                 )
                         },
                     ),
@@ -421,6 +471,7 @@ impl SpecCache {
                     SpecProvider::LoadChecked {
                         direct,
                         sources: sources.into_iter().collect(),
+                        alias: resolver.aliases.get(key).map(|alias| alias.as_str().into()),
                     }
                 } else if direct {
                     SpecProvider::Direct(source.clone())
@@ -463,6 +514,7 @@ struct Resolver<'a> {
     types: BTreeMap<String, Type>,
     conversions: BTreeMap<String, SpecConversion>,
     direct_conversions: BTreeSet<&'a str>,
+    aliases: BTreeMap<&'a str, String>,
     local_conversions: BTreeMap<&'a str, usize>,
     required_registrations: BTreeMap<&'a str, BTreeSet<&'a str>>,
     diagnostics: BTreeMap<String, Vec<Diagnostic>>,
@@ -559,14 +611,19 @@ impl<'a> Resolver<'a> {
                 let conversion = structured_conversion(owner.names, body, &ty, |key| {
                     self.conversions.get(key).cloned()
                 })?;
-                if !self.project_core_namespace
-                    && let Some(fields) = conversion.bundle_fields()
-                    && fields.values().all(|field| {
-                        self.direct_conversions
-                            .contains(field.registration.as_str())
-                            && self.declarations[&field.registration.as_str()].path == owner.path
-                    })
-                {
+                let local = |name: &str| {
+                    self.direct_conversions.contains(name)
+                        && self.declarations[name].path == owner.path
+                };
+                let portable = conversion
+                    .bundle_fields()
+                    .is_some_and(|fields| fields.values().all(|field| local(&field.registration)))
+                    || conversion.portable_collection().is_some_and(|(name, _)| {
+                        local(name)
+                            && self.declarations[name].declaration.body.span.end.offset
+                                < registered_at
+                    });
+                if !self.project_core_namespace && portable {
                     self.direct_conversions.insert(key);
                     required.insert(key);
                 }
@@ -588,22 +645,35 @@ impl<'a> Resolver<'a> {
                     .then_some(conversion)
             })
             .or_else(|| {
-                let alias = owner.names.key(body.keyword()?);
-                self.conversions.get(&alias).cloned()
+                let alias = owner.names.validation_key(body.keyword()?)?;
+                let conversion = self.conversions.get(&alias)?.clone();
+                if self.direct_conversions.contains(alias.as_str())
+                    && self.declarations[alias.as_str()].path == owner.path
+                    && conversion.is_portable()
+                {
+                    self.aliases.insert(key, alias);
+                    self.direct_conversions.insert(key);
+                    required.insert(key);
+                }
+                Some(conversion)
             });
         if let Some(conversion) = conversion {
             if let Some(ready) = local_ready_at {
                 self.local_conversions.insert(key, ready);
             }
-            if conversion.requires_standard_core()
+            if conversion.has_unchecked_input()
+                || conversion.is_field_conformer()
                 || matches!(
                     conversion,
                     SpecConversion::IdentityDomain(_)
                         | SpecConversion::TaggedChoice(_)
                         | SpecConversion::TaggedOr(_)
                         | SpecConversion::ProjectedCollection(_)
-                        | SpecConversion::StringKeyedMap(_)
-                        | SpecConversion::Enum { inverted: true, .. }
+                        | SpecConversion::StringKeyedMap { .. }
+                        | SpecConversion::Enum {
+                            kind: EnumKind::Inverted,
+                            ..
+                        }
                 )
             {
                 required.insert(key);
@@ -651,9 +721,18 @@ impl<'a> Resolver<'a> {
             }
             (key, SpecConversion::ProjectedCollection(Arc::new(element)))
         } else {
+            if self.project_core_namespace {
+                return None;
+            }
             let child = string_keyed_map_child(owner.names, body)?;
-            let (key, value) = self.earlier_local_conversion(owner, registered_at, child)?;
-            (key, SpecConversion::StringKeyedMap(Arc::new(value)))
+            let (key, values) = self.earlier_local_conversion(owner, registered_at, child)?;
+            (
+                key,
+                SpecConversion::StringKeyedMap {
+                    values: Arc::new(values),
+                    registration: key.into(),
+                },
+            )
         };
         if let Some(sources) = self.required_registrations.get(key) {
             required.extend(sources);

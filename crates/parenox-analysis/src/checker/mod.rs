@@ -111,6 +111,62 @@ impl Model {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum LiteralContainer {
+    Map(Option<Arc<BTreeMap<Type, LiteralContainer>>>),
+    Vector(Option<Arc<[Option<LiteralContainer>]>>),
+}
+
+impl LiteralContainer {
+    fn map_field(&self, key: &Type) -> Option<&Self> {
+        let Self::Map(Some(fields)) = self else {
+            return None;
+        };
+        fields.get(key)
+    }
+
+    fn vector_item(&self, index: usize) -> Option<&Self> {
+        let Self::Vector(Some(items)) = self else {
+            return None;
+        };
+        items.get(index).and_then(Option::as_ref)
+    }
+
+    fn matches_type(&self, ty: &Type) -> bool {
+        match (self, ty) {
+            (Self::Map(_), Type::Map(_)) => true,
+            (Self::Vector(items), Type::Tuple(types)) => items
+                .as_ref()
+                .is_none_or(|items| items.len() == types.len()),
+            _ => false,
+        }
+    }
+
+    fn join(self, other: Self, known: &Type) -> Option<Self> {
+        match (self, other) {
+            (Self::Map(left), Self::Map(right)) => {
+                let fields = match (left, right) {
+                    (Some(left), Some(right)) if left == right => Some(left),
+                    (Some(left), Some(right)) => {
+                        let shared: BTreeMap<_, _> = left
+                            .iter()
+                            .filter(|(key, child)| right.get(*key) == Some(*child))
+                            .map(|(key, child)| (key.clone(), child.clone()))
+                            .collect();
+                        (!shared.is_empty()).then(|| Arc::new(shared))
+                    }
+                    _ => None,
+                };
+                Some(Self::Map(fields))
+            }
+            (left @ Self::Vector(_), right) if left == right && left.matches_type(known) => {
+                Some(left)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Value {
     // Inferred language type for ordinary use and diagnostics, e.g. String or Set<String>.
     ty: Type,
@@ -119,8 +175,8 @@ struct Value {
     notes: Vec<String>,
     contract: Option<Arc<ContractOrigin>>,
     guard: Option<Arc<VerifiedGuard>>,
-    // A map built by a literal cannot also implement IPersistentVector.
-    literal_map: bool,
+    // Structural types do not prove ordinary JVM collection behavior.
+    literal_container: Option<LiteralContainer>,
 }
 
 impl Value {
@@ -131,7 +187,7 @@ impl Value {
             notes: Vec::new(),
             contract: None,
             guard: None,
-            literal_map: false,
+            literal_container: None,
         }
     }
 
@@ -140,6 +196,10 @@ impl Value {
             notes,
             ..Self::new(known)
         }
+    }
+
+    fn is_literal_map(&self) -> bool {
+        matches!(self.literal_container, Some(LiteralContainer::Map(_)))
     }
 
     fn join(mut self, other: Value) -> Value {
@@ -164,22 +224,36 @@ impl Value {
         } else {
             None
         };
+        let known = self.known.join_values(other.known);
+        let literal_container = self
+            .literal_container
+            .zip(other.literal_container)
+            .and_then(|(left, right)| left.join(right, &known));
         Self {
             contract,
             guard,
-            literal_map: self.literal_map && other.literal_map,
-            ..Self::with_notes(self.known.join_values(other.known), self.notes)
+            literal_container,
+            ..Self::with_notes(known, self.notes)
         }
     }
 
     fn narrow(&mut self, known: Type) {
-        self.literal_map &= matches!(known, Type::Map(_));
+        let keep = match &self.literal_container {
+            Some(LiteralContainer::Map(_)) => matches!(known, Type::Map(_)),
+            Some(LiteralContainer::Vector(_)) => {
+                matches!((&self.known, &known), (Type::Tuple(before), Type::Tuple(after)) if before.len() == after.len())
+            }
+            None => false,
+        };
+        if !keep {
+            self.literal_container = None;
+        }
         self.ty = known.inferred();
         self.known = known;
     }
 
     fn same_value_facts(&self, other: &Self) -> bool {
-        self.known == other.known && self.literal_map == other.literal_map
+        self.known == other.known && self.literal_container == other.literal_container
     }
 }
 
@@ -447,7 +521,11 @@ impl Checker<'_> {
             Kind::Utf16String(_) => Value::new(Type::String),
             Kind::Regex => Value::new(Type::Pattern),
             Kind::Character(c) => Value::new(Type::Char(*c)),
-            Kind::Metadata(_, target) => self.infer_position(target, env, tail),
+            Kind::Metadata(_, target) => {
+                let mut value = self.infer_position(target, env, tail);
+                value.literal_container = None;
+                value
+            }
             Kind::Conditional { .. } => self.unsupported(form.span, "Reader conditional must be selected before type analysis"),
             Kind::Tagged(tag, _) => self.unsupported(form.span, format!(
                 "Tagged literal #{} has no declared reader semantics; its reader function was not executed",
@@ -501,11 +579,13 @@ impl Checker<'_> {
                 }
             }
             Kind::Vector(xs) => {
-                let types: Vec<_> = self.eval_args(xs, env, true).map(|(value, _)| value.known).collect();
-                if types.last() == Some(&Type::Never) {
-                    return Value::new(Type::Never);
-                }
-                Value::new(vector_type(types))
+                let prove_origin = xs.len() <= MAX_TUPLE_ITEMS
+                    && !xs.iter().any(has_evaluated_metadata);
+                literal_vector_value(
+                    self.eval_args(xs, env, true).map(|(value, _)| value),
+                    xs.len(),
+                    prove_origin,
+                )
             }
             Kind::Set(xs) => {
                 let types = self.infer_set_members(xs, env);
@@ -536,6 +616,43 @@ fn vector_type(items: Vec<Type>) -> Type {
         Type::Tuple(items.into_boxed_slice())
     } else {
         Type::Vector(collection_element(items))
+    }
+}
+
+fn literal_vector_value(
+    items: impl Iterator<Item = Value>,
+    len: usize,
+    prove_origin: bool,
+) -> Value {
+    let prove_origin = prove_origin && len <= MAX_TUPLE_ITEMS;
+    let mut types = Vec::with_capacity(len);
+    let mut container_items = None;
+    for value in items {
+        if prove_origin && let Some(container) = value.literal_container {
+            let proofs = container_items.get_or_insert_with(|| vec![None; len]);
+            proofs[types.len()] = Some(container);
+        }
+        types.push(value.known);
+    }
+    if types.last() == Some(&Type::Never) {
+        return Value::new(Type::Never);
+    }
+    let mut value = Value::new(vector_type(types));
+    if prove_origin {
+        value.literal_container = Some(LiteralContainer::Vector(container_items.map(Arc::from)));
+    }
+    value
+}
+
+fn has_evaluated_metadata(form: &Form) -> bool {
+    match &form.kind {
+        Kind::Metadata(..) => true,
+        Kind::List(items) if items.first().and_then(Form::symbol) == Some("quote") => false,
+        Kind::List(items) | Kind::Vector(items) | Kind::Map(items) | Kind::Set(items) => {
+            items.iter().any(has_evaluated_metadata)
+        }
+        Kind::AnonymousFunction(function) => function.body.iter().any(has_evaluated_metadata),
+        _ => false,
     }
 }
 

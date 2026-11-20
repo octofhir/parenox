@@ -714,7 +714,7 @@ impl<'model> Checker<'model> {
                 return self
                     .unsupported(span, "vector? requires the standard clojure.core predicate");
             }
-            "clojure.core/vector?" if args[0].0.literal_map => Type::Bool(false),
+            "clojure.core/vector?" if args[0].0.is_literal_map() => Type::Bool(false),
             "clojure.core/vector?" => vector_predicate(&args[0].0.known),
             "clojure.core/identity" => return args[0].0.clone(),
             "clojure.core/any?" => Type::Bool(true),

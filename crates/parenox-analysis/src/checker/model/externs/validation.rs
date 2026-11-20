@@ -51,12 +51,15 @@ impl ExternCache {
                         span,
                     ),
                     ExternalDeclaration::Spec(promised) => {
-                        let registration = globals
-                            .spec_provider(name)
-                            .and_then(|provider| provider.standalone_registration());
-                        if registration.is_some_and(|source| {
-                            source.namespace == promised.registration.namespace
-                        }) && globals.spec_conversions.get(name) == Some(&promised.conversion)
+                        let provider = globals.spec_provider(name);
+                        if !globals.project_namespaces.contains("clojure.spec.alpha")
+                            && provider.is_some_and(|provider| {
+                                provider.alias() == promised.alias.as_deref()
+                                    && provider.standalone_registration().is_some_and(|source| {
+                                        source.namespace == promised.registration.namespace
+                                    })
+                            })
+                            && globals.spec_conversions.get(name) == Some(&promised.conversion)
                         {
                             None
                         } else {
