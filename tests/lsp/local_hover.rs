@@ -1,6 +1,86 @@
 use super::*;
 
 #[test]
+fn hover_narrows_the_original_seed_in_later_some_thread_steps() {
+    let fixture = Fixture::new("thread seed hover");
+    let path = fixture.0.join("src/thread_get.clj");
+    let document = uri(&path);
+    // The last step reuses the original zloc in clojure-lsp's thread-get.
+    let source = r#"(ns thread-get (:require [clojure.spec.alpha :as s]))
+(defn edits {:t/sig '[string? string? :-> string?]} [original changed] changed)
+(defn get-in-more {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]} [zloc]
+  (some->> zloc (str "🦊") str (edits zloc)))
+"#;
+    fs::write(&path, source).unwrap();
+    let broken = source.replace("some->>", "->>");
+    let column = |text: &str, read| {
+        let row = text.lines().nth(3).unwrap();
+        let start = if read {
+            row.rfind("zloc")
+        } else {
+            row.find("zloc")
+        }
+        .unwrap();
+        row[..start].encode_utf16().count()
+    };
+    let hover = |id, text, read| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/hover","params":{
+            "textDocument":{"uri":document},"position":{"line":3,"character":column(text, read)+1}
+        }})
+    };
+    let change = |version, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let responses = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"languageId":"clojure","version":1,"text":source
+        }}}),
+        hover(2, source, false),
+        hover(3, source, true),
+        change(2, &broken),
+        hover(4, &broken, true),
+        change(3, source),
+        hover(5, source, true),
+        json!({"jsonrpc":"2.0","id":6,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let range = |text, read| {
+        let start = column(text, read);
+        json!({"start":{"line":3,"character":start},"end":{"line":3,"character":start+4}})
+    };
+    for (id, text, read, ty) in [
+        (2, source, false, "Nil | String"),
+        (3, source, true, "String"),
+        (4, broken.as_str(), true, "Nil | String"),
+        (5, source, true, "String"),
+    ] {
+        let result = &responses.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+        assert_eq!(result["contents"]["value"], format!("zloc\n{ty}"));
+        assert_eq!(result["range"], range(text, read));
+    }
+    for (version, count) in [(1, 0), (2, 1), (3, 0)] {
+        let findings = responses
+            .iter()
+            .find(|reply| {
+                reply["method"] == "textDocument/publishDiagnostics"
+                    && reply["params"]["version"] == version
+            })
+            .unwrap()["params"]["diagnostics"]
+            .as_array()
+            .unwrap();
+        assert_eq!(findings.len(), count, "{findings:?}");
+        if let [diagnostic] = findings.as_slice() {
+            assert_eq!(diagnostic["code"], "PNX2322");
+            assert_eq!(diagnostic["range"], range(&broken, true));
+        }
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
 fn hover_uses_the_type_at_a_local_read_after_an_unsaved_edit() {
     let fixture = Fixture::new("local hover");
     let path = fixture.0.join("src/uri_path.cljc");

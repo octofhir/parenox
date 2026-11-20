@@ -535,8 +535,10 @@ Those numeric values keep both branches possible.
 and `:let`, `:when`, and `:while`. `for` evaluates the first source expression
 immediately but defers traversal and the body. `doseq` is eager and normally
 returns nil; with no bindings or only `:let` clauses it returns the last body
-expression. `some->` stops on nil, not false. `recur` must target a supported
-tail position and analysis is bounded when argument types keep growing.
+expression. `some->` and `some->>` skip the remaining steps on nil and pass
+false through. A stable read of the original input keeps the non-nil type
+in later steps. `recur` must target a supported tail position and analysis is
+bounded when argument types keep growing.
 
 Vector `:pre` conditions are checked after parameter binding and on each
 `recur` iteration. Vector `:post` conditions run after a normal return, with

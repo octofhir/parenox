@@ -202,6 +202,11 @@ impl Checker<'_> {
         let mut current = self.infer(&xs[1], env);
         let temporary = expand::temporary(&xs[1..], |name| env.contains_key(name));
         let mut local = env.clone();
+        if threading.guards_nil() && nil_part(&current.known) == Type::Nil {
+            // Every executed step passed the first nil test. Repeated reads
+            // can share that fact only when they refer to the saved seed.
+            self.narrow_subject(&xs[1], &mut local, Type::without_nil);
+        }
         local.insert(temporary.clone(), Value::new(Type::Never));
         let mut origin = xs[1].span;
         let mut skipped_nil = false;

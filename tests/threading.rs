@@ -61,6 +61,41 @@ fn some_threading_skips_nil_but_keeps_false_and_compiles_skipped_steps() {
 }
 
 #[test]
+fn some_threading_narrows_stable_seed_reads_through_later_steps() {
+    let source = r#"
+      (defn edits {:t/sig '[string? string? :-> string?]} [original changed] changed)
+      (defn flags {:t/sig '[#{false} string? :-> string?]} [flag changed] changed)
+      (defn direct {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]} [text]
+        (some-> text str/trim str/upper-case (edits text)))
+      (defn field {:t/sig '[{:path (s/nilable string?)} :-> (s/nilable string?)]} [uri]
+        (let [saved (:path uri)]
+          (some->> (get-in uri [:path]) str/trim str/upper-case (edits saved))))
+      (defn keep-false {:t/sig '[(s/nilable #{false}) :-> (s/nilable string?)]} [flag]
+        (some->> flag str (flags flag)))
+    "#;
+    let report = check(source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let report = check(&format!(
+        "{source}{}",
+        r#"
+        (defn latest {:t/sig '[:-> (s/nilable string?)]} [] nil)
+        (defn repeat-read {:t/sig '[:-> (s/nilable string?)]} []
+          (some->> (latest) str (edits (latest))))
+        (defn shadowed {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]} [text]
+          (some->> text str (let [text nil] (subs text 0))))
+        "#
+    ));
+    let [read, shadowed] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(read.code, "PNX2322");
+    assert_eq!(read.actual.as_deref(), Some("Nil | String"));
+    assert_eq!(shadowed.code, "PNX2322");
+    assert_eq!(shadowed.actual.as_deref(), Some("Nil"));
+}
+
+#[test]
 fn diagnostics_keep_source_origins_and_only_propose_edits_for_original_forms() {
     let source = include_str!("../examples/threading_bad.clj");
     let report = Session::default().check("bad.clj", source);
