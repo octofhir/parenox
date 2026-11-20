@@ -1,9 +1,16 @@
 //! Complete symbols at the cursor using the lossless reader and project index.
+mod dependencies;
+mod import;
+mod ns_form;
+mod require;
+
 use std::ops::Range;
 
+pub use dependencies::DependencyCompletions;
 use parenox_analysis::Session;
 use parenox_analysis::reader;
 use parenox_analysis::syntax::SyntaxKind;
+use parenox_classpath::JavaMemberKind;
 use serde_json::{Value, json};
 
 use super::text::Lines;
@@ -126,6 +133,8 @@ struct Site {
     range: Range<usize>,
     kind: SyntaxKind,
     empty_call: Option<bool>, // Some(true) if the head is followed by a closing paren.
+    require: Option<require::Target>,
+    import: Option<import::Target>,
 }
 
 impl Site {
@@ -169,6 +178,8 @@ impl Site {
             range: usize::from(bytes.start())..usize::from(bytes.end()),
             kind,
             empty_call,
+            require: require::target(&token),
+            import: import::target(&token),
         })
     }
 }
@@ -177,40 +188,93 @@ pub fn complete(
     session: &Session,
     path: &str,
     uri: &str,
-    source: &str,
     lines: &Lines<'_>,
     offset: usize,
     snippets: bool,
+    dependencies: &DependencyCompletions,
 ) -> Option<Value> {
     const LIMIT: usize = 60;
+    let source = lines.source();
     let site = Site::at(source, offset)?;
     let prefix = &source[site.range.start..offset];
     let range =
         json!({"start": lines.position(site.range.start)?, "end": lines.position(site.range.end)?});
-    let mut items: Vec<_> = if site.kind == SyntaxKind::Keyword {
+    let mut items: Vec<_> = if let Some(target) = site.import {
+        import::complete(target, prefix, &range, LIMIT + 1, dependencies)
+    } else if let Some(target) = site.require {
+        require::complete(
+            session,
+            path,
+            target,
+            prefix,
+            &range,
+            LIMIT + 1,
+            dependencies,
+        )
+    } else if site.kind == SyntaxKind::Keyword {
         if !prefix.starts_with("::") && !prefix.contains('/') {
             return None;
         }
         session.complete_spec_key(path, prefix, LIMIT + 1).into_iter().map(|key| {
             json!({"label":key,"kind":14,"detail":"Project spec","textEdit":{"range":range,"newText":key}})
         }).collect()
-    } else if prefix.contains('/') && !prefix.starts_with("clojure.core/") {
-        let namespace = prefix
-            .split_once('/')
-            .and_then(|(qualifier, _)| session.completion_namespace(path, qualifier));
-        session
-            .complete_qualified_var(path, prefix, LIMIT + 1)
-            .into_iter()
-            .map(|name| {
-                let mut item =
-                    json!({"label":name,"kind":6,"textEdit":{"range":range,"newText":name}});
-                if let Some(namespace) = namespace {
-                    item["data"] =
-                        json!({"parenoxSource":{"uri":uri,"label":name,"namespace":namespace}});
-                }
-                item
-            })
-            .collect()
+    } else if let Some((qualifier, member)) = prefix.split_once('/')
+        && qualifier != "clojure.core"
+    {
+        let require_alias = session.completion_require_alias(path, qualifier, offset);
+        let java = if require_alias.is_none() {
+            session
+                .completion_java_class(path, qualifier)
+                .and_then(|class| dependencies.matching_java(class, member, LIMIT + 1))
+        } else {
+            None
+        };
+        if let Some(members) = java {
+            let dot = if member.starts_with('.') { "." } else { "" };
+            members
+                .into_iter()
+                .map(|member| {
+                    let label = format!("{qualifier}/{dot}{}", member.name);
+                    let kind = match member.kind {
+                        JavaMemberKind::Method => 2,
+                        JavaMemberKind::Field => 5,
+                        JavaMemberKind::Constant => 21,
+                    };
+                    json!({"label":label,"kind":kind,"detail":member.detail(),
+                    "textEdit":{"range":range,"newText":label}})
+                })
+                .collect()
+        } else if let Some(namespace) =
+            session.completion_archive_namespace(path, qualifier, offset)
+        {
+            dependencies
+                .matching(namespace, member, LIMIT + 1)
+                .into_iter()
+                .map(|export| {
+                    let label = format!("{qualifier}/{}", export.name);
+                    json!({"label":label,"kind":if export.callable {3} else {6},"detail":namespace,
+                    "textEdit":{"range":range,"newText":label}})
+                })
+                .collect()
+        } else {
+            let namespace = session.completion_namespace_at(path, qualifier, offset);
+            session
+                .complete_qualified_var_at(path, prefix, offset, LIMIT + 1)
+                .into_iter()
+                .map(|name| {
+                    let mut item =
+                        json!({"label":name,"kind":6,"textEdit":{"range":range,"newText":name}});
+                    if let Some(namespace) = namespace {
+                        item["data"] =
+                            json!({"parenoxSource":{"uri":uri,"label":name,"namespace":namespace}});
+                        if require_alias.is_some() {
+                            item["data"]["parenoxSource"]["offset"] = json!(offset);
+                        }
+                    }
+                    item
+                })
+                .collect()
+        }
     } else {
         let qualified = prefix.strip_prefix("clojure.core/");
         CORE.iter()
@@ -263,7 +327,11 @@ pub fn resolve(session: &Session, path: &str, mut item: Value) -> Value {
     if let (Some(label), Some(data)) = (item["label"].as_str(), item.pointer("/data/parenoxSource"))
         && data["label"].as_str() == Some(label)
         && let Some(namespace) = data["namespace"].as_str()
-        && let Some(documentation) = session.completion_documentation(path, label, namespace)
+        && let Some(offset) = data
+            .get("offset")
+            .map_or(Some(0), |offset| usize::try_from(offset.as_u64()?).ok())
+        && let Some(documentation) =
+            session.completion_documentation_at(path, label, namespace, offset)
     {
         item["documentation"] = json!({"kind":"plaintext","value":documentation});
     }

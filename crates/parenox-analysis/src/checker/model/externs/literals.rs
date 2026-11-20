@@ -4,6 +4,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use super::{ExternalDeclaration, Globals, Model, Names};
+use crate::checker::model::{type_forms::inverted_literal, vars::def_initializer};
 use crate::checker::{Checker, Declarations};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
@@ -67,15 +68,24 @@ impl Model {
             let symbol = name_form.symbol()?;
             let qualified = format!("{}/{symbol}", self.names.namespace);
             let (name, _) = self.exports.literals.get_key_value(&qualified)?;
-            let initializer = match &parts[2..] {
-                [value] => value,
-                [doc, value] if doc.is_string() => value,
-                _ => return None,
-            };
+            let initializer = def_initializer(&parts[2..])?;
             let encoded = if super::is_modeled_call(name) {
                 Err("externs cannot replace a built-in checking rule")
             } else {
-                encode(initializer, source, &self.names, Context::Initializer)
+                let expanded = if self.map_invert_in_project == Some(false) {
+                    inverted_literal(declarations, forms, source, initializer)
+                } else {
+                    None
+                };
+                encode(
+                    expanded
+                        .as_ref()
+                        .or_else(|| self.captured_initializers.get(&index))
+                        .unwrap_or(initializer),
+                    source,
+                    &self.names,
+                    Context::Initializer,
+                )
             };
             Some((name.as_str(), name_form.span, encoded))
         })

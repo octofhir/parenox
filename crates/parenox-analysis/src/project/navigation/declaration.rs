@@ -62,7 +62,7 @@ impl Session {
     }
 }
 
-fn top_level_reference<'a>(
+pub(super) fn top_level_reference<'a>(
     declarations: &'a Declarations,
     forms: &'a [Form],
     spelling: &'a str,

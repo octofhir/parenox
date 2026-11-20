@@ -3,8 +3,10 @@ mod navigation;
 mod symbols;
 
 pub use navigation::{
-    CallHierarchyCalls, CallHierarchyItem, CallSignature, CallSignatures, Definition,
-    SemanticSymbol, SemanticSymbolKind, SourceTestKind, SourceTestNode, VarInfo,
+    ArchiveDeclarations, CallHierarchyCalls, CallHierarchyItem, CallSignature, CallSignatures,
+    Definition, InspectedReference, PrivacyDeclaration, SemanticSymbol, SemanticSymbolKind,
+    SourceExport, SourceHover, SourceTestKind, SourceTestNode, VarDocumentation, VarInfo,
+    namespace_documentation, namespace_exports,
 };
 pub use symbols::{SourceSymbol, SourceSymbolKind};
 
@@ -115,7 +117,7 @@ struct FileCache {
     suppressions: Suppressions,
     declarations: Option<Declarations>,
     known_var_surface: OnceLock<bool>,
-    navigation_prefix: Option<Box<NavigationPrefix>>,
+    navigation_fallback: Option<Box<NavigationFallback>>,
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
     interface: Option<InterfaceKey>,
@@ -129,7 +131,7 @@ struct CheckedFunction {
     result: FunctionCheck,
 }
 
-struct NavigationPrefix {
+struct NavigationFallback {
     forms: Vec<Form>,
     declarations: Declarations,
 }
@@ -188,17 +190,21 @@ impl FileCache {
         self.suppressions = Suppressions::default();
         self.declarations = None;
         self.known_var_surface.take();
-        self.navigation_prefix = None;
+        self.navigation_fallback = None;
         let conditionals = if kind == FileKind::Source && path.ends_with(".cljc") {
             reader::Conditionals::Select(":clj")
         } else {
             reader::Conditionals::Reject
         };
-        let (mut read, read_error) = reader::read_for_check(
-            source,
-            conditionals,
-            (kind == FileKind::Source && source.contains(MARKER)).then_some(MARKER),
-        );
+        let (mut read, read_error) = match kind {
+            FileKind::Source => reader::read_for_check_recovering(
+                source,
+                conditionals,
+                source.contains(MARKER).then_some(MARKER),
+            ),
+            FileKind::Externs => reader::read_for_check(source, conditionals, None),
+        };
+        let reader_failed = read_error.is_some();
         let parsed = match read_error {
             Some(error) => Err(error),
             None if kind == FileKind::Source => {
@@ -231,10 +237,13 @@ impl FileCache {
             Err(error) => {
                 self.forms.clear();
                 if kind == FileKind::Source {
-                    read.forms
-                        .retain(|form| form.span.end.offset <= error.span.start.offset);
+                    if !reader_failed {
+                        // Preserve the valid prefix when namespace validation fails.
+                        read.forms
+                            .retain(|form| form.span.end.offset <= error.span.start.offset);
+                    }
                     if !read.forms.is_empty() {
-                        self.navigation_prefix = Some(Box::new(NavigationPrefix {
+                        self.navigation_fallback = Some(Box::new(NavigationFallback {
                             declarations: Declarations::read(&read.forms),
                             forms: read.forms,
                         }));
@@ -251,8 +260,8 @@ impl FileCache {
         if let Some(declarations) = &self.declarations {
             Some((declarations, &self.forms))
         } else {
-            let prefix = self.navigation_prefix.as_deref()?;
-            Some((&prefix.declarations, &prefix.forms))
+            let recovered = self.navigation_fallback.as_deref()?;
+            Some((&recovered.declarations, &recovered.forms))
         }
     }
 
@@ -494,11 +503,14 @@ impl Session {
                     let (source, cache) = &entries[index];
                     Some(SpecSource {
                         path: source.path,
+                        source: source.source,
                         declarations: cache.declarations.as_ref()?,
                         fingerprint: cache.spec_fingerprint.as_ref()?,
                     })
                 })
                 .collect(),
+            namespaces.contains_key("clojure.set"),
+            namespaces.contains_key("clojure.core"),
         );
         let mut globals = Globals::with_specs(&self.specs);
         for namespace in namespaces.keys() {
@@ -573,8 +585,17 @@ impl Session {
                 .publish_dependencies(&trusted_paths, &mut globals);
         }
         let mut top_level_calls = BTreeMap::new();
+        let mut checked_tests = BTreeMap::new();
         if matches!(mode, SnapshotMode::Check(_)) {
             let standard_test = !namespaces.contains_key("clojure.test");
+            let standard_assertions = standard_test
+                && !namespaces.contains_key("clojure.core")
+                && !entries[..count].iter().any(|(_, cache)| {
+                    cache
+                        .declarations
+                        .as_ref()
+                        .is_some_and(|item| item.refers_to_assert_expr)
+                });
             let provider = |namespace: &str| {
                 let &index = namespaces.get(namespace)?;
                 let (_, file) = &entries[index];
@@ -646,9 +667,23 @@ impl Session {
                                 )
                             },
                         ));
+                    if standard_assertions {
+                        let tests = declarations.check_test_bodies(
+                            &file.forms,
+                            model,
+                            &globals,
+                            source.source,
+                            &mut reports[index].diagnostics,
+                        );
+                        if !tests.is_empty() {
+                            checked_tests.insert(index, tests);
+                        }
+                    }
                 }
             }
         }
+        let core_in_extern_surface =
+            mode == SnapshotMode::ExternSurface && namespaces.contains_key("clojure.core");
         let mut totals = Stats::default();
         let mut report_ordinals = BTreeMap::<&str, usize>::new();
         for (index, (source, mut cache)) in entries.into_iter().enumerate() {
@@ -666,6 +701,11 @@ impl Session {
                     report
                         .diagnostics
                         .extend_from_slice(declarations.diagnostics());
+                    if core_in_extern_surface {
+                        report
+                            .diagnostics
+                            .extend(declarations.reflection_flag_gaps());
+                    }
                 }
                 if let Some(diagnostics) = self.specs.diagnostics.get(source.path) {
                     report.diagnostics.extend_from_slice(diagnostics);
@@ -677,17 +717,23 @@ impl Session {
                     report.diagnostics.extend(diagnostics.iter().cloned());
                 }
                 let calls = top_level_calls.get(&index);
+                let tests = checked_tests.get(&index);
+                let declaration_start = report.diagnostics.len();
                 report
                     .diagnostics
-                    .extend(model.diagnostics.iter().map(|diagnostic| {
-                        if diagnostic.code == "PNX9001"
-                            && let Some(call) =
-                                calls.and_then(|calls| calls.get(&diagnostic.span.start.offset))
-                        {
-                            return call.clone();
+                    .extend(model.diagnostics.iter().filter_map(|diagnostic| {
+                        if diagnostic.code == "PNX9001" {
+                            let offset = diagnostic.span.start.offset;
+                            if tests.is_some_and(|tests| tests.contains(&offset)) {
+                                return None;
+                            }
+                            if let Some(call) = calls.and_then(|calls| calls.get(&offset)) {
+                                return Some(call.clone());
+                            }
                         }
-                        diagnostic.clone()
+                        Some(diagnostic.clone())
                     }));
+                let has_declaration_findings = report.diagnostics.len() != declaration_start;
                 if index >= count {
                     report
                         .diagnostics
@@ -703,7 +749,7 @@ impl Session {
                         ));
                     }
                 }
-                let interface = model.interface_key(&globals);
+                let interface = model.interface_key(&globals, has_declaration_findings);
                 let changes = cache
                     .interface
                     .as_ref()
@@ -759,12 +805,7 @@ impl Session {
                                 cached.reusable(&cache.checked_source, source.source, &ranges)
                                     && (same_specs || cached.result.matches_specs(&globals))
                                     && changes.as_ref().is_some_and(|changes| {
-                                        // Cached messages can contain the original binder names.
-                                        changes.allows_reuse(
-                                            model,
-                                            function,
-                                            cached.result.diagnostics.is_empty(),
-                                        )
+                                        changes.allows_reuse(model, function, &cached.result)
                                     })
                             })
                         {
@@ -775,7 +816,12 @@ impl Session {
                             cached.ranges = ranges;
                         } else {
                             report.stats.checked_functions += 1;
-                            let result = model.check_function(function, source.source, &globals);
+                            let result = model.check_function(
+                                function,
+                                source.source,
+                                &globals,
+                                has_declaration_findings,
+                            );
                             report
                                 .diagnostics
                                 .extend(result.diagnostics.iter().cloned());
@@ -795,6 +841,12 @@ impl Session {
                     }
                     cache.checked_source = cache.source.clone();
                 }
+                model.diagnose_unchecked_helpers(
+                    cache.functions.values().flat_map(|function| {
+                        function.result.checked_helpers.iter().map(String::as_str)
+                    }),
+                    &mut report.diagnostics,
+                );
                 cache.interface = Some(interface);
             }
             if !specs_only {

@@ -137,6 +137,10 @@ impl Checker<'_> {
                 self.unsupported(span, "conj analysis for maps is not supported yet")
                     .known
             }
+            Type::SpecCollection(_) => {
+                self.unsupported(span, "conj analysis requires a known collection kind")
+                    .known
+            }
             other => {
                 self.diagnostics.push(Diagnostic::type_mismatch(
                     span,
@@ -276,6 +280,7 @@ impl Checker<'_> {
             Type::Vector(element) | Type::Set(element) => op.open(element, 0),
             Type::Seq(element) => op.open(element, 1),
             Type::List(element) => op.list_result(op.open(element, 1)),
+            Type::SpecCollection(element) => op.open(element, 0),
             Type::Str(text) => {
                 let items: Vec<_> = text
                     .encode_utf16()
@@ -376,7 +381,7 @@ fn sequence_kind(ty: Type, persistent_list: bool) -> Type {
 
 pub(in crate::checker) fn iteration_may_throw(ty: &Type) -> bool {
     match ty {
-        Type::Seq(_) | Type::Unknown => true,
+        Type::Seq(_) | Type::Unknown | Type::SpecCollection(_) => true,
         Type::Union(parts) => parts.iter().any(iteration_may_throw),
         _ => false,
     }
@@ -386,7 +391,7 @@ pub(super) fn collection_emptiness(ty: &Type) -> Option<Type> {
     Some(match ty {
         Type::Nil => Type::Bool(true),
         Type::Never => Type::Never,
-        Type::Unknown => Type::Boolean,
+        Type::Unknown | Type::SpecCollection(_) => Type::Boolean,
         Type::Parameter(parameter) => return collection_emptiness(parameter.upper.as_ref()?),
         Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => {
             Type::Bool(items.is_empty())
@@ -395,15 +400,7 @@ pub(super) fn collection_emptiness(ty: &Type) -> Option<Type> {
         Type::Vector(element) | Type::Set(element) if **element == Type::Never => Type::Bool(true),
         Type::Vector(_) | Type::Set(_) | Type::String => Type::Boolean,
         Type::Str(text) => Type::Bool(text.is_empty()),
-        Type::Map(map) => {
-            if map.fields.values().any(|field| field.required) {
-                Type::Bool(false)
-            } else if map.fields.is_empty() && matches!(map.extra, ExtraFields::Closed) {
-                Type::Bool(true)
-            } else {
-                Type::Boolean
-            }
-        }
+        Type::Map(map) => map.emptiness().map_or(Type::Boolean, Type::Bool),
         Type::Union(parts) => Type::union(
             parts
                 .iter()

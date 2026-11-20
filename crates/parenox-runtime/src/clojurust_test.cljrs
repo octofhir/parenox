@@ -1,0 +1,86 @@
+(ns parenox.runtime.clojurust-test
+  (:require [clojure.test :as t]))
+
+(defn- bounded-text [value]
+  (when (string? value)
+    (if (> (count value) 4096)
+      (str (subs value 0 4096) "…")
+      value)))
+
+(defn- display-value [value]
+  (try
+    (bounded-text (pr-str value))
+    (catch Throwable _ nil)))
+
+(defn- test-name []
+  (when-let [test-var (first t/*testing-vars*)]
+    (let [label (str test-var)]
+      (when (and (> (count label) 2) (= (subs label 0 2) "#'"))
+        (subs label 2)))))
+
+(defn- reporter [original findings]
+  (fn [{:keys [type expected actual message] :as event}]
+    (when (#{:fail :error} type)
+      (let [actual-text (when (contains? event :actual)
+                          (or (when (= type :error) (bounded-text (ex-message actual)))
+                              (display-value actual)))]
+        (swap! findings conj
+               [type (test-name) nil nil (bounded-text message)
+                (when (contains? event :expected) (display-value expected))
+                actual-text nil])))
+    (original event)))
+
+(def ^:private initial-counts {:test 0 :pass 0 :fail 0 :error 0})
+
+(defn- run-namespaces [namespaces]
+  (reduce (fn [counts namespace]
+            (merge-with + counts (t/run-tests namespace)))
+          initial-counts namespaces))
+
+(defn- lookup-test [qualified]
+  (let [owner (symbol (namespace qualified))
+        v (get (ns-interns owner) (symbol (name qualified)))]
+    [owner (when (:test (meta v)) v) qualified]))
+
+(defn- run-vars [namespaces selected]
+  (let [groups (group-by first selected)]
+    (binding [t/*report-counters* initial-counts]
+      (doseq [name namespaces]
+        (let [ns (find-ns name)]
+          (t/report {:type :begin-test-ns :ns ns})
+          (doseq [[_ v] (get groups name)]
+            (set! clojure.test/*report-counters* (update t/*report-counters* :test inc))
+            (t/test-var v))
+          (t/report {:type :end-test-ns :ns ns})))
+      (t/report (assoc t/*report-counters* :type :summary))
+      t/*report-counters*)))
+
+(defn -main [result mode & names]
+  (spit result ":started")
+  (let [vars? (= mode "vars")
+        names (mapv symbol (distinct names))
+        namespaces (if vars? (distinct (map (comp symbol namespace) names)) names)
+        phase (volatile! :load)
+        findings (atom [])
+        summary (try
+                  (doseq [namespace namespaces]
+                    (require namespace))
+                  (vreset! phase :selection)
+                  (let [selected (when vars? (mapv lookup-test names))
+                        missing (some (fn [[_ v qualified]] (when (nil? v) qualified)) selected)]
+                    (if missing
+                      [:run-error :selection (str "Expected a clojure.test var: " missing)
+                       nil nil nil nil]
+                      (do
+                        (vreset! phase :execution)
+                        (let [{:keys [test pass fail error]}
+                              (binding [t/report (reporter t/report findings)]
+                                (if vars?
+                                  (run-vars namespaces selected)
+                                  (run-namespaces namespaces)))]
+                          [test (+ pass fail error) fail error @findings]))))
+                  (catch Throwable error
+                    [:run-error @phase
+                     (or (bounded-text (ex-message error)) (display-value error) "Native test run failed")
+                     nil nil nil nil]))]
+    (spit result (pr-str summary))))

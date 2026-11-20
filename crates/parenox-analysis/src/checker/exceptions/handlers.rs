@@ -8,6 +8,7 @@ use crate::types::Type;
 pub(super) enum ExceptionClass {
     Throwable,
     Error,
+    AssertionError,
     Exception,
     RuntimeException,
     IllegalArgumentException,
@@ -34,6 +35,7 @@ impl ExceptionClass {
         match name.strip_prefix("java.lang.").unwrap_or(name) {
             "Throwable" => Some(Self::Throwable),
             "Error" => Some(Self::Error),
+            "AssertionError" => Some(Self::AssertionError),
             "Exception" => Some(Self::Exception),
             "RuntimeException" => Some(Self::RuntimeException),
             "IllegalArgumentException" => Some(Self::IllegalArgumentException),
@@ -50,6 +52,7 @@ impl ExceptionClass {
         match self {
             Self::Throwable => None,
             Self::Error | Self::Exception => Some(Self::Throwable),
+            Self::AssertionError => Some(Self::Error),
             Self::RuntimeException | Self::IOException => Some(Self::Exception),
             Self::FileNotFoundException => Some(Self::IOException),
             _ => Some(Self::RuntimeException),

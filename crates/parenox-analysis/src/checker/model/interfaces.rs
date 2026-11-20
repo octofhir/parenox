@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use super::{
     Contract, DeclaredValue, Function, Globals, LiteralVar, Model, Names, SpecConversion,
-    UncheckedFunction,
+    SpecProvider, UncheckedFunction,
     declarations::symbols_match,
     externs::{ExternalDeclaration, ExternalDeclarations},
 };
+use crate::checker::FunctionCheck;
 use crate::types::Type;
 
 pub(super) type Contracts = BTreeMap<String, Contract>;
@@ -80,8 +81,11 @@ struct LocalFunction {
 pub(crate) struct InterfaceKey {
     local: Arc<LocalInterface>,
     dependencies: Vec<Dependency>,
+    core_in_project: bool,
+    has_declaration_findings: bool,
     specs: Arc<BTreeMap<String, Type>>,
     spec_conversions: Arc<BTreeMap<String, SpecConversion>>,
+    spec_providers: Arc<BTreeMap<String, Arc<SpecProvider>>>,
 }
 
 struct Dependency {
@@ -111,6 +115,7 @@ impl Dependency {
 
 pub(crate) struct InterfaceChanges<'a> {
     compatible_scope: bool,
+    same_declaration_findings: bool,
     local: Option<(&'a LocalInterface, &'a LocalInterface)>,
     namespaces: BTreeMap<&'a str, (&'a Dependency, &'a Dependency)>,
 }
@@ -119,14 +124,16 @@ impl InterfaceKey {
     pub fn same_specs(&self, before: &Self) -> bool {
         Arc::ptr_eq(&self.specs, &before.specs)
             && Arc::ptr_eq(&self.spec_conversions, &before.spec_conversions)
+            && Arc::ptr_eq(&self.spec_providers, &before.spec_providers)
     }
 
     pub fn changes<'a>(&'a self, before: &'a Self) -> InterfaceChanges<'a> {
         let same_local = self.local == before.local;
-        let compatible_scope = same_local
-            || (self.local.names == before.local.names
-                && self.local.dependencies == before.local.dependencies
-                && self.local.specs == before.local.specs);
+        let compatible_scope = self.core_in_project == before.core_in_project
+            && (same_local
+                || (self.local.names == before.local.names
+                    && self.local.dependencies == before.local.dependencies
+                    && self.local.specs == before.local.specs));
         let namespaces = if compatible_scope {
             std::iter::once(self.local.names.namespace.as_str())
                 .chain(self.local.dependencies.iter().map(String::as_str))
@@ -138,6 +145,8 @@ impl InterfaceKey {
         };
         InterfaceChanges {
             compatible_scope,
+            same_declaration_findings: self.has_declaration_findings
+                == before.has_declaration_findings,
             local: (compatible_scope && !same_local).then_some((&self.local, &before.local)),
             namespaces,
         }
@@ -146,16 +155,15 @@ impl InterfaceKey {
 
 impl InterfaceChanges<'_> {
     pub fn is_unchanged(&self) -> bool {
-        self.compatible_scope && self.local.is_none() && self.namespaces.is_empty()
+        self.compatible_scope
+            && self.same_declaration_findings
+            && self.local.is_none()
+            && self.namespaces.is_empty()
     }
 
-    pub fn allows_reuse(
-        &self,
-        model: &Model,
-        function: &Function,
-        allow_binder_renames: bool,
-    ) -> bool {
+    pub fn allows_reuse(&self, model: &Model, function: &Function, result: &FunctionCheck) -> bool {
         if !self.compatible_scope
+            || (!self.same_declaration_findings && result.declaration_findings_sensitive)
             || self.local.is_some_and(|(current, old)| {
                 current.functions.get(&function.name) != old.functions.get(&function.name)
             })
@@ -165,6 +173,8 @@ impl InterfaceChanges<'_> {
         if self.is_unchanged() {
             return true;
         }
+        // Cached messages can contain the original binder names.
+        let allow_binder_renames = result.diagnostics.is_empty();
         let names = &model.names;
         let mut unchanged = |name: &str| {
             let (namespace, local) = names.resolve_parts(name);
@@ -186,6 +196,8 @@ impl InterfaceChanges<'_> {
                     arity
                         .params
                         .iter()
+                        .chain(&arity.preconditions)
+                        .chain(arity.postconditions.iter().flatten())
                         .chain(&arity.body)
                         .all(|form| symbols_match(form, &mut unchanged))
                 })
@@ -302,7 +314,7 @@ impl Model {
             .insert(self.names.namespace.clone(), self.exports.clone());
     }
 
-    pub fn interface_key(&self, globals: &Globals) -> InterfaceKey {
+    pub fn interface_key(&self, globals: &Globals, has_declaration_findings: bool) -> InterfaceKey {
         // Extern-only vars can exist in the source's own namespace without
         // adding an edge to the project's namespace load order.
         let own = std::iter::once((self.names.namespace.as_str(), false));
@@ -328,8 +340,11 @@ impl Model {
         InterfaceKey {
             local: self.local_interface.clone(),
             dependencies,
+            core_in_project: globals.project_namespaces.contains("clojure.core"),
+            has_declaration_findings,
             specs: globals.specs.clone(),
             spec_conversions: globals.spec_conversions.clone(),
+            spec_providers: globals.spec_providers.clone(),
         }
     }
 }

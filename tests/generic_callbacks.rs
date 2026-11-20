@@ -362,7 +362,7 @@ fn editing_an_extern_generic_contract_rechecks_the_contextual_body() {
         path: "app.clj",
         source: "(ns app (:require [vendor :as v]))
           (defn label {:t/sig '[:-> string?]} []
-            (v/transform #(clojure.string/upper-case %) \"text\"))
+            (v/transform #(clojure.string/trim %) \"text\"))
           (defn independent {:t/sig '[:-> number?]} [] 1)",
     };
     let externs = Source {

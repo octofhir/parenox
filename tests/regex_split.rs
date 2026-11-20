@@ -50,7 +50,7 @@ fn split_produces_string_vectors_and_nullable_destructuring() {
     assert!(!report.ok && report.complete, "{report:#?}");
     let mismatch = &report.diagnostics[0];
     assert_eq!(mismatch.code, "PNX2322");
-    assert_eq!(mismatch.expected.as_deref(), Some("String"));
+    assert_eq!(mismatch.expected.as_deref(), Some("Non-nil value"));
     assert_eq!(mismatch.actual.as_deref(), Some("Nil | String"));
     assert_eq!(
         &source[mismatch.span.start.offset..mismatch.span.end.offset],

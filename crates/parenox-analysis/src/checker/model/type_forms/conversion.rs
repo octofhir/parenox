@@ -1,11 +1,13 @@
 //! Built-in spec conversions whose input checks and effects are known.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use super::{super::declarations::SourceDeclaration, Names};
+use super::{super::declarations::SourceDeclaration, Names, generation_options, spec_field_key};
 use crate::checker::model::Declarations;
-use crate::checker::model::specs::SpecConversion;
+use crate::checker::model::specs::{MapFieldConversion, SpecConversion, StructuredConversion};
+use crate::checker::model::vars::def_initializer;
 use crate::reader::{Form, Kind};
-use crate::types::{SPEC_INVALID, Type};
+use crate::types::{IntegerClass, IntegerType, SPEC_INVALID, Type};
 
 const MAX_ENUM_ENTRIES: usize = 32;
 
@@ -13,37 +15,419 @@ pub(in crate::checker::model) fn source_conversion(
     names: &Names,
     form: &Form,
 ) -> Option<SpecConversion> {
+    if let Kind::Set(items) = &form.without_metadata().kind
+        && (1..=MAX_ENUM_ENTRIES).contains(&items.len())
+    {
+        let strings = items
+            .iter()
+            .map(|item| match &item.without_metadata().kind {
+                Kind::String(value) => Some(Type::Str(value.clone())),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        // Spec uses the set's result as a predicate and returns the input.
+        return Some(SpecConversion::IdentityDomain(Arc::new(Type::union(
+            strings,
+        ))));
+    }
     if resolves(names, form, "clojure.core", "identity") {
         return Some(SpecConversion::Identity);
+    }
+    if resolves(names, form, "clojure.core", "any?") {
+        return Some(SpecConversion::Any);
+    }
+    if resolves(names, form, "clojure.core", "keyword?") {
+        return Some(SpecConversion::Keyword);
+    }
+    if resolves(names, form, "clojure.core", "string?") {
+        return Some(SpecConversion::String);
     }
     let Kind::List(items) = &form.without_metadata().kind else {
         return None;
     };
     let (head, stages) = items.split_first()?;
+    if names.spec_core_scope_known
+        && let [function] = stages
+        && resolves(names, head, "clojure.spec.alpha", "conformer")
+        && resolves(names, function, "clojure.core", "name")
+    {
+        return Some(SpecConversion::Name);
+    }
+    if resolves(names, head, "clojure.spec.alpha", "coll-of")
+        && let [element, options @ ..] = stages
+        && resolves(names, element, "clojure.core", "any?")
+        && generation_options(options)
+    {
+        return Some(SpecConversion::AnyCollection);
+    }
     if !resolves(names, head, "clojure.spec.alpha", "and") {
         return None;
     }
     let [predicate, stage] = stages else {
         return None;
     };
+    if matches!(predicate.kind, Kind::Symbol(_))
+        && resolves(names, predicate, "clojure.core", "string?")
+        && let Some(value) = compared_string(names, stage)
+    {
+        return Some(SpecConversion::IdentityDomain(Arc::new(Type::Str(
+            value.to_owned(),
+        ))));
+    }
+    let any = |form| resolves(names, form, "clojure.core", "any?");
+    let keyword = |form| resolves(names, form, "clojure.core", "keyword?");
+    if (any(predicate) && keyword(stage)) || (keyword(predicate) && any(stage)) {
+        return Some(SpecConversion::Keyword);
+    }
     let Kind::List(items) = &stage.without_metadata().kind else {
         return None;
     };
     let [head, function] = items.as_slice() else {
         return None;
     };
-    (resolves(names, head, "clojure.spec.alpha", "conformer")
-        && resolves(names, predicate, "clojure.core", "integer?")
+    if !resolves(names, head, "clojure.spec.alpha", "conformer") {
+        return None;
+    }
+    if resolves(names, function, "clojure.core", "second") {
+        return tagged_identity(names, predicate);
+    }
+    (resolves(names, predicate, "clojure.core", "integer?")
         && resolves(names, function, "clojure.core", "int"))
     .then_some(SpecConversion::CheckedInt32)
 }
 
-/// An exact source pattern where the same literal map checks and converts an int.
+fn compared_string<'a>(names: &Names, predicate: &'a Form) -> Option<&'a str> {
+    let Kind::AnonymousFunction(function) = &predicate.kind else {
+        return None;
+    };
+    if function.required != 1 || function.variadic {
+        return None;
+    }
+    let [head, left, right] = function.body.as_slice() else {
+        return None;
+    };
+    if !matches!(head.kind, Kind::Symbol(_)) || !resolves(names, head, "clojure.core", "=") {
+        return None;
+    }
+    match (&left.kind, &right.kind) {
+        (Kind::AnonymousArgument(input), Kind::String(value))
+        | (Kind::String(value), Kind::AnonymousArgument(input))
+            if input == "%1" =>
+        {
+            Some(value)
+        }
+        _ => None,
+    }
+}
+
+/// `second` returns the original value only when the chosen predicate preserves it.
+fn tagged_identity(names: &Names, choice: &Form) -> Option<SpecConversion> {
+    let branches = tagged_branches(names, choice)?;
+    let mut domains = Vec::new();
+    for [_, predicate] in branches {
+        let domain = if resolves(names, predicate, "clojure.core", "keyword?") {
+            Type::SpecKeyword
+        } else if resolves(names, predicate, "clojure.core", "int?") {
+            Type::Integral(IntegerType::FIXED)
+        } else {
+            return None;
+        };
+        domains.push(domain);
+    }
+    Some(SpecConversion::IdentityDomain(Arc::new(Type::union(
+        domains,
+    ))))
+}
+
+fn tagged_branches<'a>(names: &Names, choice: &'a Form) -> Option<&'a [[Form; 2]]> {
+    let Kind::List(items) = &choice.without_metadata().kind else {
+        return None;
+    };
+    let (head, args) = items.split_first()?;
+    let (branches, unmatched) = args.as_chunks::<2>();
+    if !resolves(names, head, "clojure.spec.alpha", "or")
+        || branches.is_empty()
+        || !unmatched.is_empty()
+    {
+        return None;
+    }
+    let mut tags = BTreeSet::new();
+    for [tag, _] in branches {
+        if !tags.insert(names.key(tag.keyword()?)) {
+            return None;
+        }
+    }
+    Some(branches)
+}
+
+pub(in crate::checker::model) fn named_tagged_branches<'a>(
+    names: &Names,
+    form: &'a Form,
+) -> Option<&'a [[Form; 2]]> {
+    let branches = tagged_branches(names, form)?;
+    branches
+        .iter()
+        .all(|[_, spec]| spec.keyword().is_some())
+        .then_some(branches)
+}
+
+pub(in crate::checker::model) fn tagged_or(
+    names: &Names,
+    form: &Form,
+    lookup: impl Fn(&str) -> Option<SpecConversion>,
+) -> Option<SpecConversion> {
+    let branches = named_tagged_branches(names, form)?;
+    let conversions = branches
+        .iter()
+        .map(|[tag, spec]| {
+            let tag = tag.keyword()?;
+            if tag.starts_with("::") {
+                names.validation_key(tag)?;
+            }
+            let conversion = lookup(&names.validation_key(spec.keyword()?)?)?;
+            if !matches!(&conversion, SpecConversion::Structured(spec)
+                if matches!(spec.as_ref(), StructuredConversion::Map(_)))
+            {
+                return None;
+            }
+            Some((names.key(tag), conversion))
+        })
+        .collect::<Option<_>>()?;
+    Some(SpecConversion::TaggedOr(conversions))
+}
+
+pub(in crate::checker::model) fn projected_collection_child<'a>(
+    names: &Names,
+    form: &'a Form,
+) -> Option<&'a Form> {
+    let Kind::List(items) = &form.kind else {
+        return None;
+    };
+    let [and, collection, projection] = items.as_slice() else {
+        return None;
+    };
+    let (Kind::List(collection), Kind::List(projection)) = (&collection.kind, &projection.kind)
+    else {
+        return None;
+    };
+    let ([coll_of, child], [conformer, mapping]) = (collection.as_slice(), projection.as_slice())
+    else {
+        return None;
+    };
+    let Kind::AnonymousFunction(mapping) = &mapping.kind else {
+        return None;
+    };
+    let [map, second, input] = mapping.body.as_slice() else {
+        return None;
+    };
+    (matches!(child.kind, Kind::Keyword(_))
+        && mapping.required == 1
+        && !mapping.variadic
+        && matches!(&input.kind, Kind::AnonymousArgument(input) if input == "%1")
+        && matches!(map.kind, Kind::Symbol(_))
+        && matches!(second.kind, Kind::Symbol(_))
+        && resolves(names, and, "clojure.spec.alpha", "and")
+        && resolves(names, coll_of, "clojure.spec.alpha", "coll-of")
+        && resolves(names, conformer, "clojure.spec.alpha", "conformer")
+        && resolves(names, map, "clojure.core", "map")
+        && resolves(names, second, "clojure.core", "second"))
+    .then_some(child)
+}
+
+pub(in crate::checker::model) fn string_keyed_map_child<'a>(
+    names: &Names,
+    form: &'a Form,
+) -> Option<&'a Form> {
+    let Kind::List(items) = &form.kind else {
+        return None;
+    };
+    let [coll_of, entry, kind, map] = items.as_slice() else {
+        return None;
+    };
+    let Kind::List(entry) = &entry.kind else {
+        return None;
+    };
+    let [tuple, string, child] = entry.as_slice() else {
+        return None;
+    };
+    (matches!(child.kind, Kind::Keyword(_))
+        && kind.keyword() == Some(":kind")
+        && resolves(names, coll_of, "clojure.spec.alpha", "coll-of")
+        && resolves(names, tuple, "clojure.spec.alpha", "tuple")
+        && resolves(names, string, "clojure.core", "string?")
+        && resolves(names, map, "clojure.core", "map?"))
+    .then_some(child)
+}
+
+fn projected_pair<'a>(names: &Names, form: &'a Form) -> Option<[&'a Form; 2]> {
+    let Kind::List(items) = &form.without_metadata().kind else {
+        return None;
+    };
+    let [head, choice, stage] = items.as_slice() else {
+        return None;
+    };
+    if !resolves(names, head, "clojure.spec.alpha", "and") {
+        return None;
+    }
+    let Kind::List(items) = &stage.without_metadata().kind else {
+        return None;
+    };
+    let [conformer, function] = items.as_slice() else {
+        return None;
+    };
+    if !resolves(names, conformer, "clojure.spec.alpha", "conformer")
+        || !resolves(names, function, "clojure.core", "second")
+    {
+        return None;
+    }
+    let [[_, left], [_, right]] = tagged_branches(names, choice)? else {
+        return None;
+    };
+    Some([left, right])
+}
+
+pub(in crate::checker::model) fn tagged_projection_branches<'a>(
+    names: &Names,
+    form: &'a Form,
+) -> Option<[&'a Form; 2]> {
+    let [left, right] = projected_pair(names, form)?;
+    let alternative = |form: &Form| {
+        resolves(names, form, "clojure.core", "string?")
+            || matches!(&form.without_metadata().kind, Kind::List(items)
+                if matches!(items.as_slice(), [head, _, options @ ..]
+                    if resolves(names, head, "clojure.spec.alpha", "coll-of")
+                        && generation_options(options)))
+    };
+    let map = |form: &Form| {
+        form.keyword().is_some()
+            || matches!(&form.without_metadata().kind, Kind::List(items)
+                if items.first().is_some_and(|head| resolves(names, head, "clojure.spec.alpha", "keys")))
+    };
+    ((map(left) && alternative(right)) || (map(right) && alternative(left)))
+        .then_some([left, right])
+}
+
+/// Remove the tag from a string or collection and a map choice.
+pub(in crate::checker::model) fn tagged_projection(
+    names: &Names,
+    form: &Form,
+    input: &Type,
+    lookup: impl Fn(&str) -> Option<SpecConversion>,
+) -> Option<SpecConversion> {
+    let [left, right] = tagged_projection_branches(names, form)?;
+    let branch = |form: &Form| {
+        if resolves(names, form, "clojure.core", "string?") {
+            return Some(SpecConversion::String);
+        }
+        if let Some(key) = form.keyword() {
+            let conversion = lookup(&names.key(key))?;
+            return matches!(&conversion, SpecConversion::Structured(map)
+                if matches!(map.as_ref(), StructuredConversion::Map(_)))
+            .then_some(conversion);
+        }
+        let Type::Union(parts) = input else {
+            return None;
+        };
+        parts
+            .iter()
+            .find_map(|ty| structured_conversion(names, form, ty, &lookup))
+    };
+    Some(SpecConversion::TaggedChoice(
+        [branch(left)?, branch(right)?].into(),
+    ))
+}
+
+/// Compose exact child conversions that the spec resolver has already indexed.
+pub(in crate::checker::model) fn structured_conversion(
+    names: &Names,
+    form: &Form,
+    input: &Type,
+    lookup: impl Fn(&str) -> Option<SpecConversion>,
+) -> Option<SpecConversion> {
+    let Kind::List(items) = &form.without_metadata().kind else {
+        return None;
+    };
+    let (head, args) = items.split_first()?;
+    let conversion = match (input, args) {
+        (Type::Map(map), options) if resolves(names, head, "clojure.spec.alpha", "keys") => {
+            let (pairs, unmatched) = options.as_chunks::<2>();
+            if !unmatched.is_empty() {
+                return None;
+            }
+            let mut fields = BTreeMap::new();
+            for [directive, keys] in pairs {
+                let directive = directive.keyword()?;
+                if !matches!(directive, ":req" | ":opt" | ":req-un" | ":opt-un") {
+                    return None;
+                }
+                for key in keys.vector()? {
+                    let qualified = names.key(key.keyword()?);
+                    let key = Type::Key(spec_field_key(&qualified, directive)?);
+                    let field = map.fields.get(&key)?;
+                    let conversion = if field.value_constraint().is_some() {
+                        Some(lookup(&qualified)?)
+                    } else {
+                        None
+                    };
+                    fields.insert(
+                        key,
+                        MapFieldConversion {
+                            required: field.required,
+                            conversion,
+                        },
+                    );
+                }
+            }
+            StructuredConversion::Map(fields)
+        }
+        (Type::SpecCollection(item), [child, options @ ..])
+            if **item != Type::SpecValue
+                && resolves(names, head, "clojure.spec.alpha", "coll-of")
+                && generation_options(options) =>
+        {
+            let element = if let Some(key) = child.keyword() {
+                lookup(&names.key(key))?
+            } else {
+                source_conversion(names, child)?
+            };
+            StructuredConversion::Collection(element)
+        }
+        _ => return None,
+    };
+    Some(SpecConversion::Structured(Arc::new(conversion)))
+}
+
+/// Exact source patterns where the same finite table checks and converts the input.
 pub(in crate::checker::model) fn enum_conversion(
     declarations: &Declarations,
     forms: &[Form],
     source: &str,
     form: &Form,
+) -> Option<SpecConversion> {
+    let names = &declarations.names;
+    let Some([left, right]) = projected_pair(names, form) else {
+        return table_conversion(declarations, forms, source, form, false);
+    };
+    let is_string = |form| resolves(names, form, "clojure.core", "string?");
+    let (table, string_first) = match (is_string(left), is_string(right)) {
+        (true, false) => (right, true),
+        (false, true) => (left, false),
+        _ => return None,
+    };
+    let enumeration = table_conversion(declarations, forms, source, table, true)?;
+    let mut branches = [enumeration, SpecConversion::String];
+    if string_first {
+        branches.swap(0, 1);
+    }
+    Some(SpecConversion::TaggedChoice(branches.into()))
+}
+
+fn table_conversion(
+    declarations: &Declarations,
+    forms: &[Form],
+    source: &str,
+    form: &Form,
+    keyword_strings: bool,
 ) -> Option<SpecConversion> {
     let names = &declarations.names;
     let Kind::List(items) = &form.without_metadata().kind else {
@@ -58,9 +442,13 @@ pub(in crate::checker::model) fn enum_conversion(
     let [conformer, convert] = stage.as_slice() else {
         return None;
     };
+    let integer_keys = resolves(names, predicate, "clojure.core", "int?");
+    let inverted = resolves(names, predicate, "clojure.core", "integer?");
+    let keyword_keys = resolves(names, predicate, "clojure.core", "keyword?");
     if !names.spec_core_scope_known
         || !resolves(names, head, "clojure.spec.alpha", "and")
-        || !resolves(names, predicate, "clojure.core", "int?")
+        || !(integer_keys || inverted || keyword_keys)
+        || (keyword_strings && !keyword_keys)
         || !resolves(names, conformer, "clojure.spec.alpha", "conformer")
     {
         return None;
@@ -69,54 +457,175 @@ pub(in crate::checker::model) fn enum_conversion(
     if local_var(names, convert)? != local {
         return None;
     }
-    let mut definitions = declarations.source_declarations(forms, local);
-    let SourceDeclaration::Value(definition) = definitions.next()? else {
-        return None;
-    };
-    let [head, name, tail @ ..] = definition else {
-        return None;
-    };
-    if definitions.next().is_some()
-        || !matches!(head.symbol(), Some("def" | "clojure.core/def"))
-        || name.span.end.offset >= form.span.start.offset
-        || name.metadata(":dynamic").is_some_and(|value| {
-            !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
-        })
-    {
-        return None;
+    let initializer = prior_initializer(declarations, forms, local, form.span.start.offset)?;
+    if inverted {
+        declarations.reader_namespace_before(forms, form.span.start.offset)?;
+        return inverted_enum(declarations, forms, source, initializer);
     }
-    let initializer = match tail {
-        [value] => value,
-        [doc, value] if doc.is_string() => value,
-        _ => return None,
-    };
+    if keyword_strings {
+        declarations.reader_namespace_before(forms, initializer.span.start.offset)?;
+        if !matches!(initializer.kind, Kind::Map(_)) {
+            return None;
+        }
+    }
     let entries = initializer.map()?.as_chunks::<2>().0;
     if entries.len() > MAX_ENUM_ENTRIES {
         return None;
     }
     let mut values = BTreeMap::new();
     for [key, value] in entries {
-        let Type::Integer(key) = Type::integer_literal(key, source)? else {
+        if keyword_strings
+            && (!matches!(key.kind, Kind::Keyword(_)) || matches!(value.kind, Kind::Metadata(..)))
+        {
             return None;
+        }
+        let key = if integer_keys {
+            fixed_integer(key, source)?
+        } else {
+            Type::Key(names.key(key.keyword()?))
         };
         let value = match &value.without_metadata().kind {
             Kind::Nil | Kind::Bool(false) => None,
             Kind::Keyword(keyword) => {
                 let keyword = names.key(keyword);
-                (keyword != SPEC_INVALID).then_some(keyword)
+                if keyword == SPEC_INVALID {
+                    None
+                } else if integer_keys {
+                    Some(Type::Key(keyword))
+                } else {
+                    return None;
+                }
             }
+            Kind::String(value) if keyword_strings => Some(Type::Str(value.clone())),
+            _ if !integer_keys && !keyword_strings => Some(fixed_integer(value, source)?),
             _ => return None,
         };
+        let value = value.filter(|_| !matches!(&key, Type::Key(name) if name == SPEC_INVALID));
         if values.insert(key, value).is_some() {
             return None;
         }
     }
-    Some(SpecConversion::IntEnum(
-        values
+    Some(SpecConversion::Enum {
+        entries: values
             .into_iter()
             .filter_map(|(key, value)| Some((key, value?)))
             .collect(),
-    ))
+        inverted: false,
+    })
+}
+
+fn inverted_enum(
+    declarations: &Declarations,
+    forms: &[Form],
+    source: &str,
+    initializer: &Form,
+) -> Option<SpecConversion> {
+    let entries = inverted_entries(declarations, forms, source, initializer)?;
+    Some(SpecConversion::Enum {
+        entries: entries
+            .into_iter()
+            .filter_map(|(code, _, key)| {
+                let key = declarations.names.key(key.keyword()?);
+                (key != SPEC_INVALID)
+                    .then(|| (Type::exact_integer(code, IntegerClass::Any), Type::Key(key)))
+            })
+            .collect(),
+        inverted: true,
+    })
+}
+
+/// Materialize the same bounded inversion as inert map data, including markers.
+pub(in crate::checker::model) fn inverted_literal(
+    declarations: &Declarations,
+    forms: &[Form],
+    source: &str,
+    initializer: &Form,
+) -> Option<Form> {
+    let entries = inverted_entries(declarations, forms, source, initializer)?;
+    Some(Form {
+        kind: Kind::Map(
+            entries
+                .into_iter()
+                .flat_map(|(_, code, key)| [code.clone(), key.clone()])
+                .collect(),
+        ),
+        span: initializer.span,
+    })
+}
+
+fn inverted_entries<'a>(
+    declarations: &'a Declarations,
+    forms: &'a [Form],
+    source: &str,
+    initializer: &'a Form,
+) -> Option<Vec<(i32, &'a Form, &'a Form)>> {
+    let names = &declarations.names;
+    let Kind::List(items) = &initializer.without_metadata().kind else {
+        return None;
+    };
+    let [invert, table] = items.as_slice() else {
+        return None;
+    };
+    if !names.spec_core_scope_known
+        || !names.required_libraries.contains("clojure.set")
+        || !resolves(names, invert, "clojure.set", "map-invert")
+    {
+        return None;
+    }
+    declarations.reader_namespace_before(forms, initializer.span.start.offset)?;
+    let table = prior_initializer(
+        declarations,
+        forms,
+        local_var(names, table)?,
+        initializer.span.start.offset,
+    )?;
+    declarations.reader_namespace_before(forms, table.span.start.offset)?;
+    let entries = table.map()?.as_chunks::<2>().0;
+    if entries.len() > MAX_ENUM_ENTRIES {
+        return None;
+    }
+    let mut codes = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    let mut values = Vec::with_capacity(entries.len());
+    for [key, number] in entries {
+        let Type::Integer(code) = fixed_integer(number, source)? else {
+            return None;
+        };
+        // map-invert would choose a winner by map traversal order.
+        if !codes.insert(code) || !keys.insert(names.key(key.keyword()?)) {
+            return None;
+        }
+        values.push((code, number, key));
+    }
+    values.sort_unstable_by_key(|(code, _, _)| *code);
+    Some(values)
+}
+
+fn prior_initializer<'a>(
+    declarations: &'a Declarations,
+    forms: &'a [Form],
+    local: &'a str,
+    before: usize,
+) -> Option<&'a Form> {
+    let mut definitions = declarations.source_declarations(forms, local);
+    let SourceDeclaration::Value([head, name, tail @ ..]) = definitions.next()? else {
+        return None;
+    };
+    if definitions.next().is_some()
+        || !matches!(head.symbol(), Some("def" | "clojure.core/def"))
+        || name.span.end.offset >= before
+        || name.metadata(":dynamic").is_some_and(|value| {
+            !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
+        })
+    {
+        return None;
+    }
+    def_initializer(tail)
+}
+
+fn fixed_integer(form: &Form, source: &str) -> Option<Type> {
+    let ty = Type::integer_literal(form, source)?;
+    matches!(ty, Type::Integer(_)).then_some(ty)
 }
 
 fn local_var<'a>(names: &Names, form: &'a Form) -> Option<&'a str> {
@@ -129,7 +638,12 @@ fn local_var<'a>(names: &Names, form: &'a Form) -> Option<&'a str> {
     }
 }
 
-fn resolves(names: &Names, form: &Form, namespace: &str, name: &str) -> bool {
+pub(in crate::checker::model) fn resolves(
+    names: &Names,
+    form: &Form,
+    namespace: &str,
+    name: &str,
+) -> bool {
     form.symbol().is_some_and(|symbol| {
         names.resolve_parts(symbol) == (namespace, name)
             && (symbol.contains('/')

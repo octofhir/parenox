@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 use super::{Checker, Env, Value, calls::call_returns, nil_part};
 use crate::Diagnostic;
 use crate::reader::{Form, Span};
-use crate::types::{ExtraFields, Field, IndexedItem, MapSlot, MapType, Type};
+use crate::types::{
+    ExtraFields, Field, IndexedItem, IntegerClass, IntegerType, MapSlot, MapType, Type,
+};
 
 const MAX_MAP_CALLBACK_CHECKS: usize = 128;
 
@@ -26,6 +28,53 @@ pub(super) enum Lookup<'a> {
 pub(super) enum MapLiteral<'a> {
     Expression(&'a Env),
     Quoted,
+}
+
+pub(super) fn map_predicate(input: &Type) -> Type {
+    match input {
+        Type::Never => Type::Never,
+        Type::Map(_) => Type::Bool(true),
+        Type::Nil
+        | Type::Bool(_)
+        | Type::Boolean
+        | Type::Char(_)
+        | Type::Character
+        | Type::Str(_)
+        | Type::String
+        | Type::Key(_)
+        | Type::Keyword
+        | Type::SpecKeyword
+        | Type::Symbol
+        | Type::SimpleSymbol
+        | Type::QualifiedSymbol
+        | Type::Integer(_)
+        | Type::Integral(IntegerType {
+            class: IntegerClass::Fixed,
+            ..
+        }) => Type::Bool(false),
+        Type::Union(parts) => Type::union(parts.iter().map(map_predicate)),
+        Type::Parameter(parameter) => parameter
+            .upper
+            .as_ref()
+            .map_or(Type::Boolean, map_predicate),
+        // An opaque JVM class can implement IPersistentMap alongside another
+        // interface or even extend Number at the same time.
+        _ => Type::Boolean,
+    }
+}
+
+pub(super) fn narrow_map_predicate(input: &Type, truth: bool) -> Type {
+    match input {
+        Type::Union(parts) => {
+            Type::union(parts.iter().map(|part| narrow_map_predicate(part, truth)))
+        }
+        Type::Unknown | Type::SpecValue | Type::SpecTruthy if truth => Type::Map(MapType {
+            fields: BTreeMap::new(),
+            extra: ExtraFields::Open,
+        }),
+        _ if map_predicate(input) == Type::Bool(!truth) => Type::Never,
+        _ => input.clone(),
+    }
 }
 
 impl Checker<'_> {

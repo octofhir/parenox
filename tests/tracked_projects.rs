@@ -53,7 +53,7 @@ const CONSUMER: &str = r#"(ns app (:require [store :as store]))
     (defn title {:t/sig '[string? :-> string?]} [name]
       (db/title (store/normalize name)))"#;
 const PROVIDER: &str = r#"(ns store)
-    (defn normalize {:t/sig '[string? :-> string?]} [name] (str name))"#;
+    (defn normalize "Normalize a name." {:t/sig '[string? :-> string?]} [name] (str name))"#;
 const EXTERNS: &str = "{db/title [string? :-> string?]}";
 
 #[test]
@@ -107,6 +107,8 @@ fn opens_project_configuration_and_keeps_edits_in_memory() {
     assert_eq!(hover["signatures"], json!(["[String -> String]"]));
     assert_eq!(hover["contract"]["kind"], "t_sig");
     assert_eq!(hover["contract"]["path"], target["path"]);
+    assert_eq!(hover["documentation"], "Normalize a name.");
+    assert_eq!(hover["arglists"], json!(["[name]"]));
 
     let changed = client.result(json!({
         "op": "update", "changes": [{
@@ -169,6 +171,23 @@ fn opens_project_configuration_and_keeps_edits_in_memory() {
         client.result(json!({ "op": "refresh_project" }))["ok"],
         true
     );
+
+    let updated = PROVIDER
+        .replace("Normalize a name.", "Normalize a patient label.")
+        .replace("[name] (str name)", "[label] (str label)");
+    let changed = client.result(json!({
+        "op": "update", "changes": [{"path": provider, "source": updated}]
+    }));
+    assert_eq!(changed["ok"], true, "{changed}");
+    let hover = client.result(json!({
+        "op": "hover", "path": caller, "offset": CONSUMER.find("store/normalize").unwrap()
+    }));
+    assert_eq!(hover["name"], "store/normalize");
+    assert_eq!(hover["signatures"], json!(["[String -> String]"]));
+    assert_eq!(hover["contract"]["kind"], "t_sig");
+    assert_eq!(hover["documentation"], "Normalize a patient label.");
+    assert_eq!(hover["arglists"], json!(["[label]"]));
+    assert_eq!(fs::read_to_string(provider).unwrap(), PROVIDER);
 }
 
 #[test]
@@ -183,7 +202,10 @@ fn agent_hover_reads_the_current_overlay_and_reports_untyped_vars() {
         {"path":"store.clj","source":"(ns store) (defn label [] \"a\")"}
     ]}));
     let untyped = client.result(hover());
-    assert_eq!(untyped, json!({"name":"store/label","signatures":[]}));
+    assert_eq!(
+        untyped,
+        json!({"name":"store/label","signatures":[],"arglists":["[]"]})
+    );
     client.result(json!({"op":"update","changes":[
         {"path":"store.clj","source":"(ns store) (defn label {:t/sig '[:-> string?]} [] \"a\")"}
     ]}));

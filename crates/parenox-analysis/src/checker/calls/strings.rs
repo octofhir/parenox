@@ -1,5 +1,5 @@
 //! Type checks for JVM string functions with type-dependent behavior.
-use super::{Checker, Env, Span, Type, Value, call_returns};
+use super::{Checker, Compatibility, Env, Span, Type, Value, call_returns};
 use crate::Diagnostic;
 use crate::reader::{Form, Kind};
 use crate::types::MAX_TUPLE_ITEMS;
@@ -134,15 +134,44 @@ impl Checker<'_> {
         Value::new(result.nilable())
     }
 
+    pub(super) fn case_string(&mut self, name: &str, (value, span): &(Value, Span)) -> Type {
+        const NON_NIL: &str = "Non-nil value";
+        if self.partial_scope.is_some() && value.known.contains_unknown() {
+            return Type::String;
+        }
+        match non_nil_compatibility(&value.known) {
+            Compatibility::Proven => {}
+            Compatibility::Unproven => self.unproven_expectation(value, NON_NIL, *span, name),
+            Compatibility::Mismatch => {
+                let mut diagnostic =
+                    Diagnostic::type_mismatch(*span, name, NON_NIL.into(), value.ty.to_string());
+                diagnostic.notes = value.notes.clone();
+                let remaining = value.ty.without_nil();
+                if remaining != Type::Never && remaining.subtype_of(&Type::String) {
+                    diagnostic.suggestions.push(self.nil_string_fallback(*span));
+                } else {
+                    diagnostic.help =
+                        Some("Handle Nil before converting the value to a string.".into());
+                }
+                self.diagnostics.push(diagnostic);
+            }
+        }
+        if value.known == Type::Nil {
+            Type::Never
+        } else {
+            Type::String
+        }
+    }
+
     pub(super) fn blank_string(&mut self, (value, span): &(Value, Span)) -> Type {
         self.expect(
             value,
-            &Type::String.nilable(),
+            &Type::union([Type::String, Type::Nil, Type::Bool(false)]),
             *span,
             "clojure.string/blank?",
         );
         match &value.known {
-            Type::Nil => Type::Bool(true),
+            input if input.truthy() == Type::Never => Type::Bool(true),
             Type::Str(text) if text.is_empty() => Type::Bool(true),
             _ => Type::Boolean,
         }
@@ -230,6 +259,19 @@ impl Checker<'_> {
             }
         }
         Type::String
+    }
+}
+
+fn non_nil_compatibility(ty: &Type) -> Compatibility {
+    match ty {
+        Type::Nil => Compatibility::Mismatch,
+        Type::Unknown | Type::SpecValue => Compatibility::Unproven,
+        Type::Parameter(parameter) => parameter
+            .upper
+            .as_ref()
+            .map_or(Compatibility::Mismatch, non_nil_compatibility),
+        Type::Union(parts) => Compatibility::all(parts.iter().map(non_nil_compatibility)),
+        _ => Compatibility::Proven,
     }
 }
 

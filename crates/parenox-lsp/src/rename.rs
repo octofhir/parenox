@@ -12,6 +12,16 @@ pub struct Document<'a> {
     pub version: Option<i64>,
 }
 
+impl Document<'_> {
+    pub fn workspace_edit(&self, edits: Vec<Value>, versioned: bool) -> Value {
+        if versioned {
+            json!({"documentChanges":[{"textDocument":{"uri":self.uri,"version":self.version},"edits":edits}]})
+        } else {
+            json!({"changes":{(&self.uri):edits}})
+        }
+    }
+}
+
 pub fn prepare(session: &Session, path: &str, offset: usize, source: &str) -> Option<Value> {
     let span = session.prepare_rename(path, offset)?;
     let placeholder = source.get(span.start.offset..span.end.offset)?;

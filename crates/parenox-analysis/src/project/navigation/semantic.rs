@@ -5,7 +5,7 @@ use crate::SourceSymbolKind;
 use crate::checker::ScopedReference;
 use crate::reader::{Kind, Span};
 
-use super::Session;
+use super::{Session, SourceTarget, symbol_at};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticSymbolKind {
@@ -27,7 +27,88 @@ pub struct SemanticSymbol {
     pub default_library: bool,
 }
 
+pub enum InspectedReference<'a> {
+    Local(Span),
+    Spec {
+        path: &'a str,
+        span: Span,
+    },
+    Var {
+        path: &'a str,
+        span: Span,
+        namespace: &'a str,
+        name: &'a str,
+    },
+    Core {
+        name: &'a str,
+        kind: SemanticSymbolKind,
+    },
+}
+
 impl Session {
+    /// Identify a cursor occurrence without treating semantic coloring as name resolution.
+    pub fn inspect_reference(&self, path: &str, offset: usize) -> Option<InspectedReference<'_>> {
+        if let Some(definition) = self.spec_definition(path, offset) {
+            return Some(InspectedReference::Spec {
+                path: self.files.get_key_value(&definition.path)?.0,
+                span: definition.span,
+            });
+        }
+        let file = self.current_file(path)?;
+        let (declarations, forms) = file.navigation_source()?;
+        let spelling = symbol_at(forms, offset)?;
+        let references = self.collect_file_references(
+            path,
+            file,
+            self.has_standard_test(),
+            false,
+            &mut BTreeMap::new(),
+        );
+        let reference = references
+            .uses
+            .iter()
+            .find(|(span, _)| (span.start.offset..span.end.offset).contains(&offset))
+            .map(|(_, reference)| *reference)
+            .or_else(|| {
+                super::declaration::top_level_reference(declarations, forms, spelling, offset)
+            });
+        let target = self
+            .reference_target(path, offset, file, &references)
+            .or_else(|| match reference? {
+                ScopedReference::Referred(namespace, name) => self
+                    .resolve_source_var(path, namespace, name, None)
+                    .map(SourceTarget::Var),
+                ScopedReference::InNamespace(name) => self
+                    .resolve_source_var(path, declarations.namespace(), name, Some(offset))
+                    .map(SourceTarget::Var),
+                ScopedReference::Local(span) => Some(SourceTarget::Local(span)),
+            });
+        match target {
+            Some(SourceTarget::Local(span)) => Some(InspectedReference::Local(span)),
+            Some(SourceTarget::Var(var)) => Some(InspectedReference::Var {
+                path: var.path,
+                span: var.span,
+                namespace: var.namespace,
+                name: var.name,
+            }),
+            None => {
+                let name = match reference? {
+                    ScopedReference::Referred("clojure.core", name) => name,
+                    ScopedReference::InNamespace(name)
+                        if declarations.core_completion_visible(forms, name, offset) =>
+                    {
+                        name
+                    }
+                    _ => return None,
+                };
+                Some(InspectedReference::Core {
+                    name,
+                    kind: core_kind(name)?,
+                })
+            }
+        }
+    }
+
     /// Classify source declarations and lexical occurrences in the current snapshot.
     pub fn semantic_symbols(&self, path: &str) -> Vec<SemanticSymbol> {
         use SemanticSymbolKind::*;

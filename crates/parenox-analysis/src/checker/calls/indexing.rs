@@ -70,12 +70,23 @@ impl Checker<'_> {
                     .map(|part| self.nth_value(collection, (part, key.1), fallback, access)),
             ),
             Type::Integer(index) => self.nth_at(collection, (*index, key.1), fallback, access),
+            Type::Integral(IntegerType {
+                range: IntegerRange::Exact(index),
+                ..
+            }) if matches!(access, IndexedAccess::Nth) => {
+                self.nth_at(collection, (*index, key.1), fallback, access)
+            }
             Type::NonIntegral if matches!(access, IndexedAccess::VectorCall) => {
                 self.invalid_index(key, access)
             }
             Type::Number
             | Type::Integral(IntegerType {
-                range: IntegerRange::Int32 | IntegerRange::OutsideInt32,
+                range:
+                    IntegerRange::IntCache
+                    | IntegerRange::Int32
+                    | IntegerRange::Exact(_)
+                    | IntegerRange::ExactLong(_)
+                    | IntegerRange::OutsideInt32,
                 ..
             }) if matches!(access, IndexedAccess::VectorCall) => {
                 let source = &self.source[key.1.start.offset..key.1.end.offset];
@@ -99,7 +110,7 @@ impl Checker<'_> {
             Type::Number | Type::Integral(_) | Type::NonIntegral => {
                 self.unsupported(
                     key.1,
-                    "nth analysis requires a known decimal integer index in the i32 range",
+                    "nth analysis requires a known integer index in the i32 range",
                 )
                 .known
             }

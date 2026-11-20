@@ -1,5 +1,4 @@
 //! Inert EDN project settings for command-line checks.
-mod classpath;
 mod deps;
 
 use std::fs;
@@ -16,6 +15,7 @@ pub(super) use deps::deps_paths;
 #[derive(Default)]
 pub(super) struct ProjectConfig {
     pub paths: Vec<String>,
+    pub classpath: Option<Vec<PathBuf>>,
     pub dependency_sources: Vec<String>,
     pub externs: Vec<String>,
     pub dependency_externs: Vec<String>,
@@ -50,6 +50,11 @@ impl ProjectOptions {
         self.load_context(root, false)
     }
 
+    pub(super) fn dependency_jars(&self, root: &Path) -> Vec<PathBuf> {
+        let [_, manifest] = self.manifests(root);
+        parenox_classpath::manifest_jars(&manifest, &self.aliases)
+    }
+
     pub(super) fn load_for_format(&self, root: &Path) -> Result<ProjectConfig, String> {
         self.load_context(root, true)
     }
@@ -75,7 +80,15 @@ impl ProjectOptions {
             ProjectConfig::default()
         };
         if let Some(file) = &self.classpath {
-            settings.paths = classpath::directories(root, &root.join(file))?;
+            let path = root.join(file);
+            let entries = parenox_classpath::explicit_entries(root, &path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            settings.paths = entries
+                .iter()
+                .filter(|entry| entry.is_dir())
+                .map(|entry| entry.to_string_lossy().into_owned())
+                .collect();
+            settings.classpath = Some(entries);
         } else if !self.paths.is_empty() {
             settings.paths = self
                 .paths

@@ -75,7 +75,14 @@ fn jvm_declaration_gaps_allow_checking_a_typed_function_in_the_same_namespace() 
     let report = Session::default().check("jvm_forms.clj", source);
     assert!(!report.complete, "{report:#?}");
     assert_eq!(report.stats.checked_functions, 1);
-    assert_eq!(report.diagnostics.len(), 11, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 10, "{report:#?}");
+    let compiler_flags: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message.contains("compiler flag assignments"))
+        .map(|diagnostic| diagnostic.span.start.line)
+        .collect();
+    assert_eq!(compiler_flags, [5], "{report:#?}");
     assert!(
         report
             .diagnostics

@@ -1,5 +1,6 @@
 //! Namespace resolution, project interfaces and cache dependencies.
 mod contracts;
+mod data_functions;
 mod declarations;
 mod externs;
 mod fdefs;
@@ -11,6 +12,7 @@ mod references;
 mod require;
 mod spec_navigation;
 mod specs;
+mod test_bodies;
 mod type_forms;
 mod vars;
 
@@ -23,12 +25,17 @@ pub(super) use externs::MacroScope;
 pub(crate) use externs::{EncodeError, ExternCache, SnapshotWriter};
 use externs::{ExternFile, Externs};
 pub(super) use guards::VerifiedGuard;
+pub(crate) use imports::java_type_tag_at;
 pub(crate) use interfaces::InterfaceKey;
 use interfaces::{Exports, LocalInterface, visible_value};
 pub(crate) use references::{DocumentReferences, ProjectCall, ScopedReference};
-pub(crate) use specs::{SpecCache, SpecConversion, SpecFingerprint, SpecSource};
+pub(crate) use specs::{
+    MapFieldConversion, SpecCache, SpecConversion, SpecFingerprint, SpecProvider, SpecSource,
+    StructuredConversion,
+};
 use vars::LiteralVar;
 
+use super::function_forms::FunctionConditions;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, Signature, Type};
 use crate::{ContractKind, ContractOrigin, Diagnostic};
@@ -39,6 +46,7 @@ pub(crate) struct Function {
     pub private: bool,
     pub arities: BTreeMap<Arity, FunctionArity>,
     pub contract: Option<Contract>,
+    data_body_eligible: bool,
     pub span: Span,
 }
 
@@ -84,8 +92,19 @@ impl Contract {
 #[derive(Clone, Debug)]
 pub(crate) struct FunctionArity {
     pub params: Vec<Form>,
+    pub preconditions: Vec<Form>,
+    pub postconditions: Option<Vec<Form>>,
     pub body: Vec<Form>,
     pub span: Span,
+}
+
+impl FunctionArity {
+    pub(in crate::checker) fn conditions(&self) -> FunctionConditions<'_> {
+        FunctionConditions {
+            pre: &self.preconditions,
+            post: self.postconditions.as_deref(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +126,8 @@ pub(super) enum DeclaredValue<'a> {
 pub(crate) struct Globals {
     specs: Arc<BTreeMap<String, Type>>,
     spec_conversions: Arc<BTreeMap<String, SpecConversion>>,
+    spec_unchecked_inputs: Arc<BTreeSet<String>>,
+    spec_providers: Arc<BTreeMap<String, Arc<SpecProvider>>>,
     pub(super) project_namespaces: BTreeSet<String>,
     exports: BTreeMap<String, Arc<Exports>>,
     externs: Option<Arc<Externs>>,
@@ -117,6 +138,8 @@ impl Globals {
         Self {
             specs: cache.types.clone(),
             spec_conversions: cache.conversions.clone(),
+            spec_unchecked_inputs: cache.unchecked_inputs.clone(),
+            spec_providers: cache.providers.clone(),
             ..Self::default()
         }
     }
@@ -131,6 +154,11 @@ impl Globals {
 
     pub fn spec_conversion(&self, key: &str) -> Option<SpecConversion> {
         self.spec_conversions.get(key).cloned()
+    }
+
+    /// Registration sources used to check exact registry operations.
+    pub(super) fn spec_provider(&self, key: &str) -> Option<&Arc<SpecProvider>> {
+        self.spec_providers.get(key)
     }
 
     fn declared_value(&self, name: &str) -> Option<DeclaredValue<'_>> {
@@ -154,19 +182,34 @@ pub(crate) struct Model {
     path: String,
     externs: Option<Arc<ExternFile>>,
     literals: BTreeMap<String, LiteralVar>,
+    captured_initializers: BTreeMap<usize, Form>,
     unchecked_functions: BTreeMap<String, UncheckedFunction>,
     exports: Arc<Exports>,
     local_interface: Arc<LocalInterface>,
-    external_specs: BTreeMap<String, Option<Type>>,
+    external_specs: BTreeMap<String, (Option<Type>, bool)>,
     external_refers: BTreeMap<String, Option<Arc<Exports>>>,
-    guard_core_in_project: Option<bool>,
+    core_in_project: Option<bool>,
+    map_invert_in_project: Option<bool>,
     pub functions: BTreeMap<String, Function>,
+    checked_data_functions: BTreeSet<String>,
     // Conservative references to unannotated helpers, including transitive cache dependencies.
     helper_dependencies: BTreeMap<String, BTreeSet<String>>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
 impl Model {
+    pub(super) fn loads_spec(&self, provider: &SpecProvider) -> bool {
+        let loaded = |source: &specs::RegistrationSource| {
+            self.path == source.path || self.names.required_libraries.contains(&source.namespace)
+        };
+        match provider {
+            SpecProvider::Direct(source) => loaded(source),
+            SpecProvider::LoadChecked { sources, .. } => {
+                sources.iter().all(|source| loaded(source))
+            }
+        }
+    }
+
     pub(crate) fn resolved_referral(&self, name: &str) -> Option<(&str, &str)> {
         self.names.refers.get(name)?.split_once('/')
     }
@@ -205,18 +248,46 @@ impl Model {
                 .collect(),
             ..Self::default()
         };
+        if !declarations.reflection_flags.is_empty() && model.check_project_core(globals) {
+            model
+                .diagnostics
+                .extend(declarations.reflection_flag_gaps());
+        }
         let mut specs = BTreeMap::new();
         for key in declarations.specs.keys() {
             let ty = globals.specs.get(key).cloned();
             specs.insert(key.clone(), ty.clone().unwrap_or(Type::Unknown));
-            model.external_specs.insert(key.clone(), ty);
+            model.external_specs.insert(
+                key.clone(),
+                (ty, globals.spec_unchecked_inputs.contains(key)),
+            );
         }
+        let project_set_namespace = globals.project_namespaces.contains("clojure.set");
         for &index in &declarations.literal_vars {
             let form = &forms[index];
             let Kind::List(xs) = &form.without_metadata().kind else {
                 unreachable!()
             };
-            model.read_def(xs, form.span, source, globals);
+            let initializer = xs.get(2..).and_then(vars::def_initializer);
+            let inverted = initializer
+                .and_then(|value| type_forms::inverted_literal(declarations, forms, source, value));
+            if inverted.is_some() {
+                model.map_invert_in_project = Some(project_set_namespace);
+            }
+            let expanded = inverted.as_ref().filter(|_| !project_set_namespace);
+            let captured = initializer.and_then(|value| {
+                model.capture_literal_root(declarations, forms, source, index, value)
+            });
+            model.read_def(
+                xs,
+                form.span,
+                source,
+                expanded.or(captured.as_ref()),
+                globals,
+            );
+            if let Some(captured) = captured {
+                model.captured_initializers.insert(index, captured);
+            }
         }
         for &index in &declarations.unchecked_vars {
             let Kind::List(xs) = &forms[index].without_metadata().kind else {
@@ -232,13 +303,9 @@ impl Model {
         let mut guards = BTreeMap::new();
         let source_arities_known = declarations.has_known_var_surface(forms);
         for &index in &declarations.functions {
-            let form = &forms[index];
-            let Kind::List(xs) = &form.without_metadata().kind else {
-                unreachable!()
-            };
             model.read_function(
-                xs,
-                form.span,
+                &forms[index],
+                source,
                 globals,
                 &mut fdefs,
                 &mut guards,
@@ -295,6 +362,7 @@ impl Model {
             }
         }
         model.verify_guards(guards, declarations, forms, globals);
+        model.check_data_functions(source, globals);
         model.collect_helpers();
         model.freeze_interfaces(specs, declarations.dependencies.clone());
         model
@@ -339,13 +407,25 @@ impl Model {
         }
     }
 
+    fn check_project_core(&mut self, globals: &Globals) -> bool {
+        let present = globals.project_namespaces.contains("clojure.core");
+        self.core_in_project = Some(present);
+        present
+    }
+
     pub fn refresh_external_inputs(&mut self, globals: &Globals) -> bool {
-        self.guard_core_in_project
+        self.core_in_project
             .is_none_or(|present| present == globals.project_namespaces.contains("clojure.core"))
+            && self
+                .map_invert_in_project
+                .is_none_or(|present| present == globals.project_namespaces.contains("clojure.set"))
             && self
                 .external_specs
                 .iter()
-                .all(|(key, previous)| globals.specs.get(key) == previous.as_ref())
+                .all(|(key, (previous, unchecked))| {
+                    globals.specs.get(key) == previous.as_ref()
+                        && globals.spec_unchecked_inputs.contains(key) == *unchecked
+                })
             && self
                 .external_refers
                 .iter_mut()
@@ -386,7 +466,14 @@ impl Model {
                         visit(xs, model, names)
                     }
                     Kind::AnonymousFunction(function) => visit(&function.body, model, names),
-                    Kind::Metadata(_, target) => visit(std::slice::from_ref(target), model, names),
+                    Kind::Metadata(_, target) => {
+                        for condition in [":pre", ":post"] {
+                            if let Some(forms) = form.metadata(condition) {
+                                visit(std::slice::from_ref(forms), model, names);
+                            }
+                        }
+                        visit(std::slice::from_ref(target), model, names);
+                    }
                     _ => {}
                 }
             }
@@ -422,6 +509,10 @@ impl Model {
                 for param in &arity.params {
                     visit_defaults(param, self, &mut names);
                 }
+                visit(&arity.preconditions, self, &mut names);
+                if let Some(postconditions) = &arity.postconditions {
+                    visit(postconditions, self, &mut names);
+                }
                 visit(&arity.body, self, &mut names);
             }
             self.helper_dependencies
@@ -436,13 +527,53 @@ impl Model {
         let unused: Vec<_> = self
             .functions
             .values()
-            .filter(|f| f.inferred() && !reachable.contains(f.name.as_str()))
+            .filter(|f| {
+                f.inferred()
+                    && !self.checked_data_functions.contains(&f.name)
+                    && !reachable.contains(f.name.as_str())
+            })
             .map(|f| (f.span, f.name.clone()))
             .collect();
         for (span, name) in unused {
             self.error("PNX9002", span, format!(
                 "Cannot infer unused private function {name}; add a :t/sig annotation or a direct typed caller"
             ));
+        }
+    }
+
+    pub fn diagnose_unchecked_helpers<'a>(
+        &self,
+        checked: impl Iterator<Item = &'a str>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if self.helper_dependencies.is_empty() {
+            return;
+        }
+        let checked: BTreeSet<_> = checked.collect();
+        let already_reported: BTreeSet<_> = self
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "PNX9002")
+            .map(|diagnostic| diagnostic.span.start.offset)
+            .collect();
+        for function in self
+            .functions
+            .values()
+            .filter(|function| function.inferred())
+        {
+            if !checked.contains(function.name.as_str())
+                && !self.checked_data_functions.contains(&function.name)
+                && !already_reported.contains(&function.span.start.offset)
+            {
+                diagnostics.push(Diagnostic::new(
+                    "PNX9002",
+                    function.span,
+                    format!(
+                        "Cannot infer private function {} without a reachable typed call; add a :t/sig annotation or a direct typed caller",
+                        function.name
+                    ),
+                ));
+            }
         }
     }
 

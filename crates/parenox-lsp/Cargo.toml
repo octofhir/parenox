@@ -8,5 +8,6 @@ description = "Editor protocol and language features for Parenox"
 
 [dependencies]
 parenox-analysis = { path = "../parenox-analysis" }
+parenox-classpath = { path = "../parenox-classpath" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

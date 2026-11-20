@@ -65,7 +65,7 @@ fn extern_diff_reads_explicit_file_lists_and_configuration_snapshots() {
                 {"kind": "field", "key": ":title"}
             ],
             "reason": "type_mismatch",
-            "expected": "Keyword",
+            "expected": "Keyword excluding :clojure.spec.alpha/invalid",
             "actual": "String"
         })
     );
@@ -87,7 +87,9 @@ fn extern_diff_reads_explicit_file_lists_and_configuration_snapshots() {
     assert_eq!(plain.status.code(), Some(1));
     let text = String::from_utf8(plain.stdout).unwrap();
     assert!(
-        text.contains("argument 1 → field :payload → field :title: expected Keyword, got String"),
+        text.contains(
+            "argument 1 → field :payload → field :title: expected Keyword excluding :clojure.spec.alpha/invalid, got String"
+        ),
         "{text}"
     );
 

@@ -190,11 +190,11 @@ impl Checker<'_> {
             let Some(combined) = self.combine_values(a, b, Some(key), value_span, call) else {
                 return Type::Unknown;
             };
-            field.ty = Type::union(
+            field.replace_type(Type::union(
                 std::iter::once(combined)
                     .chain((!b_required).then(|| a.clone()))
                     .chain((!a_required).then(|| b.clone())),
-            );
+            ));
             returns &= !field.required || field.ty != Type::Never;
         }
         if let (ExtraFields::Typed(a), ExtraFields::Typed(b)) = (&left.extra, &right.extra)

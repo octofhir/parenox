@@ -146,14 +146,14 @@ fn cljc_checks_selected_namespaces_contracts_and_diagnostic_locations() {
     let report = session.check("portable.cljc", source);
     assert_eq!(report.stats.checked_functions, 0);
     assert_eq!(report.stats.reused_functions, 2);
-    let changed = source.replace("(str/upper-case name)", "(str/upper-case 4242)");
+    let changed = source.replace("(str/upper-case name)", "(str/upper-case nil)");
     let report = session.check("portable.cljc", &changed);
     assert!(!report.ok && report.complete, "{report:#?}");
     assert_eq!(report.stats.checked_functions, 1);
     let diagnostic = &report.diagnostics[0];
     assert_eq!(
         &changed[diagnostic.span.start.offset..diagnostic.span.end.offset],
-        "4242"
+        "nil"
     );
     let report = Session::default().check("portable.clj", source);
     assert!(!report.ok && !report.complete, "{report:#?}");

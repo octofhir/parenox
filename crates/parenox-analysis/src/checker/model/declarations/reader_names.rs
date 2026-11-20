@@ -5,8 +5,20 @@ use crate::reader::{
 };
 
 impl Declarations {
+    pub(crate) fn reader_namespace_before(
+        &self,
+        forms: &[Form],
+        offset: usize,
+    ) -> Option<(&str, Span)> {
+        self.namespace_end.filter(|end| *end <= offset)?;
+        Some((
+            self.reader_namespace(offset),
+            self.namespace_selection(forms)?,
+        ))
+    }
+
     pub(crate) fn read_source(source: &str, read: &mut CheckRead) -> Result<Self, ReadError> {
-        let declarations = Self::read(&read.forms);
+        let mut declarations = Self::read(&read.forms);
         declarations.validate_reader_aliases(source, &read.namespace_tokens)?;
         if read
             .namespace_tokens
@@ -14,10 +26,13 @@ impl Declarations {
             .any(|token| matches!(token, NamespaceToken::Map { .. }))
         {
             declarations.resolve_reader_maps(source, &mut read.forms)?;
-            Ok(Self::read(&read.forms))
-        } else {
-            Ok(declarations)
+            declarations = Self::read(&read.forms);
         }
+        // References can occur in quoted data and namespace renames. Check
+        // the selected forms only when the spelling occurs in the source.
+        declarations.refers_to_assert_expr =
+            source.contains("assert-expr") && declarations.references_assert_expr(&read.forms);
+        Ok(declarations)
     }
 
     fn validate_reader_aliases(

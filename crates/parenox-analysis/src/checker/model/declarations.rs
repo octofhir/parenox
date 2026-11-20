@@ -1,6 +1,10 @@
 //! Source declarations and the namespace context used to read them.
 mod outline;
+mod protocol_implementations;
 mod reader_names;
+mod var_documentation;
+
+pub(super) use protocol_implementations::collect_protocol_group_methods;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,6 +33,8 @@ pub(crate) struct FunctionParameters<'a> {
 pub(super) struct ProtocolVar<'a> {
     pub name: &'a Form,
     pub method: bool,
+    owner: &'a Form,
+    tail: &'a [Form],
 }
 
 impl ProtocolVar<'_> {
@@ -55,6 +61,7 @@ pub(super) struct Names {
     pub(super) refers: BTreeMap<String, String>,
     pub(super) aliases: BTreeMap<String, String>,
     pub(super) imports: BTreeMap<String, String>,
+    pub(super) required_libraries: BTreeSet<String>,
     pub(super) core_only: Option<BTreeSet<String>>,
     pub(super) core_hidden: BTreeSet<String>,
     pub(super) spec_core_shadows: BTreeSet<String>,
@@ -140,11 +147,15 @@ pub(crate) struct Declarations {
     pub(super) referrals: Vec<ExplicitReferral>,
     pub(super) namespace_usages: Vec<(String, Span)>,
     pub(super) namespace_alias_sites: BTreeMap<String, Span>,
+    pub(super) java_import_sites: Vec<(Span, String)>,
+    pub(crate) has_top_level_require: bool,
     pub(super) specs: BTreeMap<String, SpecDeclaration>,
     pub(super) duplicate_specs: BTreeSet<String>,
+    pub(super) reflection_flags: Vec<Span>,
     pub(super) fdefs: Vec<usize>,
     pub(super) functions: Vec<usize>,
     pub(super) test_forms: Vec<usize>,
+    pub(crate) refers_to_assert_expr: bool,
     pub(super) method_forms: Vec<usize>,
     pub(super) literal_vars: Vec<usize>,
     pub(super) unchecked_vars: Vec<usize>,
@@ -154,6 +165,7 @@ pub(crate) struct Declarations {
     pub(super) forward_vars: BTreeMap<String, DeclaredVar>,
     types: Vec<TypeDeclaration>,
     protocols: Vec<usize>,
+    protocol_extensions: Vec<usize>,
     pub(super) opaque_var_surface: bool,
     pub(super) diagnostics: Vec<Diagnostic>,
 }
@@ -165,6 +177,10 @@ impl Declarations {
 
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    pub(crate) fn reflection_flag_gaps(&self) -> impl Iterator<Item = Diagnostic> + '_ {
+        self.reflection_flags.iter().copied().map(compiler_flag_gap)
     }
 
     pub(crate) fn spec_site(&self, key: &str) -> Option<Result<Span, ()>> {
@@ -288,20 +304,13 @@ impl Declarations {
         name: &'a str,
     ) -> Option<FunctionParameters<'a>> {
         let mut declarations = self.source_declarations(forms, name);
-        let SourceDeclaration::Function([head, _, tail @ ..]) = declarations.next()? else {
+        let SourceDeclaration::Function([head, name, tail @ ..]) = declarations.next()? else {
             return None;
         };
         if declarations.next().is_some() {
             return None;
         }
-        let documentation = match tail
-            .first()
-            .map(Form::without_metadata)
-            .map(|form| &form.kind)
-        {
-            Some(Kind::String(doc)) => Some(doc.as_str()),
-            _ => None,
-        };
+        let documentation = var_documentation::function_docstring(name, tail);
         let clauses = lexical_function_clauses(function_parts(tail).0, head.span).ok()?;
         Some(FunctionParameters {
             documentation,
@@ -457,9 +466,12 @@ impl Declarations {
             let Kind::List(items) = &forms[index].without_metadata().kind else {
                 unreachable!();
             };
+            let owner = &items[1];
             let protocol = ProtocolVar {
-                name: &items[1],
+                name: owner,
                 method: false,
+                owner,
+                tail: &items[2..],
             };
             let methods = protocol_methods(&items[2..]).iter().filter_map(|form| {
                 let Kind::List(items) = &form.without_metadata().kind else {
@@ -470,7 +482,12 @@ impl Declarations {
                 };
                 (name.symbol().is_some_and(unqualified)
                     && params.vector().is_some_and(|args| !args.is_empty()))
-                .then_some(ProtocolVar { name, method: true })
+                .then_some(ProtocolVar {
+                    name,
+                    method: true,
+                    owner,
+                    tail: &items[1..],
+                })
             });
             std::iter::once(protocol).chain(methods)
         })
@@ -603,12 +620,35 @@ impl Declarations {
         if (namespace, name) == ("clojure.core", "defonce") {
             return items[1].metadata(":private").is_some_and(private);
         }
-        let mut attrs = function_parts(&items[2..]).1;
-        if let Some([_, value]) = attrs.find(|[key, _]| key.keyword() == Some(":private")) {
+        if let Some(value) = Self::function_privacy_attribute(&items[2..]) {
             return private(value);
         }
         (namespace, name) == ("clojure.core", "defn-")
             || items[1].metadata(":private").is_some_and(private)
+    }
+
+    pub(crate) fn function_privacy_attribute(tail: &[Form]) -> Option<&Form> {
+        function_parts(tail)
+            .1
+            .find_map(|[key, value]| (key.keyword() == Some(":private")).then_some(value))
+    }
+
+    pub(crate) fn privacy_operator(&self, forms: &[Form], operator: &Form) -> Option<&'static str> {
+        let spelling = operator.symbol()?;
+        if spelling == "def" {
+            return Some("def");
+        }
+        if !spelling.contains('/')
+            && !self.core_completion_visible(forms, spelling, operator.span.start.offset)
+        {
+            return None;
+        }
+        match self.names.resolve_parts(spelling) {
+            ("clojure.core", "defn") => Some("defn"),
+            ("clojure.core", "defn-") => Some("defn-"),
+            ("clojure.core", "defonce") => Some("defonce"),
+            _ => None,
+        }
     }
 
     pub(super) fn error(&mut self, code: &str, span: Span, message: impl Into<String>) {
@@ -618,6 +658,16 @@ impl Declarations {
 
     pub fn read(forms: &[Form]) -> Self {
         Self::read_with_imports(forms, None)
+    }
+
+    fn references_assert_expr(&self, forms: &[Form]) -> bool {
+        forms.iter().any(|form| {
+            !symbols_match_inner::<true>(form, &mut |name| {
+                name != "assert-expr"
+                    && (!name.ends_with("/assert-expr")
+                        || self.names.resolve_parts(name) != ("clojure.test", "assert-expr"))
+            })
+        })
     }
 
     pub(super) fn read_with_imports(forms: &[Form], globals: Option<&Globals>) -> Self {
@@ -644,21 +694,44 @@ impl Declarations {
                 model.read_ns(xs, form.span, globals);
             }
         }
-        let mut dependencies: BTreeSet<_> = model.dependencies.iter().map(String::as_str).collect();
+        let mut dependencies: BTreeSet<_> = model
+            .names
+            .required_libraries
+            .iter()
+            .map(String::as_str)
+            .collect();
         let mut uses_spec_composition = false;
         for form in forms {
             symbols_match(form, &mut |name| {
                 let (namespace, local) = model.names.resolve_parts(name);
                 dependencies.insert(namespace);
                 uses_spec_composition |= (namespace == "clojure.spec.alpha"
-                    && matches!(local, "and" | "conformer" | "coll-of"))
-                    || (namespace == "clojure.core" && matches!(local, "integer?" | "int?"));
+                    && (matches!(local, "and" | "or" | "conformer" | "coll-of")
+                        || (local == "keys" && !name.contains('/'))))
+                    || (namespace == "clojure.core" && matches!(local, "integer?" | "int?"))
+                    || (namespace == "clojure.set" && local == "map-invert");
                 true
             });
         }
         dependencies.remove(model.names.namespace.as_str());
         model.dependencies = dependencies.into_iter().map(str::to_owned).collect();
+        if !model.opaque_var_surface
+            && model.all_refers.is_empty()
+            && let [namespace, first, rest @ ..] = forms
+            && let Some(first) = reflection_flag_assignment(first, &model.names)
+            && static_namespace_prelude(namespace)
+        {
+            model.reflection_flags = std::iter::once(first)
+                .chain(
+                    rest.iter()
+                        .map_while(|form| reflection_flag_assignment(form, &model.names)),
+                )
+                .collect();
+        }
         for (index, form) in forms.iter().enumerate() {
+            if index > 0 && index <= model.reflection_flags.len() {
+                continue;
+            }
             let Kind::List(xs) = &form.without_metadata().kind else {
                 model.error("PNX9001", form.span, "Unsupported top-level form");
                 continue;
@@ -667,6 +740,7 @@ impl Declarations {
                 model.error("PNX9001", form.span, "Expected a top-level declaration");
                 continue;
             };
+            model.has_top_level_require |= matches!(op, "require" | "clojure.core/require");
             match op {
                 "ns" | "clojure.core/ns" => continue,
                 "def" => {
@@ -674,11 +748,7 @@ impl Declarations {
                     continue;
                 }
                 "set!" if compiler_flag_assignment(xs, &model.names) => {
-                    model.diagnostics.push(Diagnostic::analysis_gap(
-                        "PNX9001",
-                        xs[0].span,
-                        "Analysis for compiler flag assignments is unavailable",
-                    ));
+                    model.diagnostics.push(compiler_flag_gap(xs[0].span));
                     continue;
                 }
                 _ => {}
@@ -714,6 +784,10 @@ impl Declarations {
                         }
                         "clojure.core/defprotocol" => {
                             model.protocols.push(index);
+                            model.opaque_var_surface = true;
+                        }
+                        "clojure.core/extend-type" | "clojure.core/extend-protocol" => {
+                            model.protocol_extensions.push(index);
                             model.opaque_var_surface = true;
                         }
                         "clojure.core/defmethod" => {
@@ -774,7 +848,7 @@ impl Declarations {
         }
         if uses_spec_composition
             || model.has_inline_spec_composition(forms)
-            || model.has_identity_spec(forms)
+            || model.has_preserving_spec(forms)
         {
             model.read_spec_core_scope(forms);
         }
@@ -830,7 +904,7 @@ impl Declarations {
         self.names.namespace = name.to_string();
         let mut has_core_clause = false;
         for clause in xs.iter().skip(2) {
-            // ns docstrings and attr-maps are declarations, not executable forms.
+            // Docstrings and attribute maps do not introduce namespace clauses.
             if clause.is_string() || matches!(clause.kind, Kind::Map(_)) {
                 continue;
             }
@@ -957,6 +1031,107 @@ fn known_unsupported_declaration(qualified: &str, items: &[Form]) -> bool {
     }
 }
 
+fn compiler_flag_gap(span: Span) -> Diagnostic {
+    Diagnostic::analysis_gap(
+        "PNX9001",
+        span,
+        "Analysis for compiler flag assignments is unavailable",
+    )
+}
+
+fn reflection_flag_assignment(form: &Form, names: &Names) -> Option<Span> {
+    let Kind::List(items) = &form.kind else {
+        return None;
+    };
+    let [head, target, value] = items.as_slice() else {
+        return None;
+    };
+    let (Kind::Symbol(op), Kind::Symbol(target), Kind::Bool(_)) =
+        (&head.kind, &target.kind, &value.kind)
+    else {
+        return None;
+    };
+    (op == "set!" && names.resolve_parts(target) == ("clojure.core", "*warn-on-reflection*"))
+        .then_some(head.span)
+}
+
+pub(super) fn static_namespace_prelude(form: &Form) -> bool {
+    let Kind::List(items) = &form.kind else {
+        return false;
+    };
+    let [head, name, clauses @ ..] = items.as_slice() else {
+        return false;
+    };
+    if !matches!(&head.kind, Kind::Symbol(op) if matches!(op.as_str(), "ns" | "clojure.core/ns")) {
+        return false;
+    }
+    // The JVM ns macro evaluates the merged name metadata and attribute map.
+    let mut name = name;
+    while let Kind::Metadata(metadata, target) = &name.kind {
+        if !matches!(metadata.kind, Kind::Map(_)) || !inert_namespace_attribute(metadata) {
+            return false;
+        }
+        name = target;
+    }
+    if !matches!(&name.kind, Kind::Symbol(symbol) if !symbol.contains('/')) {
+        return false;
+    }
+    let clauses = match clauses {
+        [doc, rest @ ..] if doc.is_string() => rest,
+        _ => clauses,
+    };
+    let clauses = match clauses {
+        [attrs, rest @ ..] if matches!(attrs.kind, Kind::Map(_)) => {
+            if !inert_namespace_attribute(attrs) {
+                return false;
+            }
+            rest
+        }
+        _ => clauses,
+    };
+    clauses.iter().all(|clause| {
+        let Kind::List(items) = &clause.kind else {
+            return false;
+        };
+        let Some(Kind::Keyword(key)) = items.first().map(|head| &head.kind) else {
+            return false;
+        };
+        match key.as_str() {
+            ":require" | ":use" => {
+                items.len() > 1
+                    && items[1..].iter().all(|libspec| {
+                        !matches!(&libspec.without_metadata().kind, Kind::List(group) if group.len() < 2)
+                    })
+            }
+            ":import" | ":refer-clojure" | ":gen-class" => true,
+            _ => false,
+        }
+    })
+}
+
+fn inert_namespace_attribute(form: &Form) -> bool {
+    match &form.kind {
+        Kind::Nil
+        | Kind::Bool(_)
+        | Kind::Number
+        | Kind::SymbolicNumber(_)
+        | Kind::Character(_)
+        | Kind::String(_)
+        | Kind::Utf16String(_) => true,
+        Kind::Keyword(keyword) => !keyword.starts_with("::"),
+        Kind::Vector(items) => items.iter().all(inert_namespace_attribute),
+        Kind::Map(entries) => {
+            let (pairs, remainder) = entries.as_chunks::<2>();
+            remainder.is_empty()
+                && pairs.iter().all(|[key, value]| {
+                    matches!(&key.kind, Kind::Keyword(keyword) if !keyword.starts_with("::"))
+                        && inert_namespace_attribute(value)
+                })
+        }
+        _ => false,
+    }
+}
+
 fn compiler_flag_assignment(items: &[Form], names: &Names) -> bool {
     let [_, target, value] = items else {
         return false;
@@ -1019,17 +1194,37 @@ fn protocol_methods(mut tail: &[Form]) -> &[Form] {
 }
 
 pub(super) fn symbols_match<'a>(form: &'a Form, test: &mut impl FnMut(&'a str) -> bool) -> bool {
+    symbols_match_inner::<false>(form, test)
+}
+
+fn symbols_match_inner<'a, const QUOTED: bool>(
+    form: &'a Form,
+    test: &mut impl FnMut(&'a str) -> bool,
+) -> bool {
     match &form.kind {
         Kind::Symbol(name) => test(name),
-        Kind::List(forms) if forms.first().and_then(Form::symbol) == Some("quote") => true,
-        Kind::List(forms) | Kind::Vector(forms) | Kind::Map(forms) | Kind::Set(forms) => {
-            forms.iter().all(|form| symbols_match(form, test))
+        Kind::List(forms) if !QUOTED && forms.first().and_then(Form::symbol) == Some("quote") => {
+            true
         }
-        Kind::AnonymousFunction(function) => {
-            function.body.iter().all(|form| symbols_match(form, test))
-        }
+        Kind::List(forms) | Kind::Vector(forms) | Kind::Map(forms) | Kind::Set(forms) => forms
+            .iter()
+            .all(|form| symbols_match_inner::<QUOTED>(form, test)),
+        Kind::AnonymousFunction(function) => function
+            .body
+            .iter()
+            .all(|form| symbols_match_inner::<QUOTED>(form, test)),
         Kind::Metadata(metadata, target) => {
-            symbols_match(metadata, test) && symbols_match(target, test)
+            symbols_match_inner::<QUOTED>(metadata, test)
+                && symbols_match_inner::<QUOTED>(target, test)
+        }
+        Kind::Quote(form) | Kind::SyntaxQuote(form) | Kind::Unquote { form, .. } if QUOTED => {
+            symbols_match_inner::<QUOTED>(form, test)
+        }
+        Kind::AutoNamespacedMap { entries, .. } if QUOTED => entries
+            .iter()
+            .all(|form| symbols_match_inner::<QUOTED>(form, test)),
+        Kind::Tagged(tag, value) if QUOTED => {
+            symbols_match_inner::<QUOTED>(tag, test) && symbols_match_inner::<QUOTED>(value, test)
         }
         _ => true,
     }

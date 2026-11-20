@@ -7,7 +7,12 @@ use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
 impl Declarations {
-    pub(crate) fn spec_type_reference_at(&self, forms: &[Form], offset: usize) -> Option<String> {
+    pub(crate) fn spec_type_reference_at(
+        &self,
+        forms: &[Form],
+        source: &str,
+        offset: usize,
+    ) -> Option<String> {
         let index = forms.partition_point(|form| form.span.end.offset <= offset);
         let form = forms.get(index)?.without_metadata();
         let Kind::List(items) = &form.kind else {
@@ -32,15 +37,31 @@ impl Declarations {
                 .find_map(|[key, value]| (key.keyword() == Some(":t/sig")).then_some(value))
                 .or_else(|| name.metadata(":t/sig"))?;
             let ty = signature_type_at(signature, offset)?;
-            read_type_with_parameters(&self.names, ty, None, &mut diagnostics, lookup);
+            read_type_with_parameters(
+                &self.names,
+                ty,
+                source,
+                None,
+                None,
+                &mut diagnostics,
+                lookup,
+            );
         } else if self.fdefs.binary_search(&index).is_ok() {
-            read_function_spec(&self.names, tail, form.span, &mut diagnostics, lookup);
+            read_function_spec(
+                &self.names,
+                tail,
+                form.span,
+                source,
+                None,
+                &mut diagnostics,
+                lookup,
+            );
         } else if let [body] = tail
             && name.keyword().is_some()
             && self.names.resolve_parts(head.symbol()?) == ("clojure.spec.alpha", "def")
             && span_at(body.span, offset)
         {
-            read_type(&self.names, body, &mut diagnostics, lookup);
+            read_type(&self.names, body, source, &mut diagnostics, lookup);
         }
         reference
     }

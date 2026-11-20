@@ -2,4 +2,7 @@
  :deps {org.clojure/clojure #:mvn{:version "1.13.0-alpha11"}}
  :aliases {:test {:extra-paths ["test"]
                   :jvm-opts ["-Dparenox.test.flag=from-alias"]
-                  :main-opts ["-e" "(throw (Exception. \"unexpected main opts\"))"]}}}
+                  :main-opts ["-e" "(throw (Exception. \"unexpected main opts\"))"]}
+           :run-deps {:extra-paths ["app"]
+                      :extra-deps {demo/greeting {:local/root "greeting"}}}
+           :run-main {:main-opts ["-m" "demo.app" "from-alias"]}}}

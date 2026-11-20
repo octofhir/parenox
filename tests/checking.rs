@@ -24,7 +24,7 @@ fn optional_field_requires_nil_handling() {
     assert!(report.complete);
     assert_eq!(report.diagnostics.len(), 1);
     let diagnostic = &report.diagnostics[0];
-    assert_eq!(diagnostic.expected.as_deref(), Some("String"));
+    assert_eq!(diagnostic.expected.as_deref(), Some("Non-nil value"));
     assert!(diagnostic.actual.as_deref().unwrap().contains("Nil"));
     assert!(
         diagnostic

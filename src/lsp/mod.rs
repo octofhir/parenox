@@ -1,21 +1,44 @@
 //! Editor-facing LSP requests over stdin and stdout.
+mod clojuredocs;
 mod projects;
 mod workspace;
 
+use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use parenox_lsp::{completion, protocol, semantic, symbols, text};
+use parenox_lsp::{completion, project_tree, protocol, refactor, semantic, symbols, text};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use self::clojuredocs::Docs;
 use self::projects::{ClientFeatures, Projects};
 use self::protocol::{read_message, write_message};
 use self::text::file_path;
-use crate::cli::ProjectOptions;
+use self::workspace::file_rename::RenameFiles;
+use self::workspace::inspection;
+use crate::cli::{LspOptions, ProjectOptions};
 
 const WATCH_REQUEST_ID: &str = "parenox/file-watch";
+
+struct ServerOptions {
+    project: ProjectOptions,
+    clojuredocs: Docs,
+}
+
+#[derive(Default)]
+struct ServerState {
+    workspace: Option<Projects>,
+    shutdown: bool,
+    edits: ApplyEdits,
+}
+
+#[derive(Default)]
+struct ApplyEdits {
+    next: u64,
+    pending: BTreeMap<String, (Value, Value)>,
+}
 
 #[derive(Deserialize)]
 struct Message {
@@ -23,6 +46,7 @@ struct Message {
     id: Option<Value>,
     method: Option<String>,
     error: Option<Value>,
+    result: Option<Value>,
     #[serde(default)]
     params: Value,
 }
@@ -40,6 +64,13 @@ struct Initialize {
 #[derive(Deserialize)]
 struct Folder {
     uri: String,
+}
+
+#[derive(Deserialize)]
+struct ExecuteCommand {
+    command: String,
+    #[serde(default)]
+    arguments: Vec<Value>,
 }
 
 impl Initialize {
@@ -61,12 +92,15 @@ impl Initialize {
     }
 }
 
-pub(super) fn run(options: ProjectOptions) -> Result<u8, String> {
+pub(super) fn run(options: LspOptions) -> Result<u8, String> {
+    let options = ServerOptions {
+        project: options.project,
+        clojuredocs: Docs::open(options.clojuredocs.as_deref(), options.clojuredocs_offline)?,
+    };
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
     let mut buffer = Vec::new();
-    let mut workspace = None;
-    let mut shutdown = false;
+    let mut state = ServerState::default();
     while read_message(&mut input, &mut buffer).map_err(|err| err.to_string())? {
         let message = match serde_json::from_slice::<Message>(&buffer) {
             Ok(message) if message.jsonrpc == "2.0" => message,
@@ -91,6 +125,30 @@ pub(super) fn run(options: ProjectOptions) -> Result<u8, String> {
                     }))
                     .map_err(|err| err.to_string())?;
                 }
+            } else if let Some((request, edit)) = message
+                .id
+                .as_ref()
+                .and_then(Value::as_str)
+                .and_then(|id| state.edits.pending.remove(id))
+            {
+                let applied = message
+                    .result
+                    .as_ref()
+                    .and_then(|response| response.get("applied"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                if message.error.is_none() && applied {
+                    result(&mut output, request, edit)
+                } else {
+                    let reason = message
+                        .result
+                        .as_ref()
+                        .and_then(|response| response.get("failureReason"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Client did not apply the edit");
+                    send_error(&mut output, request, -32803, reason)
+                }
+                .map_err(|err| err.to_string())?;
             } else {
                 send_error(&mut output, Value::Null, -32600, "Invalid request")
                     .map_err(|err| err.to_string())?;
@@ -101,15 +159,16 @@ pub(super) fn run(options: ProjectOptions) -> Result<u8, String> {
             request(
                 &mut output,
                 &options,
-                &mut workspace,
-                &mut shutdown,
+                &mut state,
                 id,
                 &method,
                 message.params,
             )
         } else if method == "exit" {
-            return Ok(if shutdown { 0 } else { 1 });
-        } else if !shutdown && let Some(workspace) = &mut workspace {
+            return Ok(if state.shutdown { 0 } else { 1 });
+        } else if !state.shutdown
+            && let Some(workspace) = &mut state.workspace
+        {
             notification(&mut output, workspace, &method, message.params)
         } else {
             Ok(())
@@ -121,13 +180,17 @@ pub(super) fn run(options: ProjectOptions) -> Result<u8, String> {
 
 fn request(
     output: &mut impl Write,
-    options: &ProjectOptions,
-    workspace: &mut Option<Projects>,
-    shutdown: &mut bool,
+    options: &ServerOptions,
+    state: &mut ServerState,
     id: Value,
     method: &str,
     params: Value,
 ) -> io::Result<()> {
+    let ServerState {
+        workspace,
+        shutdown,
+        edits,
+    } = state;
     if *shutdown {
         return send_error(output, id, -32600, "Server is shut down");
     }
@@ -153,11 +216,28 @@ fn request(
             .pointer("/workspace/workspaceEdit/documentChanges")
             .and_then(Value::as_bool)
             == Some(true);
+        let apply_edit = init
+            .capabilities
+            .pointer("/workspace/applyEdit")
+            .and_then(Value::as_bool)
+            == Some(true);
         let snippets = init
             .capabilities
             .pointer("/textDocument/completion/completionItem/snippetSupport")
             .and_then(Value::as_bool)
             == Some(true);
+        let markdown_hover = init
+            .capabilities
+            .pointer("/textDocument/hover/contentFormat")
+            .and_then(Value::as_array)
+            .and_then(|formats| {
+                formats.iter().find_map(|format| match format.as_str() {
+                    Some("markdown") => Some(true),
+                    Some("plaintext") => Some(false),
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
         let hierarchical_symbols = init
             .capabilities
             .pointer("/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport")
@@ -175,16 +255,25 @@ fn request(
             == Some(true);
         *workspace = Some(Projects::load(
             root,
-            options,
+            &options.project,
             watch,
             ClientFeatures {
+                apply_edit,
                 versioned_edits,
                 snippets,
+                markdown_hover,
                 hierarchical_symbols,
                 folding,
                 test_tree,
             },
         ));
+        let rename_files = json!({"filters":[{
+            "scheme":"file", "pattern":{"glob":"**/*.{clj,cljc}", "matches":"file"}
+        }]});
+        let commands = ["server-info", "cursor-info"]
+            .into_iter()
+            .chain(refactor::Command::ALL.map(refactor::Command::name))
+            .collect::<Vec<_>>();
         return result(
             output,
             id,
@@ -199,16 +288,90 @@ fn request(
             "referencesProvider":true,"documentHighlightProvider":true,
             "codeLensProvider":{"resolveProvider":true},
             "documentSymbolProvider":true,"workspaceSymbolProvider":true,
-            "completionProvider":{"resolveProvider":true,"triggerCharacters":[":","/"]},
+            "completionProvider":{"resolveProvider":true,"triggerCharacters":[":","/","."]},
             "signatureHelpProvider":{"triggerCharacters":[" "],"retriggerCharacters":[")"]},
-            "codeActionProvider":{"codeActionKinds":["refactor.rewrite"]},
-            "experimental":{"testTree":true}
+            "codeActionProvider":{"codeActionKinds":[refactor::REFACTOR_KIND,refactor::REWRITE_KIND,refactor::EXTRACT_KIND]},
+            "executeCommandProvider":{"commands":commands},
+            "workspace":{"fileOperations":{"willRename":rename_files,"didRename":rename_files}},
+            "experimental":{"testTree":true,"projectTree":true,"serverInfo":true,"cursorInfo":true,"clojuredocs":true}
         }, "serverInfo":{"name":"parenox", "version":env!("CARGO_PKG_VERSION")}}),
         );
     }
     let Some(projects) = workspace else {
         return send_error(output, id, -32002, "Server not initialized");
     };
+    if method == "clojure/serverInfo/raw" {
+        return result(output, id, projects.for_document(None).inspect_server());
+    }
+    if method == "clojure/clojuredocs/raw" {
+        return result(
+            output,
+            id,
+            json!(options.clojuredocs.snapshot().raw(&params)),
+        );
+    }
+    if method == "workspace/executeCommand" {
+        let command: ExecuteCommand = match serde_json::from_value(params) {
+            Ok(command) => command,
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        };
+        match command.command.as_str() {
+            "server-info" => inspection::log(
+                output,
+                "Server info",
+                &projects.for_document(None).inspect_server(),
+            )?,
+            "cursor-info" => {
+                let Some(query) = inspection::command_cursor(&command.arguments) else {
+                    return send_error(output, id, -32602, "Invalid cursor-info arguments");
+                };
+                log_cursor(projects, query, output)?;
+            }
+            name => {
+                let Some(refactoring) = refactor::Command::named(name) else {
+                    return send_error(output, id, -32602, "Unknown command");
+                };
+                let Some((uri, position)) = command_position(&command.arguments) else {
+                    return send_error(
+                        output,
+                        id,
+                        -32602,
+                        &format!("Invalid {} arguments", command.command),
+                    );
+                };
+                let collection = if matches!(refactoring, refactor::Command::ChangeCollection) {
+                    let Some(collection) = command
+                        .arguments
+                        .get(3)
+                        .and_then(Value::as_str)
+                        .and_then(refactor::Collection::named)
+                    else {
+                        return send_error(
+                            output,
+                            id,
+                            -32602,
+                            "Expected change-coll target list, map, vector or set",
+                        );
+                    };
+                    Some(collection)
+                } else {
+                    None
+                };
+                let apply = projects.apply_edit();
+                let workspace = projects.for_document_mut(Some(uri));
+                workspace.ensure_index(output)?;
+                let Some(edit) = workspace.refactor(uri, position, refactoring, collection) else {
+                    let (code, message) = refactoring.missing_edit();
+                    return send_error(output, id, code, message);
+                };
+                if !apply {
+                    return result(output, id, edit);
+                }
+                return edits.send(output, id, edit);
+            }
+        }
+        return result(output, id, Value::Null);
+    }
     if method == "workspace/symbol" {
         let search: symbols::Search = match serde_json::from_value(params) {
             Ok(search) => search,
@@ -216,6 +379,30 @@ fn request(
         };
         let matches = projects.workspace_symbols(&search.query, output)?;
         return result(output, id, json!(matches));
+    }
+    if method == "clojure/workspace/projectTree/nodes" {
+        let query: Option<project_tree::Leaf> = match serde_json::from_value(params) {
+            Ok(query) => query,
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        };
+        let value = projects.project_tree(query, output)?.unwrap_or(Value::Null);
+        return result(output, id, value);
+    }
+    if method == "clojure/dependencyContents" {
+        let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+            return send_error(output, id, -32602, "Expected a dependency URI");
+        };
+        return result(output, id, json!(projects.dependency_contents(uri)));
+    }
+    if method == "workspace/willRenameFiles" {
+        let query: RenameFiles = match serde_json::from_value(params) {
+            Ok(query) => query,
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        };
+        return match projects.will_rename_files(&query.files, output)? {
+            Ok(value) => result(output, id, value),
+            Err(reason) => send_error(output, id, -32803, &reason),
+        };
     }
     let document = document_uri(&params);
     if matches!(
@@ -232,8 +419,11 @@ fn request(
             | "textDocument/semanticTokens/full"
             | "textDocument/semanticTokens/range"
             | "textDocument/codeLens"
+            | "textDocument/hover"
+            | "textDocument/codeAction"
             | "codeLens/resolve"
             | "completionItem/resolve"
+            | "clojure/cursorInfo/raw"
     ) {
         projects.for_document_mut(document).ensure_index(output)?;
     }
@@ -241,6 +431,9 @@ fn request(
     let value = match method {
         "shutdown" => {
             *shutdown = true;
+            for (_, (request, _)) in std::mem::take(&mut edits.pending) {
+                send_error(output, request, -32800, "Server is shut down")?;
+            }
             Value::Null
         }
         "textDocument/definition" => match serde_json::from_value(params) {
@@ -329,7 +522,13 @@ fn request(
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         "textDocument/hover" => match serde_json::from_value(params) {
-            Ok(params) => workspace.hover(params).unwrap_or(Value::Null),
+            Ok(params) => workspace
+                .hover(
+                    params,
+                    projects.markdown_hover(),
+                    &options.clojuredocs.snapshot(),
+                )
+                .unwrap_or(Value::Null),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         "textDocument/signatureHelp" => match serde_json::from_value(params) {
@@ -343,6 +542,10 @@ fn request(
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         "completionItem/resolve" => workspace.resolve_completion(params),
+        "clojure/cursorInfo/raw" => match serde_json::from_value(params) {
+            Ok(params) => workspace.inspect_cursor(params).unwrap_or(Value::Null),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
         "textDocument/codeAction" => match serde_json::from_value(params) {
             Ok(params) => json!(workspace.code_actions(params)),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
@@ -360,6 +563,34 @@ fn request(
         _ => return send_error(output, id, -32601, "Method not found"),
     };
     result(output, id, value)
+}
+
+impl ApplyEdits {
+    fn send(&mut self, output: &mut impl Write, command: Value, edit: Value) -> io::Result<()> {
+        self.next += 1;
+        let id = format!("parenox/apply-edit/{}", self.next);
+        write_message(
+            output,
+            &json!({
+                "jsonrpc":"2.0","id":id,"method":"workspace/applyEdit","params":{"edit":edit}
+            }),
+        )?;
+        self.pending.insert(id, (command, edit));
+        Ok(())
+    }
+}
+
+fn command_position(arguments: &[Value]) -> Option<(&str, text::Position)> {
+    let [uri, line, character, ..] = arguments else {
+        return None;
+    };
+    Some((
+        uri.as_str()?,
+        text::Position {
+            line: usize::try_from(line.as_u64()?).ok()?,
+            character: usize::try_from(character.as_u64()?).ok()?,
+        },
+    ))
 }
 
 fn notification(
@@ -404,9 +635,37 @@ fn notification(
                 projects.changed_files(params, output)?;
             }
         }
+        "workspace/didRenameFiles" => {
+            if let Ok(query) = serde_json::from_value::<RenameFiles>(params) {
+                projects.did_rename_files(&query.files, output)?;
+            }
+        }
+        "clojure/serverInfo/log" => {
+            inspection::log(
+                output,
+                "Server info",
+                &projects.for_document(None).inspect_server(),
+            )?;
+        }
+        "clojure/cursorInfo/log" => {
+            if let Ok(query) = serde_json::from_value(params) {
+                log_cursor(projects, query, output)?;
+            }
+        }
         _ => {}
     }
     Ok(())
+}
+
+fn log_cursor(
+    projects: &mut Projects,
+    query: workspace::TextQuery,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let workspace = projects.for_document_mut(Some(inspection::cursor_uri(&query)));
+    workspace.ensure_index(output)?;
+    let report = workspace.inspect_cursor(query).unwrap_or(Value::Null);
+    inspection::log(output, "Cursor info", &report)
 }
 
 fn document_uri(params: &Value) -> Option<&str> {

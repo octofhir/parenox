@@ -32,6 +32,9 @@ fn checks_saved_indices_and_diagnoses_out_of_bounds_at_the_index() {
 fn read_fallbacks_distinguish_missing_from_present_nil() {
     for (expression, result) in [
         ("(nth nil 8)", "nil?"),
+        ("(nth [:zero :one] 1N)", "#{:one}"),
+        ("(nth [:zero :one] 0x1)", "#{:one}"),
+        ("(nth [:zero :one] 2N :missing)", "#{:missing}"),
         (r#"(nth [:sku] -1 "missing")"#, "string?"),
         (r#"(get [:sku nil] 1 "missing")"#, "nil?"),
         (r#"(get [:sku] 1 "missing")"#, "string?"),

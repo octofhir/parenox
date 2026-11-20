@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -5,7 +6,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use crate::extern_diff_cli::DiffOptions;
 
 #[derive(Parser)]
-#[command(about = "Clojure checker, formatter and language server", version)]
+#[command(
+    about = "Clojure checker, formatter, language server and runtime CLI",
+    version
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
@@ -21,6 +25,10 @@ pub(crate) enum Command {
         #[arg(long)]
         allow_incomplete: bool,
     },
+    /// Evaluate Clojure forms.
+    Eval(EvalOptions),
+    /// Run a Clojure script, namespace main or deps.edn alias.
+    Run(RunOptions),
     /// Run clojure.test namespaces on the project's JVM.
     Test(TestOptions),
     /// Send explicit requests to an existing local nREPL server.
@@ -43,7 +51,7 @@ pub(crate) enum Command {
     /// Check in-memory source snapshots over the JSON Lines protocol.
     Serve,
     /// Serve editor diagnostics and navigation using LSP over stdio.
-    Lsp(ProjectOptions),
+    Lsp(LspOptions),
     /// Measure repeated checks of a single source file.
     Bench {
         #[arg(value_name = "FILE")]
@@ -54,27 +62,103 @@ pub(crate) enum Command {
 }
 
 #[derive(Args)]
-pub(crate) struct TestOptions {
-    /// Project directory containing deps.edn.
+pub(crate) struct JvmOptions {
+    /// Project directory. JVM commands and --deps-paths use its deps.edn.
     #[arg(long, value_name = "DIR", default_value = ".")]
     pub(crate) project: PathBuf,
-    /// Select a Clojure CLI alias. Repeat to combine aliases in order.
+    /// Select a deps.edn alias. Repeat to combine aliases in order.
     #[arg(long = "alias", value_name = "NAME")]
     pub(crate) aliases: Vec<String>,
-    /// Clojure CLI executable.
-    #[arg(long, value_name = "EXECUTABLE", default_value = "clojure")]
-    pub(crate) clojure: PathBuf,
+    /// Clojure CLI executable (defaults to clojure).
+    #[arg(long, value_name = "EXECUTABLE")]
+    pub(crate) clojure: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct EvalOptions {
+    #[command(flatten)]
+    pub(crate) jvm: JvmOptions,
+    #[command(flatten)]
+    pub(crate) runtime: BackendOptions,
+    /// Clojure source to evaluate. Repeat to evaluate in the same process.
+    #[arg(
+        long = "expr",
+        value_name = "SOURCE",
+        required = true,
+        allow_hyphen_values = true
+    )]
+    pub(crate) expressions: Vec<String>,
+    /// Terminate evaluation after this many milliseconds.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) timeout_ms: Option<u64>,
+    /// Result format. Program output goes to stderr.
+    #[arg(long, value_enum, default_value_t = RuntimeFormat::Text)]
+    pub(crate) format: RuntimeFormat,
+}
+
+#[derive(Args)]
+pub(crate) struct RunOptions {
+    #[command(flatten)]
+    pub(crate) jvm: JvmOptions,
+    #[command(flatten)]
+    pub(crate) runtime: BackendOptions,
+    /// Invoke the namespace's -main.
+    #[arg(long, value_name = "NAMESPACE", conflicts_with = "script")]
+    pub(crate) main: Option<String>,
+    /// Terminate execution if the run exceeds this many milliseconds.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) timeout_ms: Option<u64>,
+    /// Script path relative to the project directory.
+    #[arg(value_name = "SCRIPT")]
+    pub(crate) script: Option<PathBuf>,
+    /// Arguments passed to the program.
+    #[arg(last = true, value_name = "ARGS")]
+    pub(crate) args: Vec<OsString>,
+}
+
+#[derive(Args)]
+pub(crate) struct BackendOptions {
+    /// Clojure runtime to use.
+    #[arg(long, value_enum, default_value_t = RuntimeBackend::Jvm)]
+    pub(crate) backend: RuntimeBackend,
+    /// External clojurust executable (defaults to cljrs).
+    #[arg(long, value_name = "EXECUTABLE")]
+    pub(crate) cljrs: Option<PathBuf>,
+    /// Source root for clojurust namespace loading. Repeat to add more roots.
+    #[arg(long = "src-path", value_name = "DIR")]
+    pub(crate) source_paths: Vec<PathBuf>,
+    /// Use local source roots from deps.edn for clojurust, including selected alias paths.
+    #[arg(long, conflicts_with = "source_paths")]
+    pub(crate) deps_paths: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum RuntimeBackend {
+    Jvm,
+    Clojurust,
+    Parenox,
+}
+
+#[derive(Args)]
+pub(crate) struct TestOptions {
+    #[command(flatten)]
+    pub(crate) jvm: JvmOptions,
+    #[command(flatten)]
+    pub(crate) runtime: BackendOptions,
+    /// Terminate execution if the tests exceed this many milliseconds.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) timeout_ms: Option<u64>,
     /// Test report format. JSON sends the runtime log to stderr.
-    #[arg(long, value_enum, default_value_t = TestFormat::Text)]
-    pub(crate) format: TestFormat,
-    /// Run a test var with its fixtures. Repeat to select multiple vars.
+    #[arg(long, value_enum, default_value_t = RuntimeFormat::Text)]
+    pub(crate) format: RuntimeFormat,
+    /// Run a test var. Repeat to select multiple vars. The JVM runs fixtures.
     #[arg(
         long = "var",
         value_name = "NAMESPACE/NAME",
         conflicts_with = "namespaces"
     )]
     pub(crate) vars: Vec<String>,
-    /// Find conventional *_test.clj and *_test.cljc namespaces in project source roots.
+    /// Find conventional *_test namespaces in the selected runtime's source roots.
     #[arg(long, conflicts_with_all = ["namespaces", "vars"])]
     pub(crate) discover: bool,
     /// Namespaces to require and run with clojure.test.
@@ -83,7 +167,7 @@ pub(crate) struct TestOptions {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum TestFormat {
+pub(crate) enum RuntimeFormat {
     Text,
     Json,
 }
@@ -144,6 +228,18 @@ impl CheckOptions {
     pub(crate) fn format(&self) -> Format {
         if self.json { Format::Json } else { self.format }
     }
+}
+
+#[derive(Args)]
+pub(crate) struct LspOptions {
+    #[command(flatten)]
+    pub(crate) project: ProjectOptions,
+    /// Use a pinned compact EDN export for ClojureDocs requests and hover.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) clojuredocs: Option<PathBuf>,
+    /// Use cached ClojureDocs without downloading updates.
+    #[arg(long)]
+    pub(crate) clojuredocs_offline: bool,
 }
 
 #[derive(Args)]

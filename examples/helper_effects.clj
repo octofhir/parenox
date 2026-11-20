@@ -19,6 +19,7 @@
     (catch ExceptionInfo _ :unexpected)))
 
 (defn rejected-argument {:t/sig '[:-> #{:param}]} []
+  (constant nil)
   (try
     (constant (throw (ex-info "Parameter failed" {:stage :param})))
     (catch ExceptionInfo e (:stage (ex-data e)))))

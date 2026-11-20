@@ -17,6 +17,7 @@ use model::{Contract, DeclaredValue, Function, SpecConversion, VerifiedGuard};
 pub(crate) use model::{
     Declarations, DocumentReferences, EncodeError, ExternCache, Globals, InterfaceKey, Model,
     ProjectCall, ScopedReference, SnapshotWriter, SpecCache, SpecFingerprint, SpecSource,
+    java_type_tag_at,
 };
 use recur::RecurTarget;
 
@@ -29,12 +30,15 @@ use crate::{ContractOrigin, Diagnostic, Suggestion};
 
 pub(crate) struct FunctionCheck {
     pub diagnostics: Vec<Diagnostic>,
+    pub checked_helpers: BTreeSet<String>,
+    pub declaration_findings_sensitive: bool,
     specs: BTreeMap<String, SpecInput>,
 }
 
 struct SpecInput {
     ty: Option<Type>,
     conversion: Option<SpecConversion>,
+    provider: Option<Arc<model::SpecProvider>>,
 }
 
 impl FunctionCheck {
@@ -42,6 +46,7 @@ impl FunctionCheck {
         self.specs.iter().all(|(key, previous)| {
             globals.spec(key) == previous.ty.as_ref()
                 && globals.spec_conversion(key) == previous.conversion
+                && globals.spec_provider(key) == previous.provider.as_ref()
         })
     }
 }
@@ -52,8 +57,10 @@ impl Model {
         function: &Function,
         source: &str,
         globals: &Globals,
+        has_declaration_findings: bool,
     ) -> FunctionCheck {
         let mut checker = Checker::new(self, globals, source);
+        checker.has_declaration_findings = has_declaration_findings;
         let contract = function
             .contract
             .as_ref()
@@ -74,8 +81,14 @@ impl Model {
                 };
                 args.push(Value::new(rest));
             }
-            let result =
-                checker.function_body(&arity.params, &arity.body, args, &Env::new(), arity.span);
+            let result = checker.function_body(
+                &arity.params,
+                arity.conditions(),
+                &arity.body,
+                args,
+                &Env::new(),
+                arity.span,
+            );
             checker.expect_contract(
                 &result,
                 &signature.ret,
@@ -86,6 +99,12 @@ impl Model {
         }
         FunctionCheck {
             diagnostics: checker.diagnostics,
+            checked_helpers: checker
+                .specializations
+                .into_keys()
+                .filter_map(|(name, _, reachable)| reachable.then_some(name))
+                .collect(),
+            declaration_findings_sensitive: checker.has_unproven_expectation,
             specs: checker.spec_inputs,
         }
     }
@@ -171,10 +190,13 @@ struct Checker<'a> {
     source: &'a str,
     partial_scope: Option<&'a BTreeSet<&'a str>>,
     diagnostics: Vec<Diagnostic>,
+    has_declaration_findings: bool,
+    has_unproven_expectation: bool,
     spec_inputs: BTreeMap<String, SpecInput>,
     active_helpers: Vec<String>,
     thread_depth: usize,
-    specializations: BTreeMap<(String, Vec<Value>), calls::Specialization>,
+    path_reachable: bool,
+    specializations: BTreeMap<(String, Vec<Value>, bool), calls::Specialization>,
     recur_target: Option<RecurTarget>,
     recur_checks: usize,
     reduction_steps: usize,
@@ -192,9 +214,12 @@ impl<'a> Checker<'a> {
             source,
             partial_scope: None,
             diagnostics: Vec::new(),
+            has_declaration_findings: !model.diagnostics.is_empty(),
+            has_unproven_expectation: false,
             spec_inputs: BTreeMap::new(),
             active_helpers: Vec::new(),
             thread_depth: 0,
+            path_reachable: true,
             specializations: BTreeMap::new(),
             recur_target: None,
             recur_checks: 0,
@@ -216,6 +241,7 @@ impl Checker<'_> {
             .or_insert_with(|| SpecInput {
                 ty: ty.cloned(),
                 conversion: conversion.clone(),
+                provider: self.globals.spec_provider(key).cloned(),
             });
         (ty, conversion)
     }
@@ -261,15 +287,7 @@ impl Checker<'_> {
         }
         let compatibility = actual.known.compatibility(expected);
         if compatibility == Compatibility::Unproven {
-            // Unknown types often result from an error already reported for this function or
-            // its declarations. If there is no local diagnostic, surface the unproven use.
-            if self.diagnostics.is_empty() && self.model.diagnostics.is_empty() {
-                self.error(
-                    "PNX9004",
-                    span,
-                    format!("{context}: cannot verify {} against {expected}", actual.ty),
-                );
-            }
+            self.unproven_expectation(actual, expected, span, context);
             return;
         }
         if compatibility == Compatibility::Mismatch {
@@ -291,12 +309,7 @@ impl Checker<'_> {
                 && actual.ty.without_nil() != Type::Never
                 && actual.ty.without_nil().subtype_of(expected)
             {
-                diagnostic.suggestions.push(Suggestion {
-                    message: "handle Nil explicitly; choose a fallback for your application".into(),
-                    span,
-                    replacement: format!("(or {expression} \"\")"),
-                    applicability: "requires-review",
-                });
+                diagnostic.suggestions.push(self.nil_string_fallback(span));
             } else if *expected == Type::Number
                 && expression.starts_with('"')
                 && let Type::Str(value) = &actual.known
@@ -324,6 +337,41 @@ impl Checker<'_> {
                 });
             }
             self.diagnostics.push(diagnostic);
+        }
+    }
+
+    fn unproven_expectation(
+        &mut self,
+        actual: &Value,
+        expected: impl std::fmt::Display,
+        span: Span,
+        context: &str,
+    ) {
+        // Unknown types often follow a finding already reported for the
+        // function or its declarations.
+        if !self.path_reachable {
+            return;
+        }
+        self.has_unproven_expectation = true;
+        if !self.diagnostics.is_empty() {
+            return;
+        }
+        if !self.has_declaration_findings {
+            self.error(
+                "PNX9004",
+                span,
+                format!("{context}: cannot verify {} against {expected}", actual.ty),
+            );
+        }
+    }
+
+    fn nil_string_fallback(&self, span: Span) -> Suggestion {
+        let expression = &self.source[span.start.offset..span.end.offset];
+        Suggestion {
+            message: "handle Nil explicitly; choose a fallback for your application".into(),
+            span,
+            replacement: format!("(or {expression} \"\")"),
+            applicability: "requires-review",
         }
     }
 
@@ -355,6 +403,13 @@ impl Checker<'_> {
 
     fn infer(&mut self, form: &Form, env: &Env) -> Value {
         self.infer_position(form, env, false)
+    }
+
+    fn infer_set_members(&mut self, forms: &[Form], env: &Env) -> Vec<Type> {
+        forms
+            .iter()
+            .map(|form| self.infer(form, env).known)
+            .collect()
     }
 
     fn eval_args<'a>(
@@ -444,7 +499,7 @@ impl Checker<'_> {
                 Value::new(vector_type(types))
             }
             Kind::Set(xs) => {
-                let types: Vec<_> = xs.iter().map(|x| self.infer(x, env).known).collect();
+                let types = self.infer_set_members(xs, env);
                 if types.contains(&Type::Never) {
                     return Value::new(Type::Never);
                 }
@@ -476,20 +531,28 @@ fn vector_type(items: Vec<Type>) -> Type {
 }
 
 fn collection_element(types: Vec<Type>) -> Box<Type> {
-    Box::new(Type::union(types.into_iter().map(|ty| match ty {
-        Type::Integer(_)
-        | Type::Integral(IntegerType {
-            range: IntegerRange::OutsideInt32 | IntegerRange::OutsideInt64,
-            ..
-        })
-        | Type::NonIntegral => Type::Number,
-        ty => ty,
-    })))
+    Box::new(
+        Type::union(
+            types.into_iter().map(|ty| match ty {
+                Type::Integer(_)
+                | Type::Integral(IntegerType {
+                    range:
+                        IntegerRange::ExactLong(_)
+                        | IntegerRange::OutsideInt32
+                        | IntegerRange::OutsideInt64,
+                    ..
+                })
+                | Type::NonIntegral => Type::Number,
+                Type::Integral(integer) => Type::Integral(integer.without_value()),
+                ty => ty,
+            }),
+        ),
+    )
 }
 
 fn nil_part(ty: &Type) -> Type {
     match ty {
-        Type::Nil | Type::Unknown => Type::Nil,
+        Type::Nil | Type::Unknown | Type::SpecValue => Type::Nil,
         Type::Parameter(parameter) => parameter.upper.as_ref().map_or(Type::Nil, nil_part),
         Type::Union(xs) if xs.iter().any(|t| nil_part(t) == Type::Nil) => Type::Nil,
         _ => Type::Never,

@@ -9,9 +9,17 @@ use crate::types::{Arity, MAX_TUPLE_ITEMS, Type};
 
 pub(super) const MAX_FIXED_PARAMETERS: usize = 20;
 
+#[derive(Clone, Copy)]
+pub(super) struct FunctionConditions<'a> {
+    pub pre: &'a [Form],
+    pub post: Option<&'a [Form]>,
+}
+
 pub(super) struct Clause<'a> {
+    pub parameter_vector: &'a Form,
     params: &'a [Form],
     rest: Option<&'a Form>,
+    pub conditions: FunctionConditions<'a>,
     pub body: &'a [Form],
     pub span: Span,
 }
@@ -38,23 +46,37 @@ pub(super) fn function_clauses(
     forms: &[Form],
     span: Span,
 ) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
-    read_function_clauses(forms, span, true)
+    read_function_clauses(forms, span, ClauseMode::Checked)
 }
 
 pub(super) fn lexical_function_clauses(
     forms: &[Form],
     span: Span,
 ) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
-    read_function_clauses(forms, span, false)
+    read_function_clauses(forms, span, ClauseMode::Lexical)
+}
+
+pub(super) fn lexical_fn_star_clauses(
+    forms: &[Form],
+    span: Span,
+) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
+    read_function_clauses(forms, span, ClauseMode::FnStar)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClauseMode {
+    Checked,
+    Lexical,
+    FnStar,
 }
 
 fn read_function_clauses(
     forms: &[Form],
     span: Span,
-    check_types: bool,
+    mode: ClauseMode,
 ) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
     if forms.first().and_then(Form::vector).is_some() {
-        let clause = function_clause(forms, span, check_types)?;
+        let clause = function_clause(forms, span, mode)?;
         return Ok(BTreeMap::from([(clause.arity(), clause)]));
     }
     let mut clauses = BTreeMap::new();
@@ -66,7 +88,7 @@ fn read_function_clauses(
                 "Expected a function arity declaration",
             ));
         };
-        let clause = function_clause(forms, arm.span, check_types)?;
+        let clause = function_clause(forms, arm.span, mode)?;
         let count = clause.arity();
         if clauses.insert(count, clause).is_some() {
             return Err(error(
@@ -126,8 +148,9 @@ pub(super) fn pack_arguments(arity: Arity, mut values: Vec<Value>) -> Vec<Value>
 fn function_clause(
     forms: &[Form],
     span: Span,
-    check_types: bool,
+    mode: ClauseMode,
 ) -> Result<Clause<'_>, Box<Diagnostic>> {
+    let check_types = mode == ClauseMode::Checked;
     let [parameters, body @ ..] = forms else {
         return Err(error(
             "PNX1001",
@@ -175,33 +198,51 @@ fn function_clause(
             "Clojure/JVM supports at most 20 fixed parameters",
         ));
     }
-    let (condition_span, body) = if let [head, rest @ ..] = body
+    let (conditions, body) = if mode != ClauseMode::FnStar
+        && let [head, rest @ ..] = body
         && !rest.is_empty()
         && let Some(entries) = head.map()
     {
-        let span = entries
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .any(|[key, _]| matches!(key.keyword(), Some(":pre" | ":post")))
-            .then_some(head.span);
-        (span, rest)
+        (Some(entries), rest)
     } else {
-        let span = [":pre", ":post"]
-            .iter()
-            .find_map(|key| parameters.metadata(key).map(|form| form.span));
-        (span, body)
+        (None, body)
     };
-    if check_types && let Some(span) = condition_span {
-        return Err(Box::new(Diagnostic::analysis_gap(
+    let condition = |name| {
+        if mode == ClauseMode::FnStar {
+            return None;
+        }
+        conditions
+            .map_or_else(
+                || parameters.metadata(name),
+                |entries| {
+                    entries
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .find_map(|[key, value]| (key.keyword() == Some(name)).then_some(value))
+                },
+            )
+            .filter(|form| !matches!(form.kind, Kind::Nil | Kind::Bool(false)))
+    };
+    let conditions = |key, description| match condition(key) {
+        Some(Form {
+            kind: Kind::Vector(items),
+            ..
+        }) => Ok(Some(items.as_slice())),
+        Some(form) if check_types => Err(Box::new(Diagnostic::analysis_gap(
             "PNX9001",
-            span,
-            "Function preconditions and postconditions are not supported yet",
-        )));
-    }
+            form.span,
+            format!("Function {description} checking requires a vector of expressions"),
+        ))),
+        _ => Ok(None),
+    };
+    let pre = conditions(":pre", "precondition")?.unwrap_or_default();
+    let post = conditions(":post", "postcondition")?;
     Ok(Clause {
+        parameter_vector: parameters,
         params,
         rest,
+        conditions: FunctionConditions { pre, post },
         body,
         span,
     })

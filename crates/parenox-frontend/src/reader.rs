@@ -179,6 +179,8 @@ pub enum Conditionals<'a> {
     Reject,
     Preserve,
     Select(&'a str),
+    /// Select the first clause whose feature is active, in source order.
+    SelectFeatures(&'a [&'a str]),
 }
 
 /// Fast semantic forms without capturing a CST. Rejects reader conditionals.
@@ -189,6 +191,12 @@ pub fn read(source: &str) -> Result<Vec<Form>, ReadError> {
 /// The same reader with an explicit conditional policy; no project code is executed.
 pub fn read_with(source: &str, conditionals: Conditionals<'_>) -> Result<Vec<Form>, ReadError> {
     Reader::new(source, false, conditionals).read_all()
+}
+
+/// Read semantic forms before the first error. A consumer can act on each
+/// complete top-level form before reporting the failure.
+pub fn read_prefix(source: &str, conditionals: Conditionals<'_>) -> (Vec<Form>, Option<ReadError>) {
+    Reader::new(source, false, conditionals).read_with_first_error(false)
 }
 
 #[doc(hidden)]
@@ -221,13 +229,33 @@ pub fn read_for_check(
     conditionals: Conditionals<'_>,
     comment_marker: Option<&'static str>,
 ) -> (CheckRead, Option<ReadError>) {
+    read_for_check_inner(source, conditionals, comment_marker, false)
+}
+
+/// Continue reading semantic forms for navigation when the project check encounters an error.
+/// Return the first error so the caller can keep the check itself strict.
+#[doc(hidden)]
+pub fn read_for_check_recovering(
+    source: &str,
+    conditionals: Conditionals<'_>,
+    comment_marker: Option<&'static str>,
+) -> (CheckRead, Option<ReadError>) {
+    read_for_check_inner(source, conditionals, comment_marker, true)
+}
+
+fn read_for_check_inner(
+    source: &str,
+    conditionals: Conditionals<'_>,
+    comment_marker: Option<&'static str>,
+    recover: bool,
+) -> (CheckRead, Option<ReadError>) {
     let mut reader = Reader::new(source, false, conditionals);
     reader.namespace_tokens = Some(Vec::new());
     reader.comment_capture = comment_marker.map(|marker| CommentCapture {
         marker,
         comments: Vec::new(),
     });
-    let (forms, error) = reader.read_prefix();
+    let (forms, error) = reader.read_with_first_error(recover);
     (
         CheckRead {
             forms,
@@ -273,25 +301,11 @@ pub fn parse_edn(source: &str) -> Parse {
 }
 
 fn parse_tree(mut reader: Reader<'_>) -> Parse {
-    let mut forms = Vec::new();
     let mut errors = Vec::new();
-    loop {
-        let start = reader.pos;
-        match reader.next_form() {
-            Ok(Some(form)) => forms.push(form),
-            Ok(None) => break,
-            Err(error) => {
-                errors.push(error);
-                // Every recovery step must consume input, even at an unsupported construct.
-                if reader.pos.offset == start.offset {
-                    if reader.bump().is_none() {
-                        break;
-                    }
-                    reader.token(SyntaxKind::ErrorToken, start);
-                }
-            }
-        }
-    }
+    let forms = reader.read_forms(|error| {
+        errors.push(error);
+        true
+    });
     Parse {
         green: reader.tree.unwrap().build(),
         forms,
@@ -337,19 +351,41 @@ impl<'a> Reader<'a> {
     }
 
     fn read_all(&mut self) -> Result<Vec<Form>, ReadError> {
-        let (forms, error) = self.read_prefix();
+        let (forms, error) = self.read_with_first_error(false);
         error.map_or(Ok(forms), Err)
     }
 
-    fn read_prefix(&mut self) -> (Vec<Form>, Option<ReadError>) {
+    fn read_with_first_error(&mut self, recover: bool) -> (Vec<Form>, Option<ReadError>) {
+        let mut first_error = None;
+        let forms = self.read_forms(|error| {
+            first_error.get_or_insert(error);
+            recover
+        });
+        (forms, first_error)
+    }
+
+    fn read_forms(&mut self, mut recover: impl FnMut(ReadError) -> bool) -> Vec<Form> {
         let mut forms = Vec::new();
         loop {
+            let start = self.pos;
             match self.next_form() {
                 Ok(Some(form)) => forms.push(form),
-                Ok(None) => return (forms, None),
-                Err(error) => return (forms, Some(error)),
+                Ok(None) => break,
+                Err(error) => {
+                    if !recover(error) {
+                        break;
+                    }
+                    // Every recovery step must consume input, even at an unsupported construct.
+                    if self.pos.offset == start.offset {
+                        if self.bump().is_none() {
+                            break;
+                        }
+                        self.token(SyntaxKind::ErrorToken, start);
+                    }
+                }
             }
         }
+        forms
     }
 
     fn next_form(&mut self) -> Result<Option<Form>, ReadError> {
@@ -1014,7 +1050,7 @@ impl<'a> Reader<'a> {
         if self.peek() != Some('(') {
             return Err(self.error(start, "Reader conditional requires a list"));
         }
-        let feature = match self.conditionals {
+        match self.conditionals {
             Conditionals::Reject => {
                 return Err(self.error(
                     start,
@@ -1031,13 +1067,13 @@ impl<'a> Reader<'a> {
                     },
                 }));
             }
-            Conditionals::Select(feature) => feature,
-        };
+            Conditionals::Select(_) | Conditionals::SelectFeatures(_) => {}
+        }
         let open = self.pos;
         self.start_node(open);
         self.bump(); // (
         self.token(SyntaxKind::OpenParen, open);
-        let result = self.select_conditional(start, feature, splicing);
+        let result = self.select_conditional(start, splicing);
         self.finish_node(if result.is_ok() {
             SyntaxKind::List
         } else {
@@ -1046,12 +1082,7 @@ impl<'a> Reader<'a> {
         result
     }
 
-    fn select_conditional(
-        &mut self,
-        start: Position,
-        feature: &str,
-        splicing: bool,
-    ) -> Result<Item, ReadError> {
+    fn select_conditional(&mut self, start: Position, splicing: bool) -> Result<Item, ReadError> {
         loop {
             let Some(key) = self.without_comments(|reader| reader.conditional_form(start))? else {
                 return Ok(Item::Omit);
@@ -1065,7 +1096,12 @@ impl<'a> Reader<'a> {
             if matches!(key_name, ":else" | ":none") {
                 return Err(self.error(key.span.start, "Reader conditional feature is reserved"));
             }
-            let selected = key_name == feature || key_name == ":default";
+            let selected = key_name == ":default"
+                || match self.conditionals {
+                    Conditionals::Select(feature) => key_name == feature,
+                    Conditionals::SelectFeatures(features) => features.contains(&key_name),
+                    _ => false,
+                };
             let value = if selected {
                 self.conditional_form(start)?
             } else {

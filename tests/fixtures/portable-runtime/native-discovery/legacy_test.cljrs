@@ -1,0 +1,6 @@
+#?(:rust (ns discovery.legacy-test
+           (:require [clojure.test :refer [deftest is]]))
+   :cljrs (ns discovery.later-cljrs-test))
+
+(deftest selects-the-first-native-branch
+  (is (= :legacy #?(:rust :legacy :cljrs :modern))))

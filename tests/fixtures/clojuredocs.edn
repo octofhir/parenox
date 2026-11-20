@@ -1,0 +1,19 @@
+{:clojure.core/map
+ {:ns "clojure.core"
+  :name "map"
+  :type "var"
+  :doc "Map fixture documentation."
+  :arglists ["[f coll]"]
+  :examples ["(map inc [1 2])\n;; (2 3)"]
+  :see-alsos [:clojure.core/mapv]
+  :notes ["Fixture note with Unicode 🧪."]
+  :library-url "https://clojure.org"
+  :line 12
+  :static true}
+ :clojure.core//
+ {:ns "clojure.core"
+  :name "/"
+  :doc "Division fixture documentation."
+  :arglists ["[x y]"]
+  :examples ["(/ 8 2)"]
+  :notes nil}}

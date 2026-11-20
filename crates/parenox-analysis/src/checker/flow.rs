@@ -5,6 +5,7 @@ mod spec_guards;
 pub(super) use selectors::{narrow_literal, refine_owner};
 
 use super::calls::{is_builtin, narrow_emptiness, predicate_type};
+use super::maps::narrow_map_predicate;
 use super::model::DeclaredValue;
 use super::{Checker, Env, Value, nil_part};
 use crate::expand::{self, Threading};
@@ -149,12 +150,14 @@ impl Checker<'_> {
         }
         let start = self.diagnostics.len();
         let enclosing_throws = self.throws.take();
+        let enclosing_reachability = std::mem::replace(&mut self.path_reachable, false);
         let old = self
             .recur_target
             .as_mut()
             .map(|target| std::mem::replace(&mut target.reachable, false));
         let value = check(self);
         self.throws = enclosing_throws;
+        self.path_reachable = enclosing_reachability;
         if let Some((target, old)) = self.recur_target.as_mut().zip(old) {
             target.reachable = old;
         }
@@ -699,8 +702,13 @@ impl Checker<'_> {
                     }
                 });
             }
+            ("clojure.core/map?", [operand])
+                if !self.globals.project_namespaces.contains("clojure.core") =>
+            {
+                self.narrow_subject(operand, env, |ty| narrow_map_predicate(ty, truth));
+            }
             ("clojure.string/blank?", [operand]) if !truth => {
-                self.narrow_subject(operand, env, Type::without_nil);
+                self.narrow_subject(operand, env, Type::truthy);
             }
             ("clojure.spec.alpha/valid?", [spec, operand] | [spec, operand, _]) if truth => {
                 if let Some(projection) = self.validation_projection(spec) {
@@ -761,6 +769,8 @@ pub(super) fn narrow_by_type(actual: &Type, wanted: &Type, truth: bool) -> Type 
             }
         }
         Type::SpecTruthy if truth => wanted.spec_truthy().unwrap_or_else(|| wanted.clone()),
+        Type::SpecValue if truth => wanted.spec_value().unwrap_or_else(|| wanted.clone()),
+        Type::SpecValue if *wanted == Type::Nil => actual.without_nil(),
         actual if truth && let Some(ty) = actual.integer_intersection(wanted) => ty,
         actual if *actual == Type::Unknown || wanted.subtype_of(actual) => {
             if truth {

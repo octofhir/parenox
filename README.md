@@ -33,6 +33,12 @@ in your editor. Both use the same [`parenox.edn` settings](docs/reference.md#for
 `parenox check --allow-incomplete` accepts coverage warnings when adding
 contracts gradually. The report still shows which checks were incomplete.
 
+Evaluate forms with `parenox eval --expr '(+ 1 2)'` and launch an application
+with `parenox run --main my-app.main -- arg`. [Runtime reference](docs/reference.md#jvm-evaluation)
+
+Try the built-in Rust evaluator with `parenox eval --backend parenox --expr '(+ 40 2)'`.
+[Supported forms](docs/reference.md#parenox-evaluation)
+
 Run project tests with `parenox test --alias test --discover` or name a test
 namespace. Parenox uses the standard Clojure CLI and reports local assertion
 locations and a CI exit status. [JVM test reference](docs/reference.md#jvm-tests)

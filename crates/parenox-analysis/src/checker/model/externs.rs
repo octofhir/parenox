@@ -153,7 +153,7 @@ impl Model {
                 }
             } else {
                 model
-                    .parse_signatures(declaration, name_string, globals)
+                    .parse_signatures(declaration, source, name_string, globals)
                     .map(|signatures| {
                         ExternalDeclaration::Function(Contract::new(
                             signatures,

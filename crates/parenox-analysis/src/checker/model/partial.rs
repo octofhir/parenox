@@ -9,6 +9,7 @@ use crate::types::Type;
 const STRING_OPERATORS: &[&str] = &[
     "upper-case",
     "lower-case",
+    "capitalize",
     "trim",
     "blank?",
     "join",
@@ -70,7 +71,14 @@ impl Declarations {
             for clause in clauses.values() {
                 let params = clause.bindings();
                 let args = vec![Value::new(Type::Unknown); params.len()];
-                checker.function_body(&params, clause.body, args, &Env::new(), clause.span);
+                checker.function_body(
+                    &params,
+                    clause.conditions,
+                    clause.body,
+                    args,
+                    &Env::new(),
+                    clause.span,
+                );
             }
             diagnostics.extend(checker.diagnostics.into_iter().filter(|diagnostic| {
                 matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")

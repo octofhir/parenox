@@ -86,6 +86,12 @@ impl Throws {
 }
 
 impl Checker<'_> {
+    pub(in crate::checker) fn assertion_error(&mut self) {
+        if let Some(throws) = &mut self.throws {
+            throws.record(ExceptionClass::AssertionError, Type::Throwable);
+        }
+    }
+
     pub(in crate::checker) fn may_throw(&mut self) {
         if let Some(throws) = &mut self.throws {
             throws.unknown();
@@ -95,6 +101,12 @@ impl Checker<'_> {
     pub(in crate::checker) fn class_cast(&mut self) {
         if let Some(throws) = &mut self.throws {
             throws.record(ExceptionClass::ClassCastException, Type::Throwable);
+        }
+    }
+
+    pub(in crate::checker) fn null_pointer(&mut self) {
+        if let Some(throws) = &mut self.throws {
+            throws.record(ExceptionClass::NullPointerException, Type::Throwable);
         }
     }
 

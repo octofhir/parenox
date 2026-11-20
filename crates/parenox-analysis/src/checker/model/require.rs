@@ -1,4 +1,5 @@
 //! Namespace imports from Clojure ns declarations.
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Declarations, Globals};
@@ -69,6 +70,21 @@ impl Declarations {
             .map(|(_, span)| *span)
     }
 
+    pub(crate) fn namespace_reference_at(&self, offset: usize) -> Option<&str> {
+        let contains = |span: &Span| (span.start.offset..span.end.offset).contains(&offset);
+        self.namespace_usages
+            .iter()
+            .find(|(_, span)| contains(span))
+            .map(|(namespace, _)| namespace.as_str())
+            .or_else(|| {
+                let (alias, _) = self
+                    .namespace_alias_sites
+                    .iter()
+                    .find(|(_, span)| contains(span))?;
+                self.names.aliases.get(alias).map(String::as_str)
+            })
+    }
+
     pub(crate) fn referral_declaration(
         &self,
         namespace: &str,
@@ -135,12 +151,54 @@ impl Declarations {
         globals: Option<&Globals>,
         refer_by_default: bool,
     ) {
-        let (name, options) = if let Some([name, options @ ..]) = lib.vector() {
-            (name, options)
-        } else {
-            (lib, &[][..])
+        let group = match &lib.without_metadata().kind {
+            Kind::List(items) => Some(items),
+            Kind::Vector(items)
+                if items.get(1).is_some_and(|second| {
+                    second.keyword().is_none()
+                        && !matches!(second.without_metadata().kind, Kind::Nil)
+                }) =>
+            {
+                Some(items)
+            }
+            _ => None,
         };
-        let Some(namespace) = name.symbol() else {
+        let Some(group) = group else {
+            self.read_library(lib, None, globals, refer_by_default);
+            return;
+        };
+        let Some((prefix, children)) = group.split_first() else {
+            self.error("PNX9001", lib.span, "Expected a library prefix");
+            return;
+        };
+        let Some(prefix_name) = prefix.symbol().filter(|name| !name.contains('/')) else {
+            self.error(
+                "PNX9001",
+                prefix.span,
+                "Expected an unqualified library prefix",
+            );
+            return;
+        };
+        for child in children {
+            self.read_library(child, Some(prefix_name), globals, refer_by_default);
+        }
+    }
+
+    fn read_library(
+        &mut self,
+        lib: &Form,
+        prefix: Option<&str>,
+        globals: Option<&Globals>,
+        refer_by_default: bool,
+    ) {
+        let (name, options) = match &lib.without_metadata().kind {
+            Kind::Vector(items) | Kind::List(items) if prefix.is_some() => {
+                items.split_first().unwrap_or((lib, &[]))
+            }
+            Kind::Vector(items) => items.split_first().unwrap_or((lib, &[])),
+            _ => (lib, &[][..]),
+        };
+        let Some(namespace) = unqualified(name) else {
             self.error(
                 "PNX9001",
                 name.span,
@@ -148,6 +206,20 @@ impl Declarations {
             );
             return;
         };
+        let full_namespace = if let Some(prefix) = prefix {
+            if namespace.contains('/') || namespace.find('.').is_some_and(|dot| dot > 0) {
+                self.error(
+                    "PNX9001",
+                    name.span,
+                    "Expected an unqualified library name without an embedded period",
+                );
+                return;
+            }
+            Cow::Owned(format!("{prefix}.{namespace}"))
+        } else {
+            Cow::Borrowed(namespace)
+        };
+        let namespace = full_namespace.as_ref();
         let (clause, supported): (&str, &[_]) = if refer_by_default {
             (
                 ":use",
@@ -167,11 +239,21 @@ impl Declarations {
         let alias_only =
             !refer_by_default && options.contains_key(":as-alias") && !options.contains_key(":as");
         if !alias_only {
-            self.dependencies.push(namespace.to_owned());
+            self.names.required_libraries.insert(namespace.to_owned());
         }
         for key in [":as", ":as-alias"] {
             if let Some(form) = options.get(key) {
-                if let Some(alias) = form.symbol() {
+                if let Some(alias) = unqualified(form) {
+                    if let Some(previous) = self.names.aliases.get(alias)
+                        && previous != namespace
+                    {
+                        self.error(
+                            "PNX2790",
+                            form.span,
+                            format!("Namespace alias {alias} already refers to {previous}"),
+                        );
+                        continue;
+                    }
                     self.names
                         .aliases
                         .insert(alias.to_owned(), namespace.to_owned());
@@ -422,7 +504,7 @@ impl Declarations {
         forms
             .iter()
             .filter_map(|form| {
-                if let Some(name) = form.symbol() {
+                if let Some(name) = unqualified(form) {
                     Some((name, form))
                 } else {
                     self.error("PNX9001", form.span, format!("{option} expects a symbol"));
@@ -438,7 +520,7 @@ fn unqualified(form: &Form) -> Option<&str> {
         .filter(|name| !name.contains('/') || *name == "/")
 }
 
-fn known_core_var(name: &str) -> bool {
+pub(super) fn known_core_var(name: &str) -> bool {
     is_builtin(&format!("clojure.core/{name}"))
         || matches!(
             name,

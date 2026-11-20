@@ -46,6 +46,8 @@ fn run() -> Result<u8, String> {
                 CheckMode::Strict
             },
         ),
+        Some(Command::Eval(options)) => runtime::eval(options),
+        Some(Command::Run(options)) => runtime::run(options),
         Some(Command::Test(options)) => runtime::run_tests(options),
         Some(Command::Nrepl(options)) => nrepl::run(options),
         Some(Command::Definition(options)) => definition(options),

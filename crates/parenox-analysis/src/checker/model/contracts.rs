@@ -2,31 +2,36 @@
 use std::collections::BTreeMap;
 
 pub(super) fn function_parts(tail: &[Form]) -> (&[Form], impl Iterator<Item = &[Form; 2]> + Clone) {
+    let (arms, maps) = function_parts_with_attributes(tail);
+    (arms, attributes(maps))
+}
+
+fn function_parts_with_attributes(tail: &[Form]) -> (&[Form], [Option<&Form>; 2]) {
     let tail = if tail.first().is_some_and(Form::is_string) {
         &tail[1..]
     } else {
         tail
     };
-    let (attrs, arms) = match tail.split_first() {
-        Some((first, rest)) if first.map().is_some() => (first.map().unwrap(), rest),
-        _ => (&[][..], tail),
+    let (leading, arms) = match tail.split_first() {
+        Some((first, rest)) if first.map().is_some() => (Some(first), rest),
+        _ => (None, tail),
     };
     let (trailing, arms) = match arms.split_last() {
         Some((last, rest))
             if arms.first().and_then(Form::vector).is_none() && last.map().is_some() =>
         {
-            (last.map().unwrap(), rest)
+            (Some(last), rest)
         }
-        _ => (&[][..], arms),
+        _ => (None, arms),
     };
-    (
-        arms,
-        trailing
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .chain(attrs.as_chunks::<2>().0),
-    )
+    (arms, [trailing, leading])
+}
+
+fn attributes(maps: [Option<&Form>; 2]) -> impl Iterator<Item = &[Form; 2]> + Clone {
+    maps.into_iter()
+        .flatten()
+        .filter_map(Form::map)
+        .flat_map(|entries| entries.as_chunks::<2>().0)
 }
 use std::sync::Arc;
 
@@ -43,13 +48,16 @@ impl Model {
     fn contract_type(
         &mut self,
         form: &Form,
+        source: &str,
         parameters: Option<&Parameters>,
         globals: &Globals,
     ) -> Type {
         read_type_with_parameters(
             &self.names,
             form,
+            source,
             parameters,
+            Some(&globals.spec_unchecked_inputs),
             &mut self.diagnostics,
             |key, _| track_spec(&mut self.external_specs, globals, key),
         )
@@ -57,13 +65,17 @@ impl Model {
 
     pub(super) fn read_function<'a>(
         &mut self,
-        xs: &'a [Form],
-        span: Span,
+        form: &'a Form,
+        source: &str,
         globals: &Globals,
         fdefs: &mut BTreeMap<String, &[Form]>,
         guards: &mut BTreeMap<String, &'a Form>,
         source_arities_known: bool,
     ) {
+        let Kind::List(xs) = &form.without_metadata().kind else {
+            unreachable!()
+        };
+        let span = form.span;
         let Some(symbol) = xs.get(1).and_then(Form::symbol) else {
             self.error("PNX9001", span, "defn requires a function name");
             return;
@@ -76,7 +88,8 @@ impl Model {
             self.error("PNX2790", xs[1].span, format!("Duplicate var {name}"));
             return;
         }
-        let (arms, attrs) = function_parts(&xs[2..]);
+        let (arms, attr_maps) = function_parts_with_attributes(&xs[2..]);
+        let attrs = attributes(attr_maps);
         let attribute = |key| {
             attrs
                 .clone()
@@ -153,6 +166,22 @@ impl Model {
             self.error("PNX9002", span, message);
             return;
         }
+        let data_body_eligible = inferred
+            && private
+            && source_arities_known
+            && !opaque_callable()
+            && metadata(":tag").is_none()
+            && matches!(form.kind, Kind::List(_))
+            && matches!(xs[0].kind, Kind::Symbol(_))
+            && self.inert_function_metadata(&xs[1], attr_maps)
+            && arms
+                .first()
+                .is_some_and(|arm| matches!(arm.kind, Kind::Vector(_) | Kind::List(_)))
+            && clauses.values().all(|clause| {
+                clause.conditions.pre.is_empty()
+                    && clause.conditions.post.is_none()
+                    && matches!(clause.parameter_vector.kind, Kind::Vector(_))
+            });
         let arities: BTreeMap<_, _> = clauses
             .into_iter()
             .map(|(count, clause)| {
@@ -160,6 +189,8 @@ impl Model {
                     count,
                     FunctionArity {
                         params: clause.bindings().into_owned(),
+                        preconditions: clause.conditions.pre.to_vec(),
+                        postconditions: clause.conditions.post.map(<[Form]>::to_vec),
                         body: clause.body.to_vec(),
                         span: clause.span,
                     },
@@ -170,7 +201,7 @@ impl Model {
             if !matches!(signature.without_metadata().kind, Kind::Quote(_)) {
                 self.error("PNX9001", signature.span, ":t/sig must be quoted data");
             }
-            let Some(signatures) = self.parse_signatures(signature, &name, globals) else {
+            let Some(signatures) = self.parse_signatures(signature, source, &name, globals) else {
                 return;
             };
             Some((signatures, signature.span, ContractKind::TSig))
@@ -178,7 +209,7 @@ impl Model {
             None
         };
         let spec_signature = if let Some(fdef) = fdef {
-            let Some(spec_signatures) = self.parse_fdef(fdef, globals) else {
+            let Some(spec_signatures) = self.parse_fdef(fdef, source, globals) else {
                 let arities = (source_arities_known && !opaque_callable())
                     .then(|| arities.keys().copied().collect());
                 self.remember_unchecked_function(
@@ -224,6 +255,7 @@ impl Model {
             private,
             arities,
             contract,
+            data_body_eligible,
             span,
         };
         if let Some(guard) = guard {
@@ -283,6 +315,7 @@ impl Model {
     pub(super) fn parse_signatures(
         &mut self,
         form: &Form,
+        source: &str,
         owner: &str,
         globals: &Globals,
     ) -> Option<Vec<Signature>> {
@@ -290,7 +323,7 @@ impl Model {
             && items.first().and_then(Form::symbol) == Some("t/all")
         {
             return self
-                .parse_generic_signature(items, form.span, owner, globals)
+                .parse_generic_signature(items, form.span, source, owner, globals)
                 .map(|signature| vec![signature]);
         }
         let types = match &form.unquoted().without_metadata().kind {
@@ -301,12 +334,12 @@ impl Model {
             types.filter(|arms| !arms.is_empty() && arms.iter().all(|arm| arm.vector().is_some()))
         else {
             return self
-                .parse_signature(form, None, globals)
+                .parse_signature(form, source, None, globals)
                 .map(|signature| vec![signature]);
         };
         let mut signatures = BTreeMap::new();
         for arm in arms {
-            let signature = self.parse_signature(arm, None, globals)?;
+            let signature = self.parse_signature(arm, source, None, globals)?;
             let count = signature.arity();
             if signatures.insert(count, signature).is_some() {
                 self.error(
@@ -329,6 +362,7 @@ impl Model {
         &mut self,
         forms: &[Form],
         span: Span,
+        source: &str,
         owner: &str,
         globals: &Globals,
     ) -> Option<Signature> {
@@ -353,7 +387,7 @@ impl Model {
         };
         let mut parameters: Vec<Arc<Parameter>> = Vec::with_capacity(binders.len());
         for form in binders {
-            let parameter = self.parse_type_parameter(form, owner, globals)?;
+            let parameter = self.parse_type_parameter(form, source, owner, globals)?;
             if parameters
                 .iter()
                 .any(|previous| previous.name == parameter.name)
@@ -371,7 +405,7 @@ impl Model {
             binders: parameters.into_boxed_slice(),
             output: None,
         });
-        let mut signature = self.parse_signature(signature, Some(parameters), globals)?;
+        let mut signature = self.parse_signature(signature, source, Some(parameters), globals)?;
         if signature.rest.is_some() {
             self.error("PNX9001", span, "t/all requires fixed arity");
             return None;
@@ -437,6 +471,7 @@ impl Model {
     fn parse_type_parameter(
         &mut self,
         binder: &Form,
+        source: &str,
         owner: &str,
         globals: &Globals,
     ) -> Option<Arc<Parameter>> {
@@ -474,7 +509,7 @@ impl Model {
                 );
                 return None;
             }
-            let ty = self.contract_type(form, None, globals);
+            let ty = self.contract_type(form, source, None, globals);
             match ty {
                 Type::Number
                 | Type::String
@@ -505,6 +540,7 @@ impl Model {
     fn parse_signature(
         &mut self,
         form: &Form,
+        source: &str,
         parameters: Option<Arc<Parameters>>,
         globals: &Globals,
     ) -> Option<Signature> {
@@ -538,10 +574,16 @@ impl Model {
         }
         let args = args
             .iter()
-            .map(|t| self.contract_type(t, parameters.as_deref(), globals))
+            .map(|t| self.contract_type(t, source, parameters.as_deref(), globals))
             .collect();
-        let ret = self.contract_type(types.last().unwrap(), parameters.as_deref(), globals);
-        let rest = rest.map(|form| self.contract_type(form, parameters.as_deref(), globals));
+        let ret = self.contract_type(
+            types.last().unwrap(),
+            source,
+            parameters.as_deref(),
+            globals,
+        );
+        let rest =
+            rest.map(|form| self.contract_type(form, source, parameters.as_deref(), globals));
         Some(Signature {
             args,
             rest,
@@ -552,13 +594,13 @@ impl Model {
 }
 
 pub(super) fn track_spec(
-    dependencies: &mut BTreeMap<String, Option<Type>>,
+    dependencies: &mut BTreeMap<String, (Option<Type>, bool)>,
     globals: &Globals,
     key: &str,
 ) -> Option<Type> {
     let ty = globals.specs.get(key);
     dependencies
         .entry(key.to_owned())
-        .or_insert_with(|| ty.cloned());
+        .or_insert_with(|| (ty.cloned(), globals.spec_unchecked_inputs.contains(key)));
     ty.cloned()
 }

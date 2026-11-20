@@ -19,3 +19,19 @@
   (let [state (atom {:seen #{}})]
     (swap! state update :seen conj :ready)
     (is (= {:seen #{:ready}} @state))))
+
+(def ^:dynamic *multiplier* 1)
+
+(defmacro scaled [value]
+  `(* *multiplier* ~value))
+
+(deftest macros-are-evaluated-with-the-current-binding
+  (is (= 12 (binding [*multiplier* 3] (scaled 4))))
+  (is (= 4 (scaled 4))))
+
+(deftest handles-exception-data
+  (is (= {:code :failure}
+         (try
+           (throw (ex-info "portable exception" {:code :failure}))
+           #?(:clj (catch clojure.lang.ExceptionInfo error (ex-data error))
+              :cljrs (catch Exception error (ex-data error)))))))

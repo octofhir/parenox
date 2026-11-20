@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use parenox::{ProjectReport, Session, Source};
+use parenox::{ProjectReport, Session, Source, VarInfo};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -323,6 +323,16 @@ struct CheckResponse<T> {
 }
 
 #[derive(Serialize)]
+struct HoverResponse {
+    #[serde(flatten)]
+    info: VarInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    arglists: Vec<String>,
+}
+
+#[derive(Serialize)]
 struct ErrorResponse {
     id: Value,
     error: RequestError,
@@ -413,7 +423,14 @@ fn write_tracked(
             Some(project) => write_check(
                 output,
                 request.id,
-                project.session.var_at(&request.path, request.offset),
+                project
+                    .session
+                    .hover_at(&request.path, request.offset)
+                    .map(|hover| HoverResponse {
+                        info: hover.info,
+                        documentation: hover.documentation,
+                        arglists: hover.arglists,
+                    }),
             ),
             None => write_error(
                 output,

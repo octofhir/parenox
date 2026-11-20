@@ -1,0 +1,13 @@
+{:paths ["base" :shared "missing" "base"]
+ :deps {org.clojure/clojure {:mvn/version "1.13.0-alpha11"}}
+ :aliases
+ {:shared [:common "common-tail"]
+  :common ["shared"]
+  :first {:extra-paths ["first" :shared]}
+  :second {:extra-paths ["second" "first"]}
+  :replace {:replace-paths ["replacement" "shared"]}
+  :legacy {:paths ["legacy"]}
+  :inert {:extra-paths ["first"]
+          :extra-deps {dev.parenox/unresolvable {:local/root "definitely-missing"}}
+          :jvm-opts ["-Dtest.marker=not-native"]
+          :main-opts ["-e" "(throw (Exception. \"JVM main options active\"))"]}}}

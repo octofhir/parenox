@@ -52,7 +52,7 @@ fn points_at_elements_and_callback_bodies_without_suggesting_collection_replacem
             .is_some_and(|help| help.contains("elements"))
     );
     assert_eq!(fragment(inline), "name");
-    assert_eq!(inline.expected.as_deref(), Some("String"));
+    assert_eq!(inline.expected.as_deref(), Some("Non-nil value"));
     assert_eq!(inline.suggestions[0].replacement, r#"(or name "")"#);
 }
 

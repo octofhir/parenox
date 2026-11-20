@@ -1,11 +1,20 @@
 //! Facts from a successful named spec check. A projection need not capture every
 //! runtime constraint; it cannot prove success or characterize the false branch.
+mod conform;
+
 use crate::Diagnostic;
-use crate::checker::{Checker, Env, Value, calls::call_returns, model::SpecConversion};
+use crate::checker::{
+    Checker, Env, Value,
+    calls::{call_returns, iteration_may_throw},
+    model::{SpecConversion, SpecProvider},
+};
 use crate::reader::{Form, Span};
 use crate::types::{
-    Compatibility, ExtraFields, Field, IntegerRange, IntegerType, MapSlot, SPEC_INVALID, Type,
+    Compatibility, ExtraFields, Field, IntegerRange, IntegerType, MapSlot, MapType, SPEC_INVALID,
+    Type,
 };
+
+const SPEC_LOAD_GAP: &str = "Cannot prove the named spec and its registrations are loaded";
 
 #[derive(Clone, Copy)]
 enum SpecOperation {
@@ -55,6 +64,11 @@ impl Checker<'_> {
         env: &Env,
     ) -> Option<Value> {
         let op = self.spec_operation(name)?;
+        if let [spec, input] = args
+            && let Some(value) = self.conform_set_literal(spec, input, op, env)
+        {
+            return Some(value);
+        }
         let values: Vec<_> = self.eval_args(args, env, true).collect();
         let returns = call_returns(&values);
         // Clojure's Specize implementation for Keyword ignores the optional
@@ -87,16 +101,28 @@ impl Checker<'_> {
         let key = spec
             .keyword()
             .and_then(|key| self.model.validation_key(key));
+        let loaded = key
+            .as_deref()
+            .is_none_or(|key| self.spec_load_is_known(key));
         let (ty, conversion) = key
             .as_deref()
             .map(|key| self.read_spec(key))
             .unwrap_or_default();
-        if let Some(conversion) = conversion {
-            return Some(Value::new(self.convert_spec(
-                &values[1].0.known,
-                &conversion,
-                op,
-            )));
+        if !loaded {
+            return Some(self.unchecked_form(spec.span, SPEC_LOAD_GAP));
+        }
+        if let Some(conversion) = conversion.filter(|conversion| {
+            matches!(op, SpecOperation::Conform)
+                || !matches!(
+                    conversion,
+                    SpecConversion::String | SpecConversion::Structured(_)
+                )
+        }) {
+            let result = self.convert_spec(&values[1].0.known, &conversion, op);
+            return Some(match result {
+                Ok(ty) => Value::new(ty),
+                Err(reason) => self.unchecked_form(spec.span, reason),
+            });
         }
         if let SpecOperation::Conform = op {
             return Some(self.unchecked_form(
@@ -125,31 +151,119 @@ impl Checker<'_> {
         input: &Type,
         conversion: &SpecConversion,
         op: SpecOperation,
-    ) -> Type {
+    ) -> Result<Type, &'static str> {
         match input {
-            Type::Never => Type::Never,
-            Type::Union(members) => Type::union(
-                members
+            Type::Never => Ok(Type::Never),
+            Type::Union(members) => {
+                let outcomes = members
                     .iter()
-                    .map(|ty| self.convert_spec(ty, conversion, op)),
-            ),
-            Type::Parameter(parameter) if !matches!(conversion, SpecConversion::Identity) => self
-                .convert_spec(
+                    .map(|ty| self.convert_spec(ty, conversion, op))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Type::union(outcomes))
+            }
+            Type::Parameter(parameter)
+                if !matches!(conversion, SpecConversion::Identity | SpecConversion::Any) =>
+            {
+                self.convert_spec(
                     parameter.upper.as_ref().unwrap_or(&Type::Unknown),
                     conversion,
                     op,
-                ),
-            ty => match conversion {
+                )
+            }
+            ty => Ok(match conversion {
                 SpecConversion::CheckedInt32 => self.convert_int32(ty, op),
-                SpecConversion::Identity => match ty.compatibility(&Type::SpecTruthy) {
-                    Compatibility::Proven => op.success(ty.clone()),
-                    Compatibility::Mismatch => op.invalid(),
-                    Compatibility::Unproven => {
-                        Type::union([op.success(refine(ty, &Type::SpecTruthy)), op.invalid()])
+                SpecConversion::Name => {
+                    let result = self.name_result(ty);
+                    if result == Type::Never {
+                        Type::Never
+                    } else {
+                        op.success(result)
                     }
-                },
-                SpecConversion::IntEnum(entries) => convert_enum(ty, entries, op),
-            },
+                }
+                SpecConversion::Identity
+                | SpecConversion::IdentityDomain(_)
+                | SpecConversion::Any
+                | SpecConversion::String
+                | SpecConversion::Keyword => {
+                    let accepted = conversion.success_input();
+                    match ty.compatibility(&accepted) {
+                        Compatibility::Proven => op.success(ty.clone()),
+                        Compatibility::Mismatch
+                            if matches!(conversion, SpecConversion::IdentityDomain(_))
+                                && let Some(overlap) = ty.known_intersection(&accepted)
+                                && overlap != Type::Never =>
+                        {
+                            // A general string can pass a finite set predicate
+                            // without meeting a contract for a particular literal.
+                            Type::union([op.success(overlap), op.invalid()])
+                        }
+                        Compatibility::Mismatch => op.invalid(),
+                        Compatibility::Unproven => {
+                            Type::union([op.success(refine(ty, &accepted)), op.invalid()])
+                        }
+                    }
+                }
+                SpecConversion::AnyCollection => self.convert_collection(ty, op),
+                SpecConversion::Enum { entries, .. } => convert_enum(ty, entries, op),
+                SpecConversion::TaggedChoice(branches) => {
+                    return self.conform_choice(
+                        ty,
+                        branches.iter().map(|branch| (None, branch)),
+                        op,
+                    );
+                }
+                SpecConversion::TaggedOr(branches) => {
+                    return self.conform_choice(
+                        ty,
+                        branches
+                            .iter()
+                            .map(|(tag, branch)| (Some(tag.as_str()), branch)),
+                        op,
+                    );
+                }
+                SpecConversion::ProjectedCollection(element) => {
+                    return self.conform_projected_collection(ty, element, op);
+                }
+                SpecConversion::StringKeyedMap(values) => {
+                    return self.conform_string_keyed_map(ty, values, op);
+                }
+                SpecConversion::Structured(spec) => {
+                    return self.conform_structure(ty, spec);
+                }
+            }),
+        }
+    }
+
+    fn convert_collection(&mut self, input: &Type, op: SpecOperation) -> Type {
+        if iteration_may_throw(input) || matches!(input, Type::SpecValue | Type::SpecTruthy) {
+            self.may_throw();
+        }
+        let expected = SpecConversion::AnyCollection.success_input();
+        let compatibility = input.compatibility(&expected);
+        if compatibility == Compatibility::Mismatch && !may_pass_collection(input) {
+            return op.invalid();
+        }
+        // With no :kind, spec can build a persistent list from a queue or
+        // another seqable collection. Only retain a shape known to survive.
+        let success = if compatibility == Compatibility::Proven
+            && matches!(
+                input,
+                Type::Map(_)
+                    | Type::MapEntry(_)
+                    | Type::Vector(_)
+                    | Type::Tuple(_)
+                    | Type::Set(_)
+                    | Type::List(_)
+                    | Type::ListTuple(_)
+            ) {
+            input.clone()
+        } else {
+            expected
+        };
+        if compatibility == Compatibility::Proven {
+            op.success(success)
+        } else {
+            Type::union([op.success(success), op.invalid()])
         }
     }
 
@@ -157,7 +271,7 @@ impl Checker<'_> {
         let output = Type::Integral(IntegerType::FIXED_INT32);
         match input {
             Type::Integral(IntegerType {
-                range: IntegerRange::OutsideInt32,
+                range: IntegerRange::ExactLong(_) | IntegerRange::OutsideInt32,
                 ..
             }) => {
                 self.arithmetic_exception();
@@ -173,10 +287,7 @@ impl Checker<'_> {
             ty if ty.subtype_of(&Type::Integral(IntegerType::INT32)) => {
                 // Conversion changes the JVM number class, not the numeric
                 // value. Keep a proven in-range literal when available.
-                op.success(match ty {
-                    Type::Integer(_) => ty.clone(),
-                    _ => output,
-                })
+                op.success(ty.exact_integer_value().map_or(output, Type::Integer))
             }
             ty => match ty.compatibility(&Type::Integral(IntegerType::ANY)) {
                 Compatibility::Mismatch => op.invalid(),
@@ -196,16 +307,34 @@ impl Checker<'_> {
 
     pub(super) fn validation_projection(&self, form: &Form) -> Option<&Type> {
         let key = self.model.validation_key(form.keyword()?)?;
+        if !self.spec_load_is_known(&key) {
+            return None;
+        }
         self.globals.spec(&key).filter(|ty| usable(ty))
+    }
+
+    fn spec_load_is_known(&self, key: &str) -> bool {
+        match self.globals.spec_provider(key).map(std::sync::Arc::as_ref) {
+            Some(provider @ SpecProvider::LoadChecked { .. }) => self.model.loads_spec(provider),
+            _ => true,
+        }
     }
 }
 
-fn convert_enum(input: &Type, entries: &[(i32, String)], op: SpecOperation) -> Type {
+fn convert_enum(input: &Type, entries: &[(Type, Type)], op: SpecOperation) -> Type {
     let mut outcomes = vec![op.invalid()];
     for (key, value) in entries {
-        match input.compatibility(&Type::Integer(*key)) {
-            Compatibility::Proven => return op.success(Type::Key(value.clone())),
-            Compatibility::Unproven => outcomes.push(op.success(Type::Key(value.clone()))),
+        match input.compatibility(key) {
+            Compatibility::Proven => return op.success(value.clone()),
+            Compatibility::Unproven => outcomes.push(op.success(value.clone())),
+            Compatibility::Mismatch
+                if matches!(input, Type::Keyword | Type::SpecKeyword)
+                    && matches!(key, Type::Key(_)) =>
+            {
+                // A general keyword does not meet a literal contract, but it
+                // can still be one of the keys when the enum runs.
+                outcomes.push(op.success(value.clone()));
+            }
             Compatibility::Mismatch => {}
         }
     }
@@ -215,6 +344,7 @@ fn convert_enum(input: &Type, entries: &[(i32, String)], op: SpecOperation) -> T
 fn usable(ty: &Type) -> bool {
     match ty {
         Type::Never
+        | Type::SpecValue
         | Type::SpecTruthy
         | Type::Nil
         | Type::Boolean
@@ -227,14 +357,42 @@ fn usable(ty: &Type) -> bool {
         | Type::Character
         | Type::Char(_)
         | Type::Keyword
+        | Type::SpecKeyword
         | Type::Key(_)
         | Type::Symbol
         | Type::SimpleSymbol
         | Type::QualifiedSymbol => true,
+        Type::SpecCollection(element) => usable(element),
         Type::Union(parts) => parts.iter().all(usable),
         Type::Map(map) => {
-            map.extra == ExtraFields::Open && map.fields.values().all(|field| usable(&field.ty))
+            map.extra == ExtraFields::Open
+                && map
+                    .fields
+                    .values()
+                    .all(|field| field.value_constraint().is_none_or(usable))
         }
+        _ => false,
+    }
+}
+
+fn may_pass_collection(ty: &Type) -> bool {
+    fn always_invalid(ty: &Type) -> bool {
+        match ty {
+            Type::Key(key) => key == SPEC_INVALID,
+            Type::Union(items) => items.iter().all(always_invalid),
+            _ => false,
+        }
+    }
+
+    match ty {
+        // A homogeneous vector or set may be empty even if its possible
+        // element types include the sentinel.
+        Type::Vector(_) | Type::Set(_) => true,
+        Type::Seq(item) | Type::List(item) => !always_invalid(item),
+        Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => {
+            !items.iter().any(always_invalid)
+        }
+        Type::MapEntry(items) => !items.iter().any(always_invalid),
         _ => false,
     }
 }
@@ -246,17 +404,32 @@ pub(super) fn refine(actual: &Type, projection: &Type) -> Type {
     if *projection == Type::SpecTruthy {
         return actual.spec_truthy().unwrap_or(Type::SpecTruthy);
     }
+    if *projection == Type::SpecValue {
+        return actual.spec_value().unwrap_or(Type::SpecValue);
+    }
     if *actual == Type::SpecTruthy {
         return projection
             .spec_truthy()
+            .unwrap_or_else(|| projection.clone());
+    }
+    if *actual == Type::SpecValue {
+        return projection
+            .spec_value()
             .unwrap_or_else(|| projection.clone());
     }
     if let Some(intersection) = actual.integer_intersection(projection) {
         return intersection;
     }
     match (actual, projection) {
+        (Type::Key(key), Type::SpecKeyword) if key == SPEC_INVALID => Type::Never,
         (Type::Union(variants), projection) => {
             Type::union(variants.iter().map(|actual| refine(actual, projection)))
+        }
+        (Type::Key(_), Type::Key(_)) => Type::Never,
+        (Type::Key(_), Type::Union(members))
+            if members.iter().all(|ty| matches!(ty, Type::Key(_))) =>
+        {
+            Type::Never
         }
         (_, Type::Union(members)) if members.iter().all(|ty| matches!(ty, Type::Integer(_))) => {
             Type::union(
@@ -266,12 +439,37 @@ pub(super) fn refine(actual: &Type, projection: &Type) -> Type {
                     .cloned(),
             )
         }
+        (Type::Map(_), Type::Union(parts))
+            if let [Type::String, map @ Type::Map(_)] | [map @ Type::Map(_), Type::String] =
+                parts.as_slice() =>
+        {
+            refine(actual, map)
+        }
+        (Type::Map(actual_map), Type::Union(parts))
+            if let [Type::SpecCollection(element), map @ Type::Map(_)]
+            | [map @ Type::Map(_), Type::SpecCollection(element)] = parts.as_slice()
+                && element.excludes_map_entry() =>
+        {
+            match actual_map.emptiness() {
+                Some(true) => actual.clone(),
+                Some(false) => refine(actual, map),
+                None => Type::union([
+                    Type::Map(MapType::dictionary(Type::Never, Type::Never)),
+                    refine(actual, map),
+                ]),
+            }
+        }
+        (_, Type::Union(_)) if let Some(overlap) = actual.known_intersection(projection) => overlap,
         (Type::Map(actual), Type::Map(projection)) => {
             let mut shape = actual.clone();
             for (key, field) in &projection.fields {
+                let constraint = field.value_constraint();
+                let value = |current: &Type| {
+                    constraint.map_or_else(|| current.clone(), |ty| refine(current, ty))
+                };
                 let (ty, required) = match actual.slot(key) {
-                    MapSlot::Present(current) => (refine(current, &field.ty), true),
-                    MapSlot::Optional(current) => (refine(current, &field.ty), field.required),
+                    MapSlot::Present(current) => (value(current), true),
+                    MapSlot::Optional(current) => (value(current), field.required),
                     MapSlot::Absent if field.required => return Type::Never,
                     MapSlot::Absent => continue,
                     MapSlot::Undeclared => (field.ty.clone(), field.required),
@@ -279,7 +477,12 @@ pub(super) fn refine(actual: &Type, projection: &Type) -> Type {
                 if required && ty == Type::Never {
                     return Type::Never;
                 }
-                shape.set_field(key.clone(), Field::new(ty, required));
+                let field = if constraint.is_none() && ty == Type::Unknown {
+                    Field::presence_only(required)
+                } else {
+                    Field::new(ty, required)
+                };
+                shape.set_field(key.clone(), field);
             }
             Type::Map(shape)
         }

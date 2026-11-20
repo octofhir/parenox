@@ -2,8 +2,10 @@
 
 - Use Rust for implementation, developer tools and performance scenarios. Do not add Python.
 - Use `justfile` for common commands and Clojure/EDN for language fixtures and contracts.
-- Keep the workspace split by responsibility. Put the reader and CST in `parenox-frontend`, checking and project sessions in `parenox-analysis`, formatting in `parenox-formatter`, and editor protocol and language features in `parenox-lsp`. Keep CLI entry points and disk project wiring in `parenox`.
+- Keep the workspace split by responsibility. Put the reader and CST in `parenox-frontend`, checking and project sessions in `parenox-analysis`, formatting in `parenox-formatter`, local dependency archives in `parenox-classpath`, and editor protocol and language features in `parenox-lsp`. Keep CLI entry points and disk project wiring in `parenox`.
+- Keep type representations, compatibility and specialization in `parenox-types`.
 - Organize checker code by responsibility. Extend its existing model, binding, flow, call or map modules as appropriate.
+- Keep JVM and native runtime invocations in `parenox-runtime` and CLI process management and disk test discovery in `parenox`.
 - Prefer small, maintainable code and few dependencies. Measure performance changes.
 - Add tests for meaningful behavior and regressions; avoid tests that mirror implementation.
 - Target Clojure 1.13 semantics; pin the JVM reference in deps.edn and report unsupported features explicitly.

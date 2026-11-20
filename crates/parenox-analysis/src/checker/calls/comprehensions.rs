@@ -207,7 +207,7 @@ impl Checker<'_> {
             Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
                 self.comprehension_seq(upper, span, name)
             }
-            Type::Unknown | Type::Parameter(_) => {
+            Type::Unknown | Type::SpecValue | Type::SpecTruthy | Type::Parameter(_) => {
                 self.error(
                     "PNX9004",
                     span,

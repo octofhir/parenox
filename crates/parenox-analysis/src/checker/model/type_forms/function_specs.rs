@@ -11,13 +11,17 @@ pub(in crate::checker::model) fn read_function_spec(
     names: &Names,
     options: &[Form],
     span: Span,
+    source: &str,
+    unchecked_inputs: Option<&BTreeSet<String>>,
     diagnostics: &mut Vec<Diagnostic>,
     lookup: impl FnMut(&str, Span) -> Option<Type>,
 ) -> Option<Vec<Signature>> {
     TypeReader {
         names,
+        source,
         parameters: None,
         literal_shapes: false,
+        unchecked_inputs,
         diagnostics,
         lookup,
     }

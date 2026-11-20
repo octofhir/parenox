@@ -7,14 +7,7 @@ fn resolves_clojure_test_refer_all_and_renamed_test_macros() {
         (scenario finds-a-label (is (= "label" "label")))
     "#;
     let report = Session::default().check("app_test.clj", source);
-    assert!(!report.complete);
-    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
-    let gap = &report.diagnostics[0];
-    assert_eq!(gap.severity, "warning");
-    assert!(
-        gap.message
-            .contains("Type checking for scenario declarations")
-    );
+    assert!(report.ok && report.complete, "{report:#?}");
 
     let excluded = source.replace(":rename {deftest scenario}", ":exclude [deftest]");
     let excluded = excluded.replace("(scenario ", "(deftest ");
@@ -36,11 +29,7 @@ fn legacy_use_supports_bare_namespaces_and_renamed_explicit_referrals() {
       (defn text {:t/sig '[:-> string?]} [] (caption))
       (deftest output (is (= "ready" (text))))"#;
     let report = check(&mut Session::default(), LIBRARY, app);
-    let [gap] = report.files[0].diagnostics.as_slice() else {
-        panic!("{report:#?}");
-    };
-    assert_eq!(gap.severity, "warning");
-    assert!(gap.message.contains("deftest"));
+    assert!(report.ok && report.complete, "{report:#?}");
 }
 
 const LIBRARY: &str = include_str!("../examples/all_refers/library.clj");

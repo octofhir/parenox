@@ -27,9 +27,7 @@ impl Model {
         if claims.is_empty() {
             return;
         }
-        let core_in_project = globals.project_namespaces.contains("clojure.core");
-        self.guard_core_in_project = Some(core_in_project);
-        if core_in_project {
+        if self.check_project_core(globals) {
             self.diagnostics.extend(claims.values().map(|claim| {
                 Diagnostic::new(
                     "PNX9008",
@@ -115,6 +113,11 @@ fn prove(
         ));
     }
     let arm = &function.arities[&signature.arity()];
+    if !arm.preconditions.is_empty() || arm.postconditions.is_some() {
+        return Err(invalid(
+            ":t/guard verification requires an arity without preconditions or postconditions",
+        ));
+    }
     let mut names = BTreeSet::new();
     let params: Vec<_> = arm
         .params

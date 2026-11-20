@@ -1,10 +1,23 @@
 //! Source outline from declarations the analyzer has recognized.
 use crate::project::{SourceSymbol, SourceSymbolKind};
-use crate::reader::{Form, Kind};
+use crate::reader::{Form, Kind, Span};
 
 use super::{Declarations, protocol_methods};
 
 impl Declarations {
+    pub(crate) fn namespace_selection(&self, forms: &[Form]) -> Option<Span> {
+        let end = self.namespace_end?;
+        let index = forms.partition_point(|form| form.span.end.offset < end);
+        let form = forms
+            .get(index)
+            .filter(|form| form.span.end.offset == end)?;
+        let Kind::List(items) = &form.without_metadata().kind else {
+            return None;
+        };
+        let name = items.get(1)?;
+        (name.symbol()? == self.namespace()).then(|| name.without_metadata().span)
+    }
+
     pub(crate) fn outline<'a>(&self, forms: &'a [Form]) -> Vec<SourceSymbol<'a>> {
         use SourceSymbolKind::*;
         let mut symbols = Vec::new();

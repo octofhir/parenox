@@ -1,8 +1,13 @@
 //! Source queries over the current project snapshot.
+mod archive;
 mod call_hierarchy;
 mod completion_docs;
+mod completion_require;
 mod declaration;
+mod hover;
 mod implementations;
+mod java_completion;
+mod namespace_move;
 mod rename;
 mod semantic;
 mod signatures;
@@ -10,14 +15,18 @@ mod specs;
 mod test_tree;
 mod usages;
 
+pub use archive::ArchiveDeclarations;
 pub use call_hierarchy::{CallHierarchyCalls, CallHierarchyItem};
-pub use semantic::{SemanticSymbol, SemanticSymbolKind};
+pub use completion_docs::{SourceExport, namespace_exports};
+use completion_require::LiteralRequireSite;
+pub use hover::{SourceHover, VarDocumentation, namespace_documentation};
+pub use semantic::{InspectedReference, SemanticSymbol, SemanticSymbolKind};
 use serde::Serialize;
 pub use signatures::{CallSignature, CallSignatures};
 pub use test_tree::{SourceTestKind, SourceTestNode};
 
 use crate::ContractOrigin;
-use crate::checker::{Declarations, ProjectCall, ScopedReference};
+use crate::checker::{Declarations, ProjectCall, ScopedReference, java_type_tag_at};
 use crate::reader::{Form, Kind, Span};
 
 use super::{FileCache, Session};
@@ -26,6 +35,13 @@ use super::{FileCache, Session};
 pub struct Definition {
     pub path: String,
     pub span: Span,
+}
+
+pub struct PrivacyDeclaration<'a> {
+    pub operator: &'a Form,
+    pub name: &'a Form,
+    pub attribute: Option<&'a Form>,
+    pub core_name: &'static str,
 }
 
 #[derive(Serialize)]
@@ -46,43 +62,23 @@ struct ResolvedVar<'a> {
 
 type Provider<'a> = (&'a str, &'a FileCache, &'a Declarations, &'a [Form]);
 
-enum SourceTarget<'a> {
-    Local(Span),
-    Var(ResolvedVar<'a>),
-}
-
-impl Session {
-    /// Resolves a source var, local binding or named spec at a UTF-8 byte offset.
-    /// Ambiguous declarations and references outside successfully read forms have no target.
-    pub fn definition(&self, path: &str, offset: usize) -> Option<Definition> {
-        if let Some(spec) = self.spec_definition(path, offset) {
-            return Some(spec);
+impl ResolvedVar<'_> {
+    fn definition(&self) -> Definition {
+        Definition {
+            path: self.path.into(),
+            span: self.span,
         }
-        Some(match self.source_target(path, offset)? {
-            SourceTarget::Var(target) => Definition {
-                path: target.path.into(),
-                span: target.span,
-            },
-            SourceTarget::Local(span) => Definition {
-                path: path.into(),
-                span,
-            },
-        })
     }
 
-    /// Describes a qualified source var and any signature from the checked declaration model.
-    pub fn var_at(&self, path: &str, offset: usize) -> Option<VarInfo> {
-        let SourceTarget::Var(target) = self.source_target(path, offset)? else {
-            return None;
-        };
-        let name = format!("{}/{}", target.namespace, target.name);
-        let contract = target
+    fn info(&self) -> VarInfo {
+        let name = format!("{}/{}", self.namespace, self.name);
+        let contract = self
             .source
             .model
             .as_ref()
             .and_then(|model| model.functions.get(&name))
             .and_then(|function| function.contract.as_ref());
-        Some(VarInfo {
+        VarInfo {
             name,
             signatures: contract.map_or_else(Vec::new, |contract| {
                 contract
@@ -92,25 +88,73 @@ impl Session {
                     .collect()
             }),
             contract: contract.map(|contract| contract.origin.as_ref().clone()),
+        }
+    }
+}
+
+enum SourceTarget<'a> {
+    Local(Span),
+    Var(ResolvedVar<'a>),
+}
+
+impl Session {
+    /// Resolves a source var, local binding, namespace or named spec at a UTF-8 byte offset.
+    /// Ambiguous declarations and references outside successfully read forms have no target.
+    pub fn definition(&self, path: &str, offset: usize) -> Option<Definition> {
+        if let Some(spec) = self.spec_definition(path, offset) {
+            return Some(spec);
+        }
+        if let Some((namespace, name)) = self.literal_require_var_at(path, offset) {
+            return Some(
+                self.resolve_source_var(path, namespace, name, None)?
+                    .definition(),
+            );
+        }
+        Some(match self.source_target(path, offset) {
+            Some(SourceTarget::Var(target)) => target.definition(),
+            Some(SourceTarget::Local(span)) => Definition {
+                path: path.into(),
+                span,
+            },
+            None => {
+                let namespace = self.namespace_reference_at(path, offset)?;
+                let (path, _, provider, forms) = self.navigation_provider(namespace)?;
+                Definition {
+                    path: path.into(),
+                    span: provider.namespace_selection(forms)?,
+                }
+            }
         })
     }
 
-    /// Complete a qualified var from the current source snapshot, using its
-    /// namespace or an alias in the caller's (possibly incomplete) buffer.
+    /// Describes a qualified source var and any signature from the checked declaration model.
+    pub fn var_at(&self, path: &str, offset: usize) -> Option<VarInfo> {
+        let SourceTarget::Var(target) = self.source_target(path, offset)? else {
+            return None;
+        };
+        Some(target.info())
+    }
+
     pub fn complete_qualified_var(&self, path: &str, prefix: &str, limit: usize) -> Vec<String> {
+        self.complete_qualified_var_at(path, prefix, 0, limit)
+    }
+
+    /// Complete a qualified var in the caller's (possibly incomplete) buffer.
+    pub fn complete_qualified_var_at(
+        &self,
+        path: &str,
+        prefix: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Vec<String> {
         let Some((qualifier, prefix)) = prefix.split_once('/').filter(|(ns, _)| !ns.is_empty())
         else {
             return Vec::new();
         };
-        let Some((caller, _)) = self
-            .current_file(path)
-            .and_then(FileCache::navigation_source)
-        else {
+        let Some(namespace) = self.completion_namespace_at(path, qualifier, offset) else {
             return Vec::new();
         };
-        let Some((provider_path, _, provider, forms)) =
-            self.navigation_provider(caller.qualifier(qualifier))
-        else {
+        let Some((provider_path, _, provider, forms)) = self.navigation_provider(namespace) else {
             return Vec::new();
         };
         provider
@@ -167,10 +211,128 @@ impl Session {
             .is_none_or(|(decl, forms)| decl.core_completion_visible(forms, name, offset))
     }
 
+    /// Identify a reference to the standard get or get-in functions in evaluated source.
+    pub fn core_lookup_at(&self, path: &str, offset: usize) -> Option<&str> {
+        if self.has_source_namespace("clojure.core") {
+            return None;
+        }
+        let file = self.current_file(path)?;
+        let (declarations, forms) = file.navigation_source()?;
+        let (spelling, reference) = declarations.evaluated_reference_at(
+            forms,
+            offset,
+            self.has_standard_test(),
+            |namespace, name, arity| self.navigation_call(namespace, name, arity),
+        )?;
+        let (namespace, name) = if let Some((qualifier, name)) = spelling.split_once('/') {
+            (self.completion_namespace_at(path, qualifier, offset)?, name)
+        } else if let Some(target) = self.literal_require_referred_var(path, offset) {
+            target
+        } else {
+            match reference {
+                ScopedReference::Referred(namespace, name) => (namespace, name),
+                ScopedReference::InNamespace(name)
+                    if declarations.hover_core_visible(forms, name, offset) =>
+                {
+                    ("clojure.core", name)
+                }
+                _ => return None,
+            }
+        };
+        (namespace == "clojure.core" && matches!(name, "get" | "get-in")).then_some(name)
+    }
+
+    /// Check whether a refactor can introduce an unqualified core name in this file.
+    /// The caller also checks lexical binders in the enclosing syntax.
+    pub fn refactor_core_visible(&self, path: &str, name: &str, offset: usize) -> bool {
+        !self.has_source_namespace("clojure.core")
+            && self
+                .current_file(path)
+                .and_then(FileCache::navigation_source)
+                .is_some_and(|(declarations, forms)| {
+                    !declarations.has_top_level_require
+                        && declarations.hover_core_visible(forms, name, offset)
+                })
+    }
+
+    /// Look up a local name at the start of an expression whose evaluation is known.
+    pub fn refactor_local_binding_at(&self, path: &str, name: &str, offset: usize) -> Option<bool> {
+        let (declarations, forms) = self.current_file(path)?.navigation_source()?;
+        declarations.lexical_binding_at(
+            forms,
+            offset,
+            name,
+            self.has_standard_test(),
+            |namespace, name, arity| self.navigation_call(namespace, name, arity),
+        )
+    }
+
+    pub fn privacy_declaration_at(
+        &self,
+        path: &str,
+        offset: usize,
+    ) -> Option<PrivacyDeclaration<'_>> {
+        let (declarations, forms) = self.current_file(path)?.navigation_source()?;
+        let form = forms
+            .iter()
+            .find(|form| form.span.start.offset <= offset && offset < form.span.end.offset)?;
+        let Kind::List(items) = &form.without_metadata().kind else {
+            return None;
+        };
+        let [operator, name, tail @ ..] = items.as_slice() else {
+            return None;
+        };
+        if name.symbol()?.contains('/') {
+            return None;
+        }
+        let core_name = declarations.privacy_operator(forms, operator)?;
+        let attribute = if matches!(core_name, "defn" | "defn-") {
+            Declarations::function_privacy_attribute(tail)
+        } else {
+            None
+        };
+        Some(PrivacyDeclaration {
+            operator,
+            name,
+            attribute,
+            core_name,
+        })
+    }
+
     fn current_file(&self, path: &str) -> Option<&FileCache> {
         self.files
             .get(path)
             .filter(|file| file.snapshot == self.snapshot)
+    }
+
+    fn namespace_reference_at(&self, path: &str, offset: usize) -> Option<&str> {
+        let file = self.current_file(path)?;
+        if !file.source.is_char_boundary(offset) {
+            return None;
+        }
+        let (declarations, _) = file.navigation_source()?;
+        declarations.namespace_reference_at(offset).or_else(|| {
+            let LiteralRequireSite::Namespace(namespace) =
+                self.literal_require_site(path, offset)?
+            else {
+                return None;
+            };
+            Some(namespace)
+        })
+    }
+
+    fn literal_require_var_at(&self, path: &str, offset: usize) -> Option<(&str, &str)> {
+        let (declarations, _) = self.current_file(path)?.navigation_source()?;
+        if !declarations.has_top_level_require {
+            return None;
+        }
+        if let Some(LiteralRequireSite::Var(namespace, name)) =
+            self.literal_require_site(path, offset)
+        {
+            return Some((namespace, name));
+        }
+        self.literal_require_qualified_var(path, offset)
+            .or_else(|| self.literal_require_referred_var(path, offset))
     }
 
     fn source_target(&self, path: &str, offset: usize) -> Option<SourceTarget<'_>> {
@@ -278,26 +440,42 @@ impl Session {
 }
 
 fn symbol_at(forms: &[Form], offset: usize) -> Option<&str> {
+    symbol_form_at(forms, offset)?.symbol()
+}
+
+fn symbol_form_at(forms: &[Form], offset: usize) -> Option<&Form> {
+    source_symbol_form_at(forms, offset, false)
+}
+
+fn source_symbol_form_at(forms: &[Form], offset: usize, type_hint: bool) -> Option<&Form> {
     let index = forms.partition_point(|form| form.span.end.offset <= offset);
-    let form = forms.get(index)?.without_metadata();
+    let form = forms.get(index)?;
+    if type_hint && let Some(tag) = java_type_tag_at(form, offset) {
+        return Some(tag);
+    }
+    let form = form.without_metadata();
     if offset < form.span.start.offset || offset >= form.span.end.offset {
         return None;
     }
     match &form.kind {
-        Kind::Symbol(name) => Some(name),
+        Kind::Symbol(_) if !type_hint => Some(form),
         Kind::List(items)
             if !matches!(
                 items.first().and_then(Form::symbol),
                 Some("ns" | "clojure.core/ns" | "quote")
             ) =>
         {
-            symbol_at(items, offset)
+            source_symbol_form_at(items, offset, type_hint)
         }
         Kind::Vector(items)
         | Kind::Map(items)
         | Kind::Set(items)
-        | Kind::AutoNamespacedMap { entries: items, .. } => symbol_at(items, offset),
-        Kind::AnonymousFunction(function) => symbol_at(&function.body, offset),
+        | Kind::AutoNamespacedMap { entries: items, .. } => {
+            source_symbol_form_at(items, offset, type_hint)
+        }
+        Kind::AnonymousFunction(function) => {
+            source_symbol_form_at(&function.body, offset, type_hint)
+        }
         _ => None,
     }
 }

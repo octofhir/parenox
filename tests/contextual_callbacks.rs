@@ -138,7 +138,9 @@ fn externs_can_supply_context_and_edits_recheck_only_consumers() {
     let mut session = Session::default();
     let first = session.check_project(&[app], Some(externs));
     assert!(first.ok && first.complete, "{first:#?}");
-    let bad = externs.source.replace(":x string?", ":x number?");
+    let bad = externs
+        .source
+        .replace(":x string?", ":x (clojure.spec.alpha/nilable string?)");
     let edited = Source {
         source: &bad,
         ..externs
@@ -149,7 +151,7 @@ fn externs_can_supply_context_and_edits_recheck_only_consumers() {
     assert_eq!(after.files[0].diagnostics.len(), 1, "{after:#?}");
     assert_eq!(
         after.files[0].diagnostics[0].actual.as_deref(),
-        Some("Number")
+        Some("Nil | String")
     );
     let cold = Session::default().check_project(&[app], Some(edited));
     assert_eq!(

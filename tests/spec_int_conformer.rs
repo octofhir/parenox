@@ -84,8 +84,9 @@ fn class_unknown_is_unproven_even_with_a_proven_range() {
 
 #[test]
 fn int_predicate_narrows_conditions_without_losing_a_known_range() {
+    let imports = NS.replace(":as-alias", ":as");
     let source = format!(
-        r#"{NS}
+        r#"{imports}
 (defn guarded {{:t/sig '[integer? :-> :error/code]}} [x]
   (if (int? x) x :failed))
 (defn guarded-in-range {{:t/sig '[::wire/line :-> ::wire/line]}} [x]

@@ -139,7 +139,7 @@ impl Checker<'_> {
                     }
                     value
                 }
-                Type::Map(_) | Type::Key(_) | Type::Keyword => {
+                Type::Map(_) | Type::Key(_) | Type::Keyword | Type::SpecKeyword => {
                     self.check_spread_arities(
                         &[Arity::Fixed(1), Arity::Fixed(2)],
                         minimum,

@@ -140,7 +140,7 @@ impl Checker<'_> {
             };
             invoked = true;
             returns &= !field.required || value != Type::Never;
-            field.ty = value;
+            field.replace_type(value);
         }
         if let ExtraFields::Typed(pair) = &mut map.extra {
             let old = std::mem::replace(&mut pair[1], Type::Never);

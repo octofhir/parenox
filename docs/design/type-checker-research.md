@@ -152,6 +152,85 @@ JVM and 15.2 ms for `cljrs test`. The clojurust release build took 3m 08s and
 produced a 41.2 MB executable. These timings cover this fixture's test
 execution and runtime startup. [Pinned clojurust source](https://github.com/csm/clojurust/tree/793ad97e57cc797878a09c66771d651cfab1ee9b)
 
+The expanded corpus adds lexical bindings and closures, `loop/recur`,
+sequences, immutable collections, namespace loading, macros, dynamic
+vars and exception data. `just native-run-smoke /path/to/cljrs` compares
+the printed value and output of a portable script, checks command-line
+arguments and reader branches, and verifies an exception's exit status.
+`just portable-runtime-smoke /path/to/cljrs` now passes five tests and
+ten assertions on each runtime.
+
+`just native-run-smoke /path/to/cljrs` exercises the same files on the
+pinned JVM and Clojurust. Repeated `require` loads the namespace once,
+and `:as` and `:refer` resolve its public var. A cross-namespace macro
+resolves its helper at its definition and evaluates the argument once.
+Nested dynamic bindings are restored across `catch` and `finally`.
+Both runtimes preserve exception data and write uncaught exception
+diagnostics to stderr with exit status 1. Binding `*out*` to `*err*`
+redirects `println` only on the JVM.
+
+The mixed `clojure.test` fixture produced four tests, four assertions,
+one pass, one failure, two errors, and exit status 1 on both runtimes.
+Parenox's JVM runner sends the JSON report with source locations to
+stdout and the test log to stderr. The pinned native runner sends its
+human-readable counts, test output and exception data to stdout and
+leaves stderr empty.
+
+The [core.async fixture](../../tests/fixtures/portable-runtime/core-async/channel.cljc)
+uses an unbuffered channel. Both runtimes let `go` transfer the value
+and close the channel, and the consumer prints `[{:answer 42} nil]`.
+Stdout matches byte for byte, stderr is empty, and both exit 0. The
+[timeout fixture](../../tests/fixtures/portable-runtime/core-async/timeout.cljc)
+adds `alts!!` with a `timeout` port. On JVM core.async 1.8.741 it has the
+same outcome. Native exits 1 with empty stdout because `timeout`
+returns a future and `alts!!` expects channel ports. Keep the backend's
+existing scheduler for the covered exchange. The
+[timeout port fixture](../../tests/fixtures/portable-runtime/core-async/timeout-port.cljc)
+uses the JVM port directly. Its clojurust branch waits for the built-in
+future in `go` and closes an ordinary channel. Both runtimes pass the
+same data-win, timer-win, repeated-read and losing-take assertions.
+Code that needs a portable timeout port can make this conversion at the
+call site and keep clojurust's future API available elsewhere.
+[Pinned native async built-ins](https://github.com/csm/clojurust/blob/793ad97e57cc797878a09c66771d651cfab1ee9b/crates/cljrs-async/src/builtins.rs)
+
+Parenox ran three Medley 1.9.0 calls on both backends from a temporary
+project with untouched upstream `src` and the pinned JVM dependency.
+`find-first`, `dissoc-in` and `update-existing` printed
+`[4 {:version 1} {:count 5}]` after the same log line and both exited 0.
+The native run used an empty `PATH` and no Java environment variables.
+Medley's full upstream suite passed 53 tests and 280 assertions on the
+JVM. The native suite stopped on `unbound symbol: deftest` during loading
+because the test namespace imports `deftest` in `:clj` and `:cljs`
+branches. [Pinned Medley source and tests](https://github.com/weavejester/medley/tree/54f45abc16ecd30121d05ef52014af8c65d4635f)
+
+| Capability | JVM | Clojurust |
+| --- | --- | --- |
+| Script and namespace loading | Clojure CLI classpath and aliases | `.cljc` or `.cljrs` with explicit source roots |
+| Reader conditionals | `:clj` | `:cljrs` and legacy `:rust` |
+| Script arguments | `*command-line-args*` | Arguments to an optional `-main` |
+| Dynamic vars and output | Binding `*out*` to `*err*` redirects `println` | Custom dynamic vars passed the fixture. The `*out*` probe still printed to stdout. |
+| Java interop and JVM dependencies | Project JVM and dependencies | Use the JVM backend for these projects |
+
+The engine comparison ran the same Medley script in ten fresh processes
+per runtime after one warm-up on macOS arm64, with dependencies cached.
+The standalone embedding probe used `Runtime::builder` in tree-walk
+mode, installed `cljrs-stdlib`, and evaluated forms with the clojurust
+reader. It matched the portable script and Medley output and passed the
+five portable tests. [Clojurust runtime builder](https://github.com/csm/clojurust/blob/793ad97e57cc797878a09c66771d651cfab1ee9b/crates/cljrs-runtime/src/runtime.rs)
+
+| Option | Median fresh launch | Release executable | Coverage and upkeep |
+| --- | ---: | ---: | --- |
+| Project JVM via Parenox | 861 ms | 7.6 MB Parenox plus project JVM | Clojure 1.13 reference and JVM libraries |
+| External clojurust via Parenox | 22.9 ms | 7.6 MB Parenox plus 41.2 MB cljrs | Verified portable corpus with a separately installed EPL-1.0 executable |
+| Embedded clojurust probe | 11.0 ms | 7.25 MB standalone probe | Same measured portable cases and EPL-1.0 engine crates. The host owns runtime initialization and stream and process behavior. |
+| Parenox Rust engine | Unmeasured | Unmeasured | Would require new executable values, environments, and a differential semantics suite |
+
+Keep the external backend in `parenox-runtime` for the current release.
+It covers the tested portable cases and keeps Clojure CLI compatibility
+and native engine upgrades independent. The embedding measurement shows
+the size and startup potential of a narrower host. Future adoption needs
+a host API that can preserve streams, failure reporting and cancellation.
+
 ### Pinned URI editor measurements
 
 On macOS 26.5 arm64 with Rust 1.100.0, the same URI checkout used five Clojure
@@ -483,6 +562,22 @@ errors. Across five alternating clinic runs of 100 warm requests each,
 the median of the run p50 values was 26.3 → 27.7 µs, and the median of the
 run p95 values was 35.0 → 39.0 µs.
 
+### Keyword enum tables
+
+The same literal-table pattern accepts `keyword?` keys and produces fixed
+integers. On Clojure 1.13.0-alpha11, the 25 completion item kinds and two
+insert-text formats in lsp4clj 2.0.1 return the `Long` values in their
+tables. Accepted keys include exact qualified entries and entries mapped
+to zero. False, nil, and the invalid marker remove entries from the domain.
+The invalid marker is also excluded as an input key. The checker exports
+the finite keyword domain for consumers using externs without source.
+
+The configured pilot went from 2,309 to 2,293 warnings with zero errors.
+Twelve enum-stage warnings disappeared from completion, symbol, code
+action, inlay hint, and test tree specs. Four dependent collection-shape
+warnings disappeared. Computed inverse tables and wider numeric outputs
+remain analysis gaps. [JVM fixture](../../tests/fixtures/spec-keyword-enum.clj)
+
 ## Signature help and LSP data contracts
 
 Parenox and Clojure LSP 2026.05.05-12.58.26 returned identical signature
@@ -523,3 +618,187 @@ Median CLI time over 15 alternating runs was 64.92 → 65.03 ms on the
 ordinary pilot and 66.94 → 66.62 ms with dependency source. Clinic warm
 p95 was 37.8 → 39.2 µs across five runs. `just verify` passed 653 tests,
 and the clinic scenario fixed all three deliberate errors.
+
+## The universal spec predicate
+
+The Clojure 1.13 fixture accepts nil, false and ordinary values for
+`any?`. Spec conformance rejects the reserved `::s/invalid` marker.
+Parenox tracks this distinction in named specs, checked arguments and
+collections with an explicit `:kind`. The pinned Clojure LSP pilot
+with `lsp4clj` went from one error to zero.
+
+Parenox also checks `(s/coll-of any?)` without `:kind`. The accepted
+domain includes queues, lists, vectors, sets and maps. Map entries count
+as elements, and the reserved invalid marker is excluded only at the
+element boundary. Conformance can rebuild sequence-like inputs as lists.
+The dependency pilot lost one warning for its command arguments spec.
+The ordinary pilot's 2,224 findings matched the preceding build.
+
+For lsp4clj's `::locations`, the checker now preserves the nested location
+map as the collection's element type, including through externs. The
+input check distinguishes empty maps, nonempty maps that yield entries,
+and entry values whose key and value each satisfy the location shape.
+A successful `s/valid?` exposes that shape to sequence operations such
+as `first`. The [pinned JVM fixture](../../tests/fixtures/spec-location-collection.clj)
+also covers invalid values, range overflow and conformance that rebuilds
+a map entry as a plain vector.
+With the lsp4clj source loaded, the pinned pilot kept zero errors and
+reported 2,312 warnings, down from 2,321. Warnings for unkinded collection
+specs fell from 28 to 19.
+
+Nested `s/conform` now handles known vectors of closed maps with
+unqualified keys. It resolves each required child spec, distinguishes
+`::s/invalid` from a thrown overflow and stops after a failing vector
+element. Editing a nested conformer invalidates callers even if their
+input type is unchanged. Open or registry-sensitive maps and nonempty
+collections outside the modeled result shapes still report an analysis gap.
+The pinned pilot kept its 2,312 warnings and zero errors.
+In ten alternating release CLI runs of that pilot, median time moved
+from 113.6 ms to 118.7 ms. Timing ranges overlapped from 96.4 ms to
+143.2 ms, so this run does not establish the size of a change.
+
+For a location map entry, equal values can still yield different JVM
+objects. The checker preserves a `MapEntry` when child conformers
+retain both objects and yields a vector when a child changes, as in
+`BigInt` to JVM `Integer`. The JVM fixture verifies identical reuse
+with cached boxed integers at -128 and 127, and tests 128 against the
+local VM's cache behavior. When identity cannot be proven, Parenox
+reports `PNX9001`. The quoted-map CLI example now checks completely.
+The pinned pilot still had 2,312 warnings and zero errors. In ten
+alternating release runs across the combined snapshots, the median
+was 70.4 ms before the change and 66.1 ms after it.
+
+### Text edit collections
+
+Lsp4clj 2.0.1 defines `::text-edit` with required `:new-text` and
+`:range` fields. Its three collection specs use `s/coll-of` without
+`:kind`. The [JVM fixture](../../tests/fixtures/spec-text-edit.clj)
+confirms that conforming lists and sequences produces a persistent list
+in encounter order. Nested positions become JVM `Integer` values, and
+an invalid element stops conformance before any later overflow.
+
+Parenox now checks this reconstruction for lists and sequences of known
+length and preserves provably empty sets and vectors. Nonempty sets,
+unbounded collection shapes and open or registry-sensitive map shapes
+still produce a conformance gap. The CLI regression exports and validates
+the required fields and the return contract for a conformed list. It
+then deletes the provider source, checks the imported return as a list
+and rejects six invalid inputs with diagnostics pointing to the externs.
+For a small direct hash set literal, the checker tracks each input
+member before joining their types. Conformance yields a set of converted
+edits. Traversal order is unspecified by the static model. When one
+member rejects and another overflows, either result is possible. The JVM
+fixture reproduces both outcomes by varying a map field that affects its
+hash. The same fixture shows how reinsertion into a sorted set can invoke
+its comparator with converted values. General `set?` inputs keep a gap.
+
+The pinned pilot's diagnostics matched before and after the change. With
+the lsp4clj source configured, 130 files produced 2,312 warnings and zero
+errors.
+
+### Folding range collections
+
+The `::folding-ranges` input is a collection of maps with required
+`:start-line` and `:end-line` and a modeled optional `:kind` predicate.
+Lsp4clj 2.0.1 leaves five child value specs unregistered. The checker
+retains presence constraints and modeled fields inside the collection,
+including on the successful side of `s/valid?`. It reports the missing
+value specs individually. Adding the registration in another source file
+updates the checked callers. The [JVM fixture](../../tests/fixtures/spec-folding-ranges.clj)
+also covers late conversion of a coordinate and the reserved invalid
+marker.
+
+With the pinned lsp4clj source configured, the pilot reported 2,309
+warnings and zero errors. Three unkinded collection warnings were
+removed at lines 174, 356 and 418 of `coercer.clj`.
+
+A named spec backed by core `keyword?` rejects
+`:clojure.spec.alpha/invalid`. Parenox models that domain through
+`s/valid?`, `s/conform`, aliases, and both orders of `s/and` with `any?`.
+In a folding range input the known optional `:kind` field rejects the
+sentinel when present. Ordinary keyword predicates and map annotations
+continue to accept it. The narrower type round-trips through externs
+as an `s/and` of `keyword?` and `any?`. The pinned pilot's diagnostics
+matched before and after this refinement.
+
+`s/conform` models closed keyword maps with known presence, including
+qualified fields declared by `:req` and `:opt` and unqualified fields
+declared by `:req-un` and `:opt-un`. It checks required keys first,
+leaves absent optional keys out of the result and uses the registered
+child conversion for present keys.
+Fields with missing registrations retain their values and the checker
+reports the missing registration. A new registration rechecks consumers
+that depend on the enclosing spec. Known ordered collections, small hash
+set literals and two-element map entries use the same child conversions.
+An extra qualified key uses a self-contained registered conversion from
+the same file or a namespace loaded through an explicit `ns` `:require`
+or `:use`. This can rebuild a map entry when conversion
+changes the identity of one of its values. The cache tracks registration
+origin and conversion, so a consumer is checked again after the registration
+moves or its output changes. Unavailable and unsupported registrations,
+unproven loads, and open input shapes report analysis gaps. Aliases and
+composite extra specs need load evidence for their child registrations.
+[JVM optional-key fixture](../../tests/fixtures/spec-optional-keys.clj),
+[JVM qualified-key fixture](../../tests/fixtures/spec-qualified-keys.clj),
+[JVM extra-key fixture](../../tests/fixtures/spec-extra-registry.clj)
+
+For lsp4clj's `:error/code`, `(s/conformer second)` unwraps the tag
+from a choice of core `keyword?` and `int?` predicates. A successful
+conversion preserves the original object. The checker models the fixed
+integer or non-sentinel keyword input, the conformed value and the
+sentinel on failure. It retains identity when that conversion runs on a
+map field and supplies the input domain in source-free externs. Runtime
+checks require evidence that the spec and the registrations reached
+through its aliases or fields are loaded. A direct `:require` or `:use`
+provides that evidence. The same source file also provides it.
+[JVM error-code fixture](../../tests/fixtures/spec-error-code.clj)
+
+The two inverse completion-item enums in lsp4clj use `integer?` and
+`clojure.set/map-invert`. Fixed and arbitrary-precision classes with the
+same integer value match the same code. Exact values survive a checked
+`int` conversion, including when it is nested inside another conformer.
+Parenox proves a bounded inversion from earlier non-dynamic literal vars
+with unique codes. It checks registry load evidence, models the inverse
+map as literal data and exports a standalone `(s/and integer? #{...})`
+input contract. The fixture checks representation equality, a nested
+map, `MapEntry` reconstruction and the marker as ordinary map data.
+[JVM inverse enum fixture](../../tests/fixtures/spec-inverse-enum.clj)
+
+The lsp4clj `:markup/kind` string set accepts `"plaintext"` and
+`"markdown"`. `s/conform` keeps the original string object. A general
+`String` can conform to either literal or produce the invalid marker.
+When `s/valid?` succeeds, the original value narrows to the accepted
+strings. `::markup-content` uses that conversion for its `:kind` field
+and preserves a `MapEntry` when its fields preserve identity. The finite
+input domain round-trips through externs without the provider source.
+[JVM markup fixture](../../tests/fixtures/spec-markup-content.clj)
+
+For lsp4clj's `::documentation`, `s/or` chooses a string or a named
+map spec and `(s/conformer second)` projects the conformed value.
+Parenox models the two branches in order, including the invalid marker
+and a field conformer's exception. It checks that the named
+registrations are loaded and that source declarations cannot force a
+forward branch before registration. A failed resolution on the JVM can
+persist after a later registration. Early registry aliases and
+initializers whose effects are unknown leave a coverage diagnostic.
+Externs preserve the accepted string and map input shapes.
+[JVM documentation fixture](../../tests/fixtures/spec-documentation.clj)
+
+The inline map branch of lsp4clj's `::marked-string` requires
+`:language` and `:value`. Without registered field specs, the keys
+only need to be present. The checker retains the field coverage
+findings and models conformance for a known input value. Adding a
+registration can change an unchanged caller's behavior and triggers
+rechecking. Registered inline fields export their constraints as part
+of the string-or-map input contract.
+[JVM marked-string fixture](../../tests/fixtures/spec-marked-string.clj)
+
+The collection branch of `::contents` accepts strings and marked maps.
+It accepts an empty map and rejects nonempty maps because their members
+are map entries. A nonempty markup map can then conform through the
+markup branch. Ordered conformance stops at the first invalid element
+or exception. A literal hash set can be checked without assuming its
+iteration order. The checker reconstructs a vector when conformance
+changes either member of a `MapEntry`. A successful validation of a
+broad map allows the empty case as well as the markup shape.
+[JVM contents fixture](../../tests/fixtures/spec-contents.clj)

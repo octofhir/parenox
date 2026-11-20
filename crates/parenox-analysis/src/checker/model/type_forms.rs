@@ -2,7 +2,11 @@
 mod conjunction;
 mod conversion;
 mod function_specs;
-pub(super) use conversion::{enum_conversion, source_conversion};
+pub(super) use conversion::{
+    enum_conversion, inverted_literal, named_tagged_branches, projected_collection_child, resolves,
+    source_conversion, string_keyed_map_child, structured_conversion, tagged_or, tagged_projection,
+    tagged_projection_branches,
+};
 pub(super) use function_specs::read_function_spec;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,13 +19,16 @@ use crate::types::{ExtraFields, Field, IntegerType, MAX_TUPLE_ITEMS, MapType, Pa
 pub(super) fn read_type(
     names: &Names,
     form: &Form,
+    source: &str,
     diagnostics: &mut Vec<Diagnostic>,
     lookup: impl FnMut(&str, Span) -> Option<Type>,
 ) -> Type {
     TypeReader {
         names,
+        source,
         parameters: None,
         literal_shapes: false,
+        unchecked_inputs: None,
         diagnostics,
         lookup,
     }
@@ -31,14 +38,18 @@ pub(super) fn read_type(
 pub(super) fn read_type_with_parameters(
     names: &Names,
     form: &Form,
+    source: &str,
     parameters: Option<&Parameters>,
+    unchecked_inputs: Option<&BTreeSet<String>>,
     diagnostics: &mut Vec<Diagnostic>,
     lookup: impl FnMut(&str, Span) -> Option<Type>,
 ) -> Type {
     TypeReader {
         names,
+        source,
         parameters,
         literal_shapes: true,
+        unchecked_inputs,
         diagnostics,
         lookup,
     }
@@ -47,8 +58,10 @@ pub(super) fn read_type_with_parameters(
 
 struct TypeReader<'a, F> {
     names: &'a Names,
+    source: &'a str,
     parameters: Option<&'a Parameters>,
     literal_shapes: bool,
+    unchecked_inputs: Option<&'a BTreeSet<String>>,
     diagnostics: &'a mut Vec<Diagnostic>,
     lookup: F,
 }
@@ -58,8 +71,20 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
         self.diagnostics.push(Diagnostic::new(code, span, message));
     }
 
+    fn lookup_spec(&mut self, key: &str, span: Span) -> Option<Type> {
+        let ty = (self.lookup)(key, span)?;
+        if self.unchecked_inputs.is_some_and(|keys| keys.contains(key)) {
+            self.diagnostics.push(Diagnostic::analysis_gap(
+                "PNX9001",
+                span,
+                format!("Spec {key} has an unchecked input type in this function contract"),
+            ));
+        }
+        Some(ty)
+    }
+
     fn spec(&mut self, key: &str, span: Span) -> Type {
-        (self.lookup)(key, span).unwrap_or_else(|| {
+        self.lookup_spec(key, span).unwrap_or_else(|| {
             self.error("PNX9001", span, format!("No declaration for spec {key}"));
             Type::Unknown
         })
@@ -261,7 +286,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                                     continue;
                                 };
                                 let qualified = self.names.key(k);
-                                let Some((_, name)) = qualified.split_once('/') else {
+                                let Some(field_key) = spec_field_key(&qualified, directive) else {
                                     self.error(
                                         "PNX9001",
                                         key.span,
@@ -273,12 +298,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                                 let required = directive.starts_with(":req");
                                 // Look up each source occurrence so navigation can
                                 // resolve a repeated reference at its own span.
-                                let value = (self.lookup)(&qualified, key.span);
-                                let field_key = if directive.ends_with("-un") {
-                                    format!(":{name}")
-                                } else {
-                                    qualified.clone()
-                                };
+                                let value = self.lookup_spec(&qualified, key.span);
                                 match fields.entry(field_key) {
                                     Entry::Occupied(mut entry) => {
                                         let (spec, field) = entry.get_mut();
@@ -354,11 +374,14 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             .iter()
             .rfind(|[key, _]| key.keyword() == Some(":kind"))
         else {
-            self.parse(element);
+            let element = self.parse(element);
+            if collection_element(&element) {
+                return Type::SpecCollection(Box::new(element));
+            }
             self.diagnostics.push(Diagnostic::analysis_gap(
                 "PNX9001",
                 form.span,
-                "A collection spec without :kind has no modeled collection type",
+                "A collection spec without :kind requires any?, strings, or modeled map shapes",
             ));
             return Type::Unknown;
         };
@@ -377,17 +400,21 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                 Type::List(Box::new(self.parse(element))),
             ]),
             Some(("clojure.core", "map?")) => {
-                if let Type::Tuple(items) = self.parse(element)
-                    && let [key, value] = items.as_ref()
-                {
-                    Type::Map(MapType::dictionary(key.clone(), value.clone()))
-                } else {
-                    self.diagnostics.push(Diagnostic::analysis_gap(
-                        "PNX9001",
-                        element.span,
-                        "A map collection spec requires a modeled two-item tuple",
-                    ));
-                    Type::Unknown
+                match &self.parse(element) {
+                    // Each map member is an entry, even if its key or value
+                    // happens to be the spec-invalid keyword.
+                    Type::SpecValue | Type::SpecTruthy => core_predicate_type("map?").unwrap(),
+                    Type::Tuple(items) if let [key, value] = items.as_ref() => {
+                        Type::Map(MapType::dictionary(key.clone(), value.clone()))
+                    }
+                    _ => {
+                        self.diagnostics.push(Diagnostic::analysis_gap(
+                            "PNX9001",
+                            element.span,
+                            "A map collection spec requires a modeled entry predicate",
+                        ));
+                        Type::Unknown
+                    }
                 }
             }
             _ => {
@@ -396,6 +423,24 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             }
         }
     }
+}
+
+fn collection_element(element: &Type) -> bool {
+    match element {
+        Type::SpecValue | Type::String | Type::Str(_) => true,
+        Type::Map(map) => !map.has_unknown_value_constraint(),
+        Type::Union(parts) => parts.iter().all(collection_element),
+        _ => false,
+    }
+}
+
+fn spec_field_key(qualified: &str, directive: &str) -> Option<String> {
+    let (_, local) = qualified.split_once('/')?;
+    Some(if directive.ends_with("-un") {
+        format!(":{local}")
+    } else {
+        qualified.to_owned()
+    })
 }
 
 fn predicate_type(names: &Names, symbol: &str) -> Option<Type> {
@@ -418,6 +463,7 @@ pub(super) fn core_predicate_type(name: &str) -> Option<Type> {
         "integer?" => Type::Integral(IntegerType::ANY),
         "int?" => Type::Integral(IntegerType::FIXED),
         "boolean?" => Type::Boolean,
+        "any?" => Type::SpecValue,
         "identity" => Type::SpecTruthy,
         "keyword?" => Type::Keyword,
         "symbol?" => Type::Symbol,

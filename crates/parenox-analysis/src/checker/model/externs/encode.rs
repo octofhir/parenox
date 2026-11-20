@@ -3,7 +3,9 @@ use std::fmt::{self, Write};
 
 use super::{ExternalDeclaration, Model, is_modeled_call};
 use crate::reader::{MAX_NESTING_DEPTH, Span};
-use crate::types::{ExtraFields, IntegerType, MapType, Signature, Type};
+use crate::types::{
+    ExtraFields, IntegerClass, IntegerRange, IntegerType, MapType, Signature, Type,
+};
 
 impl Model {
     pub(crate) fn extern_count(&self) -> usize {
@@ -230,11 +232,20 @@ impl SnapshotWriter {
     }
 
     fn ty(&mut self, ty: &Type) -> Encoded {
+        if let Some((predicate, value)) = exact_integer(ty) {
+            return self.integer_set(predicate, std::iter::once(value));
+        }
         let atom = match ty {
             Type::Never => "#{}",
             Type::Nil => "clojure.core/nil?",
             Type::Boolean => "clojure.core/boolean?",
+            Type::SpecValue => "clojure.core/any?",
             Type::SpecTruthy => "clojure.core/identity",
+            Type::SpecCollection(element) => {
+                return self.nested(1, "(clojure.spec.alpha/coll-of ", ")", |out| {
+                    out.ty(element)
+                });
+            }
             Type::Number => "clojure.core/number?",
             Type::Integral(IntegerType::ANY) => "clojure.core/integer?",
             Type::Integral(IntegerType::FIXED) => "clojure.core/int?",
@@ -248,6 +259,14 @@ impl SnapshotWriter {
             Type::Pattern => "java.util.regex.Pattern",
             Type::Character => "clojure.core/char?",
             Type::Keyword => "clojure.core/keyword?",
+            Type::SpecKeyword => {
+                return self.nested(
+                    1,
+                    "(clojure.spec.alpha/and clojure.core/keyword? clojure.core/any?",
+                    ")",
+                    |_| Ok(()),
+                );
+            }
             Type::Symbol => "clojure.core/symbol?",
             Type::SimpleSymbol => "clojure.core/simple-symbol?",
             Type::QualifiedSymbol => "clojure.core/qualified-symbol?",
@@ -301,6 +320,18 @@ impl SnapshotWriter {
     }
 
     fn union(&mut self, items: &[Type]) -> Encoded {
+        if let Some((predicate, _)) = items.first().and_then(exact_integer)
+            && items.iter().all(|item| {
+                exact_integer(item).is_some_and(|(item_predicate, _)| item_predicate == predicate)
+            })
+        {
+            return self.integer_set(
+                predicate,
+                items
+                    .iter()
+                    .filter_map(|item| exact_integer(item).map(|(_, value)| value)),
+            );
+        }
         if let [Type::Nil, item] | [item, Type::Nil] = items {
             return self.nested(1, "(clojure.spec.alpha/nilable ", ")", |out| out.ty(item));
         }
@@ -326,6 +357,17 @@ impl SnapshotWriter {
             for (index, ty) in types.enumerate() {
                 write!(out, " :p{index} ")?;
                 encode(out, ty)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn integer_set(&mut self, predicate: &str, values: impl Iterator<Item = i64>) -> Encoded {
+        self.nested(2, "(clojure.spec.alpha/and clojure.core/", "})", |out| {
+            write!(out, "{predicate} #{{")?;
+            for (index, value) in values.enumerate() {
+                out.separator(index)?;
+                write!(out, "{value}")?;
             }
             Ok(())
         })
@@ -404,5 +446,24 @@ impl SnapshotWriter {
             self.write_char(' ')?;
         }
         Ok(())
+    }
+}
+
+fn exact_integer(ty: &Type) -> Option<(&'static str, i64)> {
+    match ty {
+        Type::Integer(value) => Some(("int?", i64::from(*value))),
+        Type::Integral(IntegerType {
+            class: IntegerClass::Any,
+            range: IntegerRange::Exact(value),
+        }) => Some(("integer?", i64::from(*value))),
+        Type::Integral(IntegerType {
+            class: IntegerClass::Fixed,
+            range: IntegerRange::ExactLong(value),
+        }) => Some(("int?", *value)),
+        Type::Integral(IntegerType {
+            class: IntegerClass::Any,
+            range: IntegerRange::ExactLong(value),
+        }) => Some(("integer?", *value)),
+        _ => None,
     }
 }

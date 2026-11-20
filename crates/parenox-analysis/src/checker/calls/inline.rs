@@ -268,6 +268,7 @@ impl<'model> Checker<'model> {
                 };
                 checker.function_body(
                     &clause.bindings(),
+                    clause.conditions,
                     clause.body,
                     parameters,
                     env,

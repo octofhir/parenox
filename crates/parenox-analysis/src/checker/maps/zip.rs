@@ -128,7 +128,7 @@ fn zipped_map(keys: ZipInput<'_>, values: ZipInput<'_>) -> Option<MapType> {
 fn supported_key(key: &Type) -> bool {
     match key {
         Type::Union(parts) => parts.iter().all(supported_key),
-        Type::Key(_) | Type::Str(_) | Type::Keyword | Type::String => true,
+        Type::Key(_) | Type::Str(_) | Type::Keyword | Type::SpecKeyword | Type::String => true,
         _ => false,
     }
 }

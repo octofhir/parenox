@@ -1,8 +1,10 @@
 //! Function resolution, call-site inference and built-in calls.
 mod apply;
+mod arithmetic;
 mod comprehensions;
 mod forms;
 mod generics;
+mod identifiers;
 mod indexing;
 mod inline;
 mod interop;
@@ -102,7 +104,8 @@ impl<'model> Checker<'model> {
             );
             return Value::new(Type::Unknown);
         }
-        let key = (function.name.clone(), args);
+        // Compiler checks on dead paths cannot establish coverage, including for nested calls.
+        let key = (function.name.clone(), args, self.path_reachable);
         let start = self.diagnostics.len();
         let tracking = self.throws.is_some();
         let result = if let Some(cached) = self
@@ -129,6 +132,7 @@ impl<'model> Checker<'model> {
             let enclosing = std::mem::replace(&mut self.throws, tracking.then(Throws::default));
             let result = self.function_body(
                 &clause.params,
+                clause.conditions(),
                 &clause.body,
                 pack_arguments(arity, key.1.clone()),
                 &Env::new(),
@@ -388,7 +392,7 @@ impl<'model> Checker<'model> {
                 self.check_call_arguments(signature, function, args);
                 Value::new(signature.ret.clone())
             }
-            kind @ (Type::Key(_) | Type::Keyword | Type::Map(_)) => {
+            kind @ (Type::Key(_) | Type::Keyword | Type::SpecKeyword | Type::Map(_)) => {
                 let is_map = matches!(kind, Type::Map(_));
                 if !(1..=2).contains(&args.len()) {
                     let kind = if is_map { "Map" } else { "Keyword" };
@@ -541,13 +545,24 @@ impl<'model> Checker<'model> {
         let arity_ok = builtin_arities(name)
             .iter()
             .any(|arity| arity.accepts(args.len()));
+        let returns = call_returns(args);
+        let arithmetic = if arity_ok && returns {
+            arithmetic::fixed_result(name, args)
+        } else {
+            None
+        };
         if self.throws.is_some()
+            && arithmetic.is_none()
             && (!arity_ok
                 || (!matches!(
                     name,
                     "clojure.core/ex-info"
+                        | "clojure.lang.MapEntry/create"
                         | "clojure.core/ex-data"
                         | "clojure.core/identity"
+                        | "clojure.core/name"
+                        | "clojure.core/map?"
+                        | "clojure.core/any?"
                         | "clojure.core/dissoc"
                         | "clojure.core/find"
                         | "clojure.core/list"
@@ -565,9 +580,11 @@ impl<'model> Checker<'model> {
                         | "clojure.core/ensure-reduced"
                         | "clojure.core/nil?"
                         | "clojure.core/some?"
+                        | "clojure.core/true?"
+                        | "clojure.core/false?"
                         | "clojure.core/not"
                 ) && predicate_type(name).is_none()))
-            && call_returns(args)
+            && returns
         {
             self.may_throw();
         }
@@ -579,7 +596,7 @@ impl<'model> Checker<'model> {
             );
             return Value::new(Type::Unknown);
         }
-        if !call_returns(args) {
+        if !returns {
             return Value::new(Type::Never);
         }
         let ty = match name {
@@ -602,6 +619,9 @@ impl<'model> Checker<'model> {
             "clojure.core/find" => return self.find_entry(&args[0], &args[1]),
             "clojure.core/select-keys" => return self.select_keys(&args[0], &args[1]),
             "clojure.core/zipmap" => return self.zipmap(&args[0], &args[1], span),
+            "clojure.lang.MapEntry/create" => {
+                Type::MapEntry(Box::new([args[0].0.known.clone(), args[1].0.known.clone()]))
+            }
             "clojure.core/ex-info" => return self.ex_info(args),
             "clojure.core/ex-data" => return self.ex_data(&args[0].0),
             "clojure.core/seq" | "clojure.core/first" | "clojure.core/next"
@@ -616,7 +636,14 @@ impl<'model> Checker<'model> {
                 for (value, span) in args {
                     self.expect(value, &Type::Number, *span, name);
                 }
-                Type::Number
+                if let Some(result) = arithmetic {
+                    if result.may_overflow {
+                        self.arithmetic_exception();
+                    }
+                    result.ty
+                } else {
+                    Type::Number
+                }
             }
             "clojure.core/long" => {
                 self.expect(
@@ -627,7 +654,10 @@ impl<'model> Checker<'model> {
                 );
                 Type::Number
             }
-            "clojure.string/upper-case" | "clojure.string/lower-case" | "clojure.string/trim" => {
+            "clojure.string/upper-case"
+            | "clojure.string/lower-case"
+            | "clojure.string/capitalize" => self.case_string(name, &args[0]),
+            "clojure.string/trim" => {
                 self.expect(&args[0].0, &Type::String, args[0].1, name);
                 Type::String
             }
@@ -667,7 +697,18 @@ impl<'model> Checker<'model> {
                 Type::Vector(Box::new(Type::String))
             }
             "clojure.core/str" => Type::String,
+            "clojure.core/name" if self.globals.project_namespaces.contains("clojure.core") => {
+                self.may_throw();
+                return self.unsupported(span, "name requires the standard clojure.core function");
+            }
+            "clojure.core/name" => self.name_result(&args[0].0.known),
+            "clojure.core/map?" if self.globals.project_namespaces.contains("clojure.core") => {
+                self.may_throw();
+                return self.unsupported(span, "map? requires the standard clojure.core predicate");
+            }
+            "clojure.core/map?" => super::maps::map_predicate(&args[0].0.known),
             "clojure.core/identity" => return args[0].0.clone(),
+            "clojure.core/any?" => Type::Bool(true),
             "clojure.core/key" | "clojure.core/val" => {
                 let (entry, span) = &args[0];
                 let index = usize::from(name == "clojure.core/val");
@@ -734,6 +775,8 @@ impl<'model> Checker<'model> {
                     Type::Boolean
                 }
             }
+            // These predicates test JVM object identity with the canonical Booleans.
+            "clojure.core/true?" | "clojure.core/false?" => Type::Boolean,
             "clojure.core/not" => {
                 if args[0].0.ty.truthy() == Type::Never {
                     Type::Bool(true)
@@ -762,6 +805,7 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         "clojure.string/replace" => &[Arity::Fixed(3)],
         "clojure.string/join" => &[Arity::Fixed(1), Arity::Fixed(2)],
         "clojure.core/cons"
+        | "clojure.lang.MapEntry/create"
         | "clojure.core/find"
         | "clojure.core/select-keys"
         | "clojure.core/zipmap" => &[Arity::Fixed(2)],
@@ -801,7 +845,7 @@ fn equality(args: &[(Value, Span)]) -> Type {
     result
 }
 
-fn literal_equality(left: &Type, right: &Type) -> Option<bool> {
+pub(super) fn literal_equality(left: &Type, right: &Type) -> Option<bool> {
     fn alternatives(ty: &Type) -> &[Type] {
         match ty {
             Type::Union(parts) => parts,
@@ -812,13 +856,8 @@ fn literal_equality(left: &Type, right: &Type) -> Option<bool> {
     fn is_atom(ty: &Type) -> bool {
         matches!(
             ty,
-            Type::Nil
-                | Type::Bool(_)
-                | Type::Key(_)
-                | Type::Str(_)
-                | Type::Char(_)
-                | Type::Integer(_)
-        )
+            Type::Nil | Type::Bool(_) | Type::Key(_) | Type::Str(_) | Type::Char(_)
+        ) || ty.exact_long_value().is_some()
     }
 
     let (left, right) = (alternatives(left), alternatives(right));
@@ -828,7 +867,11 @@ fn literal_equality(left: &Type, right: &Type) -> Option<bool> {
     let mut known = None;
     for a in left {
         for b in right {
-            let equal = (is_atom(a) && is_atom(b)).then(|| a == b)?;
+            let equal = match (a.exact_long_value(), b.exact_long_value()) {
+                (Some(a), Some(b)) => a == b,
+                _ if is_atom(a) && is_atom(b) => a == b,
+                _ => return None,
+            };
             if known.is_some_and(|previous| previous != equal) {
                 return None;
             }
@@ -867,16 +910,22 @@ pub(super) fn is_modeled_call(name: &str) -> bool {
 pub(super) fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "clojure.core/+"
+        "clojure.lang.MapEntry/create"
+            | "clojure.core/+"
             | "clojure.core/-"
             | "clojure.core/*"
             | "clojure.core/inc"
             | "clojure.core/dec"
             | "clojure.core/long"
             | "clojure.core/str"
+            | "clojure.core/name"
+            | "clojure.core/map?"
             | "clojure.core/identity"
+            | "clojure.core/any?"
             | "clojure.core/nil?"
             | "clojure.core/some?"
+            | "clojure.core/true?"
+            | "clojure.core/false?"
             | "clojure.core/not"
             | "clojure.core/="
             | "clojure.core/key"
@@ -908,6 +957,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/re-pattern"
             | "clojure.string/upper-case"
             | "clojure.string/lower-case"
+            | "clojure.string/capitalize"
             | "clojure.string/trim"
             | "clojure.string/blank?"
             | "clojure.string/replace"

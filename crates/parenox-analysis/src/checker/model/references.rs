@@ -4,13 +4,15 @@ use std::collections::BTreeSet;
 use crate::Diagnostic;
 use crate::checker::bindings::binding_names;
 use crate::checker::calls::arity_counts;
-use crate::checker::function_forms::{Clause, function_clauses, lexical_function_clauses};
+use crate::checker::function_forms::{
+    Clause, function_clauses, lexical_fn_star_clauses, lexical_function_clauses,
+};
 use crate::expand::Threading;
 use crate::reader::{Form, Kind, Span};
 
 use super::contracts::function_parts;
-use super::declarations::{SourceDeclaration, symbols_match};
-use super::{Declarations, Model};
+use super::declarations::{SourceDeclaration, collect_protocol_group_methods, symbols_match};
+use super::{Declarations, Model, java_type_tag_at};
 
 pub(crate) enum ProjectCall {
     Unknown,
@@ -130,6 +132,7 @@ impl Declarations {
             names: self,
             top_level_names: &top_level_names,
             locals: Vec::new(),
+            post_result_scope: None,
             inside_test: false,
             standard_test,
             template_scope: None,
@@ -176,7 +179,7 @@ impl Declarations {
         standard_test: bool,
         resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Option<ScopedReference<'a>> {
-        self.navigation_at(forms, offset, standard_test, resolve)?
+        self.navigation_at(forms, offset, standard_test, false, None, resolve)?
             .symbol
     }
 
@@ -187,8 +190,42 @@ impl Declarations {
         standard_test: bool,
         resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Option<&'a str> {
-        self.navigation_at(forms, offset, standard_test, resolve)?
+        self.navigation_at(forms, offset, standard_test, false, None, resolve)?
             .spec
+    }
+
+    pub(crate) fn evaluated_reference_at<'a>(
+        &'a self,
+        forms: &'a [Form],
+        offset: usize,
+        standard_test: bool,
+        resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
+    ) -> Option<(&'a str, ScopedReference<'a>)> {
+        let target = self.navigation_at(forms, offset, standard_test, true, None, resolve)?;
+        target.evaluated_symbol.zip(target.symbol)
+    }
+
+    pub(crate) fn lexical_binding_at(
+        &self,
+        forms: &[Form],
+        offset: usize,
+        name: &str,
+        standard_test: bool,
+        resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
+    ) -> Option<bool> {
+        self.navigation_at(forms, offset, standard_test, true, Some(name), resolve)?
+            .lexical_binding
+    }
+
+    pub(crate) fn evaluated_java_class_at<'a>(
+        &'a self,
+        forms: &'a [Form],
+        offset: usize,
+        standard_test: bool,
+        resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
+    ) -> Option<&'a str> {
+        self.navigation_at(forms, offset, standard_test, true, None, resolve)?
+            .java_class
     }
 
     fn navigation_at<'a>(
@@ -196,13 +233,16 @@ impl Declarations {
         forms: &'a [Form],
         offset: usize,
         standard_test: bool,
+        include_top_level_expressions: bool,
+        binding_name: Option<&str>,
         mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Option<NavigationTarget<'a>> {
         let index = forms.partition_point(|form| form.span.end.offset <= offset);
         let form = forms.get(index)?;
         let inside_test = self.test_forms.binary_search(&index).is_ok();
         let inside_method = self.method_forms.binary_search(&index).is_ok();
-        if !inside_test && !inside_method && self.functions.binary_search(&index).is_err() {
+        let inside_function = self.functions.binary_search(&index).is_ok();
+        if !(inside_test || inside_method || inside_function || include_top_level_expressions) {
             return None;
         }
         let top_level_names = self.top_level_names(forms);
@@ -210,12 +250,14 @@ impl Declarations {
             names: self,
             top_level_names: &top_level_names,
             locals: Vec::new(),
+            post_result_scope: None,
             inside_test,
             standard_test,
             template_scope: None,
             resolve: &mut resolve,
             purpose: Purpose::Navigate {
                 offset,
+                binding_name,
                 target: NavigationTarget::default(),
             },
         };
@@ -225,12 +267,26 @@ impl Declarations {
             }
         } else if inside_method {
             visit.method(form);
-        } else {
+        } else if inside_function {
             visit.definition(form);
+        } else if let Kind::List(items) = &form.without_metadata().kind
+            && let [head, name, tail @ ..] = items.as_slice()
+            && head.symbol() == Some("def")
+        {
+            if name.symbol().is_some() {
+                visit.select_type_hint(name);
+            }
+            if let Some(initializer) = tail.last() {
+                visit.forms(std::slice::from_ref(initializer));
+            }
+        } else {
+            visit.forms(std::slice::from_ref(form));
         }
         match visit.purpose {
             Purpose::Navigate { target, .. } => Some(target),
-            Purpose::Check(_) | Purpose::Collect(_) => unreachable!(),
+            Purpose::Check(_) | Purpose::Collect(_) | Purpose::ProtocolMethods { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -239,22 +295,59 @@ impl Declarations {
         forms: &'a [Form],
         standard_test: bool,
         collect_calls: bool,
-        mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
+        resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> DocumentReferences<'a> {
-        let names = self.top_level_names(forms);
         let mut occurrences = DocumentReferences {
             calls: collect_calls.then(Vec::new),
             ..DocumentReferences::default()
         };
+        self.collect_source_forms(
+            forms,
+            standard_test,
+            resolve,
+            Purpose::Collect(&mut occurrences),
+        );
+        occurrences
+    }
+
+    pub(crate) fn reify_method_targets<'a>(
+        &'a self,
+        forms: &'a [Form],
+        method: &str,
+        standard_test: bool,
+        resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
+    ) -> Vec<(&'a str, Span)> {
+        let mut targets = Vec::new();
+        self.collect_source_forms(
+            forms,
+            standard_test,
+            resolve,
+            Purpose::ProtocolMethods {
+                method,
+                targets: &mut targets,
+            },
+        );
+        targets
+    }
+
+    fn collect_source_forms<'a>(
+        &'a self,
+        forms: &'a [Form],
+        standard_test: bool,
+        mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
+        purpose: Purpose<'a, '_>,
+    ) {
+        let names = self.top_level_names(forms);
         let mut visit = References {
             names: self,
             top_level_names: &names,
             locals: Vec::new(),
+            post_result_scope: None,
             inside_test: false,
             standard_test,
             template_scope: None,
             resolve: &mut resolve,
-            purpose: Purpose::Collect(&mut occurrences),
+            purpose,
         };
         for &index in &self.functions {
             visit.definition(&forms[index]);
@@ -292,7 +385,6 @@ impl Declarations {
                 visit.forms(&items[2..]);
             }
         }
-        occurrences
     }
 
     pub(crate) fn top_level_names<'a>(&'a self, forms: &'a [Form]) -> BTreeSet<&'a str> {
@@ -319,8 +411,13 @@ impl Declarations {
 enum Purpose<'source, 'query> {
     Check(&'query mut Vec<Diagnostic>),
     Collect(&'query mut DocumentReferences<'source>),
+    ProtocolMethods {
+        method: &'query str,
+        targets: &'query mut Vec<(&'source str, Span)>,
+    },
     Navigate {
         offset: usize,
+        binding_name: Option<&'query str>,
         target: NavigationTarget<'source>,
     },
 }
@@ -329,12 +426,16 @@ enum Purpose<'source, 'query> {
 struct NavigationTarget<'source> {
     symbol: Option<ScopedReference<'source>>,
     spec: Option<&'source str>,
+    evaluated_symbol: Option<&'source str>,
+    lexical_binding: Option<bool>,
+    java_class: Option<&'source str>,
 }
 
 struct References<'source, 'query, F> {
     names: &'source Declarations,
     top_level_names: &'query BTreeSet<&'source str>,
     locals: Vec<(&'source str, Span)>,
+    post_result_scope: Option<usize>,
     inside_test: bool,
     standard_test: bool,
     template_scope: Option<usize>,
@@ -345,32 +446,54 @@ struct References<'source, 'query, F> {
 impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
     fn definition(&mut self, form: &'a Form) {
         if let Kind::List(items) = &form.without_metadata().kind
-            && let Some(tail) = items.get(2..)
+            && let [_, name, tail @ ..] = items.as_slice()
         {
-            self.definition_parts(tail, form.span);
-        }
-    }
-
-    fn definition_parts(&mut self, tail: &'a [Form], span: Span) {
-        if let Ok(clauses) = lexical_function_clauses(function_parts(tail).0, span) {
-            for clause in clauses.values() {
-                self.clause(clause);
+            let (arms, mut attributes) = function_parts(tail);
+            if let Ok(clauses) = lexical_function_clauses(arms, form.span) {
+                if matches!(self.purpose, Purpose::Navigate { .. })
+                    && name.symbol().is_some()
+                    && !attributes.any(|[key, _]| key.keyword() == Some(":tag"))
+                {
+                    self.select_type_hint(name);
+                }
+                for clause in clauses.values() {
+                    self.clause(clause);
+                }
             }
         }
     }
 
     fn clause(&mut self, clause: &Clause<'a>) {
         let scope = self.locals.len();
+        self.select_type_hint(clause.parameter_vector);
         for parameter in clause.parameters() {
             self.bind_pattern(parameter);
         }
+        // These forms can be elided by the compiler. Typed checking reports
+        // their findings with the activation condition.
+        if !matches!(self.purpose, Purpose::Check(_)) {
+            self.forms(clause.conditions.pre);
+        }
         self.forms(clause.body);
+        if !matches!(self.purpose, Purpose::Check(_))
+            && let Some(post) = clause.conditions.post
+        {
+            let previous = self.post_result_scope.replace(self.locals.len());
+            self.forms(post);
+            self.post_result_scope = previous;
+        }
         self.locals.truncate(scope);
     }
 
     fn bind_pattern(&mut self, pattern: &'a Form) {
         let first = self.locals.len();
         binding_names(pattern, &mut self.locals);
+        if matches!(self.purpose, Purpose::Navigate { .. })
+            && self.locals.get(first).map(|(_, span)| *span)
+                == Some(pattern.without_metadata().span)
+        {
+            self.select_type_hint(pattern);
+        }
         if let Purpose::Collect(occurrences) = &mut self.purpose
             && occurrences.calls.is_none()
         {
@@ -397,25 +520,47 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             // The dispatch value is evaluated before the method's bindings exist.
             self.forms(std::slice::from_ref(target));
             self.forms(std::slice::from_ref(dispatch));
-            self.function(tail, form.span);
+            self.function(tail, form.span, false);
         }
     }
 
     fn forms(&mut self, forms: &'a [Form]) {
         for form in forms {
-            if let Purpose::Navigate { offset, .. } = self.purpose
-                && !(form.span.start.offset..form.span.end.offset).contains(&offset)
+            if let Purpose::Navigate {
+                offset,
+                binding_name,
+                target,
+            } = &mut self.purpose
             {
-                continue;
+                if !(form.span.start.offset..form.span.end.offset).contains(offset) {
+                    continue;
+                }
+                if form.without_metadata().span.start.offset == *offset
+                    && let Some(name) = binding_name
+                {
+                    target.lexical_binding = Some(
+                        (*name == "%" && self.post_result_scope.is_some())
+                            || self.locals.iter().any(|(local, _)| local == name),
+                    );
+                    return;
+                }
             }
             match &form.without_metadata().kind {
-                Kind::List(items) => self.call(items),
+                Kind::List(items) => {
+                    if items.first().and_then(Form::symbol) != Some("quote") {
+                        self.select_type_hint(form);
+                    }
+                    self.call(items);
+                }
                 Kind::Vector(items)
                 | Kind::Map(items)
                 | Kind::Set(items)
                 | Kind::AutoNamespacedMap { entries: items, .. } => self.forms(items),
                 Kind::AnonymousFunction(function) => self.call(&function.body),
-                Kind::Symbol(symbol) => self.select_reference(symbol, form.without_metadata().span),
+                Kind::Symbol(symbol) => {
+                    self.select_type_hint(form);
+                    self.select_reference(symbol, form.without_metadata().span);
+                }
                 _ => {}
             }
         }
@@ -434,6 +579,34 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             self.select_reference(symbol, span);
             return;
         }
+        if matches!(self.purpose, Purpose::Navigate { .. }) {
+            if let Some(receiver) = args.first()
+                && (symbol == "."
+                    || symbol
+                        .strip_prefix('.')
+                        .is_some_and(|member| !member.is_empty() && !member.contains(['.', '/'])))
+            {
+                self.select_type_hint(receiver);
+            }
+            if symbol == "new" {
+                if let Some((class, arguments)) = args.split_first() {
+                    if let Some(symbol) = class.symbol() {
+                        self.select_class(symbol, class.without_metadata().span);
+                    }
+                    self.forms(arguments);
+                }
+                return;
+            }
+            if let Some(class) = symbol.strip_suffix('.')
+                && !class.is_empty()
+                && !class.starts_with('.')
+                && !class.contains('/')
+            {
+                self.select_class(class, span);
+                self.forms(args);
+                return;
+            }
+        }
         match symbol {
             "quote" => return,
             "var" => {
@@ -447,7 +620,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             "if" | "do" | "recur" | "throw" => return self.forms(args),
             "try" => return self.try_body(args),
             "let*" | "loop*" => return self.bindings(args),
-            "fn*" => return self.function(args, head.span),
+            "fn*" => return self.function(args, head.span, true),
             _ => {}
         }
         self.select_reference(symbol, span);
@@ -477,7 +650,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                     && !self.names.forward_vars.contains_key(symbol)))
             && let [spec, _, ..] = args
             && args.len() <= 3
-            && let Purpose::Navigate { offset, target } = &mut self.purpose
+            && let Purpose::Navigate { offset, target, .. } = &mut self.purpose
         {
             if (spec.span.start.offset..spec.span.end.offset).contains(offset) {
                 target.spec = spec.keyword();
@@ -494,10 +667,19 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 "when-let" | "when-some" | "when-first" => {
                     return self.conditional_binding(args, false);
                 }
-                "fn" => return self.function(args, head.span),
+                "fn" => return self.function(args, head.span, false),
                 "letfn" => return self.local_functions(args),
                 "case" => return self.case_body(args),
                 "as->" => return self.named_thread(args),
+                "instance?" if matches!(self.purpose, Purpose::Navigate { .. }) => {
+                    return self.forms(args);
+                }
+                "reify"
+                    if !self.names.forward_vars.contains_key(symbol)
+                        && let Purpose::ProtocolMethods { method, targets } = &mut self.purpose =>
+                {
+                    return collect_protocol_group_methods(args, None, method, targets);
+                }
                 _ if plain_core_arguments(local) => return self.forms(args),
                 _ => {}
             }
@@ -520,7 +702,10 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 && (self.top_level_names.contains(symbol)
                     || !self.names.names.refers.contains_key(symbol)))
         {
-            if !matches!(self.purpose, Purpose::Collect(_)) {
+            if !matches!(
+                self.purpose,
+                Purpose::Collect(_) | Purpose::ProtocolMethods { .. }
+            ) {
                 return false;
             }
             namespace = self.names.namespace();
@@ -570,9 +755,25 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         self.record_reference(symbol, span, true);
     }
 
+    fn select_class(&mut self, symbol: &'a str, span: Span) {
+        if let Purpose::Navigate { offset, target, .. } = &mut self.purpose
+            && (span.start.offset..span.end.offset).contains(offset)
+        {
+            target.java_class = Some(symbol);
+        }
+    }
+
+    fn select_type_hint(&mut self, form: &'a Form) {
+        if let Purpose::Navigate { offset, target, .. } = &mut self.purpose
+            && let Some(tag) = java_type_tag_at(form, *offset)
+        {
+            target.java_class = tag.symbol();
+        }
+    }
+
     fn record_reference(&mut self, symbol: &'a str, span: Span, allow_local: bool) {
         match self.purpose {
-            Purpose::Check(_) => return,
+            Purpose::Check(_) | Purpose::ProtocolMethods { .. } => return,
             Purpose::Collect(ref occurrences) if occurrences.calls.is_some() => return,
             Purpose::Navigate { offset, .. }
                 if !(span.start.offset..span.end.offset).contains(&offset) =>
@@ -584,9 +785,15 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         let hit = if let Some((namespace, name)) = self.names.qualified_reference(symbol) {
             ScopedReference::Referred(namespace, name)
         } else if allow_local
-            && let Some((_, binding)) = self.locals.iter().rev().find(|(name, _)| *name == symbol)
+            && let Some((_, binding)) = self.locals[self.local_scope(symbol)..]
+                .iter()
+                .rev()
+                .find(|(name, _)| *name == symbol)
         {
             ScopedReference::Local(*binding)
+        } else if allow_local && symbol == "%" && self.post_result_scope.is_some() {
+            // The macro-introduced result has no source definition or rename target.
+            return;
         } else if !self.top_level_names.contains(symbol)
             && let Some((namespace, local)) = self
                 .names
@@ -600,14 +807,32 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             ScopedReference::InNamespace(symbol)
         };
         match &mut self.purpose {
-            Purpose::Navigate { target, .. } => target.symbol = Some(hit),
+            Purpose::Navigate { target, .. } => {
+                target.symbol = Some(hit);
+                if allow_local {
+                    target.evaluated_symbol = Some(symbol);
+                    if matches!(hit, ScopedReference::InNamespace(_))
+                        && !self.top_level_names.contains(symbol)
+                        && !self.names.forward_vars.contains_key(symbol)
+                    {
+                        target.java_class = Some(symbol);
+                    }
+                }
+            }
             Purpose::Collect(found) => found.uses.push((span, hit)),
-            Purpose::Check(_) => unreachable!(),
+            Purpose::Check(_) | Purpose::ProtocolMethods { .. } => unreachable!(),
         }
     }
 
     fn is_local(&self, symbol: &str) -> bool {
-        self.locals.iter().rev().any(|(name, _)| *name == symbol)
+        (symbol == "%" && self.post_result_scope.is_some())
+            || self.locals.iter().rev().any(|(name, _)| *name == symbol)
+    }
+
+    fn local_scope(&self, symbol: &str) -> usize {
+        self.post_result_scope
+            .filter(|_| symbol == "%")
+            .unwrap_or(0)
     }
 
     fn template_parameter(&self, symbol: &str) -> bool {
@@ -701,7 +926,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         self.locals.truncate(scope);
     }
 
-    fn function(&mut self, args: &'a [Form], span: Span) {
+    fn function(&mut self, args: &'a [Form], span: Span, special_form: bool) {
         // Template substitution can change the names of lexical binders.
         if self.template_scope.is_some() {
             return;
@@ -715,7 +940,12 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         } else {
             args
         };
-        if let Ok(clauses) = lexical_function_clauses(clauses, span) {
+        let clauses = if special_form {
+            lexical_fn_star_clauses(clauses, span)
+        } else {
+            lexical_function_clauses(clauses, span)
+        };
+        if let Ok(clauses) = clauses {
             for clause in clauses.values() {
                 self.clause(clause);
             }
@@ -962,6 +1192,8 @@ fn plain_core_arguments(name: &str) -> bool {
             | "not"
             | "nil?"
             | "some?"
+            | "name"
+            | "map?"
             | "symbol?"
             | "simple-symbol?"
             | "qualified-symbol?"
@@ -971,6 +1203,7 @@ fn plain_core_arguments(name: &str) -> bool {
             | "hash-map"
             | "set"
             | "get"
+            | "get-in"
             | "contains?"
             | "assoc"
             | "conj"

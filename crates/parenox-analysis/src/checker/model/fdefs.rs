@@ -52,12 +52,15 @@ impl Model {
     pub(super) fn parse_fdef(
         &mut self,
         parts: &[Form],
+        source: &str,
         globals: &Globals,
     ) -> Option<Vec<Signature>> {
         read_function_spec(
             &self.names,
             &parts[2..],
             parts[1].span,
+            source,
+            Some(&globals.spec_unchecked_inputs),
             &mut self.diagnostics,
             |key, _| track_spec(&mut self.external_specs, globals, key),
         )

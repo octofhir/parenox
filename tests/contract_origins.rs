@@ -123,7 +123,8 @@ fn externs_cannot_override_modeled_functions_or_macros() {
             (defn fail {:t/sig '[:-> number?]} [] (inc \"not a number\"))
             (defn lookup {:t/sig '[:-> number?]} [] (get {:id 1} :id))
             (defn thread {:t/sig '[:-> number?]} [] (-> 1 inc))
-            (defn unmodeled {:t/sig '[:-> string?]} [] (name :abc))",
+            (defn checked-name {:t/sig '[:-> #{\"abc\"}]} [] (name :demo/abc))
+            (defn unmodeled {:t/sig '[:-> string?]} [] (namespace :demo/abc))",
     };
     let externs = Source {
         path: "externs.edn",
@@ -131,17 +132,19 @@ fn externs_cannot_override_modeled_functions_or_macros() {
                   clojure.core/get [number? :-> string?]
                   clojure.core/-> [number? :-> string?]
                   clojure.string/upper-case [number? :-> number?]
-                  clojure.core/name [keyword? :-> string?]}",
+                  clojure.core/name [keyword? :-> string?]
+                  clojure.core/namespace [keyword? :-> string?]}",
     };
     let report = Session::default().check_project(&[app], Some(externs));
     assert_eq!(report.files[0].diagnostics.len(), 1, "{report:#?}");
     assert_eq!(report.files[0].diagnostics[0].code, "PNX2322");
-    assert_eq!(report.files[1].diagnostics.len(), 4, "{report:#?}");
+    assert_eq!(report.files[1].diagnostics.len(), 5, "{report:#?}");
     for (diagnostic, name) in report.files[1].diagnostics.iter().zip([
         "clojure.core/inc",
         "clojure.core/get",
         "clojure.core/->",
         "clojure.string/upper-case",
+        "clojure.core/name",
     ]) {
         assert_eq!(diagnostic.code, "PNX2790");
         assert_eq!(

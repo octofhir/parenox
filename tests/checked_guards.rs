@@ -71,7 +71,7 @@ fn a_guard_can_refine_the_owner_of_a_map_selector() {
            [x] (string? x))
          (defn use-payload {{:t/sig '[::event :-> string?]}} [event]
            (if (text-payload? (:value event))
-             (str/upper-case (:value event))
+             (str/trim (:value event))
              (str (inc (:value event)))))",
         include_str!("../examples/tagged_maps.clj")
     );

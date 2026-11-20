@@ -1,8 +1,22 @@
 //! Source locations for named spec reference sites.
 use super::{Definition, Session};
-use crate::reader::{Form, Kind};
+use crate::reader::{Form, Kind, Span};
 
 impl Session {
+    /// Identify the explicit reader namespace declared before an editable token.
+    pub fn reader_namespace_before(&self, path: &str, offset: usize) -> Option<(&str, Span)> {
+        let file = self.current_file(path)?;
+        if file
+            .parse_error
+            .as_ref()
+            .is_some_and(|error| error.span.start.offset <= offset)
+        {
+            return None;
+        }
+        let (declarations, forms) = file.navigation_source()?;
+        declarations.reader_namespace_before(forms, offset)
+    }
+
     pub(super) fn spec_definition(&self, path: &str, offset: usize) -> Option<Definition> {
         let file = self.current_file(path)?;
         if !file.source.is_char_boundary(offset) {
@@ -11,7 +25,10 @@ impl Session {
         let (caller, forms) = file.navigation_source()?;
         let spelling = keyword_at(forms, offset)?;
         let key = caller.resolve_spec_keyword(spelling)?;
-        if caller.spec_type_reference_at(forms, offset).as_deref() != Some(key.as_str())
+        if caller
+            .spec_type_reference_at(forms, &file.source, offset)
+            .as_deref()
+            != Some(key.as_str())
             && (self.has_source_namespace("clojure.spec.alpha")
                 || caller.validation_spec_at(
                     forms,

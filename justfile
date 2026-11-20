@@ -117,9 +117,13 @@ uri-editor-bench project binary="target/release/parenox": build
 malli-editor-bench project binary="target/release/parenox" transport="full" document="assertions": build
     PARENOX_MALLI_PILOT={{quote(project)}} PARENOX_LSP_BINARY={{quote(binary)}} PARENOX_LSP_TRANSPORT={{quote(transport)}} PARENOX_MALLI_DOCUMENT={{quote(document)}} cargo test --locked --release --test lsp malli_pilot_editor_benchmark -- --ignored --nocapture
 
-# Exercise passing, failing and unloadable tests on Clojure/JVM (optional).
+# Exercise JVM evaluation, application launches and clojure.test (optional).
 jvm-test-smoke:
     cargo test --locked --test runtime_cli -- --ignored
+
+# Compare Parenox evaluation with the pinned JVM and verify standalone execution.
+own-eval-smoke:
+    cargo test --locked --test own_eval -- --include-ignored
 
 # Run the same portable test namespace on JVM Clojure and a supplied cljrs build.
 portable-runtime-smoke native: build
@@ -129,7 +133,19 @@ portable-runtime-smoke native: build
     trap 'rm -rf "$fixture"' EXIT
     cp -R tests/fixtures/jvm-project/. "$fixture"
     target/release/parenox test --project "$fixture" --alias test demo.portable-test
-    {{quote(native)}} test --no-config --src-path "$fixture/test" demo.portable-test
+    target/release/parenox test --project "$fixture" --backend clojurust --cljrs {{quote(native)}} --src-path test demo.portable-test
+
+# Compare evaluation, scripts, core.async and test reports on JVM and clojurust.
+native-run-smoke native:
+    PARENOX_CLJRS={{quote(native)}} cargo test --locked --test native_runtime --test native_test_reports --test native_main --test native_eval --test native_project_paths -- --include-ignored
+
+# Run a portable application and test over the pinned Medley sources.
+native-medley-smoke checkout native:
+    PARENOX_MEDLEY={{quote(checkout)}} PARENOX_CLJRS={{quote(native)}} cargo test --locked --test native_medley -- --ignored --nocapture
+
+# Exercise the CLI against loopback JVM nREPL and clojurust servers.
+nrepl-runtime-smoke jar jvm native:
+    PARENOX_NREPL_JAR={{quote(jar)}} PARENOX_NREPL_JAVA={{quote(jvm)}} PARENOX_CLJRS={{quote(native)}} cargo test --locked --test nrepl_runtime -- --ignored --nocapture
 
 # Check private inference, then show the deliberate nil error and call chain.
 inference: build

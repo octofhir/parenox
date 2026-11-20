@@ -135,13 +135,17 @@ fn generation_settings_preserve_the_checked_collection_and_element_types() {
 }
 
 #[test]
-fn external_fdefs_and_specs_without_a_collection_kind_report_incomplete_coverage() {
+fn external_fdefs_and_unmodeled_collection_elements_report_incomplete_coverage() {
     let source = r#"(ns catalogs (:require [clojure.spec.alpha :as s]))
         (s/def ::labels (s/coll-of string? :gen-max 1))
+        (defn labels {:t/sig '[:-> ::labels]} [] ["ready"])
+        (s/def ::numbers (s/coll-of number? :gen-max 1))
         (s/fdef clojure.core/str :args (s/cat :name string?) :ret string?)"#;
     let report = Session::default().check("catalogs.clj", source);
     assert!(!report.complete);
     assert_eq!(report.diagnostics.len(), 2, "{report:#?}");
+    assert_eq!(report.diagnostics[0].span.start.line, 4, "{report:#?}");
+    assert_eq!(report.diagnostics[1].span.start.line, 5, "{report:#?}");
     assert!(
         report
             .diagnostics

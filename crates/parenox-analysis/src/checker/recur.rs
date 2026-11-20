@@ -1,11 +1,13 @@
 //! Tail transfers and bounded type inference for loop and function bodies.
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
+use super::function_forms::FunctionConditions;
 use super::{Checker, Env, Value};
 use crate::reader::{Form, Kind, Span};
-use crate::types::{ExtraFields, Type};
+use crate::types::{ExtraFields, IntegerType, Type};
 
 const MAX_STATES: usize = 16;
+const MAX_EXACT_INTEGERS_PER_SLOT: usize = 8;
 const MAX_RECHECKS: usize = 128;
 const MAX_STATE_NODES: usize = 2048;
 
@@ -133,6 +135,7 @@ impl Checker<'_> {
     pub(super) fn function_body(
         &mut self,
         params: &[Form],
+        conditions: FunctionConditions<'_>,
         body: &[Form],
         args: Vec<Value>,
         env: &Env,
@@ -140,8 +143,76 @@ impl Checker<'_> {
     ) -> Value {
         self.recur_body("fn", span, args, |checker, state| {
             let local = checker.bind_parameters(env.clone(), params, |index| state[index].clone());
-            checker.body(body, &local, true)
+            let mut active = (!conditions.pre.is_empty()).then(|| local.clone());
+            let preconditions_pass = active.as_mut().map_or(checker.path_reachable, |env| {
+                checker.check_conditions(
+                    conditions.pre,
+                    env,
+                    checker.path_reachable,
+                    "precondition",
+                )
+            });
+            // The body can also run with assertions disabled. A postcondition
+            // wrapper removes its tail position in both compiler modes.
+            let result = checker.body(body, &local, conditions.post.is_none());
+            if let Some(post) = conditions.post.filter(|post| !post.is_empty()) {
+                let mut active = active.unwrap_or(local);
+                let reachable =
+                    preconditions_pass && active.reachable() && result.known != Type::Never;
+                // A directly returned local keeps any narrowing from the
+                // enabled preconditions. The overall return still includes
+                // the path where the compiler elides both sets of checks.
+                let post_value = body
+                    .last()
+                    .and_then(Form::symbol)
+                    .and_then(|name| active.get(name))
+                    .unwrap_or(&result)
+                    .clone();
+                active.insert("%".into(), post_value);
+                checker.check_conditions(post, &mut active, reachable, "postcondition");
+            }
+            result
         })
+    }
+
+    fn check_conditions(
+        &mut self,
+        conditions: &[Form],
+        env: &mut Env,
+        mut reachable: bool,
+        description: &str,
+    ) -> bool {
+        if self.globals.project_namespaces.contains("clojure.core")
+            || self.model.resolve("clojure.core/assert") != "clojure.core/assert"
+        {
+            self.inspect_path(reachable, |checker| {
+                checker.may_throw();
+                checker.unsupported(
+                    conditions[0].span,
+                    format!(
+                        "Function {description}s require the standard clojure.core/assert macro"
+                    ),
+                );
+            });
+            return reachable;
+        }
+        let start = self.diagnostics.len();
+        for condition in conditions {
+            let value = self.infer_path(condition, env, reachable, false);
+            if value.known.falsey() != Type::Never {
+                self.assertion_error();
+            }
+            reachable = value.known.truthy() != Type::Never;
+            if reachable {
+                self.narrow(condition, true, env);
+            }
+        }
+        for diagnostic in &mut self.diagnostics[start..] {
+            diagnostic.notes.push(format!(
+                "This {description} runs when *assert* is enabled at compile time."
+            ));
+        }
+        reachable
     }
 
     fn recur_body(
@@ -177,7 +248,8 @@ impl Checker<'_> {
                 if seen.iter().any(|previous| same_types(&state, previous)) {
                     continue;
                 }
-                if widen_growing_collections(&mut state, &seen)
+                let widened_collections = widen_growing_collections(&mut state, &seen);
+                if (widen_changing_integers(&mut state, &seen) || widened_collections)
                     && seen.iter().any(|previous| same_types(&state, previous))
                 {
                     continue;
@@ -217,6 +289,30 @@ fn same_types(left: &[Value], right: &[Value]) -> bool {
     left.iter()
         .zip(right)
         .all(|(left, right)| left.known == right.known)
+}
+
+fn widen_changing_integers(state: &mut [Value], seen: &[Vec<Value>]) -> bool {
+    if seen.len() < MAX_EXACT_INTEGERS_PER_SLOT {
+        return false;
+    }
+    let fixed = Type::Integral(IntegerType::FIXED);
+    let mut changed = false;
+    for (index, value) in state.iter_mut().enumerate() {
+        if value.known.exact_long_value().is_none() || !value.known.subtype_of(&fixed) {
+            continue;
+        }
+        let previous: BTreeSet<_> = seen
+            .iter()
+            .map(|state| &state[index].known)
+            .filter(|ty| ty.subtype_of(&fixed))
+            .filter_map(Type::exact_long_value)
+            .collect();
+        if previous.len() >= MAX_EXACT_INTEGERS_PER_SLOT {
+            value.narrow(fixed.clone());
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(super) fn widen_growing_collections(state: &mut [Value], seen: &[Vec<Value>]) -> bool {

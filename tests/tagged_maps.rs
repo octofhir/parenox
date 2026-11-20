@@ -11,11 +11,11 @@ fn equality_and_case_narrow_the_owner_and_nested_aliases() {
     let report = check(
         "(defn exhaustive {:t/sig '[::event :-> string?]} [event]
            (case (get event :kind)
-             :note (str/upper-case (:value event))
+             :note (str/trim (:value event))
              :counter (str (inc (:value event)))))
          (defn conjunction {:t/sig '[::event boolean? :-> string?]} [event flag]
            (if (and flag (= :note (:kind event)))
-             (str/upper-case (:value event))
+             (str/trim (:value event))
              \"fallback\"))
          (defn contradictory {:t/sig '[::event :-> number?]} [event]
            (let [kind (:kind event)]
@@ -31,7 +31,7 @@ fn a_false_conjunction_does_not_prove_the_opposite_tag() {
     let report = check(
         "(defn ambiguous {:t/sig '[::event boolean? :-> string?]} [event flag]
            (if (and flag (= :note (:kind event)))
-             (str/upper-case (:value event))
+             (str/trim (:value event))
              (str (inc (:value event)))))",
     );
     assert!(!report.ok && report.complete, "{report:#?}");
@@ -47,8 +47,8 @@ fn a_known_tag_still_rejects_the_wrong_payload_operation() {
     let report = check(
         "(defn broken {:t/sig '[::event :-> string?]} [event]
            (if (= (get event :kind) :note)
-             (str/upper-case (:value event))
-             (str/upper-case (:value event))))",
+             (str/trim (:value event))
+             (str/trim (:value event))))",
     );
     assert!(!report.ok && report.complete, "{report:#?}");
     assert_eq!(report.diagnostics.len(), 1);
@@ -61,7 +61,7 @@ fn partial_case_reports_the_unhandled_known_tag() {
     let report = check(
         "(defn missing {:t/sig '[::event :-> string?]} [event]
            (case (:kind event)
-             :note (str/upper-case (:value event))))",
+             :note (str/trim (:value event))))",
     );
     assert!(!report.ok && report.complete, "{report:#?}");
     assert_eq!(report.diagnostics.len(), 1);
@@ -79,7 +79,7 @@ fn missing_nil_and_false_have_different_guard_behavior() {
          (defn with-legacy {:t/sig '[::with-legacy :-> string?]} [event]
            (if (some? (:kind event))
              (if (:kind event)
-               (str/upper-case (:value event))
+               (str/trim (:value event))
                (str (inc (:value event))))
              (str (inc (:value event)))))
          (s/def :text/name string?)
@@ -97,10 +97,10 @@ fn shadowing_the_owner_or_alias_drops_the_old_relationship() {
     let report = check(
         "(defn owner-shadow {:t/sig '[::event ::event :-> string?]} [event replacement]
            (let [kind (:kind event) event replacement]
-             (if (= kind :note) (str/upper-case (:value event)) \"\")))
+             (if (= kind :note) (str/trim (:value event)) \"\")))
          (defn alias-shadow {:t/sig '[::event :-> string?]} [event]
            (let [kind (:kind event) kind :note]
-             (if (= kind :note) (str/upper-case (:value event)) \"\")))",
+             (if (= kind :note) (str/trim (:value event)) \"\")))",
     );
     assert!(!report.ok && report.complete, "{report:#?}");
     assert_eq!(report.diagnostics.len(), 2);
@@ -117,15 +117,15 @@ fn defaults_shadowed_get_and_custom_predicates_do_not_prove_a_tag() {
          (s/def ::with-legacy (s/or :note ::note :legacy ::legacy))
          (defn default-result {:t/sig '[::with-legacy :-> string?]} [event]
            (if (= (get event :kind :note) :note)
-             (str/upper-case (:value event))
+             (str/trim (:value event))
              \"other\"))
          (defn always-note {:t/sig '[::event keyword? :-> #{:note}]} [m k] :note)
          (defn shadow-get {:t/sig '[::event :-> string?]} [event]
            (let [get always-note]
-             (if (= (get event :kind) :note) (str/upper-case (:value event)) \"\")))
+             (if (= (get event :kind) :note) (str/trim (:value event)) \"\")))
          (defn accepts-tag {:t/sig '[keyword? :-> boolean?]} [kind] true)
          (defn no-assertion {:t/sig '[::event :-> string?]} [event]
-           (if (accepts-tag (:kind event)) (str/upper-case (:value event)) \"\"))",
+           (if (accepts-tag (:kind event)) (str/trim (:value event)) \"\"))",
     );
     assert!(!report.ok && report.complete, "{report:#?}");
     assert_eq!(report.diagnostics.len(), 3);

@@ -1,9 +1,13 @@
 //! Input contracts for sequential spec checks. A conformed value is not the input.
 
-use super::{TypeReader, conversion::source_conversion, predicate_type};
+use super::{
+    TypeReader,
+    conversion::{resolves, source_conversion},
+    predicate_type,
+};
 use crate::Diagnostic;
 use crate::reader::{Form, Kind};
-use crate::types::Type;
+use crate::types::{IntegerClass, Type};
 
 impl<F: FnMut(&str, crate::reader::Span) -> Option<Type>> TypeReader<'_, F> {
     pub(super) fn conjunction(&mut self, form: &Form, stages: &[Form]) -> Type {
@@ -12,6 +16,11 @@ impl<F: FnMut(&str, crate::reader::Span) -> Option<Type>> TypeReader<'_, F> {
             // inputs that can conform without throwing. The runtime
             // predicate domain and converted output are tracked separately.
             return conversion.success_input();
+        }
+        if let [predicate, set] = stages
+            && let Some(domain) = self.guarded_integer_set(predicate, set)
+        {
+            return domain;
         }
         let [first, rest @ ..] = stages else {
             return self.conjunction_gap(form, "An empty s/and has no modeled input type");
@@ -30,7 +39,7 @@ impl<F: FnMut(&str, crate::reader::Span) -> Option<Type>> TypeReader<'_, F> {
             let next = self.conjunction_stage(stage);
             if !input.contains_unknown() && !next.contains_unknown() {
                 input = if same_value {
-                    intersect(input, next).unwrap_or_else(|| {
+                    input.known_intersection(&next).unwrap_or_else(|| {
                         self.conjunction_gap(stage, "This s/and type intersection is not modeled")
                     })
                 } else {
@@ -42,6 +51,31 @@ impl<F: FnMut(&str, crate::reader::Span) -> Option<Type>> TypeReader<'_, F> {
             same_value &= self.preserves_input(stage);
         }
         input
+    }
+
+    fn guarded_integer_set(&self, predicate: &Form, set: &Form) -> Option<Type> {
+        let Kind::Set(items) = &set.without_metadata().kind else {
+            return None;
+        };
+        let class = if resolves(self.names, predicate, "clojure.core", "int?") {
+            IntegerClass::Fixed
+        } else if resolves(self.names, predicate, "clojure.core", "integer?") {
+            IntegerClass::Any
+        } else {
+            return None;
+        };
+        // A literal set also accepts numerically equal BigInt values. The
+        // preceding predicate determines which integer classes can reach it.
+        items
+            .iter()
+            .map(|item| {
+                let value = Type::integer_literal(item, self.source)
+                    .and_then(|ty| ty.exact_long_value())
+                    .or_else(|| Type::decimal_long_literal(item, self.source))?;
+                Some(Type::exact_long(value, class))
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(Type::union)
     }
 
     fn conjunction_stage(&mut self, form: &Form) -> Type {
@@ -106,18 +140,15 @@ impl<F: FnMut(&str, crate::reader::Span) -> Option<Type>> TypeReader<'_, F> {
     fn is_tagged_choice(&self, form: &Form) -> bool {
         matches!(&form.without_metadata().kind, Kind::List(items)
             if items.len() >= 3 && items.len() % 2 == 1
-                && items[0].symbol().is_some_and(|op| self.names.resolve_parts(op) == ("clojure.spec.alpha", "or"))
+                && resolves(self.names, &items[0], "clojure.spec.alpha", "or")
                 && items[1..].as_chunks::<2>().0.iter().all(|[tag, _]| tag.keyword().is_some()))
     }
 
     fn is_tag_projection(&self, form: &Form) -> bool {
         matches!(&form.without_metadata().kind, Kind::List(items)
             if matches!(items.as_slice(), [head, function] | [head, function, _]
-                if head.symbol().is_some_and(|op| self.names.resolve_parts(op) == ("clojure.spec.alpha", "conformer"))
-                    && function.symbol().is_some_and(|symbol|
-                        self.names.resolve_parts(symbol) == ("clojure.core", "second")
-                            && (symbol.contains('/') || (self.names.spec_core_scope_known
-                                && !self.names.spec_core_shadows.contains(symbol))))))
+                if resolves(self.names, head, "clojure.spec.alpha", "conformer")
+                    && resolves(self.names, function, "clojure.core", "second")))
     }
 
     pub(super) fn unchecked_conformer(&mut self, form: &Form) -> Type {
@@ -129,67 +160,4 @@ impl<F: FnMut(&str, crate::reader::Span) -> Option<Type>> TypeReader<'_, F> {
             .push(Diagnostic::analysis_gap("PNX9001", form.span, reason));
         Type::Unknown
     }
-}
-
-fn intersect(left: Type, right: Type) -> Option<Type> {
-    if left.subtype_of(&right) {
-        return Some(left);
-    }
-    if right.subtype_of(&left) {
-        return Some(right);
-    }
-    if left == Type::SpecTruthy {
-        return right.spec_truthy();
-    }
-    if right == Type::SpecTruthy {
-        return left.spec_truthy();
-    }
-    let left = scalar_members(&left)?;
-    let right = scalar_members(&right)?;
-    if left.len().saturating_mul(right.len()) > 256 {
-        return None;
-    }
-    Some(Type::union(left.iter().flat_map(|a| {
-        right.iter().filter_map(move |b| {
-            if let Some(ty) = a.integer_intersection(b) {
-                Some(ty)
-            } else if a.subtype_of(b) {
-                Some(a.clone())
-            } else {
-                b.subtype_of(a).then(|| b.clone())
-            }
-        })
-    })))
-}
-
-fn scalar_members(ty: &Type) -> Option<&[Type]> {
-    let members = match ty {
-        Type::Union(xs) => xs,
-        atom => std::slice::from_ref(atom),
-    };
-    members
-        .iter()
-        .all(|ty| {
-            matches!(
-                ty,
-                Type::Nil
-                    | Type::Boolean
-                    | Type::Bool(_)
-                    | Type::Number
-                    | Type::Integral(_)
-                    | Type::NonIntegral
-                    | Type::Integer(_)
-                    | Type::String
-                    | Type::Str(_)
-                    | Type::Character
-                    | Type::Char(_)
-                    | Type::Keyword
-                    | Type::Key(_)
-                    | Type::Symbol
-                    | Type::SimpleSymbol
-                    | Type::QualifiedSymbol
-                    | Type::Pattern
-            )
-        })
-        .then_some(members)
 }

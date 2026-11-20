@@ -1,0 +1,11 @@
+[package]
+name = "parenox-classpath"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Read local Clojure classpath archives without loading code"
+
+[dependencies]
+parenox-frontend = { path = "../parenox-frontend" }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }

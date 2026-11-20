@@ -138,6 +138,7 @@ pub(super) fn element_type(collection: Type) -> Result<Type, CollectionError> {
         Type::Str(string) if string.is_empty() => Ok(Type::Never),
         Type::String | Type::Str(_) => Ok(Type::Character),
         Type::Unknown => Ok(Type::Unknown),
+        Type::SpecCollection(element) => Ok(*element),
         Type::Union(parts) => parts
             .into_iter()
             .map(element_type)

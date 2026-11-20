@@ -64,7 +64,10 @@ impl Declarations {
         let (Arity::Fixed(_), clause) = clauses.first_key_value()? else {
             return None;
         };
-        if clauses.len() != 1 {
+        if clauses.len() != 1
+            || !clause.conditions.pre.is_empty()
+            || clause.conditions.post.is_some()
+        {
             return None;
         }
         let params = clause.bindings();

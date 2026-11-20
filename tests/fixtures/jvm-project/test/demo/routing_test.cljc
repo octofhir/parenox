@@ -1,6 +1,6 @@
 (ns demo.routing-test
   (:require [clojure.test :refer [deftest is testing]]
-            [demo.routing :as routing]))
+   [demo.routing :as routing]))
 
 (deftest route-status
   (testing "a nil route is missing"

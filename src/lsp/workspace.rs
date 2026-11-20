@@ -1,6 +1,10 @@
 //! One workspace and its in-memory editor overlays.
 #[path = "call_hierarchy.rs"]
 mod call_hierarchy;
+#[path = "file_rename.rs"]
+pub(super) mod file_rename;
+#[path = "inspection.rs"]
+pub(super) mod inspection;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -12,7 +16,7 @@ use parenox::{
     Definition, Diagnostic, Session, Source, output::contract_note, reader::validate_edn,
 };
 use parenox_lsp::structural::{self, FoldingOptions};
-use parenox_lsp::{lenses, rename, semantic, test_tree};
+use parenox_lsp::{hover, lenses, project_tree, refactor, rename, semantic, test_tree};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -34,6 +38,7 @@ pub(super) struct Workspace {
     versioned_edits: bool,
     test_tree: bool,
     format_options: FormatOptions,
+    dependency_completions: completion::DependencyCompletions,
     documents: BTreeMap<String, Document>,
     externs: Vec<FileSnapshot>,
     session: Session,
@@ -183,6 +188,7 @@ impl Workspace {
             versioned_edits,
             test_tree,
             format_options: FormatOptions::default(),
+            dependency_completions: completion::DependencyCompletions::default(),
             documents: BTreeMap::new(),
             externs: Vec::new(),
             session: Session::default(),
@@ -215,7 +221,7 @@ impl Workspace {
     }
 
     fn reload(&mut self) -> Result<(), String> {
-        let settings = self.options.load_for_format(&self.root)?;
+        let mut settings = self.options.load_for_format(&self.root)?;
         let format_options = settings.format.clone();
         let editable_roots = settings
             .paths
@@ -226,6 +232,13 @@ impl Workspace {
             .analysis_paths()
             .map(|path| normalize(Path::new(path)))
             .collect();
+        let classpath = settings.classpath.take().unwrap_or_else(|| {
+            source_roots
+                .iter()
+                .cloned()
+                .chain(self.options.dependency_jars(&self.root))
+                .collect()
+        });
         let source_aliases: Vec<_> = source_roots
             .iter()
             .filter_map(|root| {
@@ -287,6 +300,7 @@ impl Workspace {
         self.source_aliases = source_aliases;
         self.externs = project.externs;
         self.format_options = format_options;
+        self.dependency_completions = completion::DependencyCompletions::new(classpath);
         self.session_ready = false;
         Ok(())
     }
@@ -485,8 +499,14 @@ impl Workspace {
 
     pub fn definition(&self, params: TextQuery) -> Option<Value> {
         let (path, offset) = self.query_offset(params)?;
-        let target = self.session_for(&path)?.definition(&path, offset)?;
-        self.location(&target)
+        let session = self.session_for(&path)?;
+        session
+            .definition(&path, offset)
+            .and_then(|target| self.location(&target))
+            .or_else(|| {
+                self.dependency_completions
+                    .definition(session, &path, offset)
+            })
     }
 
     pub fn declaration(&self, params: TextQuery) -> Option<Value> {
@@ -702,17 +722,42 @@ impl Workspace {
         Ok(())
     }
 
-    pub fn hover(&self, params: TextQuery) -> Option<Value> {
+    pub fn hover(
+        &self,
+        params: TextQuery,
+        markdown: bool,
+        clojuredocs: &parenox_lsp::clojuredocs::ClojureDocs,
+    ) -> Option<Value> {
         let (path, offset) = self.query_offset(params)?;
-        let info = self.session_for(&path)?.var_at(&path, offset)?;
-        let mut lines = vec![info.name];
-        lines.extend(info.signatures);
-        if let Some(contract) = &info.contract {
-            lines.push(contract_note(contract));
-        } else {
-            lines.push("Checked type information unavailable".into());
-        }
-        Some(json!({"contents":{"kind":"plaintext","value":lines.join("\n")}}))
+        let session = self.session_for(&path)?;
+        let range = session
+            .hover_symbol_span(&path, offset)
+            .and_then(|span| Lines::new(&self.documents.get(&path)?.source).range(span));
+        let Some(source) = session.hover_at(&path, offset) else {
+            return hover::dependency(
+                session,
+                &path,
+                offset,
+                &self.dependency_completions,
+                markdown,
+                range,
+                clojuredocs,
+            );
+        };
+        let mut checked = source.info.signatures;
+        checked.push(source.info.contract.as_ref().map_or_else(
+            || "Checked type information unavailable".into(),
+            contract_note,
+        ));
+        Some(hover::render(
+            &source.info.name,
+            &source.arglists,
+            &checked,
+            source.documentation.as_deref(),
+            markdown,
+            range,
+            clojuredocs.find(&source.info.name),
+        ))
     }
 
     pub fn signature_help(&self, params: TextQuery) -> Option<Value> {
@@ -744,6 +789,20 @@ impl Workspace {
         Some(help)
     }
 
+    pub fn project_tree(&self, query: Option<project_tree::Leaf>) -> Option<Value> {
+        project_tree::nodes(
+            &self.root,
+            &self.editable_roots,
+            self.dependency_completions.jars(),
+            self.symbol_candidates(),
+            query,
+        )
+    }
+
+    pub fn dependency_contents(&self, uri: &str) -> Option<String> {
+        self.dependency_completions.dependency_contents(uri)
+    }
+
     pub fn completion(&self, params: TextQuery, snippets: bool) -> Option<Value> {
         let path = self.document_key(&params.text_document.uri)?;
         if !is_clojure_source(Path::new(&path)) {
@@ -756,10 +815,10 @@ impl Workspace {
             self.session_for(&path)?,
             &path,
             &params.text_document.uri,
-            &document.source,
             &lines,
             lines.offset(params.position)?,
             snippets,
+            &self.dependency_completions,
         )
     }
 
@@ -806,26 +865,80 @@ impl Workspace {
     }
 
     pub fn code_actions(&self, params: CodeActionQuery) -> Vec<Value> {
-        self.fdef_action(params).into_iter().collect()
+        let only = params.context.only.as_deref();
+        let rewrite = refactor::action_allowed(refactor::REWRITE_KIND, only);
+        if !rewrite
+            && !refactor::action_allowed(refactor::REFACTOR_KIND, only)
+            && !refactor::action_allowed(refactor::EXTRACT_KIND, only)
+        {
+            return Vec::new();
+        }
+        let Some(path) = self.document_key(&params.text_document.uri) else {
+            return Vec::new();
+        };
+        let Some(document) = self.documents.get(&path) else {
+            return Vec::new();
+        };
+        let lines = Lines::new(&document.source);
+        let Some(offset) = lines.byte_range(params.range).map(|range| range.start) else {
+            return Vec::new();
+        };
+        let mut actions = Vec::new();
+        if rewrite {
+            actions.extend(self.fdef_action(&path, &lines, offset));
+            if let Some(edit) =
+                self.refactor_edit(&path, &lines, offset, refactor::Command::CyclePrivacy, None)
+            {
+                actions.push(json!({"title":refactor::CYCLE_PRIVACY_TITLE,"kind":refactor::REWRITE_KIND,"edit":edit}));
+            }
+        }
+        if is_clojure_source(Path::new(&path))
+            && self.rename_document(&path).is_some()
+            && let Some(session) = self.session_for(&path)
+        {
+            actions.extend(refactor::command_actions(
+                session,
+                &path,
+                &lines,
+                offset,
+                &params.text_document.uri,
+                only,
+            ));
+        }
+        actions
     }
 
-    fn fdef_action(&self, params: CodeActionQuery) -> Option<Value> {
-        const KIND: &str = "refactor.rewrite";
-        if params.context.only.is_some_and(|kinds| {
-            !kinds.iter().any(|kind| {
-                kind.is_empty()
-                    || KIND == kind
-                    || KIND.strip_prefix(kind).is_some_and(|s| s.starts_with('.'))
-            })
-        }) {
+    pub fn refactor(
+        &self,
+        uri: &str,
+        position: Position,
+        command: refactor::Command,
+        collection: Option<refactor::Collection>,
+    ) -> Option<Value> {
+        let path = self.document_key(uri)?;
+        let lines = Lines::new(&self.documents.get(&path)?.source);
+        self.refactor_edit(&path, &lines, lines.offset(position)?, command, collection)
+    }
+
+    fn refactor_edit(
+        &self,
+        path: &str,
+        lines: &Lines<'_>,
+        offset: usize,
+        command: refactor::Command,
+        collection: Option<refactor::Collection>,
+    ) -> Option<Value> {
+        if !is_clojure_source(Path::new(path)) {
             return None;
         }
-        let path = self.document_key(&params.text_document.uri)?;
-        let document = self.documents.get(&path)?;
-        let editor = document.editor.as_ref()?;
-        let lines = Lines::new(&document.source);
-        let offset = lines.byte_range(params.range)?.start;
-        let suggestion = self.session_for(&path)?.suggest_fdef(&path, offset)?;
+        let document = self.rename_document(path)?;
+        let edits = command.edits(self.session_for(path)?, path, lines, offset, collection)?;
+        Some(document.workspace_edit(edits, self.versioned_edits))
+    }
+
+    fn fdef_action(&self, path: &str, lines: &Lines<'_>, offset: usize) -> Option<Value> {
+        let editor = self.documents.get(path)?.editor.as_ref()?;
+        let suggestion = self.session_for(path)?.suggest_fdef(path, offset)?;
         let title = if suggestion.draft {
             "Draft s/fdef (review unknown types)"
         } else {
@@ -835,14 +948,13 @@ impl Workspace {
             let position = lines.position(edit.offset)?;
             Some(json!({"range": {"start": position, "end": position}, "newText": edit.new_text}))
         }).collect::<Option<Vec<_>>>()?;
-        let edit = if self.versioned_edits {
-            json!({"documentChanges": [{
-                "textDocument":{"uri": editor.uri, "version": editor.version}, "edits": edits
-            }]})
-        } else {
-            json!({"changes": {(editor.uri.clone()): edits}})
+        let document = rename::Document {
+            source: lines.source(),
+            uri: editor.uri.clone(),
+            version: Some(editor.version),
         };
-        Some(json!({"title":title,"kind":KIND,"edit":edit}))
+        let edit = document.workspace_edit(edits, self.versioned_edits);
+        Some(json!({"title":title,"kind":"refactor.rewrite","edit":edit}))
     }
 
     fn session_for(&self, path: &str) -> Option<&Session> {

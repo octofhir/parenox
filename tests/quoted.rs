@@ -71,7 +71,7 @@ fn quotes_do_not_create_a_cycle_or_mark_an_inferred_helper_as_called() {
 
     let report = Session::default().check(
         "quoted.clj",
-        "(ns demo) (defn- helper [] 1)
+        "(ns demo) (defn- helper [] (inc 0))
                    (defn f {:t/sig '[:-> symbol?]} [] 'helper)",
     );
     let [diagnostic] = report.diagnostics.as_slice() else {

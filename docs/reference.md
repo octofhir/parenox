@@ -114,10 +114,20 @@ file would change. `--write` updates files only after the whole batch parses.
 
 Declare contracts with named `s/def` specs, source `s/fdef`, or quoted
 `:t/sig` metadata. Matching `s/fdef` and `:t/sig` declarations must agree.
-Public functions need a contract for full checking. Parenox can infer direct
-calls to supported single-arity private helpers from their arguments. Recursive
-helpers, unused helpers without typed callers, and helpers passed as values
-require a signature.
+Public functions need a contract for full checking. Parenox can infer calls to
+supported single-arity private helpers from their arguments. A reachable typed
+call establishes coverage. The checker still resolves names in dead branches.
+It can also check a private function independently when the body builds
+literal data from plain parameters. Recursive helpers and helpers passed
+as values require a signature. Other private bodies need a reachable typed
+call or a signature.
+
+An initializer can capture the immediately preceding local `def` when its
+root contains inert data. Parenox supports a bare read, vector elements, and
+map values after a static namespace declaration. Public snapshots contain
+the captured data, including values read from a private root. Intervening
+expressions, dynamic roots, evaluated metadata, and reads in map keys or
+set members leave an analysis gap.
 
 ```clojure
 (ns example.labels (:require [clojure.spec.alpha :as s]))
@@ -155,8 +165,11 @@ require a signature.
   required presence. Different unqualified specs that resolve to the same
   field still report a collision.
 - `(s/coll-of (s/tuple K V) :kind map?)` checks map entries using `K`
-  for keys and `V` for values. Collection specs without `:kind` remain
-  incomplete.
+  for keys and `V` for values. Without `:kind`, `s/coll-of` supports
+  `any?` and modeled map element shapes, including `::locations` from
+  lsp4clj. For a map input, the elements are its entries. An empty map
+  satisfies the element constraint. An individual map entry can itself
+  satisfy the constraint when both its key and value have the required shape.
 - `s/fspec` uses `s/cat` and `:ret` for callback contracts. Direct
   fixed-arity calls can supply types to `fn` and `#()` arguments.
   General callback and variadic inference remain limited.
@@ -168,20 +181,69 @@ require a signature.
   [two-input inference](../examples/generic_zip.clj), and
   [typed map boundaries](../examples/map_boundary).
 
-A successful `(s/valid? ::label entry)` narrows supported scalars and open
-map shapes in the true branch. The false branch does not exclude that shape.
+A successful `s/valid?` narrows supported scalars, open maps and
+collection element shapes in the true branch.
+For a named `s/coll-of` of modeled `s/keys :req-un` maps, `s/conform`
+can convert fields recursively in a vector of known elements.
+It preserves extra unqualified fields, returns `::s/invalid` when an
+element fails, and tracks overflow in nested `int` calls. For a map
+entry, it preserves `MapEntry` when both elements retain their JVM
+identity and returns a vector when one changes. Open maps,
+registry-sensitive qualified keys, unknown entry identity and other
+unmodeled reconstruction cases report an analysis gap.
 An approximate map shape does not prove the runtime predicate returns true.
 Recursive specs, dynamic spec names, and unsupported projections report gaps.
+
+A direct spec alias can use a target registered earlier in the same
+source. A reference to a later registration reports `PNX9001` on the
+alias. An existing `s/keys` map may resolve its field registrations later.
+[JVM fixture](../tests/fixtures/spec-alias-order.clj)
+
+A modeled `s/or` with named map branches returns a `MapEntry` with the
+selected tag and conformed value. It tries branches in source order and
+preserves exceptions from branches it visits. The input contract remains
+the union of accepted maps. [JVM fixture](../tests/fixtures/spec-document-changes-entry.clj)
+
+The `::document-changes` pattern in lsp4clj conforms a collection of
+tagged entries and projects their values with `map second`. The checker
+models the resulting sequence for known ordered or empty collections and
+small set literals. For a nonempty set, the result preserves the possible
+value types. Set traversal and deduplication can change the order and
+length. Validation and conversion errors precede the lazy sequence.
+[JVM fixture](../tests/fixtures/spec-document-changes.clj)
+
+The `::changes` form uses `(s/coll-of (s/tuple string? ::edits) :kind map?)`.
+On a known closed map, the checker preserves string keys and conforms
+each edit collection. A key of another type rejects its entry before
+its value is conformed. `::workspace-edit` can use this dictionary and
+`:document-changes` in the same input. [JVM fixture](../tests/fixtures/spec-workspace-changes.clj)
 
 As a spec predicate, core `identity` accepts truthy values and excludes
 `:clojure.spec.alpha/invalid`. For a named scalar spec defined directly
 with `identity`, `s/conform` returns the input on success and `s/valid?`
 can narrow the input in the true branch.
 
+A named spec of the form `(s/and string? #(= % "create"))` checks one
+literal string when both predicates resolve to core functions. It preserves
+the input on success and narrows `s/valid?` to the matching string. The
+exported contract uses a singleton set and can be imported without the
+provider source. [JVM fixture](../tests/fixtures/spec-file-kind.clj)
+
 Use `int?` in source contracts and conditions to check for a JVM `Byte`,
 `Short`, `Integer`, or `Long`. For example, `2147483648` satisfies
 `int?` and `1N` satisfies only `integer?`. Parenox reports `PNX9004`
 when an argument's class is required by a contract and cannot be proven.
+
+Guarded finite sets such as `(s/and int? #{9223372036854775807})`
+retain exact signed long values through checking and extern import.
+An `integer?` guard also accepts equal BigInt values.
+[JVM fixture](../tests/fixtures/signed-long-types.clj)
+
+With proven fixed-precision integer operands, `+`, `-`, `*`, `inc`, and
+`dec` return a fixed-precision integer on success. Safe results retain their
+known value or range. When overflow is possible, the checker accounts
+for `ArithmeticException` without assuming the compiler's unchecked
+math setting. [JVM fixture](../tests/fixtures/fixed-arithmetic.clj)
 
 For `(s/and integer? (s/conformer int))` with the core functions,
 `integer?` accepts Clojure integers, including BigInt. A successful input
@@ -189,9 +251,18 @@ must fit a signed 32-bit integer and can have any integral storage class.
 The normal result is a JVM `Integer` and satisfies `int?`.
 In a direct `s/conform` on this named scalar spec, a non-integer returns
 `:clojure.spec.alpha/invalid` and overflow throws. `s/valid?` distinguishes
-true, false, and an exception. Map conformation, arbitrary conformers, and
-user predicates are not executed or generally inferred. See the
+true, false, and an exception. Arbitrary conformers and user predicates
+remain outside the modeled cases. See the
 [JVM fixture](../tests/fixtures/spec-int-conformer.clj).
+
+`(s/conformer name)` and the core `name` call preserve String values and
+extract the name of an exact keyword. A `Symbol` can return String or nil.
+A general JVM `Named` implementation can return either value or throw.
+For a loaded registration, `s/valid?` returns true on a normal result and
+propagates exceptions, including `NullPointerException` for nil input.
+The unrestricted conformer has no static input projection. Function
+contracts and extern snapshots can declare an explicit supported input
+domain such as `(s/or :text string? :key keyword?)`.
 
 Named specs can use the same literal enum map as a predicate and a
 conformer. In `(s/and int? event-types (s/conformer event-types))`,
@@ -201,8 +272,24 @@ keys and keyword, nil or false values. A mapped keyword other than
 `:clojure.spec.alpha/invalid` is a successful result. On a successful
 `s/valid?`, the original value narrows to one of the accepted integer
 keys. Direct `s/conform` returns the mapped keyword or the invalid marker.
-Exporting these finite integer contracts as standalone EDN is currently
-unsupported.
+Exported EDN uses a guarded set such as
+`(clojure.spec.alpha/and clojure.core/int? #{1 2 3})`. The guard
+preserves the JVM integer-class restriction when importing the contract.
+For example, the imported contract accepts `1` and rejects `1N`.
+
+For the two-arm `:code-action/kind` spec in lsp4clj, the checker models
+the local keyword-to-string table and the `string?` branch. A mapped
+keyword produces its table value. String input keeps its identity.
+The accepted input types also survive export and source-free import.
+[JVM fixture](../tests/fixtures/spec-code-action-kind.clj)
+
+For a local `clojure.set/map-invert` of a prior literal keyword-to-code
+table, `(s/and integer? table (s/conformer table))` models the inverse
+spec with a finite, class-independent input domain. The table needs
+unique signed 32-bit decimal codes and an explicit load of `clojure.set`.
+An exported `(s/and integer? #{1 2})` accepts `1` and `1N` as the same
+code. The inverse var itself exports as an inert map, including any
+entries whose value is the spec invalid marker.
 
 ### EDN externs
 
@@ -270,12 +357,31 @@ bindings fill missing positions with nil; `[head & tail :as whole]`
 keeps the original collection in `whole` and a remaining seq or nil in
 `tail`. See `just checked`, `just defaults`, and `just presence`.
 
+The core `map?` predicate recognizes modeled persistent maps and narrows
+an unknown local or a known field to a map in the true branch. A general
+numeric type can overlap with `IPersistentMap` through a JVM subclass.
+Those numeric values keep both branches possible.
+
 `for` and `doseq` check seqable inputs, sequential bindings, destructuring,
 and `:let`, `:when`, and `:while`. `for` evaluates the first source expression
 immediately but defers traversal and the body. `doseq` is eager and normally
 returns nil; with no bindings or only `:let` clauses it returns the last body
 expression. `some->` stops on nil, not false. `recur` must target a supported
 tail position and analysis is bounded when argument types keep growing.
+
+Vector `:pre` conditions are checked after parameter binding and on each
+`recur` iteration. Vector `:post` conditions run after a normal return, with
+`%` bound to the body's value. Successful assertions can refine later
+conditions. The body is checked with the original bindings because
+`*assert*` can elide preconditions and postconditions at compile time.
+A failed assertion can throw `AssertionError`. Even an empty `:post`
+vector removes the function body's tail position. The first body map takes
+precedence over parameter metadata when a body form follows it.
+
+Literal `case` branches compare integer values across fixed and arbitrary
+precision classes within the JVM signed `long` range. A selected branch keeps
+the subject's numeric class and can refine a known field or local. `nth`
+accepts exact integer indices in the signed `int` range across those classes.
 
 Verified `:t/guard '[:then value string?]` narrows the argument after a true
 result. Use `:both` only if the checker can also verify the false branch.
@@ -288,6 +394,26 @@ Offsets count UTF-16 code units. A String hint identifies the class but
 does not rule out nil. General interop and other overloads remain outside
 the supported subset. Known explicit throws can narrow the set of reachable
 handlers; ordinary calls may throw.
+
+`clojure.string/upper-case`, `lower-case`, and `capitalize` use the
+value's JVM `toString` method. The checker accepts proven non-nil
+arguments and reports nil as an invalid input. `false` is a non-nil
+value. `clojure.string/blank?` accepts String, nil, and false in the
+modeled subset. A false result implies the argument is truthy. `trim`
+requires a String in the modeled subset.
+
+A literal Boolean assignment to the core `*warn-on-reflection*` var in
+the opening block after a statically resolved `ns` is supported. The
+checker leaves `*assert*`, `*unchecked-math*`, and computed or unresolved
+assignments as coverage gaps.
+
+Source checking analyzes standard `clojure.test/deftest` bodies containing
+`is` assertions and nested `testing` groups with literal string descriptions.
+Modeled assertions include scalar literals and selected core predicates.
+Operands use the same contracts and source diagnostics as checked function
+bodies. The runtime test command reports assertion outcomes. Computed
+messages, custom assertion dispatch, `are`, and exception assertions remain
+coverage gaps.
 
 Unknown macros, runtime-created declarations, and unsupported reader or
 numeric semantics remain explicit coverage gaps. In checked code, an
@@ -313,15 +439,63 @@ participate in analysis and navigation. A nested project can use its nearest
 project, a buffer has no project context.
 
 - `.clj` and `.cljc`: diagnostics, completion, definition, hover, find usages,
-  highlights, document outline, and workspace symbols. Hover shows checked
-  signatures and origins when available. Closed source files can contribute
+  highlights, document outline, and workspace symbols. Closed files contribute
   declarations and usages. Opaque macro expansions are not indexed.
+- **Hover** shows the var's docstring and argument lists from project source
+  or a local dependency JAR. Checked signatures and their origin appear when
+  available. Markdown is used when the client prefers it.
+- **ClojureDocs** downloads the public compact EDN export over HTTPS in
+  the background when the cache is missing, invalid, or at least 24 hours old. The
+  server uses the last valid snapshot while a refresh runs or fails. The
+  cache is `parenox/clojuredocs.edn` under `$XDG_CACHE_HOME` when set to an
+  absolute path, `~/Library/Caches` on macOS, `~/.cache` on other Unix systems,
+  or `%LOCALAPPDATA%` on Windows. Use `parenox lsp --clojuredocs-offline`
+  to use the cache without downloading, or `parenox lsp --clojuredocs FILE`
+  to pin a local compact EDN export. Hover adds examples, related symbols
+  and notes for a resolved var. The request
+  `clojure/clojuredocs/raw` takes an object such as
+  `{"symName":"map","symNs":"clojure.core"}` and returns the entry or
+  `null` when no entry is available. [Export downloads](https://github.com/clojure-emacs/clojuredocs-export-edn#exported-data)
+- **Project completion** suggests namespace names in `:require` and public
+  vars in `:refer` or after an alias such as `provider/`. The index includes
+  closed files and unsaved edits. Try hovering `provider/count-offset` and
+  completing the `demo.arities.provider` libspec in
+  [the arity example](../examples/arities/app.clj).
+- **Dependency completion** suggests public Clojure vars when typing an
+  alias such as `str/` from `[clojure.string :as str]`. It reads source in
+  cached JARs for direct `deps.edn` dependencies and selected aliases.
+  Aliases from a literal top-level `(require '[clojure.string :as str])`
+  are available after the call, including inside an unfinished form.
+  For a resolved dependency graph, run `clojure -Spath > classpath.txt`
+  in the project and start `parenox lsp --classpath classpath.txt`.
+  [Clojure CLI reference](https://clojure.org/reference/clojure_cli)
+- **Java completion** suggests public top-level classes in an `:import`
+  clause. Use a package-qualified prefix such as `java.util.UU` or a short
+  prefix in a group such as `[java.util UU]`. Incomplete import groups
+  work in unsaved buffers. `UUID/` suggests public static members and
+  `UUID/.` suggests public instance methods, including inherited methods.
+  Methods show overload signatures. Parenox reads class files in dependency
+  JARs, classpath directories and the local JDK's JMOD archives or `rt.jar`.
+  Set `JAVA_HOME` when the JDK is outside the editor's PATH.
+  See [the Java completion example](../examples/java_import_completion.clj)
+  and [Clojure's Java interop reference](https://clojure.org/reference/java_interop#_member_access).
 - **Signature Help** shows parameters, docstrings, overloads and the active
   argument for calls to source `defn` and `defn-` functions. It works in an
   unsaved call with missing closing delimiters at the end of the file.
 - **Go to Declaration** opens the local alias or refer clause for a source
-  usage. **Go to Definition** opens the provider. **Go to Implementation**
-  opens source `defmethod` registrations for a resolved `defmulti`.
+  usage. **Go to Definition** opens the provider. Invoke it on a namespace
+  name or an `:as` or `:as-alias` binding in `:require` to jump to the
+  namespace declaration. Prefix groups such as `(my.app [routes :as r])`
+  resolve the child `routes` to `my.app.routes`. If two sources declare
+  that namespace, the location is ambiguous. **Go to Implementation**
+  opens source `defmethod` registrations for a resolved `defmulti`,
+  and method definitions for a resolved protocol method in `defrecord`,
+  `deftype`, `extend-type`, `extend-protocol` and `reify` in recognized
+  expression bodies.
+- **Go to Definition** also follows a quoted library name, alias or
+  `:refer` name in a completed top-level `(require ...)` form. Later
+  uses follow bindings introduced by calls above them. A lexical binding
+  takes precedence for an unqualified name.
 - **Rename** returns versioned workspace edits when the client supports
   them. It covers ordinary source vars and lexical bindings. Linked editing
   covers proven lexical bindings within one file.
@@ -335,9 +509,81 @@ project, a buffer has no project context.
   supported direct `s/valid?` call opens its source `s/def`. It follows
   qualified keys and aliases. Ordinary keyword values and ambiguous declarations
   have no spec target. Completed forms before reader errors remain usable.
+- **Go to Definition** also opens public vars and namespace declarations
+  in local JAR sources from the selected classpath. It follows `:as`,
+  `:refer` and qualified names. Source definitions and lexical bindings
+  take precedence. Archive locations use `jar:` URIs and can be opened
+  through `clojure/dependencyContents`.
+- **Go to Definition** on an imported class, an evaluated class name,
+  the class qualifier in `UUID/randomUUID` or `UUID/.toString`, or a
+  constructor class in `(UUID. ...)` or `(new UUID ...)` opens the
+  Java file at its start. Local bindings take precedence for evaluated
+  names such as the first argument to `instance?`.
+  The winning class must be public, top-level and backed by a local JDK
+  module with source in `lib/src.zip`. The editor opens its `jar:` URI through
+  `clojure/dependencyContents`. The location identifies the class source.
 - **Generate s/fdef** works on supported top-level, single-arity `.clj`
   functions. Unknown types produce a commented draft for review; existing
   contracts are not replaced.
+- **Change nested if to cond** follows the `else` chain and leaves a
+  nested `if` in a result branch intact. Use the code action or invoke
+  `if->cond-refactor` with arguments `[uri, line, character]` near the
+  opening `if`. The edit retains comments and reader discards and
+  qualifies `clojure.core/cond` when the local spelling is shadowed.
+- **Change cond to nested if** rewrites core `cond` and
+  `clojure.core/cond` with complete test and result pairs. An empty
+  `cond` becomes `nil`. Use the code action or `cond->if-refactor`
+  with arguments `[uri, line, character]` near the opening `cond`.
+- **Remove one element from get/get-in** exposes the first keyword or
+  quoted symbol in a two-argument `get-in` with a literal vector path,
+  or turns a direct core `get` of the key into a call to that key.
+  Invoke `get-in-less` with `[uri, line, character]` at the opening
+  parenthesis. The edit preserves comments, reader discards and any
+  default on direct `get` calls.
+- **Unwind whole get/get-in** exposes all callable literal keys in a
+  two-argument `get-in` with a vector path. Invoke `get-in-none` with
+  `[uri, line, character]` at the opening parenthesis. `get-in-all`
+  can fold the resulting quoted key calls back into the path.
+- **Cycle privacy** toggles top-level `defn`, `defn-`, `def` and `defonce`.
+  It preserves unrelated metadata and uses the current editor snapshot.
+  Invoke the code action or send `workspace/executeCommand` with
+  `"command":"cycle-privacy"` and arguments `[uri, line, character]`.
+  Clients advertising `workspace.applyEdit` receive an edit request.
+  Edits carry the open document version for clients with `documentChanges`.
+- **Change auto-resolved keyword to namespaced** switches the selected
+  `::key` to `:current.namespace/key`. The reverse action changes the
+  spelling back. Invoke either action or send `cycle-keyword-auto-resolve`
+  with `[uri, line, character]`. Parenox uses the explicit source namespace
+  and skips tokens in reader discards, ambiguous namespace contexts and
+  dependency source.
+- **Thread first** rewrites a call to `->` by moving its first argument
+  into the initial position of the pipeline. Send `workspace/executeCommand`
+  with `"command":"thread-first"` and arguments `[uri, line, character]`
+  pointing to the opening parenthesis. The command uses the current buffer
+  and preserves comments in supported calls. Quoted forms, reader discards,
+  and calls inside existing threading forms are skipped.
+- **Thread first all** follows the first argument through nested calls and
+  emits the innermost step first. The code action runs `thread-first-all`
+  with `[uri, line, character]` against the current buffer. Comments and
+  reader discards in retained arguments stay in the replacement.
+- **Thread last all** follows the last argument and builds a `->>` chain.
+  The `thread-last` command moves one argument into a `->>` form.
+  **Unwind thread once** and **Unwind whole thread** expand ordinary
+  `->` and `->>` chains into calls, preserving comments and reader
+  discards. Their editor commands are `thread-last-all`, `unwind-thread`
+  and `unwind-all`. A client that rejects `workspace/applyEdit` receives
+  an error with its failure reason.
+- **Change coll to list, vector, map or set** keeps the text inside the
+  selected collection and changes its delimiters. At an opening delimiter,
+  `cycle-coll` tries the next type in the order list, map, vector, set.
+  The `change-coll` command takes `[uri, line, character, type]`.
+  Parenox skips replacements with reader errors on supported branches.
+- **Move all expressions to get/get-in** combines nested keyword lookups,
+  resolved core `get` calls and `get-in` calls with vector paths. Invoke
+  the action or `get-in-all` with `[uri, line, character]` at the opening
+  parenthesis. The edit preserves comments, reader discards and vector
+  keys. A lookup with a default can remain the receiver of the combined
+  path. In portable source the moved keys must be literals.
 - **Reformat Code** uses project settings for the whole unsaved document
   or the physical lines touched by a selection. Range formatting uses the
   surrounding indentation and preserves unselected lines. Invalid syntax
@@ -376,6 +622,134 @@ Keep `:format` in the workspace's `parenox.edn`. Use
 checks of the editor workflows. Reports on the unmodified pilot can include
 coverage gaps, not upstream bugs.
 
+## JVM evaluation
+
+```sh
+parenox eval --project tests/fixtures/jvm-project --format json \
+  --expr "(require 'demo.routing)" --expr '(demo.routing/status {:route :home})'
+```
+
+`eval` evaluates forms in order in one JVM starting in the `user` namespace.
+You can supply several forms in a single `--expr` or repeat the option.
+Definitions and namespace changes are visible to subsequent forms. The
+project directory defaults to the current directory. Use `--alias NAME`
+to select classpath and JVM options and `--clojure EXECUTABLE` to select
+the Clojure CLI. The evaluator supplies its own entry point.
+
+Stdout carries the last value as printed by Clojure. With `--format json`,
+stdout carries one report. For example, the command above returns
+`{"version":1,"ok":true,"value":":found"}`. The Clojure value `nil` appears
+as the string `"nil"`. Program output and diagnostics go to stderr.
+Exit 0 means the value was reported. Exit 2 means evaluation or launch
+failed and a JSON report includes `run_error` in place of `value`.
+
+Use `--timeout-ms 5000` to supervise an external runtime for up to five seconds.
+If the deadline expires, eval returns exit 124 and JSON reports
+`run_error.phase` as `execution`. Program output already written remains
+on stderr. On Unix, interrupting a supervised eval with SIGINT or SIGTERM
+returns 130 or 143. With redirected stdin, Parenox stops the child's
+process group. With terminal stdin or on Windows, supervision stops the
+direct child.
+
+### Parenox evaluation
+
+```sh
+parenox eval --backend parenox --format json \
+  --expr '(ns demo.calc) (def total 40)' \
+  --expr '(let [step 2] (println "calculating") (+ total step))'
+```
+
+The built-in Rust evaluator uses the same result, log and exit-code
+conventions and starts in `user`. It supports `nil`, booleans, signed
+64-bit integers, strings, keywords, vector and small map literals, quoted
+data, `let`, `if`, `do`, plain `ns` and top-level initialized `def`.
+The initial core functions are `+`, `inc`, `str`, `keyword`,
+`println` and `prn`. Repeated source arguments share the session.
+Maps accept up to eight scalar keys. Earlier complete forms retain
+their effects if a later form cannot be read.
+
+The engine runs in the Parenox process and checks `--timeout-ms` between
+forms. Unsupported evaluated forms report the source argument and
+location. Functions, library loading, Java interop, and the `run` and
+`test` commands are outside this first backend slice.
+`just own-eval-smoke` compares it with the project's pinned JVM.
+
+### Evaluation with clojurust
+
+```sh
+parenox eval --backend clojurust --cljrs /path/to/cljrs --src-path src \
+  --project my-app --expr "(require '[my-app.routes :as routes])" \
+  --expr '(routes/status {:route :home})' --format json
+```
+
+The native backend uses the same value, log and exit-code conventions.
+Repeated `--expr` arguments share one process and namespace state.
+Use `--src-path` to load local libraries. Empty, comment-only and
+discard-only arguments leave the preceding value in place. Evaluation
+can define `-main` without invoking it.
+
+Clojurust parses each argument before evaluating its forms. If an argument
+contains a reader error, earlier forms in that argument have no effect.
+A standalone reader conditional with no matching branch evaluates to
+`nil` on the tested revision. Native errors report the underlying message
+when available.
+
+## Run an application
+
+```sh
+parenox run --project my-app --main my-app.main -- argument
+parenox run --project my-app --alias dev -- argument
+parenox run --project my-app script.clj -- argument
+```
+
+The JVM backend is the default. It runs the Clojure CLI in the project
+directory, inherits stdin, stdout and stderr, and forwards the program's
+status. Relative script paths are resolved from that directory. Arguments
+after `--` go to the program. Repeat `--alias` to pass aliases in order.
+Clojure CLI applies the aliases' `:main-opts` as usual, so an alias can
+supply the entry point. [Clojure CLI reference](https://clojure.org/reference/clojure_cli)
+
+`--timeout-ms` supervises the child and returns 124 if the time expires.
+On Unix, SIGINT and SIGTERM during a supervised run terminate and reap the
+child and return 130 and 143 respectively. With redirected input, Parenox
+signals the child's process group. Terminal runs keep the child in the
+foreground process group for interactive input.
+
+### Portable scripts with clojurust
+
+```sh
+parenox run --backend clojurust --cljrs /path/to/cljrs \
+  --project tests/fixtures/portable-runtime --src-path src summary.cljc
+
+parenox run --backend clojurust --cljrs /path/to/cljrs \
+  --project my-app --src-path src --main my-app.main -- argument
+
+parenox run --backend clojurust --cljrs /path/to/cljrs \
+  --project my-app --deps-paths --alias local --main my-app.main -- argument
+```
+
+Clojurust is an external executable. Parenox uses `cljrs` from PATH by
+default and has tested revision `793ad97e`. The backend accepts `.cljc`
+and `.cljrs` scripts and loads namespaces from explicit `--src-path`
+directories. It runs without Java or a project manifest. Use `:cljrs`
+for a reader conditional branch specific to this backend.
+`--deps-paths` selects existing local source directories from the
+project's `deps.edn` for native `run`, `eval` and `test`. Repeat `--alias`
+to select path settings in order. This includes `:extra-paths`,
+`:replace-paths` and alias path references. Choose either `--deps-paths`
+or explicit `--src-path` roots for an invocation.
+
+Scripts run their top-level forms. If they define `-main` in the final
+namespace, clojurust calls it with the arguments after `--` and awaits an
+asynchronous entry point. With `--main`, Parenox searches the selected
+source roots in order, looking for `.cljrs` before `.cljc` in each root.
+The selected file must declare the requested namespace and an active,
+direct `-main`. Use a script path for entry points generated by a macro.
+The JVM backend applies Clojure CLI dependency and launch settings and
+supports Java interop.
+See the tested behavior and differences in the
+[portable runtime trial](design/type-checker-research.md#portable-runtime-trial).
+
 ## JVM tests
 
 ```sh
@@ -395,21 +769,73 @@ With `--format json`, stdout carries one report and runtime logs go to
 stderr. Exit 0 means success, 1 means test failures or errors, and 2 means
 the requested run did not complete. Run `just jvm-test-smoke` for examples.
 
+Pass `--timeout-ms 5000` to stop a test run after five seconds on either
+backend. A timeout exits 124 and preserves logs already written. JSON
+reports an incomplete run with phase `execution` and zero summary counts.
+With redirected stdin on Unix, supervision stops the runtime's process
+group. Text and JSON keep their usual stream conventions.
+
+### Native tests with clojurust
+
+```sh
+parenox test --project my-app --backend clojurust --cljrs /path/to/cljrs \
+  --src-path src --src-path test my-app.routes-test
+```
+
+Pass one or more test namespaces and repeat `--src-path` for their local
+source roots. `--discover` finds `*_test.cljc` and `*_test.cljrs` in those
+explicit roots using the native reader branches. In text mode Parenox
+forwards stdout, stderr and the clojurust exit status. On the pinned
+backend, a missing test namespace exits 1 in this mode.
+
+Use `--format json` for versioned counts and findings. Test logs go to
+stderr. Tests that fail or raise errors exit 1. A failed namespace load
+or a selection with zero tests exits 2 and includes `run_error`. Native
+findings can include the test name and assertion or error text. Source
+positions and exception classes are absent from native findings.
+Repeat `--var NAMESPACE/NAME` to select specific tests in either format.
+The runner loads all selected namespaces before checking those vars. It
+runs private test vars owned by their namespace, and reports an invalid
+selection for ordinary, missing or referred vars. `use-fixtures` is
+available on the JVM backend.
+`just native-run-smoke /path/to/cljrs` exercises both report formats.
+`just native-medley-smoke /path/to/medley /path/to/cljrs` compares a
+portable application and its JSON test report byte for byte on both
+runtimes. It reads Medley revision `54f45abc16ecd30121d05ef52014af8c65d4635f`
+from the local Git checkout and starts clojurust with a clean environment
+and an empty executable search path. The full Medley test namespace runs
+on the JVM. Its test macro import has reader branches for `:clj` and
+`:cljs`, which leaves `deftest` unbound on the pinned clojurust build.
+
 ## Local nREPL
 
 ```sh
 parenox nrepl --port 7888
 parenox nrepl --port 7888 --eval '(def total 40)' --eval '(+ total 2)'
+parenox nrepl --port 7888 --load-file src/my_app/routes.clj --eval '(my-app.routes/status {})'
+printf '%s\n' '(+ total 2)' | parenox nrepl --port 7888 --eval '(def total 40)' --eval-stdin
 ```
 
 The client only connects explicitly to an existing server on `127.0.0.1`.
-Without `--eval`, it lists supported operations. Otherwise it clones a
-session, sends forms in order, stops after an eval error, and closes the
-session. JSON separates values, `out`, `err`, exceptions, and completion.
-Exit 1 means an eval error; exit 2 means a connection or protocol error.
+With no load or eval request it lists supported operations. Otherwise it
+clones a session, loads saved files in order, runs the `--eval` expressions,
+and evaluates the UTF-8 source from `--eval-stdin` last. An editor or agent
+can pipe a selection to `--eval-stdin` and close the input. The client stops
+after a load or eval error and closes the session. JSON separates values,
+`out`, `err`, exceptions, and completion in `loads` and `evals`.
+Each result's optional `namespace` contains the last nonempty `ns` field
+the server reported during that operation.
+Exit 1 means a load or eval error. Exit 2 means a client or protocol error.
 `--timeout-ms` changes the per-operation timeout (default 5000 ms).
-A timeout does not cancel evaluation or guarantee session closure.
+After an `eval` or `load-file` timeout, Parenox keeps the values and output
+already read. It opens a separate loopback connection to interrupt the
+request when the server advertises `interrupt`, then asks the server to
+close the session. Each cleanup operation has a one-second limit.
+`session_closed` records whether the server confirmed closure. The server
+determines whether it can stop the evaluation thread.
 Opening or checking sources never starts or connects to nREPL.
+`just nrepl-runtime-smoke /path/to/nrepl-1.5.2.jar /path/to/java /path/to/cljrs`
+starts both pinned servers on loopback for a namespace and session smoke test.
 
 ## Agent sessions
 
@@ -435,7 +861,8 @@ with `id` and `result`, or an error. Use full file contents, not patches.
   retaining unsaved overlays and extern overrides.
 - `definition` and `hover` use a zero-based UTF-8 byte offset.
   Definition returns a source `path` and `span` or `null`. Hover returns
-  a var's qualified name, display signatures, and any contract origin.
+  a var's qualified `name`, display `signatures`, and available `contract`,
+  `documentation` and `arglists`. An unresolved reference returns `null`.
   Use `parenox definition --file FILE --offset N` for a disk-backed query.
 
 Results include `ok`, `complete`, diagnostics, and statistics for parsed
@@ -445,9 +872,12 @@ reuses unaffected results on edits; there is no on-disk cache.
 ## Performance and development
 
 - `parenox-frontend` owns the reader, forms and CST. `parenox-analysis`
-  owns contracts, type checking and project sessions. `parenox-formatter`
-  uses the frontend's CST. `parenox-lsp` owns protocol, text coordinates
-  and editor features. The root package wires the CLI and disk projects.
+  owns source contracts, type checking and project sessions. `parenox-types`
+  owns type representations, compatibility and specialization. `parenox-formatter`
+  uses the frontend's CST. `parenox-classpath` reads local dependency
+  archives. `parenox-lsp` owns protocol, text coordinates and editor features.
+  `parenox-runtime` owns the Parenox, JVM and clojurust backends.
+  The root package wires the CLI, disk projects and process supervision.
 - `just verify` runs formatting checks, Clippy, and tests.
 - `just agent-loop` measures the clinic edit scenario; `just bench` runs a
   synthetic workload. `parenox bench FILE` measures in-process checks.

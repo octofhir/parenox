@@ -1,6 +1,8 @@
 //! Literal values declared as source vars.
+mod initializers;
+
 use super::super::{Checker, Env};
-use super::{Globals, Model};
+use super::{Declarations, Globals, Model};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
@@ -11,6 +13,30 @@ pub(super) struct LiteralVar {
 }
 
 impl Model {
+    pub(super) fn capture_literal_root(
+        &self,
+        declarations: &Declarations,
+        forms: &[Form],
+        source: &str,
+        index: usize,
+        initializer: &Form,
+    ) -> Option<Form> {
+        if !matches!(
+            initializer.kind,
+            Kind::Symbol(_) | Kind::Vector(_) | Kind::Map(_)
+        ) {
+            return None;
+        }
+        let (name, root) = initializers::adjacent_root(declarations, forms, source, index)?;
+        let literal = self
+            .literals
+            .get(&format!("{}/{name}", self.names.namespace))?;
+        if literal.ty.contains_unknown() {
+            return None;
+        }
+        initializers::substitute(initializer, name, root)
+    }
+
     pub(super) fn definition_name(&mut self, symbol: &str, span: Span, op: &str) -> Option<String> {
         if symbol.contains('/') && symbol != "/" {
             self.error(
@@ -41,7 +67,14 @@ impl Model {
         Some(format!("{}/{symbol}", self.names.namespace))
     }
 
-    pub(super) fn read_def(&mut self, xs: &[Form], span: Span, source: &str, globals: &Globals) {
+    pub(super) fn read_def(
+        &mut self,
+        xs: &[Form],
+        span: Span,
+        source: &str,
+        expanded: Option<&Form>,
+        globals: &Globals,
+    ) {
         let Some(name_form) = xs.get(1) else {
             self.error("PNX1001", span, "def requires a var name");
             return;
@@ -57,22 +90,18 @@ impl Model {
         let Some(name) = self.definition_name(symbol, name_form.span, "def") else {
             return;
         };
-        let initializer = match &xs[2..] {
-            [] => {
+        let initializer = def_initializer(&xs[2..]);
+        if initializer.is_none() {
+            if xs.len() == 2 {
                 self.unsupported_var(name_form.span, "An unbound def has no inferred value");
-                None
-            }
-            [value] => Some(value),
-            [doc, value] if doc.is_string() => Some(value),
-            _ => {
+            } else {
                 self.error(
                     "PNX1001",
                     span,
                     "def accepts one initializer and an optional docstring",
                 );
-                None
             }
-        };
+        }
         let dynamic = name_form.metadata(":dynamic").is_some_and(|value| {
             !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
         });
@@ -82,7 +111,7 @@ impl Model {
         let ty = if dynamic {
             self.unsupported_var(name_form.span, "Dynamic vars are not supported yet");
             Type::Unknown
-        } else if let Some(value) = initializer {
+        } else if let Some(value) = expanded.or(initializer) {
             if literal(value) {
                 let mut checker = Checker::new(self, globals, source);
                 let result = checker.infer(value, &Env::new()).known;
@@ -125,7 +154,15 @@ impl Model {
     }
 }
 
-fn literal(form: &Form) -> bool {
+pub(super) fn def_initializer(tail: &[Form]) -> Option<&Form> {
+    match tail {
+        [value] => Some(value),
+        [doc, value] if doc.is_string() => Some(value),
+        _ => None,
+    }
+}
+
+pub(super) fn literal(form: &Form) -> bool {
     match &form.without_metadata().kind {
         Kind::Nil
         | Kind::Bool(_)

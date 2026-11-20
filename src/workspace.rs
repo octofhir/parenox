@@ -76,14 +76,14 @@ pub(super) fn source_paths(paths: &[String]) -> Result<Vec<PathBuf>, String> {
     matching_paths(paths, is_clojure_source)
 }
 
-pub(super) fn matching_paths<'a>(
-    paths: impl IntoIterator<Item = &'a String>,
+pub(super) fn matching_paths(
+    paths: impl IntoIterator<Item = impl AsRef<Path>>,
     include: impl Fn(&Path) -> bool,
 ) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let mut roots = BTreeSet::new();
     let mut pending = Vec::new();
-    for path in paths.into_iter().map(PathBuf::from) {
+    for path in paths.into_iter().map(|path| path.as_ref().to_owned()) {
         let metadata =
             fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?;
         if !metadata.is_dir() && !include(&path) {

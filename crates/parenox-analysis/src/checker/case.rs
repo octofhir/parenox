@@ -5,7 +5,7 @@ use std::slice;
 use super::flow::{narrow_literal, refine_owner};
 use super::{Checker, Env, Value};
 use crate::reader::{Form, Kind, Span};
-use crate::types::Type;
+use crate::types::{IntegerClass, Type};
 
 impl Checker<'_> {
     pub(super) fn case_form(&mut self, forms: &[Form], span: Span, env: &Env, tail: bool) -> Value {
@@ -26,7 +26,7 @@ impl Checker<'_> {
             for constant in constants {
                 let Some(key) = self.case_constant(constant, env) else {
                     return self.unsupported(constant.span,
-                        "case analysis supports nil, booleans, characters, strings, keywords and decimal integers in the i32 range");
+                        "case analysis supports nil, booleans, characters, strings, keywords and integers in the signed long range");
                 };
                 if !tests.insert(key.clone()) {
                     self.error(
@@ -112,10 +112,13 @@ impl Checker<'_> {
             Kind::Nil | Kind::Bool(_) | Kind::Character(_) | Kind::String(_) | Kind::Keyword(_) => {
                 Some(self.infer(form, env).known)
             }
-            Kind::Number => {
-                let ty = self.infer(form, env).known;
-                matches!(ty, Type::Integer(_)).then_some(ty)
-            }
+            // Dispatch compares the integer value. Refinement intersects the
+            // label with the subject so its JVM numeric class is retained.
+            Kind::Number => self
+                .infer(form, env)
+                .known
+                .exact_long_value()
+                .map(|value| Type::exact_long(value, IntegerClass::Any)),
             _ => None,
         }
     }
@@ -139,13 +142,9 @@ impl Checker<'_> {
 fn finite_tag(ty: &Type) -> bool {
     match ty {
         Type::Union(parts) => parts.iter().all(finite_tag),
-        Type::Nil
-        | Type::Boolean
-        | Type::Bool(_)
-        | Type::Key(_)
-        | Type::Str(_)
-        | Type::Char(_)
-        | Type::Integer(_) => true,
-        _ => false,
+        Type::Nil | Type::Boolean | Type::Bool(_) | Type::Key(_) | Type::Str(_) | Type::Char(_) => {
+            true
+        }
+        _ => ty.exact_long_value().is_some(),
     }
 }
