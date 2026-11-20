@@ -52,6 +52,8 @@ mod protocol_implementations;
 mod thread_first;
 #[path = "lsp/thread_refactoring.rs"]
 mod thread_refactoring;
+#[path = "lsp/watch_diagnostics.rs"]
+mod watch_diagnostics;
 
 struct Fixture(PathBuf);
 

@@ -11,7 +11,7 @@ pub struct ExternMismatch {
     pub reason: ExternMismatchReason,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExternPathStep {
     /// Arguments are numbered starting at one.
@@ -80,27 +80,32 @@ impl ExternMismatch {
     }
 }
 
+impl fmt::Display for ExternPathStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Argument { index } => write!(f, "argument {index}"),
+            Self::Result => f.write_str("result"),
+            Self::Field { key } => write!(f, "field {key}"),
+            Self::MapKey => f.write_str("map key"),
+            Self::MapValue => f.write_str("map value"),
+            Self::Element => f.write_str("element"),
+            Self::Item { index } => write!(f, "item {index}"),
+            Self::UnionMember => f.write_str("union member"),
+            Self::CallbackArgument { index } => write!(f, "callback argument {index}"),
+            Self::CallbackRest => f.write_str("callback rest arguments"),
+            Self::CallbackResult => f.write_str("callback result"),
+        }
+    }
+}
+
 impl fmt::Display for ExternMismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ExternMismatchReason as Reason;
-        use ExternPathStep as Step;
         for (index, step) in self.path.iter().enumerate() {
             if index > 0 {
                 f.write_str(" → ")?;
             }
-            match step {
-                Step::Argument { index } => write!(f, "argument {index}")?,
-                Step::Result => f.write_str("result")?,
-                Step::Field { key } => write!(f, "field {key}")?,
-                Step::MapKey => f.write_str("map key")?,
-                Step::MapValue => f.write_str("map value")?,
-                Step::Element => f.write_str("element")?,
-                Step::Item { index } => write!(f, "item {index}")?,
-                Step::UnionMember => f.write_str("union member")?,
-                Step::CallbackArgument { index } => write!(f, "callback argument {index}")?,
-                Step::CallbackRest => f.write_str("callback rest arguments")?,
-                Step::CallbackResult => f.write_str("callback result")?,
-            }
+            step.fmt(f)?;
         }
         if !self.path.is_empty() {
             f.write_str(": ")?;

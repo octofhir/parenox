@@ -36,8 +36,13 @@ fn distinguishes_ordered_contracts_from_homogeneous_vectors() {
     let [order, missing] = &report.diagnostics[..] else {
         panic!("{report:#?}");
     };
-    assert_eq!(order.expected.as_deref(), Some("Tuple<String, Keyword>"));
-    assert_eq!(order.actual.as_deref(), Some("Tuple<:retail, String>"));
+    assert_eq!(order.expected.as_deref(), Some("String"));
+    assert_eq!(order.actual.as_deref(), Some(":retail"));
+    assert_eq!(
+        &source[order.span.start.offset..order.span.end.offset],
+        ":retail"
+    );
+    assert!(order.message.contains("item 0"));
     assert_eq!(missing.actual.as_deref(), Some("Nil"));
 
     for (spec, expression) in [

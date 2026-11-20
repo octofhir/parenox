@@ -146,16 +146,23 @@ fn compares_keyword_shapes_and_dictionary_key_value_types() {
         r#"(defn tally {:t/sig '[(s/map-of keyword? number?) :-> number?]} [m] (count m))
            (defn ok {:t/sig '[:-> number?]} [] (+ (tally {}) (tally {:open 1})))
            (defn wrong {:t/sig '[:-> number?]} [] (tally {:open "12"}))
+           (defn wrong-key {:t/sig '[:-> number?]} [] (tally {"open" 1}))
            (defn widened {:t/sig '[map? :-> number?]} [m] (tally m))
            (defn other {:t/sig '[(s/map-of string? number?) :-> number?]} [m] (tally m))"#,
     );
     assert!(report.complete && !report.ok, "{report:#?}");
-    assert_eq!(report.diagnostics.len(), 3, "{report:#?}");
-    assert!(
-        report.diagnostics.iter().all(|d| {
-            d.code == "PNX2322" && d.expected.as_deref() == Some("Map<Keyword, Number>")
-        })
-    );
+    let [value, key, widened, other] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.diagnostics.iter().all(|d| d.code == "PNX2322"));
+    assert_eq!(value.expected.as_deref(), Some("Number"));
+    assert_eq!(value.actual.as_deref(), Some("\"12\""));
+    assert!(value.message.contains("field :open"));
+    assert_eq!(key.expected.as_deref(), Some("Keyword"));
+    assert_eq!(key.actual.as_deref(), Some("\"open\""));
+    assert!(key.message.contains("map key"));
+    assert_eq!(widened.expected.as_deref(), Some("Map<Keyword, Number>"));
+    assert_eq!(other.expected.as_deref(), Some("Map<Keyword, Number>"));
 
     let report = check(
         "(defn f {:t/sig '[(s/map-of keyword? number? :min-count 1) :-> number?]}

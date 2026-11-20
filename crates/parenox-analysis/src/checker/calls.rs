@@ -2,6 +2,7 @@
 mod apply;
 mod arithmetic;
 mod comprehensions;
+mod diagnostics;
 mod forms;
 mod generics;
 mod identifiers;
@@ -64,6 +65,12 @@ pub(super) struct Specialization {
     value: Value,
     diagnostics: Vec<Diagnostic>,
     throws: Option<Throws>,
+}
+
+#[derive(Clone, Copy)]
+struct CallArguments<'a> {
+    values: &'a [(Value, Span)],
+    forms: &'a [Form],
 }
 
 impl<'model> Checker<'model> {
@@ -276,7 +283,15 @@ impl<'model> Checker<'model> {
         if opaque_arguments {
             self.local_read = observation;
         }
-        self.call_value(&function, &args, xs[0].span, span)
+        self.call_value(
+            &function,
+            CallArguments {
+                values: &args,
+                forms: &xs[1..],
+            },
+            xs[0].span,
+            span,
+        )
     }
 
     pub(super) fn unchecked_function(&mut self, name: &str, span: Span) -> Value {
@@ -371,10 +386,11 @@ impl<'model> Checker<'model> {
     fn call_value(
         &mut self,
         function: &Value,
-        args: &[(Value, Span)],
+        arguments: CallArguments<'_>,
         head: Span,
         span: Span,
     ) -> Value {
+        let args = arguments.values;
         if !call_returns(args) {
             return Value::new(Type::Never);
         }
@@ -401,9 +417,9 @@ impl<'model> Checker<'model> {
                     return Value::new(Type::Unknown);
                 };
                 if signature.parameters.is_some() {
-                    return self.call_generic(signature, function, args);
+                    return self.call_generic(signature, function, arguments);
                 }
-                self.check_call_arguments(signature, function, args);
+                self.check_call_arguments(signature, function, arguments);
                 Value::new(signature.ret.clone())
             }
             kind @ (Type::Key(_) | Type::Keyword | Type::SpecKeyword | Type::Map(_)) => {
@@ -433,7 +449,7 @@ impl<'model> Checker<'model> {
                     guard: function.guard.clone(),
                     ..Value::with_notes(part.clone(), function.notes.clone())
                 };
-                result.join(self.call_value(&alternative, args, head, span))
+                result.join(self.call_value(&alternative, arguments, head, span))
             }),
             Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => {
                 self.vector_call(function, head, args, span)
@@ -464,21 +480,31 @@ impl<'model> Checker<'model> {
         &mut self,
         signature: &Signature,
         function: &Value,
-        args: &[(Value, Span)],
+        args: CallArguments<'_>,
     ) {
-        for (index, (actual, span)) in args.iter().enumerate() {
+        for (index, (actual, span)) in args.values.iter().enumerate() {
             let expected = signature
                 .args
                 .get(index)
                 .or(signature.rest.as_ref())
                 .unwrap();
+            let start = self.diagnostics.len();
+            let argument = index + 1;
             self.expect_contract(
                 actual,
                 expected,
                 *span,
-                &format!("Argument {}", index + 1),
+                &format!("Argument {argument}"),
                 function.contract.as_deref(),
             );
+            if let Some(form) = args.forms.get(index).filter(|form| form.span == *span)
+                && self
+                    .diagnostics
+                    .get(start)
+                    .is_some_and(|d| d.code == "PNX2322")
+            {
+                self.refine_argument_mismatch(start, argument, form, &actual.known, expected);
+            }
         }
     }
 
@@ -531,7 +557,15 @@ impl<'model> Checker<'model> {
                 span,
             ),
             Callable::Builtin(name) => self.builtin(name, &args, span),
-            Callable::Value(function) => self.call_value(function, &args, callable.span, span),
+            Callable::Value(function) => self.call_value(
+                function,
+                CallArguments {
+                    values: &args,
+                    forms: &[],
+                },
+                callable.span,
+                span,
+            ),
         }
     }
 

@@ -24,8 +24,10 @@ fn unknown_map_field_does_not_hide_a_wrong_field_at_a_call() {
     assert!(!report.ok);
     assert_eq!(
         &source[mismatch.span.start.offset..mismatch.span.end.offset],
-        "{:id (missing) :name 42}"
+        "42"
     );
+    assert_eq!(mismatch.expected.as_deref(), Some("String"));
+    assert!(mismatch.message.contains("field :name"));
     assert_eq!(report.diagnostics.len(), 2, "{report:#?}");
     assert!(report.diagnostics.iter().any(|d| d.code == "PNX2304"));
 }

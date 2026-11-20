@@ -1,7 +1,7 @@
 //! Infer input from an argument or a supported projection, then output from one callback.
 use std::borrow::Cow;
 
-use super::inline::CallbackReturn;
+use super::{CallArguments, inline::CallbackReturn};
 use crate::Diagnostic;
 use crate::checker::{Checker, Env, Value};
 use crate::reader::{Form, Span};
@@ -120,8 +120,9 @@ impl Checker<'_> {
         &mut self,
         signature: &Signature,
         function: &Value,
-        args: &[(Value, Span)],
+        arguments: CallArguments<'_>,
     ) -> Value {
+        let args = arguments.values;
         let binders = signature.parameters.as_ref().expect("generic signature");
         let mut evidence = signature.input_types(binders, |index| &args[index].0.ty);
         let missing = evidence.missing();
@@ -172,7 +173,7 @@ impl Checker<'_> {
         // Unknown stands in for a missing binder only while checking the
         // remaining arguments. It cannot hide an independent mismatch.
         let instantiated = signature.with_type_arguments(binders, &evidence, Some(&Type::Unknown));
-        self.check_call_arguments(&instantiated, function, args);
+        self.check_call_arguments(&instantiated, function, arguments);
         Value::new(if valid {
             instantiated.ret
         } else {

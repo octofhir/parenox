@@ -51,7 +51,11 @@ pub(super) fn signature_failure(
     })
 }
 
-fn type_failure(actual: &Type, expected: &Type, outcome: Compatibility) -> ExternMismatch {
+pub(super) fn type_failure(
+    actual: &Type,
+    expected: &Type,
+    outcome: Compatibility,
+) -> ExternMismatch {
     let deeper = match (actual, expected) {
         (Type::Union(parts), expected) => parts
             .iter()
@@ -64,7 +68,11 @@ fn type_failure(actual: &Type, expected: &Type, outcome: Compatibility) -> Exter
         (Type::Vector(a), Type::Vector(e))
         | (Type::Set(a), Type::Set(e))
         | (Type::Seq(a) | Type::List(a), Type::Seq(e))
-        | (Type::List(a), Type::List(e)) => Some(type_failure(a, e, outcome).at(Step::Element)),
+        | (Type::List(a), Type::List(e))
+        | (
+            Type::Vector(a) | Type::Set(a) | Type::Seq(a) | Type::List(a) | Type::SpecCollection(a),
+            Type::SpecCollection(e),
+        ) => Some(type_failure(a, e, outcome).at(Step::Element)),
         (Type::Tuple(a), Type::Tuple(e))
         | (Type::SeqTuple(a) | Type::ListTuple(a), Type::SeqTuple(e))
         | (Type::ListTuple(a), Type::ListTuple(e)) => {
@@ -82,12 +90,14 @@ fn type_failure(actual: &Type, expected: &Type, outcome: Compatibility) -> Exter
         }
         (Type::Tuple(items), Type::Vector(e))
         | (Type::SeqTuple(items) | Type::ListTuple(items), Type::Seq(e))
-        | (Type::ListTuple(items), Type::List(e)) => {
-            items.iter().enumerate().find_map(|(index, a)| {
-                (a.compatibility(e) == outcome)
-                    .then(|| type_failure(a, e, outcome).at(Step::Item { index }))
-            })
-        }
+        | (Type::ListTuple(items), Type::List(e))
+        | (
+            Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items),
+            Type::SpecCollection(e),
+        ) => items.iter().enumerate().find_map(|(index, a)| {
+            (a.compatibility(e) == outcome)
+                .then(|| type_failure(a, e, outcome).at(Step::Item { index }))
+        }),
         (Type::Function(a), Type::Function(e)) => match (a.as_ref(), e.as_ref()) {
             ([a], [e]) if signature(a, e) == outcome => {
                 Some(signature_failure(a, e, outcome, true))

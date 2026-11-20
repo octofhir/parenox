@@ -6,6 +6,7 @@ pub(super) mod file_rename;
 #[path = "inspection.rs"]
 pub(super) mod inspection;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
@@ -1134,7 +1135,7 @@ impl Document {
             diagnostics.iter().filter_map(|diagnostic| {
                 let range = lines.range(diagnostic.span)?;
                 let severity = if diagnostic.severity == "warning" { 2 } else { 1 };
-                Some(json!({"range":range,"severity":severity,"source":"parenox","code":diagnostic.code,"message":diagnostic.message}))
+                Some(json!({"range":range,"severity":severity,"source":"parenox","code":diagnostic.code,"message":diagnostic_message(diagnostic)}))
             }).collect()
         };
         if editor.published.as_ref() != Some(&rendered) {
@@ -1146,6 +1147,22 @@ impl Document {
         }
         Ok(())
     }
+}
+
+fn diagnostic_message(diagnostic: &Diagnostic) -> Cow<'_, str> {
+    if diagnostic.mismatch_path.is_empty() {
+        return Cow::Borrowed(&diagnostic.message);
+    }
+    let mut message = diagnostic.message.clone();
+    for note in &diagnostic.notes {
+        message.push('\n');
+        message.push_str(note);
+    }
+    if let Some(origin) = &diagnostic.contract {
+        message.push('\n');
+        message.push_str(&contract_note(origin));
+    }
+    Cow::Owned(message)
 }
 
 fn is_edn(path: &Path) -> bool {

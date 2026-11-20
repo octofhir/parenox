@@ -57,6 +57,12 @@ impl Type {
         self.compatibility(expected) == Compatibility::Proven
     }
 
+    /// Follow one failed obligation in a definite mismatch.
+    pub fn explain_mismatch(&self, expected: &Type) -> Option<ExternMismatch> {
+        (self.compatibility(expected) == Compatibility::Mismatch)
+            .then(|| explain::type_failure(self, expected, Compatibility::Mismatch))
+    }
+
     /// Intersect types whose overlap can be represented precisely.
     pub fn known_intersection(&self, other: &Type) -> Option<Type> {
         if self.subtype_of(other) {

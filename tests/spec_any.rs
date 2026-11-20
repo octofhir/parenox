@@ -119,10 +119,15 @@ fn unrestricted_collection_checks_shallow_elements_in_all_modeled_collections() 
             panic!("{report:#?}");
         };
         assert_eq!(finding.code, "PNX2322");
-        assert!(
-            finding.message.contains("Collection of spec values"),
-            "{finding:#?}"
-        );
+        if input == "[::s/invalid]" {
+            assert!(finding.message.contains("item 0"), "{finding:#?}");
+            assert_eq!(finding.expected.as_deref(), Some("Spec value"));
+        } else {
+            assert!(
+                finding.message.contains("Collection of spec values"),
+                "{finding:#?}"
+            );
+        }
     }
 }
 

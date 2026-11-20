@@ -483,8 +483,9 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
     };
     assert_eq!(finding.code, "PNX2322");
     assert!(
-        finding.message.contains("Argument 1") && finding.message.contains(":character: false")
+        finding.message.contains("Argument 1") && finding.message.contains("field :character:")
     );
+    assert_eq!(finding.actual.as_deref(), Some("false"));
 
     let changed = client.replace(":character 77", ":character false");
     let rejected = check(&changed);
@@ -498,9 +499,10 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
     );
     assert!(
         finding.message.contains("Argument 1")
-            && finding.message.contains(":edits:")
-            && finding.message.contains(":character: false")
+            && finding.message.contains("field :edits")
+            && finding.message.contains("field :character:")
     );
+    assert_eq!(finding.actual.as_deref(), Some("false"));
 
     let changed = client.replace(":new-text \"argument\"", ":new-text false");
     let rejected = check(&changed);
@@ -512,7 +514,8 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
         finding.contract.as_ref().unwrap().name,
         "consumer/accepts-edits"
     );
-    assert!(finding.message.contains("Argument 1") && finding.message.contains(":new-text: false"));
+    assert!(finding.message.contains("Argument 1") && finding.message.contains("field :new-text:"));
+    assert_eq!(finding.actual.as_deref(), Some("false"));
 
     let changed = client.replace(":character 42}})", ":character false}})");
     let rejected = check(&changed);
@@ -525,8 +528,9 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
         "consumer/accepts-range"
     );
     assert!(
-        finding.message.contains("Argument 1") && finding.message.contains(":character: false")
+        finding.message.contains("Argument 1") && finding.message.contains("field :character:")
     );
+    assert_eq!(finding.actual.as_deref(), Some("false"));
 
     let unchecked =
         format!("{client}\n(defn improper {{:t/sig '[{SEMANTIC_TOKENS} :-> nil?]}} [_] nil)");
@@ -666,7 +670,11 @@ fn pinned_lsp4clj_proposals_export_changes_for_cli_consumers() {
         assert_eq!(accepted["complete"], true, "{accepted:#}");
 
         for (text, code, detail) in [
-            (invalid.as_str(), "PNX2322", ":character: false"),
+            (
+                invalid.as_str(),
+                "PNX2322",
+                "field :character: expected Int32, got false",
+            ),
             (opaque.as_str(), "PNX9001", "literal map"),
         ] {
             let (status, rejected) = check(text);
