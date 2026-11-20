@@ -18,7 +18,7 @@ use parenox::{
     reader::validate_edn,
 };
 use parenox_lsp::structural::{self, FoldingOptions};
-use parenox_lsp::{hover, lenses, project_tree, refactor, rename, semantic, test_tree};
+use parenox_lsp::{hover, lenses, project_tree, refactor, rename, semantic, signatures, test_tree};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -774,30 +774,8 @@ impl Workspace {
     pub fn signature_help(&self, params: TextQuery) -> Option<Value> {
         let (path, offset) = self.query_offset(params)?;
         let info = self.session_for(&path)?.call_signatures(&path, offset)?;
-        let signatures: Vec<_> = info
-            .signatures
-            .iter()
-            .map(|signature| {
-                let parameters: Vec<_> = signature
-                    .parameters
-                    .iter()
-                    .map(|label| json!({"label":label}))
-                    .collect();
-                let mut item = json!({
-                    "label":format!("({} [{}])", info.name, signature.parameters.join(" ")),
-                    "parameters":parameters,
-                });
-                if let Some(documentation) = &info.documentation {
-                    item["documentation"] = json!(documentation);
-                }
-                item
-            })
-            .collect();
-        let mut help = json!({"signatures":signatures,"activeSignature":info.active_signature});
-        if let Some(active) = info.active_parameter {
-            help["activeParameter"] = json!(active);
-        }
-        Some(help)
+        let origin = info.contract.as_ref().map(contract_note);
+        Some(signatures::render(&info, origin.as_deref()))
     }
 
     pub fn project_tree(&self, query: Option<project_tree::Leaf>) -> Option<Value> {

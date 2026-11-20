@@ -68,9 +68,9 @@ pub(super) struct Specialization {
 }
 
 #[derive(Clone, Copy)]
-struct CallArguments<'a> {
-    values: &'a [(Value, Span)],
-    forms: &'a [Form],
+pub(super) struct CallArguments<'a> {
+    pub(super) values: &'a [(Value, Span)],
+    pub(super) forms: &'a [Form],
 }
 
 impl<'model> Checker<'model> {
@@ -271,17 +271,17 @@ impl<'model> Checker<'model> {
         let function = self.infer(&xs[0], env);
         // An unresolved var might be a macro. Its arguments are inspected for
         // findings, but may not be evaluated in this lexical scope at runtime.
-        let opaque_arguments = self.local_read.is_some()
+        let opaque_arguments = self.type_query.is_some()
             && function.known == Type::Unknown
             && xs[0].symbol().is_some_and(|name| !env.contains_key(name));
         let observation = if opaque_arguments {
-            self.local_read.take()
+            self.type_query.take()
         } else {
             None
         };
         let args = self.call_args(&function, &xs[1..], span, env);
         if opaque_arguments {
-            self.local_read = observation;
+            self.type_query = observation;
         }
         self.call_value(
             &function,
@@ -403,6 +403,20 @@ impl<'model> Checker<'model> {
                     .iter()
                     .find(|sig| sig.arity().accepts(args.len()))
                 else {
+                    if self.type_query.is_some()
+                        && let Some(nearest) = signatures
+                            .iter()
+                            .find(|sig| sig.arity().required() >= args.len())
+                            .or_else(|| signatures.last())
+                    {
+                        self.observe_call(
+                            span,
+                            arguments,
+                            nearest,
+                            nearest,
+                            function.contract.as_ref(),
+                        );
+                    }
                     let mut diagnostic = Diagnostic::new(
                         "PNX2554",
                         span,
@@ -417,8 +431,15 @@ impl<'model> Checker<'model> {
                     return Value::new(Type::Unknown);
                 };
                 if signature.parameters.is_some() {
-                    return self.call_generic(signature, function, arguments);
+                    return self.call_generic(signature, function, arguments, span);
                 }
+                self.observe_call(
+                    span,
+                    arguments,
+                    signature,
+                    signature,
+                    function.contract.as_ref(),
+                );
                 self.check_call_arguments(signature, function, arguments);
                 Value::new(signature.ret.clone())
             }

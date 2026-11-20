@@ -8,6 +8,7 @@ mod flow;
 mod function_forms;
 mod maps;
 mod model;
+mod queries;
 mod quote;
 mod recur;
 
@@ -19,6 +20,8 @@ pub(crate) use model::{
     ProjectCall, ScopedReference, SnapshotWriter, SpecCache, SpecConversion, SpecFingerprint,
     SpecSource, java_type_tag_at,
 };
+pub(crate) use queries::CheckedCall;
+use queries::TypeQuery;
 use recur::RecurTarget;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -89,12 +92,6 @@ impl Model {
             specs: checker.spec_inputs,
         }
     }
-}
-
-struct LocalRead<'a> {
-    name: &'a str,
-    span: Span,
-    ty: Type,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -259,7 +256,7 @@ struct Checker<'a> {
     globals: &'a Globals,
     source: &'a str,
     partial_scope: Option<&'a BTreeSet<&'a str>>,
-    local_read: Option<LocalRead<'a>>,
+    type_query: Option<TypeQuery<'a>>,
     diagnostics: Vec<Diagnostic>,
     has_declaration_findings: bool,
     has_unproven_expectation: bool,
@@ -284,7 +281,7 @@ impl<'a> Checker<'a> {
             globals,
             source,
             partial_scope: None,
-            local_read: None,
+            type_query: None,
             diagnostics: Vec::new(),
             has_declaration_findings: !model.diagnostics.is_empty(),
             has_unproven_expectation: false,
@@ -548,17 +545,7 @@ impl Checker<'_> {
             Kind::Keyword(k) => Value::new(Type::Key(self.model.key(k))),
             Kind::Symbol(s) | Kind::AnonymousArgument(s) => {
                 if let Some(value) = env.get(s) {
-                    if let Some(read) = &mut self.local_read
-                        && self.path_reachable
-                        && read.name == s
-                        && read.span == form.span
-                        && read.ty != value.known
-                    {
-                        read.ty = Type::union([
-                            std::mem::replace(&mut read.ty, Type::Never),
-                            value.known.clone(),
-                        ]);
-                    }
+                    self.observe_local(s, form.span, value);
                     value.clone()
                 } else if self.model.local_function(s).is_some_and(Function::inferred) {
                     self.error(

@@ -604,7 +604,8 @@ project, a buffer has no project context.
   declarations and usages. Opaque macro expansions are not indexed.
 - **Hover** shows the var's docstring and argument lists from project source
   or a local dependency JAR. Checked signatures and their origin appear when
-  available. Markdown is used when the client prefers it.
+  available. Local reads show the type proved at that occurrence, including
+  narrowing in a branch. Markdown is used when the client prefers it.
 - **ClojureDocs** downloads the public compact EDN export over HTTPS in
   the background when the cache is missing, invalid, or at least 24 hours old. The
   server uses the last valid snapshot while a refresh runs or fails. The
@@ -641,8 +642,12 @@ project, a buffer has no project context.
   See [the Java completion example](../examples/java_import_completion.clj)
   and [Clojure's Java interop reference](https://clojure.org/reference/java_interop#_member_access).
 - **Signature Help** shows parameters, docstrings, overloads and the active
-  argument for calls to source `defn` and `defn-` functions. It works in an
-  unsaved call with missing closing delimiters at the end of the file.
+  argument for calls to source functions. Checked calls can specialize
+  generic parameters from the actual arguments, including in threading
+  forms. The tooltip includes the result type and the contract's origin.
+  Calls with conflicting specializations show the declaration. Source
+  arglists and qualified checked declarations are also available when
+  missing closing delimiters can be recovered at the end of the file.
 - **Go to Declaration** opens the local alias or refer clause for a source
   usage. **Go to Definition** opens the provider. Invoke it on a namespace
   name or an `:as` or `:as-alias` binding in `:require` to jump to the

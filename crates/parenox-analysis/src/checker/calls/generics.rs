@@ -121,6 +121,7 @@ impl Checker<'_> {
         signature: &Signature,
         function: &Value,
         arguments: CallArguments<'_>,
+        call: Span,
     ) -> Value {
         let args = arguments.values;
         let binders = signature.parameters.as_ref().expect("generic signature");
@@ -143,6 +144,7 @@ impl Checker<'_> {
                 valid = false;
             }
         }
+        let input_valid = valid;
         if let Some((index, parameter)) = binders.output() {
             let witness = signature
                 .output_callback(parameter)
@@ -173,6 +175,20 @@ impl Checker<'_> {
         // Unknown stands in for a missing binder only while checking the
         // remaining arguments. It cannot hide an independent mismatch.
         let instantiated = signature.with_type_arguments(binders, &evidence, Some(&Type::Unknown));
+        if self.type_query.is_some() {
+            let specialize = input_valid
+                && (valid
+                    || binders
+                        .output()
+                        .is_none_or(|(_, parameter)| parameter.upper.is_none()));
+            self.observe_call(
+                call,
+                arguments,
+                signature,
+                if specialize { &instantiated } else { signature },
+                function.contract.as_ref(),
+            );
+        }
         self.check_call_arguments(&instantiated, function, arguments);
         Value::new(if valid {
             instantiated.ret

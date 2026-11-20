@@ -9,6 +9,7 @@ pub mod protocol;
 pub mod refactor;
 pub mod rename;
 pub mod semantic;
+pub mod signatures;
 pub mod structural;
 pub mod symbols;
 pub mod test_tree;

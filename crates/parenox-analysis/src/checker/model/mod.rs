@@ -5,7 +5,6 @@ mod declarations;
 mod externs;
 mod fdefs;
 mod guards;
-mod hover;
 mod imports;
 mod interfaces;
 mod partial;
@@ -15,6 +14,7 @@ mod spec_navigation;
 mod specs;
 mod test_bodies;
 mod type_forms;
+mod type_queries;
 mod vars;
 
 use std::collections::{BTreeMap, BTreeSet};

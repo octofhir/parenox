@@ -1,20 +1,24 @@
 //! Argument positions and parameter lists for source calls.
 use std::collections::BTreeMap;
 
-use crate::checker::Declarations;
+use crate::ContractOrigin;
+use crate::checker::{CheckedCall, Declarations};
 use crate::reader::{self, Conditionals, Form, Kind, Span};
 use crate::syntax::SyntaxKind;
 use crate::types::Arity;
 
-use super::{Session, SourceTarget};
+use super::{FileCache, Session, SourceTarget};
 
 pub struct CallSignature {
     pub parameters: Vec<String>,
+    pub result: Option<String>,
+    arity: Arity,
 }
 
 pub struct CallSignatures {
     pub name: String,
     pub documentation: Option<String>,
+    pub contract: Option<ContractOrigin>,
     pub signatures: Vec<CallSignature>,
     pub active_signature: usize,
     pub active_parameter: Option<usize>,
@@ -30,11 +34,34 @@ impl Session {
         if let Some((declarations, forms)) = caller.navigation_source()
             && let Some(site) = call_at(forms, offset)
         {
-            return self.signatures_at(path, declarations, forms, site);
+            let source = self.signatures_at(path, declarations, forms, &site);
+            return match self.checked_call(caller, &site) {
+                Some(checked) => Some(typed_signatures(&site, checked, source)),
+                None => source,
+            };
         }
         caller.parse_error.as_ref()?;
         let (declarations, forms) = recover_call(path, &caller.source)?;
-        self.signatures_at(path, &declarations, &forms, call_at(&forms, offset)?)
+        let site = call_at(&forms, offset)?;
+        let source = self.signatures_at(path, &declarations, &forms, &site);
+        let declared = self.query_globals.as_ref().and_then(|globals| {
+            declarations.qualified_call_declaration(globals, site.head.symbol()?, site.wanted())
+        });
+        match declared {
+            Some(signature) => Some(typed_signatures(&site, signature, source)),
+            None => source,
+        }
+    }
+
+    fn checked_call(&self, caller: &FileCache, site: &CallSite<'_>) -> Option<CheckedCall> {
+        caller.declarations.as_ref()?.checked_call(
+            &caller.forms,
+            caller.model.as_ref()?,
+            self.query_globals.as_ref()?,
+            &caller.source,
+            site.span,
+            site.written,
+        )
     }
 
     fn signatures_at(
@@ -42,7 +69,7 @@ impl Session {
         path: &str,
         declarations: &Declarations,
         forms: &[Form],
-        site: CallSite<'_>,
+        site: &CallSite<'_>,
     ) -> Option<CallSignatures> {
         let head_offset = site.head.without_metadata().span.start.offset;
         let target = match self.source_target_in(path, head_offset, declarations, forms) {
@@ -56,8 +83,7 @@ impl Session {
         };
         let (declarations, provider_forms) = target.source.navigation_source()?;
         let parameters = declarations.function_parameters(provider_forms, target.name)?;
-        let wanted = site.count.max(site.argument + 1);
-        let active_signature = select_arity(parameters.clauses.keys().copied(), wanted)?;
+        let active_signature = select_arity(parameters.clauses.keys().copied(), site.wanted())?;
         let signatures = source_signatures(&target.source.source, parameters.clauses);
         let active_parameter = signatures[active_signature]
             .parameters
@@ -67,11 +93,79 @@ impl Session {
         Some(CallSignatures {
             name: target.name.to_owned(),
             documentation: parameters.documentation.map(str::to_owned),
+            contract: None,
             signatures,
             active_signature,
             active_parameter,
         })
     }
+}
+
+fn typed_signatures(
+    site: &CallSite<'_>,
+    checked: CheckedCall,
+    source: Option<CallSignatures>,
+) -> CallSignatures {
+    let mut info = source.unwrap_or_else(|| CallSignatures {
+        name: checked.origin.as_ref().map_or_else(
+            || site.head.symbol().unwrap().to_owned(),
+            |origin| origin.name.clone(),
+        ),
+        documentation: None,
+        contract: None,
+        signatures: Vec::new(),
+        active_signature: 0,
+        active_parameter: None,
+    });
+    let arity = checked.signature.arity();
+    let source_arity = info
+        .signatures
+        .iter()
+        .position(|signature| signature.arity == arity);
+    let labels = source_arity.map(|index| &info.signatures[index].parameters);
+    let parameters = checked
+        .signature
+        .args
+        .iter()
+        .chain(&checked.signature.rest)
+        .enumerate()
+        .map(|(index, ty)| {
+            let label = labels.and_then(|names| names.get(index));
+            if let Some(label) = label {
+                format!("{label}: {ty}")
+            } else if matches!(arity, Arity::Variadic(required) if index == required) {
+                format!("& {ty}")
+            } else {
+                ty.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    let signature = CallSignature {
+        parameters,
+        result: Some(checked.signature.ret.to_string()),
+        arity,
+    };
+    if let Some(index) = source_arity {
+        info.signatures[index] = signature;
+        info.active_signature = index;
+    } else {
+        info.active_signature = info.signatures.len();
+        info.signatures.push(signature);
+    }
+    if let Some(count) = checked.argument_count {
+        let wanted = count + usize::from(site.argument == site.written.len());
+        info.active_signature = select_arity(info.signatures.iter().map(|sig| sig.arity), wanted)
+            .unwrap_or(info.active_signature);
+    }
+    info.active_parameter = checked.explicit_offset.and_then(|offset| {
+        info.signatures[info.active_signature]
+            .parameters
+            .len()
+            .checked_sub(1)
+            .map(|last| last.min(site.argument + offset))
+    });
+    info.contract = checked.origin.as_deref().cloned();
+    info
 }
 
 pub(super) fn source_signatures(
@@ -93,7 +187,11 @@ pub(super) fn source_signatures(
                     }
                 })
                 .collect();
-            CallSignature { parameters }
+            CallSignature {
+                parameters,
+                result: None,
+                arity,
+            }
         })
         .collect()
 }
@@ -108,9 +206,16 @@ fn select_arity(arities: impl Iterator<Item = Arity> + Clone, count: usize) -> O
 
 struct CallSite<'a> {
     head: &'a Form,
+    span: Span,
+    written: &'a [Form],
     argument: usize,
-    count: usize,
     top_level: bool,
+}
+
+impl CallSite<'_> {
+    fn wanted(&self) -> usize {
+        self.written.len().max(self.argument + 1)
+    }
 }
 
 fn call_at(forms: &[Form], offset: usize) -> Option<CallSite<'_>> {
@@ -141,8 +246,9 @@ fn call_in(form: &Form, offset: usize, top_level: bool) -> Option<CallSite<'_>> 
             }
             (head.symbol().is_some() && head.span.end.offset < offset).then(|| CallSite {
                 head,
+                span: form.span,
+                written: args,
                 argument: args.partition_point(|arg| arg.span.end.offset < offset),
-                count: args.len(),
                 top_level,
             })
         }

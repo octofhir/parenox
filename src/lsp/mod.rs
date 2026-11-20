@@ -420,6 +420,7 @@ fn request(
             | "textDocument/semanticTokens/range"
             | "textDocument/codeLens"
             | "textDocument/hover"
+            | "textDocument/signatureHelp"
             | "textDocument/codeAction"
             | "codeLens/resolve"
             | "completionItem/resolve"

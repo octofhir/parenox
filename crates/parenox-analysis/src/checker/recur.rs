@@ -258,14 +258,7 @@ impl Checker<'_> {
                     || self.recur_checks >= MAX_RECHECKS
                     || !bounded_state(&state)
                 {
-                    if self.path_reachable
-                        && self.local_read.as_ref().is_some_and(|read| {
-                            span.start.offset <= read.span.start.offset
-                                && read.span.end.offset <= span.end.offset
-                        })
-                    {
-                        self.local_read = None;
-                    }
+                    self.withhold_type_facts(span);
                     result = self.unsupported(
                         span,
                         format!("recur type inference limit reached for {kind}"),

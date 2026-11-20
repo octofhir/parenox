@@ -19,3 +19,13 @@
   {:t/sig '[(s/map-of string? number?) :-> (s/map-of string? string?)]}
   [labels]
   (medley/map-kv-vals #(str (subs %1 0) (inc %2)) labels))
+
+(defn label-entry
+  {:t/sig '[string? number? :-> string?]}
+  [path count]
+  (str (subs path 0) (inc count)))
+
+(defn labels-thread-first
+  {:t/sig '[(s/map-of string? number?) :-> (s/map-of string? string?)]}
+  [entries]
+  (-> label-entry (medley/map-kv-vals entries)))
