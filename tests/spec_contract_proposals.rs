@@ -15,6 +15,7 @@ const KIND: &str = ":markup/kind";
 const ACTION: &str = ":server-capabilities/code-action-provider";
 const COMMAND: &str = ":server-capabilities/execute-command-provider";
 const SIGNATURE_HELP: &str = ":server-capabilities/signature-help-provider";
+const SEMANTIC_TOKENS: &str = ":server-capabilities/semantic-tokens-provider";
 
 const CLIENT: Source<'_> = Source {
     path: "consumer.clj",
@@ -183,7 +184,7 @@ fn proposals_require_evidence_of_a_standard_spec_and_its_registration_namespace(
 fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
     let path = std::env::var("PARENOX_LSP4CLJ_COERCER").expect("set PARENOX_LSP4CLJ_COERCER");
     let source = fs::read_to_string(&path).unwrap();
-    let selected = [WRAP, KIND, ACTION, COMMAND, SIGNATURE_HELP].map(String::from);
+    let selected = [WRAP, KIND, ACTION, COMMAND, SIGNATURE_HELP, SEMANTIC_TOKENS].map(String::from);
     let mut session = Session::default();
     let proposals = session
         .propose_contracts(
@@ -198,6 +199,14 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
     let edn = proposals
         .externs
         .unwrap_or_else(|| panic!("{:#?}", proposals.report));
+    assert!(edn.contains(SEMANTIC_TOKENS));
+    assert!(
+        proposals
+            .edn
+            .as_ref()
+            .unwrap()
+            .contains("\"Exception classes from custom lookups\"")
+    );
     let externs = [Source {
         path: "lsp4clj.edn",
         source: &edn,
@@ -213,6 +222,11 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
   (s/conform :server-capabilities/signature-help-provider {:work-done-progress true}))
 (defn signature-vector {:t/sig '[:-> {:trigger-characters (s/tuple #{"("})}]} []
   (s/conform :server-capabilities/signature-help-provider ["("]))
+(defn semantic-tokens
+  {:t/sig '[:-> {:legend {:token-types #{:type} :token-modifiers #{:modifier}}
+                 :range nil? :full #{false}}]} []
+  (s/conform :server-capabilities/semantic-tokens-provider
+             {:token-types :type :token-modifiers :modifier}))
 "#
     );
     let check = |source| {
@@ -227,4 +241,32 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
     };
     assert_eq!(finding.code, "PNX2322");
     assert!(finding.message.contains("Argument 1") && finding.message.contains("\"html\""));
+
+    let unchecked =
+        format!("{client}\n(defn improper {{:t/sig '[{SEMANTIC_TOKENS} :-> nil?]}} [_] nil)");
+    let rejected = check(&unchecked);
+    let [finding] = rejected.files[0].diagnostics.as_slice() else {
+        panic!("{rejected:#?}");
+    };
+    assert_eq!(finding.code, "PNX9001");
+    assert!(finding.message.contains("unchecked input type"));
+
+    let project_core = Source {
+        path: "clojure/core.clj",
+        source: "(ns clojure.core)",
+    };
+    let consumer = Source {
+        source: r#"(ns consumer (:require [clojure.spec.alpha :as s] [lsp4clj.coercer]))
+                   (defn result {:t/sig '[:-> nil?]} []
+                     (s/conform :server-capabilities/semantic-tokens-provider nil))"#,
+        ..CLIENT
+    };
+    let shadowed =
+        Session::default().check_project_with_externs(&[consumer, project_core], &externs);
+    assert!(
+        shadowed.files[0].diagnostics.iter().any(|finding| {
+            finding.code == "PNX9001" && finding.message.contains("supported conversion")
+        }),
+        "{shadowed:#?}"
+    );
 }

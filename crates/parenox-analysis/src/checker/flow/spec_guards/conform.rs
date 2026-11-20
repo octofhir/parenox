@@ -468,8 +468,14 @@ impl Checker<'_> {
             {
                 Identity::Changed
             }
-            SpecConversion::VectorWrapField(_) if *input == Type::Nil => Identity::Same,
-            SpecConversion::VectorWrapField(_) if nil_part(input) == Type::Never => {
+            SpecConversion::VectorWrapField(_) | SpecConversion::GuardedMap(_)
+                if *input == Type::Nil =>
+            {
+                Identity::Same
+            }
+            SpecConversion::VectorWrapField(_) | SpecConversion::GuardedMap(_)
+                if nil_part(input) == Type::Never =>
+            {
                 Identity::Changed
             }
             SpecConversion::MapOrWrapField(_) => match map_wrap(input) {

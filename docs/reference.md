@@ -353,6 +353,15 @@ and the signature-help pattern that passes through maps after testing for
 vectors. Literal maps retain their shape in the return type. A general map
 type includes both results because a JVM object can implement both interfaces.
 
+Guarded map projections also cover the semantic-tokens pattern. It tests
+keyword lookups for truthiness and then constructs a nested map from further
+lookups and boolean conversions. Repeated reads from a literal map retain
+the types established by the guard. For opaque inputs, each lookup can
+return a different value or throw. The proposal describes the normal result
+and marks the accepted input domain and exception classes as unknown.
+Its EDN still supports checking calls to `s/conform` and `s/valid?`.
+Using that spec as a function argument type reports an unchecked input.
+
 Run the lsp4clj 2.0.1 examples with the pinned `coercer.clj` source.
 
 ```sh
@@ -362,11 +371,13 @@ just build
 target/release/parenox propose-contracts "$coercer" \
   --spec :server-capabilities/code-lens-provider \
   --spec :server-capabilities/signature-help-provider \
+  --spec :server-capabilities/semantic-tokens-provider \
   --spec :markup/kind
 just pilot-contract-smoke "$coercer"
 clojure -M tests/fixtures/spec-code-lens-provider.clj
 clojure -M tests/fixtures/spec-conditional-provider.clj
 clojure -M tests/fixtures/spec-signature-help-provider.clj
+clojure -M tests/fixtures/spec-semantic-tokens-provider.clj
 ```
 
 The smoke test imports generated EDN in a consumer with no provider source.

@@ -30,8 +30,8 @@ pub(crate) use interfaces::InterfaceKey;
 use interfaces::{Exports, LocalInterface, visible_value};
 pub(crate) use references::{DocumentReferences, ProjectCall, ScopedReference};
 pub(crate) use specs::{
-    MapFieldConversion, SpecCache, SpecConversion, SpecFingerprint, SpecProvider, SpecSource,
-    StructuredConversion,
+    GuardedMapProjection, MapFieldConversion, SpecCache, SpecConversion, SpecFingerprint,
+    SpecProvider, SpecSource, StructuredConversion,
 };
 use vars::LiteralVar;
 

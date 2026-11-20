@@ -1,5 +1,8 @@
 //! Project-wide spec declarations, resolution and cache validity.
+mod projection;
 mod registration;
+
+pub(crate) use projection::{GuardedMapProjection, ProjectedFields, ProjectedValue};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -90,6 +93,9 @@ impl Declarations {
                             | "when"
                             | "cond"
                             | "vector?"
+                            | "and"
+                            | "boolean"
+                            | "get"
                             | "="
                     ) || core_predicate_type(local).is_some()))
                     || (namespace == "clojure.spec.alpha"
@@ -200,6 +206,7 @@ pub(crate) enum SpecConversion {
     WrapField(Arc<Type>),
     VectorWrapField(Arc<Type>),
     MapOrWrapField(Arc<Type>),
+    GuardedMap(Arc<GuardedMapProjection>),
     String,
     Keyword,
     Identity,
@@ -231,6 +238,14 @@ pub(crate) struct MapFieldConversion {
 }
 
 impl SpecConversion {
+    pub fn has_unchecked_input(&self) -> bool {
+        matches!(self, Self::Name | Self::GuardedMap(_))
+    }
+
+    pub fn requires_standard_core(&self) -> bool {
+        self.has_unchecked_input() || self.is_field_conformer()
+    }
+
     pub fn is_field_conformer(&self) -> bool {
         matches!(
             self,
@@ -242,9 +257,9 @@ impl SpecConversion {
     pub fn success_input(&self) -> Type {
         match self {
             Self::CheckedInt32 => Type::Integral(IntegerType::INT32),
-            // JVM Named can also be implemented by user classes. This
-            // conversion supplies output and effects but no input contract.
-            Self::Name => Type::Unknown,
+            // User-defined JVM interfaces can throw. These conversions
+            // supply output and effects but no input contract.
+            Self::Name | Self::GuardedMap(_) => Type::Unknown,
             Self::WrapField(_) | Self::VectorWrapField(_) | Self::MapOrWrapField(_) => Type::Any,
             Self::String => Type::String,
             Self::Keyword => Type::SpecKeyword,
@@ -488,9 +503,7 @@ impl<'a> Resolver<'a> {
             .cloned()
             .or_else(|| source_conversion(owner.names, body))
             .filter(|conversion| {
-                !self.project_core_namespace
-                    || !(matches!(conversion, SpecConversion::Name)
-                        || conversion.is_field_conformer())
+                !self.project_core_namespace || !conversion.requires_standard_core()
             })
             .or_else(|| self.collection_conversion(owner, registered_at, &mut required));
         if direct.is_some() {
@@ -554,11 +567,10 @@ impl<'a> Resolver<'a> {
             if let Some(ready) = local_ready_at {
                 self.local_conversions.insert(key, ready);
             }
-            if conversion.is_field_conformer()
+            if conversion.requires_standard_core()
                 || matches!(
                     conversion,
-                    SpecConversion::Name
-                        | SpecConversion::IdentityDomain(_)
+                    SpecConversion::IdentityDomain(_)
                         | SpecConversion::TaggedChoice(_)
                         | SpecConversion::TaggedOr(_)
                         | SpecConversion::ProjectedCollection(_)
@@ -572,7 +584,10 @@ impl<'a> Resolver<'a> {
         }
         // A supported conversion may still lack an input type. Propagate
         // that distinction to aliases and contracts containing the spec.
-        if matches!(self.conversions.get(key), Some(SpecConversion::Name))
+        if self
+            .conversions
+            .get(key)
+            .is_some_and(SpecConversion::has_unchecked_input)
             || required
                 .iter()
                 .any(|child| self.unchecked_inputs.contains(*child))

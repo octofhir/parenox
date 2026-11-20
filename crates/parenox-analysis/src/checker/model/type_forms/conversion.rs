@@ -1,4 +1,6 @@
 //! Built-in spec conversions whose input checks and effects are known.
+mod guarded_map;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -151,6 +153,9 @@ fn conditional_wrapper(names: &Names, body: &[Form], param: &str) -> Option<Spec
             let key = wrapper_key(names, result, param)?;
             Some(SpecConversion::VectorWrapField(Arc::new(key)))
         }
+        [head, guard, result] if core(head, "when") => {
+            guarded_map::parse(names, guard, result, param)
+        }
         [head, vector, wrapped, map, identity, fallback, otherwise]
             if core(head, "cond")
                 && test(vector, "vector?")
@@ -176,6 +181,10 @@ fn wrapper_key(names: &Names, result: &Form, param: &str) -> Option<Type> {
     if !is_wrapper_input(value, param) {
         return None;
     }
+    projection_key(names, key)
+}
+
+fn projection_key(names: &Names, key: &Form) -> Option<Type> {
     match &key.kind {
         Kind::Keyword(key) if key.starts_with("::") => names.validation_key(key).map(Type::Key),
         Kind::Keyword(key) => Some(Type::Key(key.clone())),

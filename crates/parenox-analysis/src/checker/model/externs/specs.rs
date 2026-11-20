@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use super::{ExternCache, ExternalDeclaration, Globals, Model, Names, SnapshotWriter};
 use crate::checker::model::type_forms::source_conversion;
-use crate::checker::model::{SpecConversion, SpecProvider, specs::RegistrationSource};
+use crate::checker::model::{
+    GuardedMapProjection, SpecConversion, SpecProvider,
+    specs::{ProjectedFields, ProjectedValue, RegistrationSource},
+};
 use crate::reader::Form;
 use crate::types::{Parameter, SPEC_INVALID, Type};
 use crate::{ContractKind, ContractOrigin};
@@ -39,6 +42,7 @@ impl SpecConversion {
                     "Input when vector? is false and map? is true, {wrapped} otherwise"
                 ));
             }
+            Self::GuardedMap(projection) => projection.map_result(|_, _| Type::Any).nilable(),
             Self::String => Type::union([Type::String, invalid()]),
             Self::IdentityDomain(domain) if literal_strings(domain).is_some() => {
                 Type::union([(**domain).clone(), invalid()])
@@ -90,6 +94,7 @@ impl SnapshotWriter {
                         out.key(key)
                     },
                 ),
+                SpecConversion::GuardedMap(projection) => out.guarded_map(projection),
                 SpecConversion::String => Ok(out.write_str("clojure.core/string?")?),
                 SpecConversion::IdentityDomain(domain) => {
                     let items = literal_strings(domain).ok_or(super::EncodeError::Unsupported(
@@ -108,6 +113,50 @@ impl SnapshotWriter {
                 )),
             }?;
             Ok(write!(out, " :ns {namespace}")?)
+        })
+    }
+
+    fn guarded_map(&mut self, projection: &GuardedMapProjection) -> Result<(), super::EncodeError> {
+        self.nested(
+            3,
+            "(clojure.spec.alpha/conformer (clojure.core/fn [input] (clojure.core/when ",
+            ")))",
+            |out| {
+                out.nested(1, "(clojure.core/and", ")", |out| {
+                    for key in &projection.guards {
+                        out.write_char(' ')?;
+                        out.projection_lookup(key)?;
+                    }
+                    Ok(())
+                })?;
+                out.write_char(' ')?;
+                out.projection_fields(&projection.fields)
+            },
+        )
+    }
+
+    fn projection_lookup(&mut self, key: &Type) -> Result<(), super::EncodeError> {
+        self.nested(1, "(", " input)", |out| out.key(key))
+    }
+
+    fn projection_fields(&mut self, fields: &ProjectedFields) -> Result<(), super::EncodeError> {
+        self.nested(1, "{", "}", |out| {
+            for (index, (key, value)) in fields.iter().enumerate() {
+                out.separator(index)?;
+                out.key(key)?;
+                out.write_char(' ')?;
+                match value {
+                    ProjectedValue::Lookup(key) => out.projection_lookup(key)?,
+                    ProjectedValue::BooleanLookup(key) => out.nested(
+                        2,
+                        "(clojure.core/boolean (clojure.core/get input ",
+                        " false))",
+                        |out| out.key(key),
+                    )?,
+                    ProjectedValue::Map(fields) => out.projection_fields(fields)?,
+                }
+            }
+            Ok(())
         })
     }
 }
@@ -203,6 +252,8 @@ impl ExternCache {
                 || globals
                     .project_namespaces
                     .contains(&spec.registration.namespace)
+                || (spec.conversion.requires_standard_core()
+                    && globals.project_namespaces.contains("clojure.core"))
                 || trusted.is_some_and(|paths| {
                     !paths.contains(spec.origin.path.as_deref().unwrap_or_default())
                 })
@@ -210,6 +261,9 @@ impl ExternCache {
                 continue;
             }
             Arc::make_mut(&mut globals.specs).insert(name.clone(), spec.conversion.success_input());
+            if spec.conversion.has_unchecked_input() {
+                Arc::make_mut(&mut globals.spec_unchecked_inputs).insert(name.clone());
+            }
             Arc::make_mut(&mut globals.spec_conversions)
                 .insert(name.clone(), spec.conversion.clone());
             Arc::make_mut(&mut globals.spec_providers).insert(

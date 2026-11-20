@@ -29,6 +29,7 @@ impl Session {
     /// Describe one named spec from the current checked source snapshot.
     pub fn spec_contract(&self, path: &str, name: &str) -> Option<SpecContractProposal> {
         self.describe_spec(path, name, !self.has_source_namespace("clojure.spec.alpha"))
+            .map(|(proposal, _)| proposal)
     }
 
     fn describe_spec(
@@ -36,7 +37,7 @@ impl Session {
         path: &str,
         name: &str,
         standard_spec: bool,
-    ) -> Option<SpecContractProposal> {
+    ) -> Option<(SpecContractProposal, Option<&str>)> {
         let file = self
             .files
             .get(path)
@@ -61,26 +62,37 @@ impl Session {
             None
         };
         let result = conversion.and_then(SpecConversion::proposal_result);
+        let input_known = !self.specs.unchecked_input(name) && input.is_some();
+        let guarded = matches!(conversion, Some(SpecConversion::GuardedMap(_)));
+        let namespace = if declarations.has_namespace_declaration() {
+            self.specs.standalone_namespace(name, path)
+        } else {
+            None
+        };
+        let qualified = declarations.resolve_spec_keyword(name).as_deref() == Some(name);
+        let export_namespace =
+            namespace.filter(|_| result.is_some() && qualified && (input_known || guarded));
         let mut unknown = Vec::new();
-        if self.specs.unchecked_input(name) || input.is_none() {
+        if !input_known {
             unknown.push("Input domain");
         } else if result.is_none() {
             unknown.push("Full validation behavior of the input projection");
         }
         if result.is_none() {
             unknown.push("Conformed result");
-        } else if !declarations.has_namespace_declaration()
-            || self.specs.standalone_namespace(name, path).is_none()
-        {
+        } else if namespace.is_none() {
             unknown.push("Standalone registration");
         }
-        if declarations.resolve_spec_keyword(name).as_deref() != Some(name) {
+        if !qualified {
             unknown.push("Qualified registration name");
+        }
+        if guarded {
+            unknown.push("Exception classes from custom lookups");
         }
         if !standard_spec {
             unknown.push("Behavior of the project's clojure.spec.alpha");
         }
-        Some(SpecContractProposal {
+        let proposal = SpecContractProposal {
             name: name.into(),
             path: path.into(),
             span,
@@ -88,7 +100,8 @@ impl Session {
             input,
             result,
             unknown,
-        })
+        };
+        Some((proposal, export_namespace))
     }
 
     /// Generate proposals and a standalone extern map without editing the source
@@ -132,14 +145,13 @@ impl Session {
 
         let mut entries = BTreeMap::new();
         let mut edn = String::from("{:proposals [");
-        for (name, proposal) in &proposals {
+        for (name, (proposal, namespace)) in &proposals {
             let status = if self.externs.contains_spec(name) {
                 ":existing"
-            } else if proposal.unknown.is_empty()
+            } else if let Some(namespace) = namespace
                 && let Some(conversion) = self.specs.conversions.get(*name)
-                && let Some(namespace) = self.specs.standalone_namespace(name, &proposal.path)
             {
-                entries.insert(*name, (namespace, conversion));
+                entries.insert(*name, (*namespace, conversion));
                 ":generated"
             } else {
                 "nil"

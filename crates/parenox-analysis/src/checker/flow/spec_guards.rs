@@ -1,6 +1,7 @@
 //! Facts from a successful named spec check. A projection need not capture every
 //! runtime constraint; it cannot prove success or characterize the false branch.
 mod conform;
+mod projection;
 
 use crate::Diagnostic;
 use crate::checker::{
@@ -134,6 +135,12 @@ impl Checker<'_> {
                 )
         }) {
             let input = &values[1].0;
+            if input.literal_map
+                && let (Type::Map(map), SpecConversion::GuardedMap(projection)) =
+                    (&input.known, &conversion)
+            {
+                return Some(Value::new(projection::conform_literal(map, projection, op)));
+            }
             if matches!(op, SpecOperation::Conform) && input.literal_map {
                 match conversion {
                     SpecConversion::MapOrWrapField(_) => return Some(input.clone()),
@@ -224,6 +231,9 @@ impl Checker<'_> {
                         }
                     },
                 },
+                SpecConversion::GuardedMap(projection) => {
+                    self.conform_opaque_projection(ty, projection, op)
+                }
                 SpecConversion::Name => {
                     let result = self.name_result(ty);
                     if result == Type::Never {
