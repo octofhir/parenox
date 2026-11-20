@@ -31,7 +31,7 @@ pub(super) fn parse(
         .iter()
         .map(|form| parser.lookup(form))
         .collect::<Option<_>>()?;
-    let fields = parser.map(result, 0)?;
+    let fields = map_fields(names, result, 0, &mut |value| parser.value(value))?;
     Some(SpecConversion::GuardedMap(Arc::new(GuardedMapProjection {
         guards,
         fields,
@@ -66,47 +66,57 @@ impl ProjectionParser<'_> {
             .flatten()
     }
 
-    fn map(&self, form: &Form, depth: usize) -> Option<ProjectedFields> {
-        let Kind::Map(entries) = &form.kind else {
-            return None;
-        };
-        if entries.len() > 2 * MAX_TERMS || depth == MAX_TERMS {
-            return None;
+    fn value(&self, form: &Form) -> Option<ProjectedValue> {
+        if let Kind::List(items) = &form.kind
+            && let [head, accessor] = items.as_slice()
+            && self.core(head, "boolean")
+        {
+            let Kind::List(call) = &accessor.kind else {
+                return None;
+            };
+            let [get, input, key, default] = call.as_slice() else {
+                return None;
+            };
+            if !self.core(get, "get")
+                || !is_wrapper_input(input, self.param)
+                || !matches!(default.kind, Kind::Bool(false))
+            {
+                return None;
+            }
+            return Some(ProjectedValue::BooleanLookup(self.key(key)?));
         }
-        let mut seen = BTreeSet::new();
-        entries
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|[key, value]| {
-                let key = projection_key(self.names, key)?;
-                if !seen.insert(key.clone()) {
-                    return None;
-                }
-                let value = match &value.kind {
-                    Kind::Map(_) => ProjectedValue::Map(self.map(value, depth + 1)?),
-                    Kind::List(items)
-                        if let [head, accessor] = items.as_slice()
-                            && self.core(head, "boolean") =>
-                    {
-                        let Kind::List(call) = &accessor.kind else {
-                            return None;
-                        };
-                        let [get, input, key, default] = call.as_slice() else {
-                            return None;
-                        };
-                        if !self.core(get, "get")
-                            || !is_wrapper_input(input, self.param)
-                            || !matches!(default.kind, Kind::Bool(false))
-                        {
-                            return None;
-                        }
-                        ProjectedValue::BooleanLookup(self.key(key)?)
-                    }
-                    _ => ProjectedValue::Lookup(self.lookup(value)?),
-                };
-                Some((key, value))
-            })
-            .collect()
+        Some(ProjectedValue::Lookup(self.lookup(form)?))
     }
+}
+
+pub(super) fn map_fields(
+    names: &Names,
+    form: &Form,
+    depth: usize,
+    leaf: &mut impl FnMut(&Form) -> Option<ProjectedValue>,
+) -> Option<ProjectedFields> {
+    let Kind::Map(entries) = &form.kind else {
+        return None;
+    };
+    if entries.len() > 2 * MAX_TERMS || depth == MAX_TERMS {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    entries
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[key, value]| {
+            let key = projection_key(names, key)?;
+            if !seen.insert(key.clone()) {
+                return None;
+            }
+            let value = if matches!(value.kind, Kind::Map(_)) {
+                ProjectedValue::Map(map_fields(names, value, depth + 1, leaf)?)
+            } else {
+                leaf(value)?
+            };
+            Some((key, value))
+        })
+        .collect()
 }

@@ -1,5 +1,6 @@
 //! Built-in spec conversions whose input checks and effects are known.
 mod guarded_map;
+mod live_lookup;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::sync::Arc;
 use super::{super::declarations::SourceDeclaration, Names, generation_options, spec_field_key};
 use crate::checker::model::Declarations;
 use crate::checker::model::specs::{MapFieldConversion, SpecConversion, StructuredConversion};
-use crate::checker::model::vars::def_initializer;
+use crate::checker::model::vars::{adjacent_literal_def, def_initializer};
 use crate::reader::{Form, Kind};
 use crate::types::{IntegerClass, IntegerType, SPEC_INVALID, Type};
 
@@ -105,13 +106,21 @@ pub(in crate::checker::model) fn source_conversion(
 }
 
 fn wrapper_conversion(names: &Names, function: &Form) -> Option<SpecConversion> {
+    if let Kind::AnonymousFunction(function) = &function.kind
+        && function.required == 1
+        && !function.variadic
+    {
+        return conditional_wrapper(names, &function.body, "%1");
+    }
+    let (param, body) = unary_function(names, function)?;
+    if let Kind::List(items) = &body.kind {
+        return conditional_wrapper(names, items, param);
+    }
+    wrapper_key(names, body, param).map(|key| SpecConversion::WrapField(Arc::new(key)))
+}
+
+fn unary_function<'a>(names: &Names, function: &'a Form) -> Option<(&'a str, &'a Form)> {
     let Kind::List(items) = &function.kind else {
-        if let Kind::AnonymousFunction(function) = &function.kind
-            && function.required == 1
-            && !function.variadic
-        {
-            return conditional_wrapper(names, &function.body, "%1");
-        }
         return None;
     };
     let [head, params, body] = items.as_slice() else {
@@ -133,10 +142,34 @@ fn wrapper_conversion(names: &Names, function: &Form) -> Option<SpecConversion> 
     {
         return None;
     }
-    if let Kind::List(items) = &body.kind {
-        return conditional_wrapper(names, items, param);
-    }
-    wrapper_key(names, body, param).map(|key| SpecConversion::WrapField(Arc::new(key)))
+    Some((param, body))
+}
+
+pub(in crate::checker::model) fn live_lookup_projection(
+    names: &Names,
+    namespace: &str,
+    form: &Form,
+) -> Option<SpecConversion> {
+    live_lookup::parse(names, namespace, form)
+}
+
+pub(in crate::checker::model) fn live_lookup_conversion(
+    declarations: &Declarations,
+    forms: &[Form],
+    source: &str,
+    form: &Form,
+) -> Option<SpecConversion> {
+    let conversion = live_lookup_projection(&declarations.names, declarations.namespace(), form)?;
+    let SpecConversion::LiveLookupMap(projection) = &conversion else {
+        return None;
+    };
+    declarations.live_lookup_initializer_span(
+        forms,
+        source,
+        &projection.var,
+        form.span.start.offset,
+    )?;
+    Some(conversion)
 }
 
 fn conditional_wrapper(names: &Names, body: &[Form], param: &str) -> Option<SpecConversion> {
@@ -473,6 +506,7 @@ pub(in crate::checker::model) fn structured_conversion(
                     fields.insert(
                         key,
                         MapFieldConversion {
+                            registration: qualified,
                             required: field.required,
                             conversion,
                         },
@@ -722,6 +756,37 @@ fn prior_initializer<'a>(
         return None;
     }
     def_initializer(tail)
+}
+
+impl Declarations {
+    pub(crate) fn live_lookup_initializer_span(
+        &self,
+        forms: &[Form],
+        source: &str,
+        var: &str,
+        before: usize,
+    ) -> Option<crate::reader::Span> {
+        let (namespace, local) = var.split_once('/')?;
+        if namespace != self.namespace() {
+            return None;
+        }
+        let index = forms.partition_point(|form| form.span.end.offset <= before);
+        let (name, value) = adjacent_literal_def(self, forms, source, index)?;
+        if name != local {
+            return None;
+        }
+        let Kind::Map(entries) = &value.kind else {
+            return None;
+        };
+        (entries.len() <= 2 * MAX_ENUM_ENTRIES
+            && entries.iter().all(|entry| {
+                matches!(
+                    entry.kind,
+                    Kind::Keyword(_) | Kind::String(_) | Kind::Number | Kind::Bool(_) | Kind::Nil
+                )
+            }))
+        .then_some(value.span)
+    }
 }
 
 fn fixed_integer(form: &Form, source: &str) -> Option<Type> {

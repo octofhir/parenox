@@ -1,4 +1,5 @@
 //! Immutable EDN declarations shared with each project snapshot.
+mod bundles;
 mod diff;
 mod encode;
 mod literals;
@@ -95,7 +96,22 @@ impl Model {
         let mut namespaces = BTreeMap::<String, ExternalDeclarations>::new();
         let mut spans = BTreeMap::new();
         let mut has_specs = false;
-        for [name, declaration] in entries.as_chunks::<2>().0 {
+        let rows = entries.as_chunks::<2>().0;
+        let mut ambiguous_specs = BTreeSet::new();
+        if rows.iter().any(specs::is_bundle) {
+            let mut seen = BTreeSet::new();
+            for name in rows.iter().filter_map(|[name, _]| name.keyword()) {
+                if !seen.insert(name) {
+                    ambiguous_specs.insert(name);
+                }
+            }
+        }
+        // A bundle resolves its leaves in this file independent of EDN map order.
+        let ordered = rows
+            .iter()
+            .filter(|row| !specs::is_bundle(row))
+            .chain(rows.iter().filter(|row| specs::is_bundle(row)));
+        for [name, declaration] in ordered {
             let is_spec = name.keyword().is_some();
             let entry = name.keyword().or_else(|| name.symbol()).and_then(|name| {
                 let qualified = name.strip_prefix(':').unwrap_or(name);
@@ -120,20 +136,28 @@ impl Model {
                 model.diagnostics.push(diagnostic);
                 continue;
             }
-            let target = namespaces
-                .entry(namespace.into())
-                .or_default()
-                .entry(name_string.to_owned());
-            let Entry::Vacant(target) = target else {
+            if namespaces
+                .get(namespace)
+                .is_some_and(|table| table.contains_key(name_string))
+            {
                 model.error(
                     "PNX2790",
                     name.span,
                     format!("Duplicate extern {name_string}"),
                 );
                 continue;
-            };
+            }
             let parsed = if is_spec {
-                model.read_extern_spec(name_string, declaration, path)
+                model.read_extern_spec(name_string, declaration, path, source, |key| {
+                    if ambiguous_specs.contains(key) {
+                        return None;
+                    }
+                    let (ns, _) = key.strip_prefix(':')?.split_once('/')?;
+                    let ExternalDeclaration::Spec(spec) = namespaces.get(ns)?.get(key)? else {
+                        return None;
+                    };
+                    Some(spec)
+                })
             } else if let Some(entries) = declaration.map() {
                 match entries {
                     [kind, value] if kind.keyword() == Some(":value") => {
@@ -174,7 +198,10 @@ impl Model {
             };
             if let Some(parsed) = parsed {
                 has_specs |= matches!(parsed, ExternalDeclaration::Spec(_));
-                target.insert(parsed);
+                namespaces
+                    .entry(namespace.into())
+                    .or_default()
+                    .insert(name_string.into(), parsed);
                 spans.insert(name_string.into(), name.span);
             }
         }

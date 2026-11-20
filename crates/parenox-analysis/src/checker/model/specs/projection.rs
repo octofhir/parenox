@@ -8,6 +8,13 @@ pub(crate) struct GuardedMapProjection {
     pub fields: ProjectedFields,
 }
 
+/// The table Var is read each time the selected lookup executes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LiveLookupProjection {
+    pub var: String,
+    pub fields: ProjectedFields,
+}
+
 pub(crate) type ProjectedFields = Box<[(Type, ProjectedValue)]>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,6 +22,14 @@ pub(crate) enum ProjectedValue {
     Lookup(Type),
     BooleanLookup(Type),
     Map(ProjectedFields),
+    Boolean(bool),
+    LiveFallback(Type),
+}
+
+impl LiveLookupProjection {
+    pub fn map_result(&self) -> Type {
+        map_result(&self.fields, &mut |_, _| Type::Any)
+    }
 }
 
 impl GuardedMapProjection {
@@ -41,6 +56,8 @@ fn map_result(fields: &ProjectedFields, lookup: &mut impl FnMut(&Type, Type) -> 
                         }
                     }
                     ProjectedValue::Map(fields) => map_result(fields, lookup),
+                    ProjectedValue::Boolean(value) => Type::Bool(*value),
+                    ProjectedValue::LiveFallback(_) => Type::Any,
                 };
                 (key.clone(), Field::new(ty, true))
             })

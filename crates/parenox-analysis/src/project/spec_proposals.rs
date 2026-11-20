@@ -16,6 +16,8 @@ pub struct SpecContractProposal {
     pub input: Option<String>,
     pub result: Option<String>,
     pub unknown: Vec<&'static str>,
+    /// The literal initializer of a live Var, as written in this snapshot.
+    pub initial_table: Option<String>,
 }
 
 #[derive(Debug)]
@@ -63,15 +65,25 @@ impl Session {
         };
         let result = conversion.and_then(SpecConversion::proposal_result);
         let input_known = !self.specs.unchecked_input(name) && input.is_some();
-        let guarded = matches!(conversion, Some(SpecConversion::GuardedMap(_)));
+        let partial = conversion.is_some_and(SpecConversion::has_unchecked_input);
+        let bundle = conversion.and_then(SpecConversion::bundle_fields);
+        let children_available = bundle.is_none_or(|fields| {
+            fields
+                .values()
+                .all(|field| !self.externs.contains_spec(&field.registration))
+        });
         let namespace = if declarations.has_namespace_declaration() {
             self.specs.standalone_namespace(name, path)
         } else {
             None
         };
         let qualified = declarations.resolve_spec_keyword(name).as_deref() == Some(name);
-        let export_namespace =
-            namespace.filter(|_| result.is_some() && qualified && (input_known || guarded));
+        let export_namespace = namespace.filter(|_| {
+            result.is_some()
+                && qualified
+                && children_available
+                && (input_known || partial || bundle.is_some())
+        });
         let mut unknown = Vec::new();
         if !input_known {
             unknown.push("Input domain");
@@ -86,9 +98,32 @@ impl Session {
         if !qualified {
             unknown.push("Qualified registration name");
         }
-        if guarded {
-            unknown.push("Exception classes from custom lookups");
+        if bundle.is_some() {
+            unknown.push("Registrations for additional qualified keys");
         }
+        if !children_available {
+            unknown.push("Bundle with a child already supplied by an extern");
+        }
+        let initial_table = match conversion {
+            Some(SpecConversion::GuardedMap(_)) => {
+                unknown.push("Exception classes from custom lookups");
+                None
+            }
+            Some(SpecConversion::LiveLookupMap(projection)) => {
+                unknown.push("Runtime value of the lookup Var");
+                unknown.push("Exception classes from live lookups");
+                declarations
+                    .live_lookup_initializer_span(
+                        &file.forms,
+                        &file.source,
+                        &projection.var,
+                        span.start.offset,
+                    )
+                    .and_then(|span| file.source.get(span.start.offset..span.end.offset))
+                    .map(str::to_owned)
+            }
+            _ => None,
+        };
         if !standard_spec {
             unknown.push("Behavior of the project's clojure.spec.alpha");
         }
@@ -100,6 +135,7 @@ impl Session {
             input,
             result,
             unknown,
+            initial_table,
         };
         Some((proposal, export_namespace))
     }
@@ -152,6 +188,14 @@ impl Session {
                 && let Some(conversion) = self.specs.conversions.get(*name)
             {
                 entries.insert(*name, (*namespace, conversion));
+                if let Some(fields) = conversion.bundle_fields() {
+                    entries.extend(fields.values().filter_map(|field| {
+                        Some((
+                            field.registration.as_str(),
+                            (*namespace, field.conversion.as_ref()?),
+                        ))
+                    }));
+                }
                 ":generated"
             } else {
                 "nil"
@@ -185,7 +229,11 @@ impl SpecContractProposal {
             .map(|s| edn_string(s))
             .collect::<Vec<_>>()
             .join(" ");
-        write!(edn, "{{:name {} :source {{:path {source} :line {line} :column {column} :form {form}}} :input {input} :result {result} :unknown [{unknown}] :extern {status}}}", self.name).unwrap();
+        write!(edn, "{{:name {} :source {{:path {source} :line {line} :column {column} :form {form}}} :input {input} :result {result} :unknown [{unknown}] :extern {status}", self.name).unwrap();
+        if let Some(table) = &self.initial_table {
+            write!(edn, " :initial-table {}", edn_string(table)).unwrap();
+        }
+        edn.push('}');
     }
 }
 

@@ -5,10 +5,11 @@ const STATES: &str = r#"
 (def states {1 :ready 2 :failed})
 (s/def :external/status (s/and int? states (s/conformer states)))
 "#;
-const ABSENT: &str = "s/conform cannot check an undeclared qualified key against the spec registry";
-const OPAQUE: &str = "s/conform cannot apply a supported conversion to an undeclared qualified key's registered spec";
+const ABSENT: &str = "Cannot check an undeclared qualified key against the spec registry";
+const OPAQUE: &str =
+    "Cannot apply a supported conversion to an undeclared qualified key's registered spec";
 const NOT_LOADED: &str =
-    "s/conform cannot prove the registered spec for an undeclared qualified key is loaded";
+    "Cannot prove the registered spec for an undeclared qualified key is loaded";
 
 fn specs() -> &'static str {
     FIXTURE.split_once(";; JVM-only").unwrap().0

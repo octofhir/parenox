@@ -1,6 +1,8 @@
 //! Literal values declared as source vars.
 mod initializers;
 
+pub(super) use initializers::adjacent_literal_def;
+
 use super::super::{Checker, Env};
 use super::{Declarations, Globals, Model};
 use crate::reader::{Form, Kind, Span};

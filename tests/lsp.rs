@@ -2454,7 +2454,12 @@ fn follows_spec_references_to_closed_and_unsaved_declarations() {
             m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri(&path)
         })
         .unwrap();
-    assert_eq!(initial["params"]["diagnostics"], json!([]));
+    let diagnostics = initial["params"]["diagnostics"].as_array().unwrap();
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic["code"] == "PNX9001"
+            && diagnostic["message"]
+                == "Cannot prove the named spec and its registrations are loaded"
+    }));
     assert_eq!(*result(2), location(2));
     assert_eq!(*result(3), location(2));
     assert_eq!(*result(4), location(3));

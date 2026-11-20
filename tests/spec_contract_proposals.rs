@@ -16,6 +16,8 @@ const ACTION: &str = ":server-capabilities/code-action-provider";
 const COMMAND: &str = ":server-capabilities/execute-command-provider";
 const SIGNATURE_HELP: &str = ":server-capabilities/signature-help-provider";
 const SEMANTIC_TOKENS: &str = ":server-capabilities/semantic-tokens-provider";
+const TEXT_SYNC: &str = ":server-capabilities/text-document-sync";
+const CAPABILITIES: &str = ":lsp4clj.coercer/server-capabilities";
 
 const CLIENT: Source<'_> = Source {
     path: "consumer.clj",
@@ -184,7 +186,7 @@ fn proposals_require_evidence_of_a_standard_spec_and_its_registration_namespace(
 fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
     let path = std::env::var("PARENOX_LSP4CLJ_COERCER").expect("set PARENOX_LSP4CLJ_COERCER");
     let source = fs::read_to_string(&path).unwrap();
-    let selected = [WRAP, KIND, ACTION, COMMAND, SIGNATURE_HELP, SEMANTIC_TOKENS].map(String::from);
+    let selected = [KIND, CAPABILITIES].map(String::from);
     let mut session = Session::default();
     let proposals = session
         .propose_contracts(
@@ -200,13 +202,16 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
         .externs
         .unwrap_or_else(|| panic!("{:#?}", proposals.report));
     assert!(edn.contains(SEMANTIC_TOKENS));
-    assert!(
-        proposals
-            .edn
-            .as_ref()
-            .unwrap()
-            .contains("\"Exception classes from custom lookups\"")
-    );
+    assert!(edn.contains(TEXT_SYNC));
+    for child in [
+        WRAP,
+        ACTION,
+        COMMAND,
+        SIGNATURE_HELP,
+        ":server-capabilities/rename-provider",
+    ] {
+        assert!(edn.contains(child), "{edn}");
+    }
     let externs = [Source {
         path: "lsp4clj.edn",
         source: &edn,
@@ -227,6 +232,18 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
                  :range nil? :full #{false}}]} []
   (s/conform :server-capabilities/semantic-tokens-provider
              {:token-types :type :token-modifiers :modifier}))
+(defn text-sync {:t/sig '[:-> {:open-close #{true} :change t/any :save {:include-text #{true}}}]} []
+  (s/conform :server-capabilities/text-document-sync :incremental))
+(defn bundle
+  {:t/sig '[:-> {:semantic-tokens-provider nil?
+                 :code-lens-provider {:resolve-provider #{false}}
+                 :server-capabilities/code-lens-provider {:resolve-provider #{::s/invalid}}}]} []
+  (s/conform :lsp4clj.coercer/server-capabilities
+             {:semantic-tokens-provider false
+              :code-lens-provider false
+              :server-capabilities/code-lens-provider ::s/invalid}))
+(defn valid-bundle {:t/sig '[:-> #{true}]} []
+  (s/valid? :lsp4clj.coercer/server-capabilities {:semantic-tokens-provider nil}))
 "#
     );
     let check = |source| {

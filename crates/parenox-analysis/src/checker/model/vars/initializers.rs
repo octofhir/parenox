@@ -12,13 +12,23 @@ pub(super) fn adjacent_root<'a>(
     source: &str,
     index: usize,
 ) -> Option<(&'a str, &'a Form)> {
+    let (name, value) = adjacent_literal_def(declarations, forms, source, index)?;
+    let (current_name, initializer) = plain_def(&forms[index])?;
+    (name != current_name
+        && source[initializer.span.start.offset..initializer.span.end.offset].contains(name))
+    .then_some((name, value))
+}
+
+pub(in crate::checker::model) fn adjacent_literal_def<'a>(
+    declarations: &'a Declarations,
+    forms: &'a [Form],
+    source: &str,
+    index: usize,
+) -> Option<(&'a str, &'a Form)> {
     let previous = forms.get(index.checked_sub(1)?)?;
     let current = &forms[index];
     let (name, value) = plain_def(previous)?;
-    let (current_name, initializer) = plain_def(current)?;
-    if name == current_name
-        || !source[initializer.span.start.offset..initializer.span.end.offset].contains(name)
-        || !forms.first().is_some_and(static_namespace_prelude)
+    if !forms.first().is_some_and(static_namespace_prelude)
         || declarations.forward_vars.contains_key(name)
         || declarations
             .source_declarations(forms, name)

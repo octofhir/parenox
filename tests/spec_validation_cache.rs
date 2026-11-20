@@ -129,7 +129,7 @@ fn exported_contracts_preserve_the_checked_int_range() {
 
 #[test]
 fn body_only_spec_changes_recheck_transitive_callers_but_not_unrelated_functions() {
-    let consumer = r#"(ns consumer (:require [clojure.spec.alpha :as s]))
+    let consumer = r#"(ns consumer (:require [clojure.spec.alpha :as s] [wire]))
 (defn- title [row]
   (if (s/valid? :wire/row row) (:title row) ""))
 (defn render {:t/sig '[map? :-> string?]} [row]

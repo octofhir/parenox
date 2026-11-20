@@ -12,12 +12,12 @@ use crate::checker::{
 use crate::reader::{Form, Kind};
 use crate::types::{ExtraFields, Field, MapSlot, MapType, SPEC_INVALID, Type};
 
-const MAP_GAP: &str = "s/conform requires a closed map with known keyword fields";
-const REGISTRY_GAP: &str =
-    "s/conform cannot check an undeclared qualified key against the spec registry";
-const REGISTRY_CONVERSION_GAP: &str = "s/conform cannot apply a supported conversion to an undeclared qualified key's registered spec";
+const MAP_GAP: &str = "The map spec requires a closed map with known keyword fields";
+const REGISTRY_GAP: &str = "Cannot check an undeclared qualified key against the spec registry";
+const REGISTRY_CONVERSION_GAP: &str =
+    "Cannot apply a supported conversion to an undeclared qualified key's registered spec";
 const REGISTRY_LOAD_GAP: &str =
-    "s/conform cannot prove the registered spec for an undeclared qualified key is loaded";
+    "Cannot prove the registered spec for an undeclared qualified key is loaded";
 const COLLECTION_GAP: &str = "s/conform cannot reconstruct this collection of maps or strings; use a known ordered collection or a small hash set literal";
 const PROJECTION_GAP: &str = "s/conform cannot project this collection; use a known ordered or empty collection or a small hash set literal";
 const STRING_KEYED_MAP_GAP: &str =
@@ -171,7 +171,7 @@ impl Checker<'_> {
     ) -> Result<Type, &'static str> {
         match conversion {
             StructuredConversion::Map(fields) => match input {
-                Type::Map(map) => self.conform_map(map, fields),
+                Type::Map(map) => self.conform_map(map, fields, SpecOperation::Conform),
                 Type::Any
                 | Type::Unknown
                 | Type::SpecValue
@@ -289,17 +289,18 @@ impl Checker<'_> {
         Ok(outcome.result_for(operation))
     }
 
-    fn conform_map(
+    pub(super) fn conform_map(
         &mut self,
         map: &MapType,
         fields: &BTreeMap<Type, MapFieldConversion>,
+        operation: SpecOperation,
     ) -> Result<Type, &'static str> {
         // Required keys are tested before any of their conformers run.
         if fields
             .iter()
             .any(|(key, field)| field.required && matches!(map.slot(key), MapSlot::Absent))
         {
-            return Ok(SpecOperation::Conform.invalid());
+            return Ok(operation.invalid());
         }
         if map.extra != ExtraFields::Closed
             || map
@@ -311,7 +312,7 @@ impl Checker<'_> {
         }
         let conversions = self.map_field_conversions(map, fields)?;
         let outcome = self.conform_map_values(map, conversions, false)?;
-        Ok(outcome.result_for(SpecOperation::Conform))
+        Ok(outcome.result_for(operation))
     }
 
     fn conform_map_values<'a>(
@@ -377,6 +378,11 @@ impl Checker<'_> {
             } else {
                 REGISTRY_GAP
             })?;
+            // A bundle needs a literal map. A field type alone cannot prove
+            // that a nested value has ordinary persistent map behavior.
+            if conversion.bundle_fields().is_some() {
+                return Err(REGISTRY_CONVERSION_GAP);
+            }
             let provider = self
                 .globals
                 .spec_provider(name)
@@ -485,6 +491,7 @@ impl Checker<'_> {
             },
             SpecConversion::Enum { .. }
             | SpecConversion::WrapField(_)
+            | SpecConversion::LiveLookupMap(_)
             | SpecConversion::TaggedOr(_)
             | SpecConversion::ProjectedCollection(_) => Identity::Changed,
             SpecConversion::String

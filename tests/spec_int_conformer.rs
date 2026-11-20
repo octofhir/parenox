@@ -242,9 +242,13 @@ fn does_not_treat_a_validated_map_shape_as_a_conformed_output() {
     let report = check(&source);
     assert!(!report.complete, "{report:#?}");
     assert!(
-        report.files[1].diagnostics.iter().any(
-            |diagnostic| diagnostic.code == "PNX9001" && diagnostic.message.contains("conform")
-        ),
+        report.files[1]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "PNX9001"
+                && diagnostic
+                    .message
+                    .contains("closed map with known keyword fields")),
         "{report:#?}"
     );
 }

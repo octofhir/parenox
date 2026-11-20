@@ -120,12 +120,45 @@ impl Checker<'_> {
         let loaded = key
             .as_deref()
             .is_none_or(|key| self.spec_load_is_known(key));
+        let input = &values[1].0;
+        let provider = key
+            .as_deref()
+            .and_then(|key| self.globals.spec_provider(key));
+        let imported_keys = matches!(
+            provider.map(std::sync::Arc::as_ref),
+            Some(SpecProvider::ImportedKeys(_))
+        );
+        let can_check_map = matches!(op, SpecOperation::Valid)
+            && input.literal_map
+            && provider.is_some_and(|provider| {
+                provider.standalone_registration().is_some() && self.model.loads_spec(provider)
+            });
         let (ty, conversion) = key
             .as_deref()
             .map(|key| self.read_spec(key))
             .unwrap_or_default();
         if !loaded {
             return Some(self.unchecked_form(spec.span, SPEC_LOAD_GAP));
+        }
+        if imported_keys && !input.literal_map {
+            return Some(if map_predicate(&input.known) == Type::Bool(false) {
+                Value::new(op.invalid())
+            } else {
+                self.unchecked_spec_call(
+                    op,
+                    spec.span,
+                    "An s/keys extern requires a literal map for exact checking",
+                )
+            });
+        }
+        if can_check_map
+            && let Type::Map(map) = &input.known
+            && let Some(fields) = conversion.as_ref().and_then(SpecConversion::bundle_fields)
+        {
+            return Some(match self.conform_map(map, fields, op) {
+                Ok(ty) => Value::new(ty),
+                Err(reason) => self.unchecked_spec_call(op, spec.span, reason),
+            });
         }
         if let Some(conversion) = conversion.filter(|conversion| {
             matches!(op, SpecOperation::Conform)
@@ -134,7 +167,6 @@ impl Checker<'_> {
                     SpecConversion::String | SpecConversion::Structured(_)
                 )
         }) {
-            let input = &values[1].0;
             if input.literal_map
                 && let (Type::Map(map), SpecConversion::GuardedMap(projection)) =
                     (&input.known, &conversion)
@@ -174,6 +206,14 @@ impl Checker<'_> {
                 .push(Diagnostic::analysis_gap("PNX9001", spec.span, reason));
         }
         Some(Value::new(Type::Boolean))
+    }
+
+    fn unchecked_spec_call(&mut self, op: SpecOperation, span: Span, reason: &str) -> Value {
+        let value = self.unchecked_form(span, reason);
+        match op {
+            SpecOperation::Valid => Value::new(Type::Boolean),
+            SpecOperation::Conform => value,
+        }
     }
 
     fn convert_spec(
@@ -233,6 +273,13 @@ impl Checker<'_> {
                 },
                 SpecConversion::GuardedMap(projection) => {
                     self.conform_opaque_projection(ty, projection, op)
+                }
+                SpecConversion::LiveLookupMap(projection) => {
+                    self.may_throw();
+                    match op {
+                        SpecOperation::Conform => projection.map_result(),
+                        SpecOperation::Valid => Type::Bool(true),
+                    }
                 }
                 SpecConversion::Name => {
                     let result = self.name_result(ty);
@@ -377,7 +424,9 @@ impl Checker<'_> {
 
     fn spec_load_is_known(&self, key: &str) -> bool {
         match self.globals.spec_provider(key).map(std::sync::Arc::as_ref) {
-            Some(provider @ SpecProvider::LoadChecked { .. }) => self.model.loads_spec(provider),
+            Some(provider @ (SpecProvider::LoadChecked { .. } | SpecProvider::ImportedKeys(_))) => {
+                self.model.loads_spec(provider)
+            }
             _ => true,
         }
     }

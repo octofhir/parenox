@@ -3,8 +3,9 @@ mod conjunction;
 mod conversion;
 mod function_specs;
 pub(super) use conversion::{
-    enum_conversion, inverted_literal, named_tagged_branches, projected_collection_child, resolves,
-    source_conversion, string_keyed_map_child, structured_conversion, tagged_or, tagged_projection,
+    enum_conversion, inverted_literal, live_lookup_conversion, live_lookup_projection,
+    named_tagged_branches, projected_collection_child, resolves, source_conversion,
+    string_keyed_map_child, structured_conversion, tagged_or, tagged_projection,
     tagged_projection_branches,
 };
 pub(super) use function_specs::read_function_spec;

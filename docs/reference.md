@@ -362,6 +362,27 @@ and marks the accepted input domain and exception classes as unknown.
 Its EDN still supports checking calls to `s/conform` and `s/valid?`.
 Using that spec as a function argument type reports an unchecked input.
 
+A map projection can also contain a lookup and fallback that read the same
+Var. The text-document-sync proposal includes the adjacent literal initializer
+in `:initial-table`. The initializer and spec must follow the namespace
+declaration. The EDN contract reads the qualified Var in both places
+and preserves Clojure truthiness. A root change can alter the lookup or fallback
+result, so the runtime value and exception classes remain unknown.
+
+`s/keys` with direct child specs declared in the same source file and runtime
+namespace can be exported as a bundle. Selecting the parent adds the referenced
+children to the same EDN file. Import resolves the complete set before using
+the parent. Existing child externs are preserved, so generation omits a parent
+whose child is already supplied by an extern. Missing or conflicting children
+prevent checking the imported parent. The consumer needs an explicit namespace load.
+
+Imported bundles check literal maps with known keyword fields. Additional
+qualified keys use their loaded registry definitions. The checker reports
+an analysis gap when the registry entry is unavailable, or when the input
+may be an opaque map implementation. Required keys are tested before
+field conversion. Child specs with unchecked inputs retain that limitation
+when the parent is used as an input type.
+
 Run the lsp4clj 2.0.1 examples with the pinned `coercer.clj` source.
 
 ```sh
@@ -372,20 +393,25 @@ target/release/parenox propose-contracts "$coercer" \
   --spec :server-capabilities/code-lens-provider \
   --spec :server-capabilities/signature-help-provider \
   --spec :server-capabilities/semantic-tokens-provider \
+  --spec :server-capabilities/text-document-sync \
+  --spec :lsp4clj.coercer/server-capabilities \
   --spec :markup/kind
 just pilot-contract-smoke "$coercer"
 clojure -M tests/fixtures/spec-code-lens-provider.clj
 clojure -M tests/fixtures/spec-conditional-provider.clj
 clojure -M tests/fixtures/spec-signature-help-provider.clj
 clojure -M tests/fixtures/spec-semantic-tokens-provider.clj
+clojure -M tests/fixtures/spec-text-document-sync.clj
+clojure -M tests/fixtures/spec-server-capabilities.clj
 ```
 
 The smoke test imports generated EDN in a consumer with no provider source.
 It checks the exact output field type of the lens conformer, both branches
-of the vector conformers, the signature-help map and vector inputs, and a
-type error for `"html"` in place of
-`"markdown"`. In the editor, hover on a named spec declaration or a resolved
-type reference shows its inferred contract and source location.
+of the vector conformers, and the signature-help map and vector inputs. It
+checks `s/conform` and `s/valid?` on the capabilities bundle and a type error
+for `"html"` in place of `"markdown"`. In the editor, hover on a named spec
+declaration or a resolved type reference shows its inferred contract and source
+location.
 
 ### Comparing releases
 

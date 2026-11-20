@@ -2,7 +2,9 @@
 mod projection;
 mod registration;
 
-pub(crate) use projection::{GuardedMapProjection, ProjectedFields, ProjectedValue};
+pub(crate) use projection::{
+    GuardedMapProjection, LiveLookupProjection, ProjectedFields, ProjectedValue,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -10,8 +12,9 @@ use std::sync::Arc;
 use super::contracts::function_parts;
 use super::declarations::{Declarations, Names, SpecDeclaration, symbols_match};
 use super::type_forms::{
-    core_predicate_type, enum_conversion, projected_collection_child, read_type, source_conversion,
-    string_keyed_map_child, structured_conversion, tagged_or, tagged_projection,
+    core_predicate_type, enum_conversion, live_lookup_conversion, projected_collection_child,
+    read_type, source_conversion, string_keyed_map_child, structured_conversion, tagged_or,
+    tagged_projection,
 };
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
@@ -22,7 +25,7 @@ pub(crate) struct SpecFingerprint {
     names: Names,
     bodies: Vec<(String, Span, Span, String)>,
     duplicates: BTreeSet<String>,
-    enums: BTreeMap<String, SpecConversion>,
+    contextual: BTreeMap<String, SpecConversion>,
     registration_barriers: Vec<usize>,
 }
 
@@ -94,6 +97,7 @@ impl Declarations {
                             | "cond"
                             | "vector?"
                             | "and"
+                            | "or"
                             | "boolean"
                             | "get"
                             | "="
@@ -138,11 +142,12 @@ impl Declarations {
             names: self.names.clone(),
             bodies,
             duplicates: self.duplicate_specs.clone(),
-            enums: self
+            contextual: self
                 .specs
                 .iter()
                 .filter_map(|(key, declaration)| {
                     enum_conversion(self, forms, source, &declaration.body)
+                        .or_else(|| live_lookup_conversion(self, forms, source, &declaration.body))
                         .map(|conversion| (key.clone(), conversion))
                 })
                 .collect(),
@@ -167,6 +172,7 @@ pub(crate) struct RegistrationSource {
 #[derive(PartialEq, Eq)]
 pub(crate) enum SpecProvider {
     Direct(Arc<RegistrationSource>),
+    ImportedKeys(Arc<RegistrationSource>),
     LoadChecked {
         direct: bool,
         sources: Box<[Arc<RegistrationSource>]>,
@@ -176,7 +182,7 @@ pub(crate) enum SpecProvider {
 impl SpecProvider {
     pub fn standalone_registration(&self) -> Option<&RegistrationSource> {
         match self {
-            Self::Direct(source) => Some(source),
+            Self::Direct(source) | Self::ImportedKeys(source) => Some(source),
             Self::LoadChecked {
                 direct: true,
                 sources,
@@ -207,6 +213,7 @@ pub(crate) enum SpecConversion {
     VectorWrapField(Arc<Type>),
     MapOrWrapField(Arc<Type>),
     GuardedMap(Arc<GuardedMapProjection>),
+    LiveLookupMap(Arc<LiveLookupProjection>),
     String,
     Keyword,
     Identity,
@@ -232,6 +239,7 @@ pub(crate) enum StructuredConversion {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MapFieldConversion {
+    pub registration: String,
     pub required: bool,
     /// A missing registration checks presence but leaves a present value alone.
     pub conversion: Option<SpecConversion>,
@@ -239,7 +247,10 @@ pub(crate) struct MapFieldConversion {
 
 impl SpecConversion {
     pub fn has_unchecked_input(&self) -> bool {
-        matches!(self, Self::Name | Self::GuardedMap(_))
+        matches!(
+            self,
+            Self::Name | Self::GuardedMap(_) | Self::LiveLookupMap(_)
+        )
     }
 
     pub fn requires_standard_core(&self) -> bool {
@@ -259,7 +270,7 @@ impl SpecConversion {
             Self::CheckedInt32 => Type::Integral(IntegerType::INT32),
             // User-defined JVM interfaces can throw. These conversions
             // supply output and effects but no input contract.
-            Self::Name | Self::GuardedMap(_) => Type::Unknown,
+            Self::Name | Self::GuardedMap(_) | Self::LiveLookupMap(_) => Type::Unknown,
             Self::WrapField(_) | Self::VectorWrapField(_) | Self::MapOrWrapField(_) => Type::Any,
             Self::String => Type::String,
             Self::Keyword => Type::SpecKeyword,
@@ -367,10 +378,15 @@ impl SpecCache {
                     names: &source.declarations.names,
                     declaration,
                     registration_barriers: &source.fingerprint.registration_barriers,
-                    enum_conversion: source.fingerprint.enums.get(key).filter(|conversion| {
-                        !project_set_namespace
-                            || !matches!(conversion, SpecConversion::Enum { inverted: true, .. })
-                    }),
+                    contextual_conversion: source.fingerprint.contextual.get(key).filter(
+                        |conversion| {
+                            !project_set_namespace
+                                || !matches!(
+                                    conversion,
+                                    SpecConversion::Enum { inverted: true, .. }
+                                )
+                        },
+                    ),
                 };
                 if let Some(previous) = resolver.declarations.get(key.as_str()).copied() {
                     if duplicate.insert(key.as_str()) {
@@ -435,7 +451,7 @@ struct Owner<'a> {
     names: &'a Names,
     declaration: &'a SpecDeclaration,
     registration_barriers: &'a [usize],
-    enum_conversion: Option<&'a SpecConversion>,
+    contextual_conversion: Option<&'a SpecConversion>,
 }
 
 #[derive(Default)]
@@ -499,7 +515,7 @@ impl<'a> Resolver<'a> {
         let mut diagnostics = Vec::new();
         let mut required = BTreeSet::new();
         let direct = owner
-            .enum_conversion
+            .contextual_conversion
             .cloned()
             .or_else(|| source_conversion(owner.names, body))
             .filter(|conversion| {
@@ -540,9 +556,21 @@ impl<'a> Resolver<'a> {
         };
         let conversion = direct
             .or_else(|| {
-                structured_conversion(owner.names, body, &ty, |key| {
+                let conversion = structured_conversion(owner.names, body, &ty, |key| {
                     self.conversions.get(key).cloned()
-                })
+                })?;
+                if !self.project_core_namespace
+                    && let Some(fields) = conversion.bundle_fields()
+                    && fields.values().all(|field| {
+                        self.direct_conversions
+                            .contains(field.registration.as_str())
+                            && self.declarations[&field.registration.as_str()].path == owner.path
+                    })
+                {
+                    self.direct_conversions.insert(key);
+                    required.insert(key);
+                }
+                Some(conversion)
             })
             .or_else(|| {
                 // The choice memoizes resolution of all branch specs, including

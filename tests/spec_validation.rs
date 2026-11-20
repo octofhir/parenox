@@ -47,12 +47,14 @@ fn a_successful_projection_does_not_prove_that_validation_returns_true() {
     (inc "checked failure")))"#
     );
     let report = Session::default().check("demo.clj", &source);
-    let [diagnostic] = report.diagnostics.as_slice() else {
+    let [gap, mismatch] = report.diagnostics.as_slice() else {
         panic!("{report:#?}")
     };
-    assert_eq!(diagnostic.code, "PNX2322");
+    assert_eq!(gap.code, "PNX9001");
+    assert!(gap.message.contains("undeclared qualified key"));
+    assert_eq!(mismatch.code, "PNX2322");
     assert_eq!(
-        &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+        &source[mismatch.span.start.offset..mismatch.span.end.offset],
         "\"checked failure\""
     );
 }
