@@ -5,11 +5,14 @@ use super::Value;
 use crate::reader::Form;
 use crate::types::Type;
 
+pub(super) const MAX_SELECTOR_KEYS: usize = 32;
+
 #[derive(Clone, Default)]
 pub(super) struct Env {
     bindings: BTreeMap<String, Binding>,
     next_binding: usize,
-    shadowed_owners: BTreeMap<BindingId, Value>,
+    retained_owners: BTreeMap<BindingId, Value>,
+    pinned_owners: Vec<BindingId>,
     java_hints: BTreeMap<String, String>,
     presence: Vec<Presence>,
     selectors: BTreeMap<String, Selector>,
@@ -27,7 +30,7 @@ struct Binding {
 
 #[derive(Clone)]
 pub(super) struct SelectorRoot {
-    name: String,
+    name: Option<String>,
     id: BindingId,
 }
 
@@ -35,6 +38,17 @@ pub(super) struct SelectorRoot {
 pub(super) struct Selector {
     pub root: SelectorRoot,
     pub keys: Vec<Type>,
+}
+
+impl Selector {
+    pub(super) fn field(&self, key: Type) -> Option<Self> {
+        if self.keys.len() >= MAX_SELECTOR_KEYS {
+            return None;
+        }
+        let mut child = self.clone();
+        child.keys.push(key);
+        Some(child)
+    }
 }
 
 #[derive(Clone)]
@@ -75,27 +89,37 @@ impl Env {
             Some(source) => self.selectors.insert(name.clone(), source),
             None => self.selectors.remove(&name),
         };
-        let id = BindingId(self.next_binding);
-        self.next_binding += 1;
+        let id = self.next_binding_id();
         // An initializer can capture an old owner even when this binding
         // uses its name again. Only keep values with surviving selectors.
         if let Some(old) = self.bindings.insert(name, Binding { id, value })
-            && self.has_alias_to(old.id)
+            && self.owner_in_use(old.id)
         {
-            self.shadowed_owners.insert(old.id, old.value);
+            self.retained_owners.insert(old.id, old.value);
         }
-        if let Some(old) = old_selection
-            && self.shadowed_owners.contains_key(&old.root.id)
-            && !self.has_alias_to(old.root.id)
-        {
-            self.shadowed_owners.remove(&old.root.id);
+        if let Some(old) = old_selection {
+            self.release_unused_owner(old.root.id);
         }
     }
 
-    fn has_alias_to(&self, owner: BindingId) -> bool {
-        self.selectors
-            .values()
-            .any(|selector| selector.root.id == owner)
+    fn next_binding_id(&mut self) -> BindingId {
+        let id = BindingId(self.next_binding);
+        self.next_binding += 1;
+        id
+    }
+
+    fn owner_in_use(&self, owner: BindingId) -> bool {
+        self.pinned_owners.contains(&owner)
+            || self
+                .selectors
+                .values()
+                .any(|selector| selector.root.id == owner)
+    }
+
+    fn release_unused_owner(&mut self, id: BindingId) {
+        if self.retained_owners.contains_key(&id) && !self.owner_in_use(id) {
+            self.retained_owners.remove(&id);
+        }
     }
 
     pub(super) fn java_hint(&self, name: &str) -> Option<&str> {
@@ -115,7 +139,7 @@ impl Env {
             let binding = self.bindings.get(name)?;
             Some(Selector {
                 root: SelectorRoot {
-                    name: name.into(),
+                    name: Some(name.into()),
                     id: binding.id,
                 },
                 keys: Vec::new(),
@@ -123,17 +147,47 @@ impl Env {
         })
     }
 
+    /// A destructuring input without a visible local still has one saved value.
+    pub(super) fn captured_selector(&mut self, value: Value) -> Selector {
+        let id = self.next_binding_id();
+        self.retained_owners.insert(id, value);
+        Selector {
+            root: SelectorRoot { name: None, id },
+            keys: Vec::new(),
+        }
+    }
+
+    /// Keep the initializer's owner while its pattern introduces new names.
+    pub(super) fn with_owner_pinned(
+        &mut self,
+        source: Option<&Selector>,
+        bind: impl FnOnce(&mut Self),
+    ) {
+        if let Some(source) = source {
+            self.pinned_owners.push(source.root.id);
+            bind(self);
+            self.pinned_owners.pop();
+            self.release_unused_owner(source.root.id);
+        } else {
+            bind(self);
+        }
+    }
+
     pub(super) fn owner(&self, root: &SelectorRoot) -> Option<&Value> {
-        match self.bindings.get(&root.name) {
+        match root.name.as_ref().and_then(|name| self.bindings.get(name)) {
             Some(binding) if binding.id == root.id => Some(&binding.value),
-            _ => self.shadowed_owners.get(&root.id),
+            _ => self.retained_owners.get(&root.id),
         }
     }
 
     pub(super) fn owner_mut(&mut self, root: &SelectorRoot) -> Option<&mut Value> {
-        match self.bindings.get_mut(&root.name) {
+        match root
+            .name
+            .as_ref()
+            .and_then(|name| self.bindings.get_mut(name))
+        {
             Some(binding) if binding.id == root.id => Some(&mut binding.value),
-            _ => self.shadowed_owners.get_mut(&root.id),
+            _ => self.retained_owners.get_mut(&root.id),
         }
     }
 

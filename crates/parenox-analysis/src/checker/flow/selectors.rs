@@ -1,10 +1,11 @@
 //! Narrow immutable map reads back to their lexical owner.
 use super::narrow_by_type;
-use crate::checker::{Checker, Env, env::Selector};
+use crate::checker::{
+    Checker, Env,
+    env::{MAX_SELECTOR_KEYS, Selector},
+};
 use crate::reader::{Form, Kind};
 use crate::types::{Field, MapSlot, Type};
-
-const MAX_SELECTOR_KEYS: usize = 32;
 
 impl Checker<'_> {
     /// Only pure lookups rooted in a local are stable. In particular, a lookup

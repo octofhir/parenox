@@ -163,6 +163,56 @@ fn presence_and_truthiness_refine_captured_fields_independently() {
 }
 
 #[test]
+fn destructured_fields_share_the_saved_map_even_without_an_as_binding() {
+    let report = check(
+        "(defn parameter {:t/sig '[::event :-> string?]} [{:keys [kind value]}]
+           (case kind :note (subs value 0) :counter (str (inc value))))
+         (defn nested {:t/sig '[::envelope :-> string?]} [message]
+           (let [{{:keys [value]} :item} message]
+             (case (get-in message [:item :kind])
+               :note (subs value 0) :counter (str (inc value)))))
+         (defn shadowed-as {:t/sig '[:-> #{:field}]} []
+           (let [{:keys [part] :as part} {:part :field}] part))
+         (s/def ::label string?)
+         (s/def ::box (s/keys :req-un [::item] :opt-un [::label]))
+         (defn default-sibling {:t/sig '[::box :-> string?]} [message]
+           (let [{:keys [item label] :or {label \"default\"} :as saved} message]
+             (case (get-in saved [:item :kind])
+               :note (str label (subs (:value item) 0))
+               :counter (str label (inc (:value item))))))",
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn defaults_and_sequence_conversion_do_not_supply_a_map_selector() {
+    let fallback = check(
+        "(s/def ::path (s/nilable string?))
+         (s/def ::ref (s/keys :opt-un [::path]))
+         (defn render {:t/sig '[::ref :-> string?]} [ref]
+           (let [{:keys [path] :or {path \"default\"} :as saved} ref]
+             (if (some? path) (subs (:path saved) 0) \"empty\")))",
+    );
+    let [diagnostic] = fallback.diagnostics.as_slice() else {
+        panic!("{fallback:#?}");
+    };
+    assert!(fallback.complete);
+    assert_eq!(diagnostic.code, "PNX2322");
+    assert_eq!(diagnostic.actual.as_deref(), Some("Nil | String"));
+
+    let converted = check(
+        "(defn from-pairs {:t/sig '[:-> map?]} []
+           (let [{:as saved} (list :path \"ok\")] saved))",
+    );
+    let [diagnostic] = converted.diagnostics.as_slice() else {
+        panic!("{converted:#?}");
+    };
+    assert!(!converted.complete);
+    assert_eq!(diagnostic.code, "PNX9001");
+    assert!(diagnostic.message.contains("sequence inputs"));
+}
+
+#[test]
 fn defaults_shadowed_get_and_custom_predicates_do_not_prove_a_tag() {
     let report = check(
         "(s/def ::legacy (s/keys :opt-un [:counter/kind] :req-un [:counter/value]))

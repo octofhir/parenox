@@ -26,12 +26,16 @@ pub(super) fn binding_names<'a>(form: &'a Form, names: &mut Vec<(&'a str, Span)>
 }
 
 fn map_binding_names<'a>(entries: &'a [Form], names: &mut Vec<(&'a str, Span)>) {
-    for [binding, value] in entries.as_chunks::<2>().0 {
+    let pairs = entries.as_chunks::<2>().0;
+    if let Some([_, alias]) = pairs.iter().find(|[kind, _]| kind.keyword() == Some(":as")) {
+        binding_names(alias, names);
+    }
+    for [binding, value] in pairs {
         match binding.keyword() {
-            Some(":as" | ":all" | ":excess" | ":missing" | ":select") => {
+            Some(":all" | ":excess" | ":missing" | ":select") => {
                 binding_names(value, names);
             }
-            Some(":or" | ":defaults") => {}
+            Some(":as" | ":or" | ":defaults") => {}
             Some(":req!") => {
                 if let Some(required) = value.map() {
                     map_binding_names(required, names);
@@ -62,6 +66,34 @@ fn map_binding_name<'a>(form: &'a Form, names: &mut Vec<(&'a str, Span)>) {
 struct Defaults {
     locals: BTreeMap<String, (Value, Span)>,
     keys: BTreeMap<Type, (Value, Span)>,
+}
+
+#[derive(Clone, Copy)]
+struct MapBinding<'a> {
+    value: &'a Value,
+    defaults: &'a Defaults,
+    source: Option<&'a Selector>,
+}
+
+fn is_saved_map(ty: &Type) -> bool {
+    match ty {
+        Type::Map(_) | Type::Nil => true,
+        Type::Union(types) => types.iter().all(is_saved_map),
+        _ => false,
+    }
+}
+
+fn may_convert_sequence(ty: &Type) -> bool {
+    match ty {
+        Type::Seq(_)
+        | Type::List(_)
+        | Type::SeqTuple(_)
+        | Type::ListTuple(_)
+        | Type::SpecCollection(_) => true,
+        Type::Parameter(parameter) => parameter.upper.as_ref().is_none_or(may_convert_sequence),
+        Type::Union(types) => types.iter().any(may_convert_sequence),
+        _ => false,
+    }
 }
 
 impl Checker<'_> {
@@ -101,7 +133,9 @@ impl Checker<'_> {
         value: Value,
         env: &mut Env,
     ) {
-        let source = form.symbol().and_then(|_| self.selector(init, env));
+        let source = (form.symbol().is_some() || form.map().is_some())
+            .then(|| self.selector(init, env))
+            .flatten();
         self.bind_selected(form, value, env, source);
     }
 
@@ -125,74 +159,95 @@ impl Checker<'_> {
                 self.bind_positions(xs, form.span, value, env);
             }
             Kind::Map(xs) => {
-                self.may_throw();
-                // :missing changes checked lookups into collection of absent keys.
-                // Do not apply throwing semantics before this mode is implemented.
-                if xs
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .any(|p| p[0].keyword() == Some(":missing"))
-                {
-                    self.error(
-                        "PNX9001",
-                        form.span,
-                        "Destructuring with :missing is not supported yet",
-                    );
-                    return;
-                }
-                // Clojure evaluates every default once in the outer lexical scope,
-                // before introducing this map's locals and :as alias.
-                let defaults = xs
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .find(|p| p[0].keyword() == Some(":or"))
-                    .map(|p| self.binding_defaults(&p[1], env))
-                    .unwrap_or_default();
-                for pair in xs.as_chunks::<2>().0 {
-                    let directive = pair[0].keyword().map(|key| self.model.key(key));
-                    match directive.as_deref() {
-                        Some(":or") => {}
-                        Some(":as") if pair[1].symbol().is_some() => {
-                            self.bind(&pair[1], value.clone(), env);
-                        }
-                        Some(":req!") => {
-                            let Some(entries) = pair[1].map() else {
-                                self.error(
-                                    "PNX9001",
-                                    pair[1].span,
-                                    ":req! requires a map of bindings to keys",
-                                );
-                                continue;
-                            };
-                            for entry in entries.as_chunks::<2>().0 {
-                                self.bind_entry(entry, &value, true, &defaults, env);
-                            }
-                        }
-                        Some(directive)
-                            if matches!(directive, ":strs" | ":strs!")
-                                || matches!(
-                                    directive.rsplit('/').next(),
-                                    Some(":keys" | ":keys!" | "keys" | "keys!")
-                                ) =>
-                        {
-                            self.bind_keys(directive, &pair[1], &value, &defaults, env);
-                        }
-                        _ => self.bind_entry(pair, &value, false, &defaults, env),
-                    }
-                }
+                self.bind_map(xs.as_chunks::<2>().0, form.span, value, source, env);
             }
             _ => self.error("PNX9001", form.span, "Unsupported binding pattern"),
         }
     }
 
+    fn bind_map(
+        &mut self,
+        pairs: &[[Form; 2]],
+        span: Span,
+        value: Value,
+        source: Option<Selector>,
+        env: &mut Env,
+    ) {
+        self.may_throw();
+        // :missing changes checked lookups into collection of absent keys.
+        if pairs.iter().any(|p| p[0].keyword() == Some(":missing")) {
+            self.error(
+                "PNX9001",
+                span,
+                "Destructuring with :missing is not supported yet",
+            );
+            return;
+        }
+        // Defaults run once in the outer scope. :as then precedes the field bindings.
+        let defaults = pairs
+            .iter()
+            .find(|p| p[0].keyword() == Some(":or"))
+            .map(|p| self.binding_defaults(&p[1], env))
+            .unwrap_or_default();
+        // Clojure can convert a sequence into a map while destructuring it.
+        // Map and nil inputs retain the same value throughout the pattern.
+        let value = if may_convert_sequence(&value.known) {
+            self.unsupported(span, "Map destructuring of sequence inputs is not modeled")
+        } else {
+            value
+        };
+        let source = is_saved_map(&value.known)
+            .then(|| source.unwrap_or_else(|| env.captured_selector(value.clone())));
+        let input = MapBinding {
+            value: &value,
+            defaults: &defaults,
+            source: source.as_ref(),
+        };
+        env.with_owner_pinned(input.source, |env| {
+            if let Some([_, alias]) = pairs
+                .iter()
+                .find(|[kind, alias]| kind.keyword() == Some(":as") && alias.symbol().is_some())
+            {
+                self.bind_selected(alias, value.clone(), env, source.clone());
+            }
+            for pair in pairs {
+                let directive = pair[0].keyword().map(|key| self.model.key(key));
+                match directive.as_deref() {
+                    Some(":or") => {}
+                    Some(":as") if pair[1].symbol().is_some() => {}
+                    Some(":req!") => {
+                        let Some(entries) = pair[1].map() else {
+                            self.error(
+                                "PNX9001",
+                                pair[1].span,
+                                ":req! requires a map of bindings to keys",
+                            );
+                            continue;
+                        };
+                        for entry in entries.as_chunks::<2>().0 {
+                            self.bind_entry(entry, input, true, env);
+                        }
+                    }
+                    Some(directive)
+                        if matches!(directive, ":strs" | ":strs!")
+                            || matches!(
+                                directive.rsplit('/').next(),
+                                Some(":keys" | ":keys!" | "keys" | "keys!")
+                            ) =>
+                    {
+                        self.bind_keys(directive, &pair[1], input, env);
+                    }
+                    _ => self.bind_entry(pair, input, false, env),
+                }
+            }
+        });
+    }
+
     fn bind_entry(
         &mut self,
         pair: &[Form; 2],
-        value: &Value,
+        input: MapBinding<'_>,
         required: bool,
-        defaults: &Defaults,
         env: &mut Env,
     ) {
         if !matches!(
@@ -219,18 +274,11 @@ impl Checker<'_> {
         } else {
             Lookup::Optional(None)
         };
-        let field = self.binding_value(value, key, pair[0].symbol(), mode, defaults, pair[1].span);
-        self.bind(&pair[0], field, env);
+        let (field, source) = self.binding_value(input, key, pair[0].symbol(), mode, pair[1].span);
+        self.bind_selected(&pair[0], field, env, source);
     }
 
-    fn bind_keys(
-        &mut self,
-        directive: &str,
-        form: &Form,
-        value: &Value,
-        defaults: &Defaults,
-        env: &mut Env,
-    ) {
+    fn bind_keys(&mut self, directive: &str, form: &Form, input: MapBinding<'_>, env: &mut Env) {
         let Some(keys) = form.vector() else {
             self.error(
                 "PNX9001",
@@ -335,11 +383,11 @@ impl Checker<'_> {
                 } else {
                     Lookup::Optional(None)
                 };
-                let field =
-                    self.binding_value(value, key_type, Some(local), mode, defaults, key.span);
-                env.insert(local.into(), field);
+                let (field, source) =
+                    self.binding_value(input, key_type, Some(local), mode, key.span);
+                env.insert_selected(local.into(), field, source);
             } else if required {
-                self.binding_value(value, key_type, None, Lookup::Presence, defaults, key.span);
+                self.binding_value(input, key_type, None, Lookup::Presence, key.span);
             }
         }
     }
@@ -386,15 +434,14 @@ impl Checker<'_> {
 
     fn binding_value(
         &mut self,
-        value: &Value,
+        input: MapBinding<'_>,
         key: Type,
         local: Option<&str>,
         mode: Lookup<'_>,
-        defaults: &Defaults,
         span: Span,
-    ) -> Value {
-        let by_local = local.and_then(|name| defaults.locals.get(name));
-        let by_key = defaults.keys.get(&key);
+    ) -> (Value, Option<Selector>) {
+        let by_local = local.and_then(|name| input.defaults.locals.get(name));
+        let by_key = input.defaults.keys.get(&key);
         if let (Some(_), Some((_, span))) = (by_local, by_key) {
             self.error(
                 "PNX1001",
@@ -404,12 +451,17 @@ impl Checker<'_> {
                     local.unwrap()
                 ),
             );
-            return Value::new(Type::Unknown);
+            return (Value::new(Type::Unknown), None);
         }
         let default = by_local.or(by_key);
-        match mode {
+        let source = if default.is_none() && !matches!(mode, Lookup::Presence) {
+            input.source.and_then(|source| source.field(key.clone()))
+        } else {
+            None
+        };
+        let field = match mode {
             Lookup::Optional(_) | Lookup::Path(_) => {
-                self.lookup(value, &key, default.map(|(value, _)| value), span)
+                self.lookup(input.value, &key, default.map(|(value, _)| value), span)
             }
             Lookup::Required | Lookup::Presence => {
                 if let Some((_, span)) = default {
@@ -420,9 +472,10 @@ impl Checker<'_> {
                     );
                     Value::new(Type::Unknown)
                 } else {
-                    self.checked_lookup(value, &key, mode, span)
+                    self.checked_lookup(input.value, &key, mode, span)
                 }
             }
-        }
+        };
+        (field, source)
     }
 }
