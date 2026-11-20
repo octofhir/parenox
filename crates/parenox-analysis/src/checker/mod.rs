@@ -25,7 +25,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, Compatibility, IntegerRange, IntegerType, MAX_TUPLE_ITEMS, Type};
+use crate::types::{
+    Arity, Compatibility, IntegerRange, IntegerType, MAX_TUPLE_ITEMS, Signature, Type,
+};
 use crate::{ContractOrigin, Diagnostic, Suggestion};
 
 pub(crate) struct FunctionCheck {
@@ -67,28 +69,7 @@ impl Model {
             .expect("checked functions have contracts");
         for signature in contract.signatures.iter() {
             let arity = &function.arities[&signature.arity()];
-            let mut args: Vec<_> = signature.args.iter().cloned().map(Value::new).collect();
-            if let Some(rest) = &signature.rest {
-                let seq = Type::Seq(Box::new(rest.clone()));
-                // At the required count Clojure invokes a matching fixed clause first.
-                let rest = if function
-                    .arities
-                    .contains_key(&Arity::Fixed(signature.args.len()))
-                {
-                    seq
-                } else {
-                    seq.nilable()
-                };
-                args.push(Value::new(rest));
-            }
-            let result = checker.function_body(
-                &arity.params,
-                arity.conditions(),
-                &arity.body,
-                args,
-                &Env::new(),
-                arity.span,
-            );
+            let result = checker.declared_function_body(function, signature);
             checker.expect_contract(
                 &result,
                 &signature.ret,
@@ -108,6 +89,12 @@ impl Model {
             specs: checker.spec_inputs,
         }
     }
+}
+
+struct LocalRead<'a> {
+    name: &'a str,
+    span: Span,
+    ty: Type,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -272,6 +259,7 @@ struct Checker<'a> {
     globals: &'a Globals,
     source: &'a str,
     partial_scope: Option<&'a BTreeSet<&'a str>>,
+    local_read: Option<LocalRead<'a>>,
     diagnostics: Vec<Diagnostic>,
     has_declaration_findings: bool,
     has_unproven_expectation: bool,
@@ -296,6 +284,7 @@ impl<'a> Checker<'a> {
             globals,
             source,
             partial_scope: None,
+            local_read: None,
             diagnostics: Vec::new(),
             has_declaration_findings: !model.diagnostics.is_empty(),
             has_unproven_expectation: false,
@@ -316,6 +305,32 @@ impl<'a> Checker<'a> {
 }
 
 impl Checker<'_> {
+    fn declared_function_body(&mut self, function: &Function, signature: &Signature) -> Value {
+        let arity = &function.arities[&signature.arity()];
+        let mut args: Vec<_> = signature.args.iter().cloned().map(Value::new).collect();
+        if let Some(rest) = &signature.rest {
+            let seq = Type::Seq(Box::new(rest.clone()));
+            // At the required count Clojure invokes a matching fixed clause first.
+            let rest = if function
+                .arities
+                .contains_key(&Arity::Fixed(signature.args.len()))
+            {
+                seq
+            } else {
+                seq.nilable()
+            };
+            args.push(Value::new(rest));
+        }
+        self.function_body(
+            &arity.params,
+            arity.conditions(),
+            &arity.body,
+            args,
+            &Env::new(),
+            arity.span,
+        )
+    }
+
     fn read_spec(&mut self, key: &str) -> (Option<&Type>, Option<SpecConversion>) {
         let ty = self.globals.spec(key);
         let conversion = self.globals.spec_conversion(key);
@@ -533,6 +548,17 @@ impl Checker<'_> {
             Kind::Keyword(k) => Value::new(Type::Key(self.model.key(k))),
             Kind::Symbol(s) | Kind::AnonymousArgument(s) => {
                 if let Some(value) = env.get(s) {
+                    if let Some(read) = &mut self.local_read
+                        && self.path_reachable
+                        && read.name == s
+                        && read.span == form.span
+                        && read.ty != value.known
+                    {
+                        read.ty = Type::union([
+                            std::mem::replace(&mut read.ty, Type::Never),
+                            value.known.clone(),
+                        ]);
+                    }
                     value.clone()
                 } else if self.model.local_function(s).is_some_and(Function::inferred) {
                     self.error(

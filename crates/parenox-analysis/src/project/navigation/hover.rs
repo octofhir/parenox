@@ -19,6 +19,17 @@ pub struct SourceHover {
     pub arglists: Vec<String>,
 }
 
+pub struct LocalHover<'a> {
+    pub name: &'a str,
+    pub inferred_type: String,
+    pub span: Span,
+}
+
+pub enum DocumentHover<'a> {
+    Local(LocalHover<'a>),
+    Var(SourceHover),
+}
+
 pub fn namespace_documentation(
     source: &str,
     namespace: &str,
@@ -31,43 +42,68 @@ pub fn namespace_documentation(
 }
 
 impl Session {
+    /// Hover a source var or an evaluated local occurrence in the current snapshot.
+    pub fn document_hover_at(&self, path: &str, offset: usize) -> Option<DocumentHover<'_>> {
+        let resolved = self.hover_target(path, offset);
+        if let Some(SourceTarget::Var(target)) = resolved {
+            return Some(DocumentHover::Var(target.hover()));
+        }
+        let globals = self.query_globals.as_ref()?;
+        let file = self.current_file(path)?;
+        if !file.source.is_char_boundary(offset) {
+            return None;
+        }
+        let site = symbol_form_at(&file.forms, offset)?;
+        // A qualified symbol cannot be a local. For other names, the checker
+        // can evaluate arguments through contracts that navigation cannot see.
+        let symbol = site.symbol()?;
+        if symbol != "/" && symbol.contains('/') {
+            return None;
+        }
+        let ty = file.declarations.as_ref()?.local_read_type(
+            &file.forms,
+            file.model.as_ref()?,
+            globals,
+            &file.source,
+            site,
+        )?;
+        Some(DocumentHover::Local(LocalHover {
+            name: &file.source[site.span.start.offset..site.span.end.offset],
+            inferred_type: ty.to_string(),
+            span: site.span,
+        }))
+    }
+
     pub fn hover_at(&self, path: &str, offset: usize) -> Option<SourceHover> {
-        let target =
-            if let Some((namespace, name)) = self.literal_require_qualified_var(path, offset) {
-                self.resolve_source_var(path, namespace, name, None)?
-            } else {
-                match self.source_target(path, offset) {
-                    Some(SourceTarget::Var(target)) => target,
-                    Some(SourceTarget::Local(_)) => return None,
-                    None => {
-                        let InspectedReference::Var {
-                            path,
-                            span,
-                            namespace,
-                            name,
-                        } = self.inspect_reference(path, offset)?
-                        else {
-                            return None;
-                        };
-                        ResolvedVar {
-                            namespace,
-                            name,
-                            path,
-                            span,
-                            source: self.current_file(path)?,
-                        }
-                    }
-                }
-            };
-        let VarDocumentation {
-            documentation,
-            arglists,
-        } = target.documentation();
-        Some(SourceHover {
-            info: target.info(),
-            documentation,
-            arglists,
-        })
+        let SourceTarget::Var(target) = self.hover_target(path, offset)? else {
+            return None;
+        };
+        Some(target.hover())
+    }
+
+    fn hover_target(&self, path: &str, offset: usize) -> Option<SourceTarget<'_>> {
+        if let Some((namespace, name)) = self.literal_require_qualified_var(path, offset) {
+            return self
+                .resolve_source_var(path, namespace, name, None)
+                .map(SourceTarget::Var);
+        }
+        self.source_target(path, offset)
+            .or_else(|| match self.inspect_reference(path, offset)? {
+                InspectedReference::Local(span) => Some(SourceTarget::Local(span)),
+                InspectedReference::Var {
+                    path,
+                    span,
+                    namespace,
+                    name,
+                } => Some(SourceTarget::Var(ResolvedVar {
+                    namespace,
+                    name,
+                    path,
+                    span,
+                    source: self.current_file(path)?,
+                })),
+                _ => None,
+            })
     }
 
     /// Candidate archive var after resolving source lexical bindings and referrals.
@@ -125,6 +161,18 @@ impl Session {
 }
 
 impl ResolvedVar<'_> {
+    fn hover(&self) -> SourceHover {
+        let VarDocumentation {
+            documentation,
+            arglists,
+        } = self.documentation();
+        SourceHover {
+            info: self.info(),
+            documentation,
+            arglists,
+        }
+    }
+
     pub(super) fn documentation(&self) -> VarDocumentation {
         self.source.navigation_source().map_or_else(
             VarDocumentation::default,

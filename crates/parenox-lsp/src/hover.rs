@@ -1,8 +1,20 @@
 //! Render checked types, arglists and Clojure docstrings for editor hover.
-use parenox_analysis::{Session, SpecContractProposal};
+use parenox_analysis::{LocalHover, Session, SpecContractProposal};
 use serde_json::{Value, json};
 
 use crate::{clojuredocs::ClojureDocs, completion::DependencyCompletions, text::Range};
+
+pub fn local(local: LocalHover<'_>, markdown: bool, range: Option<Range>) -> Value {
+    render(
+        local.name,
+        &[],
+        &[local.inferred_type],
+        None,
+        markdown,
+        range,
+        None,
+    )
+}
 
 pub fn spec(proposal: &SpecContractProposal, markdown: bool, range: Option<Range>) -> Value {
     let mut checked = Vec::new();

@@ -40,6 +40,8 @@ mod java_type_hints;
 mod keyword_refactor;
 #[path = "lsp/literal_require_definition.rs"]
 mod literal_require_definition;
+#[path = "lsp/local_hover.rs"]
+mod local_hover;
 #[path = "lsp/namespace_definition.rs"]
 mod namespace_definition;
 #[path = "lsp/protocol_implementations.rs"]

@@ -262,7 +262,20 @@ impl<'model> Checker<'model> {
             return self.call_prepared(&callable, args, span, env, invoked);
         }
         let function = self.infer(&xs[0], env);
+        // An unresolved var might be a macro. Its arguments are inspected for
+        // findings, but may not be evaluated in this lexical scope at runtime.
+        let opaque_arguments = self.local_read.is_some()
+            && function.known == Type::Unknown
+            && xs[0].symbol().is_some_and(|name| !env.contains_key(name));
+        let observation = if opaque_arguments {
+            self.local_read.take()
+        } else {
+            None
+        };
         let args = self.call_args(&function, &xs[1..], span, env);
+        if opaque_arguments {
+            self.local_read = observation;
+        }
         self.call_value(&function, &args, xs[0].span, span)
     }
 

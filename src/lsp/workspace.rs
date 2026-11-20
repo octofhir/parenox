@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use parenox::formatter::{self, FormatOptions, Language};
 use parenox::{
-    Definition, Diagnostic, Session, Source, output::contract_note, reader::validate_edn,
+    Definition, Diagnostic, DocumentHover, Session, Source, output::contract_note,
+    reader::validate_edn,
 };
 use parenox_lsp::structural::{self, FoldingOptions};
 use parenox_lsp::{hover, lenses, project_tree, refactor, rename, semantic, test_tree};
@@ -735,17 +736,23 @@ impl Workspace {
         if let Some((proposal, span)) = session.hover_spec_at(&path, offset) {
             return Some(hover::spec(&proposal, markdown, range(span)));
         }
-        let range = session.hover_symbol_span(&path, offset).and_then(range);
-        let Some(source) = session.hover_at(&path, offset) else {
-            return hover::dependency(
-                session,
-                &path,
-                offset,
-                &self.dependency_completions,
-                markdown,
-                range,
-                clojuredocs,
-            );
+        let source = match session.document_hover_at(&path, offset) {
+            Some(DocumentHover::Local(local)) => {
+                let range = range(local.span);
+                return Some(hover::local(local, markdown, range));
+            }
+            Some(DocumentHover::Var(source)) => source,
+            None => {
+                return hover::dependency(
+                    session,
+                    &path,
+                    offset,
+                    &self.dependency_completions,
+                    markdown,
+                    session.hover_symbol_span(&path, offset).and_then(range),
+                    clojuredocs,
+                );
+            }
         };
         let mut checked = source.info.signatures;
         checked.push(source.info.contract.as_ref().map_or_else(
@@ -758,7 +765,7 @@ impl Workspace {
             &checked,
             source.documentation.as_deref(),
             markdown,
-            range,
+            session.hover_symbol_span(&path, offset).and_then(range),
             clojuredocs.find(&source.info.name),
         ))
     }

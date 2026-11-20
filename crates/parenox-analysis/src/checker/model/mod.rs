@@ -5,6 +5,7 @@ mod declarations;
 mod externs;
 mod fdefs;
 mod guards;
+mod hover;
 mod imports;
 mod interfaces;
 mod partial;

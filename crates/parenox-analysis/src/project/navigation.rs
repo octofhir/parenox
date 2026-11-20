@@ -19,7 +19,9 @@ pub use archive::ArchiveDeclarations;
 pub use call_hierarchy::{CallHierarchyCalls, CallHierarchyItem};
 pub use completion_docs::{SourceExport, namespace_exports};
 use completion_require::LiteralRequireSite;
-pub use hover::{SourceHover, VarDocumentation, namespace_documentation};
+pub use hover::{
+    DocumentHover, LocalHover, SourceHover, VarDocumentation, namespace_documentation,
+};
 pub use semantic::{InspectedReference, SemanticSymbol, SemanticSymbolKind};
 use serde::Serialize;
 pub use signatures::{CallSignature, CallSignatures};
@@ -458,7 +460,7 @@ fn source_symbol_form_at(forms: &[Form], offset: usize, type_hint: bool) -> Opti
         return None;
     }
     match &form.kind {
-        Kind::Symbol(_) if !type_hint => Some(form),
+        Kind::Symbol(_) | Kind::AnonymousArgument(_) if !type_hint => Some(form),
         Kind::List(items)
             if !matches!(
                 items.first().and_then(Form::symbol),

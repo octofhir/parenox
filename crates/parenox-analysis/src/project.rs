@@ -5,9 +5,9 @@ mod symbols;
 
 pub use navigation::{
     ArchiveDeclarations, CallHierarchyCalls, CallHierarchyItem, CallSignature, CallSignatures,
-    Definition, InspectedReference, PrivacyDeclaration, SemanticSymbol, SemanticSymbolKind,
-    SourceExport, SourceHover, SourceTestKind, SourceTestNode, VarDocumentation, VarInfo,
-    namespace_documentation, namespace_exports,
+    Definition, DocumentHover, InspectedReference, LocalHover, PrivacyDeclaration, SemanticSymbol,
+    SemanticSymbolKind, SourceExport, SourceHover, SourceTestKind, SourceTestNode,
+    VarDocumentation, VarInfo, namespace_documentation, namespace_exports,
 };
 pub use spec_proposals::{ContractProposals, SpecContractProposal};
 pub use symbols::{SourceSymbol, SourceSymbolKind};
@@ -302,6 +302,7 @@ pub struct Session {
     files: BTreeMap<String, FileCache>,
     specs: SpecCache,
     externs: ExternCache,
+    query_globals: Option<Globals>,
     snapshot: u64,
 }
 
@@ -398,6 +399,7 @@ impl Session {
         mode: SnapshotMode<'_>,
     ) -> ProjectReport {
         let started = Instant::now();
+        self.query_globals = None;
         self.snapshot += 1;
         let mut entries = Vec::new();
         let mut reports = Vec::new();
@@ -893,6 +895,9 @@ impl Session {
         }
         if matches!(mode, SnapshotMode::Check(Some(_))) {
             reports.retain(|report| mode.reports(&report.path));
+        }
+        if matches!(mode, SnapshotMode::Check(_)) {
+            self.query_globals = Some(globals);
         }
         totals.elapsed_us = started.elapsed().as_micros() as u64;
         ProjectReport {

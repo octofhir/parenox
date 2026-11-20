@@ -16,9 +16,9 @@ pub use extern_diff::{
 };
 pub use project::{
     ArchiveDeclarations, CallHierarchyCalls, CallHierarchyItem, CallSignature, CallSignatures,
-    ContractProposals, Definition, ExternExport, FdefSuggestion, InspectedReference,
-    PrivacyDeclaration, ProjectReport, SemanticSymbol, SemanticSymbolKind, Session, Source,
-    SourceEdit, SourceExport, SourceHover, SourceSymbol, SourceSymbolKind, SourceTestKind,
+    ContractProposals, Definition, DocumentHover, ExternExport, FdefSuggestion, InspectedReference,
+    LocalHover, PrivacyDeclaration, ProjectReport, SemanticSymbol, SemanticSymbolKind, Session,
+    Source, SourceEdit, SourceExport, SourceHover, SourceSymbol, SourceSymbolKind, SourceTestKind,
     SourceTestNode, SpecContractProposal, VarDocumentation, VarInfo, compare_externs,
     namespace_documentation, namespace_exports,
 };

@@ -1,4 +1,67 @@
-use parenox_analysis::{Session, Source, namespace_documentation};
+use parenox_analysis::{DocumentHover, Session, Source, namespace_documentation};
+
+#[test]
+fn local_hover_uses_reachable_iterations_and_lexical_scope() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn revisit {:t/sig '[:-> (s/nilable string?)]} []
+  (loop [again? true value nil]
+    (identity value)
+    (if again? (recur false "ready") value)))
+(defn unannotated [value]
+  (when (string? value)
+    (identity value)
+    (let [value :shadow] (identity value))))
+(defn opaque [value]
+  (when (string? value) (external.scope/maybe-bind value)))
+"#;
+    let mut session = Session::default();
+    session.check("demo.clj", source);
+    let ty = |offset| {
+        let DocumentHover::Local(local) = session.document_hover_at("demo.clj", offset).unwrap()
+        else {
+            panic!("expected local hover at {offset}");
+        };
+        local.inferred_type
+    };
+    let reads: Vec<_> = source
+        .match_indices("identity value")
+        .map(|(start, _)| start + "identity ".len())
+        .collect();
+    assert_eq!(ty(reads[0]), r#"Nil | "ready""#);
+    assert_eq!(ty(reads[1]), "String");
+    assert_eq!(ty(reads[2]), ":shadow");
+    let unknown_scope = source.rfind("value").unwrap();
+    assert!(
+        session
+            .document_hover_at("demo.clj", unknown_scope)
+            .is_none()
+    );
+}
+
+#[test]
+fn local_hover_withholds_types_from_unchecked_loop_iterations() {
+    let branches: String = (0..16)
+        .map(|step| {
+            let value = if step == 15 { "\"done\"" } else { "value" };
+            format!(":step-{step} (recur :step-{} {value})\n", step + 1)
+        })
+        .collect();
+    let source = format!(
+        "(ns demo)
+         (defn explore {{:t/sig '[:-> string?]}} []
+           (loop [state :step-0 value :ready]
+             (str value)
+             (case state {branches} value)))"
+    );
+    let offset = source.find("str value").unwrap() + "str ".len();
+    let mut session = Session::default();
+    let report = session.check("demo.clj", &source);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "PNX9001" && diagnostic.message.contains("recur type inference limit")
+    }));
+    assert!(session.document_hover_at("demo.clj", offset).is_none());
+}
 
 #[test]
 fn hovers_typed_and_untyped_workspace_vars_at_declarations_and_uses() {
