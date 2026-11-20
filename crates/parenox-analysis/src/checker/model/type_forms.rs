@@ -441,7 +441,7 @@ fn collection_element(element: &Type) -> bool {
     }
 }
 
-fn spec_field_key(qualified: &str, directive: &str) -> Option<String> {
+pub(super) fn spec_field_key(qualified: &str, directive: &str) -> Option<String> {
     let (_, local) = qualified.split_once('/')?;
     Some(if directive.ends_with("-un") {
         format!(":{local}")

@@ -107,6 +107,7 @@ fn definition((extern_, span): (&ExternalDeclaration, Span)) -> ExternDefinition
                 spec.registration.namespace
             )
         }
+        ExternalDeclaration::PendingSpec(_) => unreachable!("merged externs are resolved"),
     };
     ExternDefinition {
         origin: extern_.origin().clone(),

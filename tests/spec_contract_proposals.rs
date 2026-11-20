@@ -187,6 +187,12 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
     let path = std::env::var("PARENOX_LSP4CLJ_COERCER").expect("set PARENOX_LSP4CLJ_COERCER");
     let source = fs::read_to_string(&path).unwrap();
     let selected = [KIND, CAPABILITIES].map(String::from);
+    let manual = Source {
+        path: "manual.edn",
+        source: r#"{:server-capabilities/code-lens-provider
+          {:spec (clojure.spec.alpha/conformer (clojure.core/fn [input] {:resolve-provider input}))
+           :ns lsp4clj.coercer}}"#,
+    };
     let mut session = Session::default();
     let proposals = session
         .propose_contracts(
@@ -194,7 +200,7 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
                 path: &path,
                 source: &source,
             }],
-            &[],
+            &[manual],
             &selected,
         )
         .unwrap();
@@ -203,6 +209,10 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
         .unwrap_or_else(|| panic!("{:#?}", proposals.report));
     assert!(edn.contains(SEMANTIC_TOKENS));
     assert!(edn.contains(TEXT_SYNC));
+    assert!(
+        !edn.contains(":server-capabilities/code-lens-provider {:spec"),
+        "{edn}"
+    );
     for child in [
         WRAP,
         ACTION,
@@ -212,10 +222,13 @@ fn pinned_lsp4clj_proposals_check_a_consumer_without_library_sources() {
     ] {
         assert!(edn.contains(child), "{edn}");
     }
-    let externs = [Source {
-        path: "lsp4clj.edn",
-        source: &edn,
-    }];
+    let externs = [
+        Source {
+            path: "lsp4clj.edn",
+            source: &edn,
+        },
+        manual,
+    ];
     let client = format!(
         "{}{}",
         CLIENT.source,

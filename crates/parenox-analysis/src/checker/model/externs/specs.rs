@@ -1,5 +1,5 @@
 //! Standalone, exact spec conversions that can be exchanged as externs.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -11,15 +11,34 @@ use crate::checker::model::{
     GuardedMapProjection, SpecConversion, SpecProvider,
     specs::{ProjectedFields, ProjectedValue, RegistrationSource},
 };
-use crate::reader::Form;
+use crate::reader::{Form, Span};
 use crate::types::{ExtraFields, MapType, Parameter, SPEC_INVALID, Type};
-use crate::{ContractKind, ContractOrigin};
+use crate::{ContractKind, ContractOrigin, Diagnostic};
 
 #[derive(Clone, PartialEq, Eq)]
 pub(in crate::checker::model) struct SpecExtern {
     pub origin: ContractOrigin,
     pub conversion: SpecConversion,
     pub registration: Arc<RegistrationSource>,
+}
+
+#[derive(PartialEq, Eq)]
+pub(in crate::checker::model) struct PendingSpec {
+    pub origin: ContractOrigin,
+    keys: Option<PendingKeys>,
+}
+
+#[derive(PartialEq, Eq)]
+struct PendingKeys {
+    namespace: String,
+    fields: bundles::KeyFields,
+    span: Span,
+}
+
+impl PendingSpec {
+    pub(super) fn invalid(origin: ContractOrigin) -> ExternalDeclaration {
+        ExternalDeclaration::PendingSpec(Arc::new(Self { origin, keys: None }))
+    }
 }
 
 fn spec_forms(declaration: &Form) -> Option<(&Form, &str)> {
@@ -32,11 +51,6 @@ fn spec_forms(declaration: &Form) -> Option<(&Form, &str)> {
         _ => return None,
     };
     Some((body, namespace.symbol().filter(|name| !name.contains('/'))?))
-}
-
-pub(super) fn is_bundle([name, declaration]: &[Form; 2]) -> bool {
-    name.keyword().is_some()
-        && spec_forms(declaration).is_some_and(|(body, _)| bundles::is_keys(body))
 }
 
 impl SpecConversion {
@@ -232,60 +246,142 @@ impl SnapshotWriter {
 }
 
 impl Model {
-    pub(super) fn read_extern_spec<'a>(
+    pub(super) fn read_extern_spec(
         &mut self,
         name: &str,
         declaration: &Form,
         path: &str,
-        source: &str,
-        child: impl Fn(&str) -> Option<&'a SpecExtern>,
-    ) -> Option<ExternalDeclaration> {
+    ) -> ExternalDeclaration {
         let names = Names::default();
-        let parse = || {
-            let (body, namespace) = spec_forms(declaration)?;
-            let conversion = if bundles::is_keys(body) {
-                bundles::parse(body, source, |key| {
-                    let leaf = child(key)?;
-                    (leaf.registration.namespace == namespace
-                        && !matches!(leaf.conversion, SpecConversion::Structured(_)))
-                    .then(|| leaf.conversion.clone())
-                })?
+        let origin = ContractOrigin {
+            name: name.into(),
+            kind: ContractKind::Extern,
+            path: Some(path.into()),
+        };
+        let parsed = spec_forms(declaration);
+        let is_keys = parsed.is_some_and(|(body, _)| bundles::is_keys(body));
+        if let Some((body, namespace)) = parsed {
+            if is_keys {
+                if let Some(fields) = bundles::KeyFields::parse(body) {
+                    let keys = Some(PendingKeys {
+                        namespace: namespace.into(),
+                        fields,
+                        span: declaration.span,
+                    });
+                    return ExternalDeclaration::PendingSpec(Arc::new(PendingSpec {
+                        origin,
+                        keys,
+                    }));
+                }
+            } else if let Some(conversion) = source_conversion(&names, body)
+                .or_else(|| live_lookup_projection(&names, namespace, body))
+                .filter(|conversion| conversion.proposal_result().is_some())
+            {
+                return spec_extern(origin, namespace, conversion);
+            }
+        }
+        self.error(
+            "PNX9001",
+            declaration.span,
+            if is_keys {
+                "Expected an s/keys extern with up to 32 qualified child references"
             } else {
-                source_conversion(&names, body)
-                    .or_else(|| live_lookup_projection(&names, namespace, body))?
-            };
-            conversion.proposal_result()?;
-            Some((namespace, conversion))
-        };
-        let Some((namespace, conversion)) = parse() else {
-            self.error(
-                "PNX9001",
-                declaration.span,
-                if spec_forms(declaration).is_some_and(|(body, _)| bundles::is_keys(body)) {
-                    "An s/keys extern needs supported direct child specs in this file with the same :ns"
-                } else {
-                    "Expected {:spec <supported standalone spec conversion> :ns <library namespace>}"
-                },
-            );
-            return None;
-        };
-        Some(ExternalDeclaration::Spec(Arc::new(SpecExtern {
-            origin: ContractOrigin {
-                name: name.into(),
-                kind: ContractKind::Extern,
-                path: Some(path.into()),
+                "Expected {:spec <supported standalone spec conversion> :ns <library namespace>}"
             },
-            conversion,
-            registration: Arc::new(RegistrationSource {
-                path: path.into(),
-                namespace: namespace.into(),
-            }),
-        })))
+        );
+        PendingSpec::invalid(origin)
+    }
+}
+
+fn spec_extern(
+    origin: ContractOrigin,
+    namespace: &str,
+    conversion: SpecConversion,
+) -> ExternalDeclaration {
+    let registration = RegistrationSource {
+        path: origin.path.clone().expect("extern has a path"),
+        namespace: namespace.into(),
+    };
+    ExternalDeclaration::Spec(Arc::new(SpecExtern {
+        origin,
+        conversion,
+        registration: Arc::new(registration),
+    }))
+}
+
+pub(super) fn resolve_specs(
+    mut table: Arc<Externs>,
+    before: Option<&Externs>,
+    diagnostics: &mut BTreeMap<String, Vec<Diagnostic>>,
+) -> Arc<Externs> {
+    if !table.has_specs {
+        return table;
+    }
+    let mut edits = Vec::new();
+    for (namespace, declarations) in &table.namespaces {
+        for (name, declaration) in declarations.iter() {
+            let ExternalDeclaration::PendingSpec(spec) = declaration else {
+                continue;
+            };
+            let resolved = spec.keys.as_ref().and_then(|keys| {
+                let conversion = keys
+                    .fields
+                    .resolve(&keys.namespace, |key| table.spec(key))?;
+                conversion.proposal_result()?;
+                Some(spec_extern(
+                    spec.origin.clone(),
+                    &keys.namespace,
+                    conversion,
+                ))
+            });
+            if resolved.is_none()
+                && let Some(keys) = &spec.keys
+            {
+                let message = format!(
+                    "An s/keys extern needs supported direct child specs with the same :ns ({})",
+                    keys.namespace
+                );
+                let mut diagnostic = Diagnostic::analysis_gap("PNX9001", keys.span, message);
+                diagnostic.contract = Some(spec.origin.clone());
+                diagnostics
+                    .entry(spec.origin.path.clone().expect("extern has a path"))
+                    .or_default()
+                    .push(diagnostic);
+            }
+            edits.push((namespace.clone(), name.clone(), resolved));
+        }
+    }
+    if edits.is_empty() {
+        return table;
+    }
+    let resolved = Arc::make_mut(&mut table);
+    for (namespace, name, declaration) in edits {
+        let declarations = Arc::make_mut(resolved.namespaces.get_mut(&namespace).unwrap());
+        if let Some(declaration) = declaration {
+            declarations.insert(name, declaration);
+        } else {
+            declarations.remove(&name);
+        }
+    }
+    resolved.namespaces.retain(|name, table| {
+        if let Some(previous) = before.and_then(|before| before.namespaces.get(name))
+            && table == previous
+        {
+            table.clone_from(previous);
+        }
+        !table.is_empty()
+    });
+    table
+}
+
+impl ExternCache {
+    pub(crate) fn extern_spec(&self, name: &str) -> Option<(&str, &SpecConversion)> {
+        let spec = self.table.as_ref()?.spec(name)?;
+        Some((&spec.registration.namespace, &spec.conversion))
     }
 
-    pub(crate) fn extern_spec(&self, name: &str) -> Option<(&str, &SpecConversion)> {
-        let spec = self.externs.as_ref()?.table.spec(name)?;
-        Some((&spec.registration.namespace, &spec.conversion))
+    pub(crate) fn declares_spec(&self, name: &str) -> bool {
+        name.starts_with(':') && self.files.iter().any(|file| file.spans.contains_key(name))
     }
 }
 
@@ -300,12 +396,6 @@ impl Externs {
 }
 
 impl ExternCache {
-    pub(crate) fn contains_spec(&self, name: &str) -> bool {
-        self.table
-            .as_ref()
-            .is_some_and(|table| table.spec(name).is_some())
-    }
-
     /// Publish source-free specs before type signatures in source modules are read.
     pub(crate) fn publish_specs(&self, globals: &mut Globals, trusted: Option<&BTreeSet<&str>>) {
         let Some(table) = self.table.as_ref().filter(|table| table.has_specs) else {
@@ -335,11 +425,9 @@ impl ExternCache {
             .filter(|spec| {
                 eligible(spec)
                     && spec.conversion.bundle_fields().is_none_or(|fields| {
-                        fields.values().all(|field| {
-                            table.spec(&field.registration).is_some_and(|child| {
-                                child.registration == spec.registration && eligible(child)
-                            })
-                        })
+                        fields
+                            .values()
+                            .all(|field| table.spec(&field.registration).is_some_and(&eligible))
                     })
             })
             .collect();

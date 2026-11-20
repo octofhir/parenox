@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use super::{FileCache, FileKind, ProjectReport, Session, SnapshotMode, Source};
-use crate::checker::{Globals, Model, SnapshotWriter, SpecConversion};
+use crate::checker::{ExternCache, Globals, Model, SnapshotWriter, SpecConversion};
 use crate::reader::Span;
 use crate::types::Type;
 
@@ -67,16 +67,21 @@ impl Session {
         let input_known = !self.specs.unchecked_input(name) && input.is_some();
         let partial = conversion.is_some_and(SpecConversion::has_unchecked_input);
         let bundle = conversion.and_then(SpecConversion::bundle_fields);
-        let children_available = bundle.is_none_or(|fields| {
-            fields
-                .values()
-                .all(|field| !self.externs.contains_spec(&field.registration))
-        });
         let namespace = if declarations.has_namespace_declaration() {
             self.specs.standalone_namespace(name, path)
         } else {
             None
         };
+        let children_available = bundle.is_none_or(|fields| {
+            fields.values().all(|field| {
+                !self.externs.declares_spec(&field.registration)
+                    || namespace
+                        .zip(field.conversion.as_ref())
+                        .is_some_and(|expected| {
+                            self.externs.extern_spec(&field.registration) == Some(expected)
+                        })
+            })
+        });
         let qualified = declarations.resolve_spec_keyword(name).as_deref() == Some(name);
         let export_namespace = namespace.filter(|_| {
             result.is_some()
@@ -102,7 +107,10 @@ impl Session {
             unknown.push("Registrations for additional qualified keys");
         }
         if !children_available {
-            unknown.push("Bundle with a child already supplied by an extern");
+            unknown.push("Bundle with an extern child that does not match its source registration");
+        }
+        if self.externs.declares_spec(name) && self.externs.extern_spec(name).is_none() {
+            unknown.push("Existing extern could not be resolved");
         }
         let initial_table = match conversion {
             Some(SpecConversion::GuardedMap(_)) => {
@@ -140,8 +148,8 @@ impl Session {
         Some((proposal, export_namespace))
     }
 
-    /// Generate proposals and a standalone extern map without editing the source
-    /// or any supplied externs. The extern map includes only supported conversions.
+    /// Generate proposals and extern declarations without editing the source or
+    /// supplied externs. Supported bundles reuse matching named extern children.
     pub fn propose_contracts(
         &mut self,
         sources: &[Source<'_>],
@@ -182,19 +190,28 @@ impl Session {
         let mut entries = BTreeMap::new();
         let mut edn = String::from("{:proposals [");
         for (name, (proposal, namespace)) in &proposals {
-            let status = if self.externs.contains_spec(name) {
-                ":existing"
+            let status = if self.externs.declares_spec(name) {
+                if self.externs.extern_spec(name).is_some() {
+                    ":existing"
+                } else {
+                    "nil"
+                }
             } else if let Some(namespace) = namespace
                 && let Some(conversion) = self.specs.conversions.get(*name)
             {
                 entries.insert(*name, (*namespace, conversion));
                 if let Some(fields) = conversion.bundle_fields() {
-                    entries.extend(fields.values().filter_map(|field| {
-                        Some((
-                            field.registration.as_str(),
-                            (*namespace, field.conversion.as_ref()?),
-                        ))
-                    }));
+                    entries.extend(
+                        fields
+                            .values()
+                            .filter(|field| !self.externs.declares_spec(&field.registration))
+                            .filter_map(|field| {
+                                Some((
+                                    field.registration.as_str(),
+                                    (*namespace, field.conversion.as_ref()?),
+                                ))
+                            }),
+                    );
                 }
                 ":generated"
             } else {
@@ -203,7 +220,7 @@ impl Session {
             edn.push_str("\n ");
             proposal.write_edn(&mut edn, status);
         }
-        let externs = encode_externs(&entries)?;
+        let externs = encode_externs(&entries, &self.externs)?;
         write!(edn, "]\n :externs {}}}\n", externs.trim_end()).unwrap();
         Ok(ContractProposals {
             report,
@@ -244,7 +261,10 @@ fn display_type(ty: &Type) -> Option<String> {
     Some(ty.to_string())
 }
 
-fn encode_externs(entries: &BTreeMap<&str, (&str, &SpecConversion)>) -> Result<String, String> {
+fn encode_externs(
+    entries: &BTreeMap<&str, (&str, &SpecConversion)>,
+    existing: &ExternCache,
+) -> Result<String, String> {
     let mut out = SnapshotWriter::new();
     for (index, (name, (namespace, conversion))) in entries.iter().enumerate() {
         if index != 0 {
@@ -265,10 +285,17 @@ fn encode_externs(entries: &BTreeMap<&str, (&str, &SpecConversion)>) -> Result<S
     if let Some(diagnostic) = parsed.diagnostics.first() {
         return Err(diagnostic.message.clone());
     }
+    let file = parsed
+        .extern_file()
+        .ok_or("Generated EDN has no extern file")?;
+    let merged = existing.with_generated_file(file);
+    if let Some(diagnostic) = merged.diagnostics(path).first() {
+        return Err(diagnostic.message.clone());
+    }
     if parsed.extern_count() != entries.len()
         || entries
             .iter()
-            .any(|(name, spec)| parsed.extern_spec(name) != Some(*spec))
+            .any(|(name, spec)| merged.extern_spec(name) != Some(*spec))
     {
         return Err("Generated EDN did not preserve the named spec conversions".into());
     }

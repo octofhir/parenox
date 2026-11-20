@@ -33,10 +33,13 @@ impl ExternCache {
                 continue;
             };
             let source = globals.exports.get(namespace);
-            for (name, declaration) in declarations.iter() {
-                if active.get(name) != Some(declaration) {
-                    continue; // Cross-file conflicts already have diagnostics.
-                }
+            for (name, raw) in declarations.iter() {
+                let Some(declaration) = active
+                    .get(name)
+                    .filter(|decl| decl.origin() == raw.origin())
+                else {
+                    continue; // Unresolved or conflicting promises already have diagnostics.
+                };
                 let span = file.spans[name];
                 let diagnostic = match declaration {
                     ExternalDeclaration::Literal(promised) => {
@@ -72,6 +75,9 @@ impl ExternCache {
                         span,
                         format!("Cannot validate macro scope {name} against source"),
                     )),
+                    ExternalDeclaration::PendingSpec(_) => {
+                        unreachable!("merged externs are resolved")
+                    }
                 };
                 let Some(mut diagnostic) = diagnostic else {
                     continue;

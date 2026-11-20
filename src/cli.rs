@@ -46,7 +46,7 @@ pub(crate) enum Command {
         /// Select a fully qualified spec keyword. Repeat to select multiple specs.
         #[arg(long = "spec", value_name = "KEYWORD")]
         specs: Vec<String>,
-        /// Emit the standalone extern map for generated entries.
+        /// Emit only the generated extern declarations.
         #[arg(long)]
         externs_only: bool,
     },

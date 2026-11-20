@@ -336,9 +336,9 @@ Use `t/any` in a type signature when the slot accepts every Clojure value.
 The `:externs` map contains the generated entries whose conversions
 round-trip independently of the source. Use `--externs-only` to print this
 map directly. Load it with `check --externs` or `:externs` in `parenox.edn`.
-The command marks entries already supplied by an extern file as `:existing`
-and leaves them in that file. Proposals whose conversions cannot be exported
-have `:extern nil`.
+The command marks resolved entries already supplied by an extern file as
+`:existing` and leaves them in that file. Proposals whose conversions cannot
+be exported have `:extern nil`.
 
 Named spec externs use a qualified keyword and a map with `:spec` and `:ns`.
 `:ns` names the namespace that registers the spec. The consumer needs an
@@ -370,11 +370,12 @@ and preserves Clojure truthiness. A root change can alter the lookup or fallback
 result, so the runtime value and exception classes remain unknown.
 
 `s/keys` with direct child specs declared in the same source file and runtime
-namespace can be exported as a bundle. Selecting the parent adds the referenced
-children to the same EDN file. Import resolves the complete set before using
-the parent. Existing child externs are preserved, so generation omits a parent
-whose child is already supplied by an extern. Missing or conflicting children
-prevent checking the imported parent. The consumer needs an explicit namespace load.
+namespace can be exported as a bundle. Selecting the parent adds its direct
+children to the generated EDN. Generation reuses matching child contracts
+from files passed with `--externs`. Pass the generated and reused files to the
+consumer. Import resolves children across all supplied EDN files. Missing or
+conflicting children prevent checking the parent. Each child must have the
+same runtime `:ns` as the parent, and the consumer must load that namespace.
 
 Imported bundles check literal maps with known keyword fields. Additional
 qualified keys use their loaded registry definitions. The checker reports

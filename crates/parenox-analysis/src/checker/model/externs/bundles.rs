@@ -1,10 +1,11 @@
 //! Standalone s/keys declarations and their direct registrations.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt::Write;
+use std::sync::Arc;
 
-use super::{EncodeError, Names, SnapshotWriter};
+use super::{EncodeError, SnapshotWriter, SpecExtern};
 use crate::checker::model::specs::{MapFieldConversion, SpecConversion, StructuredConversion};
-use crate::checker::model::type_forms::{read_type, structured_conversion};
+use crate::checker::model::type_forms::spec_field_key;
 use crate::reader::{Form, Kind};
 use crate::types::{ExtraFields, Field, MapType, SPEC_INVALID, Type};
 
@@ -48,40 +49,77 @@ pub(super) fn is_keys(form: &Form) -> bool {
         if items.first().and_then(Form::symbol) == Some("clojure.spec.alpha/keys"))
 }
 
-pub(super) fn parse(
-    body: &Form,
-    source: &str,
-    lookup: impl Fn(&str) -> Option<SpecConversion>,
-) -> Option<SpecConversion> {
-    let names = Names::default();
-    let Kind::List(items) = &body.kind else {
-        return None;
-    };
-    let [_, options @ ..] = items.as_slice() else {
-        return None;
-    };
-    if options.len() > 8
-        || options
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .filter_map(|[_, fields]| fields.vector())
-            .map(<[Form]>::len)
-            .sum::<usize>()
-            > MAX_FIELDS
-    {
-        return None;
+#[derive(PartialEq, Eq)]
+pub(super) struct KeyFields(BTreeMap<Type, MapFieldConversion>);
+
+impl KeyFields {
+    pub(super) fn parse(body: &Form) -> Option<Self> {
+        let Kind::List(items) = &body.kind else {
+            return None;
+        };
+        let (_, options) = items.split_first()?;
+        let (options, trailing) = options.as_chunks::<2>();
+        if !trailing.is_empty() || options.len() > 4 {
+            return None;
+        }
+        let mut fields = BTreeMap::<_, MapFieldConversion>::new();
+        let mut directives = BTreeSet::new();
+        let mut members = 0;
+        for [directive, keys] in options {
+            let directive = directive.keyword()?;
+            let required = match directive {
+                ":req" | ":req-un" => true,
+                ":opt" | ":opt-un" => false,
+                _ => return None,
+            };
+            let keys = keys.vector()?;
+            members += keys.len();
+            if members > MAX_FIELDS || !directives.insert(directive) {
+                return None;
+            }
+            for key in keys {
+                let registration = key.keyword()?;
+                let name = registration.strip_prefix(':')?;
+                let (namespace, local) = name.split_once('/')?;
+                if namespace.is_empty() || namespace.starts_with(':') || local.is_empty() {
+                    return None;
+                }
+                let field = Type::Key(spec_field_key(registration, directive)?);
+                match fields.entry(field) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(MapFieldConversion {
+                            registration: registration.into(),
+                            required,
+                            conversion: None,
+                        });
+                    }
+                    Entry::Occupied(mut entry) if entry.get().registration == registration => {
+                        entry.get_mut().required |= required;
+                    }
+                    Entry::Occupied(_) => return None,
+                }
+            }
+        }
+        (!fields.is_empty()).then_some(Self(fields))
     }
-    let mut diagnostics = Vec::new();
-    let input = read_type(&names, body, source, &mut diagnostics, |key, _| {
-        lookup(key).map(|conversion| conversion.success_input())
-    });
-    if !diagnostics.is_empty() {
-        return None;
+
+    pub(super) fn resolve<'a>(
+        &self,
+        namespace: &str,
+        lookup: impl Fn(&str) -> Option<&'a SpecExtern>,
+    ) -> Option<SpecConversion> {
+        let mut fields = self.0.clone();
+        for field in fields.values_mut() {
+            let leaf = lookup(&field.registration)?;
+            if leaf.registration.namespace != namespace || !leaf.conversion.is_extern_leaf() {
+                return None;
+            }
+            field.conversion = Some(leaf.conversion.clone());
+        }
+        Some(SpecConversion::Structured(Arc::new(
+            StructuredConversion::Map(fields),
+        )))
     }
-    let conversion = structured_conversion(&names, body, &input, lookup)?;
-    conversion.bundle_fields()?;
-    Some(conversion)
 }
 
 impl SnapshotWriter {

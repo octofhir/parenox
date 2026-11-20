@@ -8,7 +8,7 @@ mod validation;
 
 pub(crate) use encode::{EncodeError, SnapshotWriter};
 use literals::LiteralExtern;
-use specs::SpecExtern;
+use specs::{PendingSpec, SpecExtern};
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use crate::checker::calls::is_modeled_call;
 use crate::reader::{Form, Kind, Span};
 use crate::{ContractKind, ContractOrigin, Diagnostic};
 
+#[derive(Clone)]
 pub(super) struct Externs {
     pub(super) namespaces: BTreeMap<String, Arc<ExternalDeclarations>>,
     has_specs: bool,
@@ -44,6 +45,7 @@ pub(super) enum ExternalDeclaration {
     Macro(MacroScope),
     Literal(Arc<LiteralExtern>),
     Spec(Arc<SpecExtern>),
+    PendingSpec(Arc<PendingSpec>),
 }
 
 impl ExternalDeclaration {
@@ -53,6 +55,7 @@ impl ExternalDeclaration {
             Self::Macro(scope) => scope.origin(),
             Self::Literal(literal) => &literal.origin,
             Self::Spec(spec) => &spec.origin,
+            Self::PendingSpec(spec) => &spec.origin,
         }
     }
 }
@@ -96,22 +99,7 @@ impl Model {
         let mut namespaces = BTreeMap::<String, ExternalDeclarations>::new();
         let mut spans = BTreeMap::new();
         let mut has_specs = false;
-        let rows = entries.as_chunks::<2>().0;
-        let mut ambiguous_specs = BTreeSet::new();
-        if rows.iter().any(specs::is_bundle) {
-            let mut seen = BTreeSet::new();
-            for name in rows.iter().filter_map(|[name, _]| name.keyword()) {
-                if !seen.insert(name) {
-                    ambiguous_specs.insert(name);
-                }
-            }
-        }
-        // A bundle resolves its leaves in this file independent of EDN map order.
-        let ordered = rows
-            .iter()
-            .filter(|row| !specs::is_bundle(row))
-            .chain(rows.iter().filter(|row| specs::is_bundle(row)));
-        for [name, declaration] in ordered {
+        for [name, declaration] in entries.as_chunks::<2>().0 {
             let is_spec = name.keyword().is_some();
             let entry = name.keyword().or_else(|| name.symbol()).and_then(|name| {
                 let qualified = name.strip_prefix(':').unwrap_or(name);
@@ -136,28 +124,27 @@ impl Model {
                 model.diagnostics.push(diagnostic);
                 continue;
             }
-            if namespaces
-                .get(namespace)
-                .is_some_and(|table| table.contains_key(name_string))
-            {
-                model.error(
-                    "PNX2790",
-                    name.span,
-                    format!("Duplicate extern {name_string}"),
-                );
-                continue;
-            }
-            let parsed = if is_spec {
-                model.read_extern_spec(name_string, declaration, path, source, |key| {
-                    if ambiguous_specs.contains(key) {
-                        return None;
+            let target = namespaces
+                .entry(namespace.into())
+                .or_default()
+                .entry(name_string.into());
+            let target = match target {
+                Entry::Vacant(entry) => entry,
+                Entry::Occupied(mut entry) => {
+                    if is_spec {
+                        entry.insert(PendingSpec::invalid(entry.get().origin().clone()));
                     }
-                    let (ns, _) = key.strip_prefix(':')?.split_once('/')?;
-                    let ExternalDeclaration::Spec(spec) = namespaces.get(ns)?.get(key)? else {
-                        return None;
-                    };
-                    Some(spec)
-                })
+                    model.error(
+                        "PNX2790",
+                        name.span,
+                        format!("Duplicate extern {name_string}"),
+                    );
+                    continue;
+                }
+            };
+            let parsed = if is_spec {
+                has_specs = true;
+                Some(model.read_extern_spec(name_string, declaration, path))
             } else if let Some(entries) = declaration.map() {
                 match entries {
                     [kind, value] if kind.keyword() == Some(":value") => {
@@ -197,11 +184,7 @@ impl Model {
                     })
             };
             if let Some(parsed) = parsed {
-                has_specs |= matches!(parsed, ExternalDeclaration::Spec(_));
-                namespaces
-                    .entry(namespace.into())
-                    .or_default()
-                    .insert(name_string.into(), parsed);
+                target.insert(parsed);
                 spans.insert(name_string.into(), name.span);
             }
         }
@@ -233,7 +216,7 @@ impl ExternCache {
         {
             self.files = files.cloned().collect();
             self.conflicts.clear();
-            self.table = match self.files.as_slice() {
+            let merged = match self.files.as_slice() {
                 [] => None,
                 [file] => Some(file.table.clone()),
                 files => Some(Arc::new(merge(
@@ -242,7 +225,16 @@ impl ExternCache {
                     &mut self.conflicts,
                 ))),
             };
+            self.table = merged.map(|table| {
+                specs::resolve_specs(table, self.table.as_deref(), &mut self.conflicts)
+            });
         }
+    }
+
+    pub(crate) fn with_generated_file(&self, file: &Arc<ExternFile>) -> Self {
+        let mut cache = Self::default();
+        cache.update(self.files.iter().chain(std::iter::once(file)));
+        cache
     }
 
     pub fn publish(&self, globals: &mut Globals) {
