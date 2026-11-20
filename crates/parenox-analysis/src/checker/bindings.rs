@@ -2,6 +2,7 @@
 mod positions;
 use std::collections::BTreeMap;
 
+use super::env::Selector;
 use super::maps::Lookup;
 use super::{Checker, Env, Value};
 use crate::reader::{Form, Kind, Span};
@@ -90,9 +91,30 @@ impl Checker<'_> {
     }
 
     pub(super) fn bind(&mut self, form: &Form, value: Value, env: &mut Env) {
+        self.bind_selected(form, value, env, None);
+    }
+
+    pub(super) fn bind_initializer(
+        &mut self,
+        form: &Form,
+        init: &Form,
+        value: Value,
+        env: &mut Env,
+    ) {
+        let source = form.symbol().and_then(|_| self.selector(init, env));
+        self.bind_selected(form, value, env, source);
+    }
+
+    fn bind_selected(
+        &mut self,
+        form: &Form,
+        value: Value,
+        env: &mut Env,
+        source: Option<Selector>,
+    ) {
         match &form.without_metadata().kind {
             Kind::Symbol(name) | Kind::AnonymousArgument(name) => {
-                env.insert(name.clone(), value);
+                env.insert_selected(name.clone(), value, source);
                 // Class selection and non-nil evidence are independent.
                 if let Some(hint) = form.metadata(":tag").and_then(Form::symbol) {
                     env.set_java_hint(name, hint);

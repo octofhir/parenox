@@ -207,9 +207,6 @@ impl Checker<'_> {
 
     pub(in crate::checker) fn narrow_contains(&self, args: &[Form], truth: bool, env: &mut Env) {
         let [target, key] = args else { return };
-        let Some(collection) = target.symbol() else {
-            return;
-        };
         let key_symbol = key
             .symbol()
             .and_then(|name| env.get(name).map(|v| (name, &v.known)));
@@ -219,10 +216,9 @@ impl Checker<'_> {
                 .map(|(_, ty)| ty.clone())
         });
         if let Some(key) = exact {
-            if let Some(value) = env.get_mut(collection) {
-                value.narrow(narrow_key_presence(&value.known, &key, truth));
-            }
+            self.narrow_subject(target, env, |ty| narrow_key_presence(ty, &key, truth));
         } else if let Some((key_name, _)) = key_symbol
+            && let Some(collection) = target.symbol()
             && env.contains_key(collection)
         {
             env.set_presence(collection, key_name, truth);

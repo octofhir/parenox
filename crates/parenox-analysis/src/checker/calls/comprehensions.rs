@@ -179,13 +179,9 @@ impl Checker<'_> {
                     for [pattern, init] in *pairs {
                         let value = self.infer_path(init, &local, reachable, false);
                         reachable = value.known != Type::Never;
-                        let alias = pattern.symbol().zip(self.selector(init, &local));
                         self.inspect_path(reachable, |checker| {
-                            checker.bind(pattern, value, &mut local);
+                            checker.bind_initializer(pattern, init, value, &mut local);
                         });
-                        if let Some((name, selector)) = alias {
-                            local.set_selector(name, selector);
-                        }
                     }
                 }
                 Binding::Test(form) => {

@@ -344,10 +344,9 @@ impl Checker<'_> {
             }
             let mut current = checker.infer(&xs[1], env);
             let mut local = env.clone();
-            local.insert(binding.to_owned(), Value::new(Type::Never));
             for (index, step) in xs[3..].iter().enumerate() {
                 let reachable = current.known != Type::Never;
-                *local.get_mut(binding).unwrap() = current;
+                local.insert(binding.to_owned(), current);
                 let start = checker.diagnostics.len();
                 current =
                     checker.infer_path(step, &local, reachable, tail && index + 4 == xs.len());
@@ -369,14 +368,7 @@ impl Checker<'_> {
         for pair in bindings.as_chunks::<2>().0 {
             let value = self.infer_path(&pair[1], &local, reachable, false);
             reachable = value.known != Type::Never;
-            let alias = pair[0].symbol().and_then(|name| {
-                self.selector(&pair[1], &local)
-                    .map(|selector| (name, selector))
-            });
-            self.bind(&pair[0], value, &mut local);
-            if let Some((name, selector)) = alias {
-                local.set_selector(name, selector);
-            }
+            self.bind_initializer(&pair[0], &pair[1], value, &mut local);
         }
         self.check_path(reachable, |checker| checker.body(&xs[2..], &local, tail))
     }
@@ -546,8 +538,10 @@ impl Checker<'_> {
         let yes = self.check_path(yes_reachable && yes_env.reachable(), |checker| {
             if first {
                 input = checker.sequence_call("clojure.core/first", &input, init.span);
+                checker.bind(pattern, input, &mut yes_env);
+            } else {
+                checker.bind_initializer(pattern, init, input, &mut yes_env);
             }
-            checker.bind(pattern, input, &mut yes_env);
             checker.body(if when { &xs[2..] } else { &xs[2..3] }, &yes_env, tail)
         });
         let no = if let Some(scope) = no_env {

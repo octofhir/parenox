@@ -95,7 +95,10 @@ impl Checker<'_> {
         } else if remaining != Type::Never {
             self.illegal_argument();
             if (!matched && remaining != Type::Unknown)
-                || (selector.is_some() && finite_tag(&remaining))
+                || (selector
+                    .as_ref()
+                    .is_some_and(|selector| !selector.keys.is_empty())
+                    && finite_tag(&remaining))
             {
                 self.error(
                     "PNX2802",

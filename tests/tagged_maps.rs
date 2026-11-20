@@ -111,6 +111,58 @@ fn shadowing_the_owner_or_alias_drops_the_old_relationship() {
 }
 
 #[test]
+fn copied_owners_and_projections_keep_the_original_binding_through_shadowing() {
+    let report = check(
+        "(s/def ::nullable (s/nilable string?))
+         (defn nil-title {:t/sig '[nil? :-> string?]} [_] \"untitled\")
+         (defn keep {:t/sig '[{:path ::nullable} {:path ::nullable} :-> string?]} [owner other]
+           (let [saved owner path (:path owner) owner other]
+             (if (nil? (:path saved)) (nil-title path) (subs path 0))))
+         (defn self-shadow {:t/sig '[{:path ::nullable} :-> string?]} [owner]
+           (let [saved owner owner (:path owner)]
+             (if (nil? (:path saved)) (nil-title owner) (subs owner 0))))
+         (defn scalar-copy {:t/sig '[::nullable :-> string?]} [path]
+           (let [copy path]
+             (if (nil? path) (nil-title copy) (subs copy 0))))
+         (defn nested-tag {:t/sig '[::envelope :-> string?]} [message]
+           (let [saved message payload (get-in saved [:item :value])]
+             (case (get-in message [:item :kind])
+               :note (str/trim payload)
+               :counter (str (inc payload)))))",
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn presence_and_truthiness_refine_captured_fields_independently() {
+    let report = check(
+        "(s/def :clean/path string?)
+         (s/def :flag/path (s/nilable (s/or :value string? :disabled #{false})))
+         (s/def ::clean (s/keys :opt-un [:clean/path]))
+         (s/def ::flag (s/keys :opt-un [:flag/path]))
+         (defn nil-title {:t/sig '[nil? :-> string?]} [_] \"untitled\")
+         (defn presence {:t/sig '[::clean :-> string?]} [owner]
+           (let [saved owner path (:path saved)]
+             (if (contains? owner :path) (subs path 0) (nil-title path))))
+         (defn truthy {:t/sig '[::flag :-> string?]} [owner]
+           (let [saved owner path (:path saved)]
+             (if (:path owner) (subs path 0) \"untitled\")))
+         (defn some-is-not-truthy {:t/sig '[::flag :-> string?]} [owner]
+           (let [saved owner path (:path saved)]
+             (if (some? (:path owner)) (subs path 0) \"untitled\")))
+         (defn present-can-be-nil {:t/sig '[::flag :-> string?]} [owner]
+           (let [saved owner path (:path saved)]
+             (if (contains? owner :path) (subs path 0) (nil-title path))))",
+    );
+    let [falsey, nilable] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(falsey.actual.as_deref(), Some("false | String"));
+    assert_eq!(nilable.actual.as_deref(), Some("Nil | false | String"));
+}
+
+#[test]
 fn defaults_shadowed_get_and_custom_predicates_do_not_prove_a_tag() {
     let report = check(
         "(s/def ::legacy (s/keys :opt-un [:counter/kind] :req-un [:counter/value]))

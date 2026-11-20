@@ -11,14 +11,14 @@ impl Checker<'_> {
     /// default, computed key, or shadowed core call is not a selector.
     pub(in crate::checker) fn selector(&self, form: &Form, env: &Env) -> Option<Selector> {
         match &form.without_metadata().kind {
-            Kind::Symbol(name) | Kind::AnonymousArgument(name) => env.selector(name).cloned(),
+            Kind::Symbol(name) | Kind::AnonymousArgument(name) => env.selector_for(name),
             Kind::List(forms) => {
                 let (head, args) = forms.split_first()?;
                 if let [target] = args
                     && head.keyword().is_some()
                 {
                     let key = self.literal_map_key(head)?;
-                    let mut selector = self.selector_root(target, env)?;
+                    let mut selector = self.selector(target, env)?;
                     selector.keys.push(key);
                     return (selector.keys.len() <= MAX_SELECTOR_KEYS).then_some(selector);
                 }
@@ -27,7 +27,7 @@ impl Checker<'_> {
                 if !matches!(op.as_str(), "clojure.core/get" | "clojure.core/get-in") {
                     return None;
                 }
-                let mut selector = self.selector_root(target, env)?;
+                let mut selector = self.selector(target, env)?;
                 match op.as_str() {
                     "clojure.core/get" => selector.keys.push(self.literal_map_key(key)?),
                     "clojure.core/get-in" => {
@@ -47,24 +47,18 @@ impl Checker<'_> {
         }
     }
 
-    fn selector_root(&self, form: &Form, env: &Env) -> Option<Selector> {
-        self.selector(form, env).or_else(|| {
-            let name = form.symbol()?;
-            env.contains_key(name).then(|| Selector {
-                root: name.to_owned(),
-                keys: Vec::new(),
-            })
-        })
-    }
-
-    pub(super) fn narrow_subject(
+    pub(in crate::checker) fn narrow_subject(
         &self,
         form: &Form,
         env: &mut Env,
         refine: impl Fn(&Type) -> Type,
     ) {
         let selector = self.selector(form, env);
-        if let Some(value) = form.symbol().and_then(|name| env.get_mut(name)) {
+        // Narrow an alias directly even when the owner's declared shape does
+        // not describe the path. A direct owner is narrowed through its root.
+        if let Some(name) = form.symbol().filter(|name| env.is_alias(name))
+            && let Some(value) = env.get_mut(name)
+        {
             let narrowed = refine(&value.known);
             let impossible = narrowed == Type::Never;
             value.narrow(narrowed);
@@ -93,7 +87,7 @@ pub(in crate::checker) fn refine_owner(
     env: &mut Env,
     refine: impl Fn(&Type) -> Type,
 ) {
-    if let Some(owner) = env.get(&selector.root) {
+    if let Some(owner) = env.owner(&selector.root) {
         let narrowed = narrow_path(&owner.known, &selector.keys, &refine);
         if narrowed != owner.known {
             if narrowed == Type::Never {
@@ -101,7 +95,7 @@ pub(in crate::checker) fn refine_owner(
             } else {
                 env.refresh_selectors(&selector.root, |keys| project_path(&narrowed, keys));
             }
-            env.get_mut(&selector.root).unwrap().narrow(narrowed);
+            env.owner_mut(&selector.root).unwrap().narrow(narrowed);
         }
     }
 }
