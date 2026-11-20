@@ -270,7 +270,7 @@ impl Checker<'_> {
                 break;
             }
             result = result.join(next.clone());
-            if seen.iter().any(|state| state[0].known == next.known) {
+            if seen.iter().any(|state| state[0].same_value_facts(&next)) {
                 return result;
             }
             seen.push(vec![next.clone()]);
@@ -322,6 +322,7 @@ impl Checker<'_> {
 fn reducer_argument(ty: &Type) -> bool {
     match ty {
         Type::Nil
+        | Type::Any
         | Type::Unknown
         | Type::Never
         | Type::Function(_)
@@ -377,7 +378,7 @@ pub(super) fn reduced_operation(name: &str, input: &Value) -> Value {
     };
     let ty = Type::union(parts.iter().map(|ty| match name {
         "clojure.core/reduced?" => match ty {
-            Type::Unknown | Type::Parameter(_) => Type::Boolean,
+            Type::Any | Type::Unknown | Type::Parameter(_) => Type::Boolean,
             ty => Type::Bool(matches!(ty, Type::Reduced(_))),
         },
         "clojure.core/unreduced" => match ty {

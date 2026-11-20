@@ -236,7 +236,7 @@ impl Checker<'_> {
         if target
             .edges
             .iter()
-            .any(|edge| !same_types(&edge.args, &initial))
+            .any(|edge| !same_state(&edge.args, &initial))
         {
             let mut seen = vec![initial];
             let mut pending = VecDeque::from(std::mem::take(&mut target.edges));
@@ -245,12 +245,12 @@ impl Checker<'_> {
                 span: edge,
             }) = pending.pop_front()
             {
-                if seen.iter().any(|previous| same_types(&state, previous)) {
+                if seen.iter().any(|previous| same_state(&state, previous)) {
                     continue;
                 }
                 let widened_collections = widen_growing_collections(&mut state, &seen);
                 if (widen_changing_integers(&mut state, &seen) || widened_collections)
-                    && seen.iter().any(|previous| same_types(&state, previous))
+                    && seen.iter().any(|previous| same_state(&state, previous))
                 {
                     continue;
                 }
@@ -285,10 +285,10 @@ impl Checker<'_> {
     }
 }
 
-fn same_types(left: &[Value], right: &[Value]) -> bool {
+fn same_state(left: &[Value], right: &[Value]) -> bool {
     left.iter()
         .zip(right)
-        .all(|(left, right)| left.known == right.known)
+        .all(|(left, right)| left.same_value_facts(right))
 }
 
 fn widen_changing_integers(state: &mut [Value], seen: &[Vec<Value>]) -> bool {
@@ -348,7 +348,7 @@ pub(super) fn widen_growing_collections(state: &mut [Value], seen: &[Vec<Value>]
 fn growing_slots(current: &[Value], previous: &[Value]) -> Option<Vec<usize>> {
     let mut growing = Vec::new();
     for (index, (current, previous)) in current.iter().zip(previous).enumerate() {
-        if current.known == previous.known {
+        if current.same_value_facts(previous) {
             continue;
         }
         match (&current.known, &previous.known) {

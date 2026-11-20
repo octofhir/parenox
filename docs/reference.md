@@ -324,6 +324,58 @@ source check and verifies the generated EDN before printing it. It does not
 export private vars, imported externs, macro scopes, or guard refinements.
 Snapshots above the export size or nesting limits report `PNX9012`.
 
+### Proposing named spec contracts
+
+`parenox propose-contracts` reads named `s/def` forms and writes EDN to
+stdout. Each proposal includes the original form and its location, the input
+domain, the result of `s/conform`, and a list of unknown parts. `Input (Any)`
+binds the value named `Input` in the result type, including when the value is
+`nil`, `false`, or `:clojure.spec.alpha/invalid`.
+Use `t/any` in a type signature when the slot accepts every Clojure value.
+
+The `:externs` map contains the generated entries whose conversions
+round-trip independently of the source. Use `--externs-only` to print this
+map directly. Load it with `check --externs` or `:externs` in `parenox.edn`.
+The command marks entries already supplied by an extern file as `:existing`
+and leaves them in that file. Proposals whose conversions cannot be exported
+have `:extern nil`.
+
+Named spec externs use a qualified keyword and a map with `:spec` and `:ns`.
+`:ns` names the namespace that registers the spec. The consumer needs an
+explicit `:require` or `:use` of that namespace for `s/conform` or `s/valid?`.
+Parenox also uses the input domain in source function signatures. A source
+registration or a source file providing the declared namespace takes
+precedence. References to named spec externs from
+another `s/def` or from signatures inside extern files remain outside this
+workflow. The current exporter supports strings, finite sets of strings, and
+single-field map conformers. The conditional forms cover `when (vector? input)`
+and the signature-help pattern that passes through maps after testing for
+vectors. Literal maps retain their shape in the return type. A general map
+type includes both results because a JVM object can implement both interfaces.
+
+Run the lsp4clj 2.0.1 examples with the pinned `coercer.clj` source.
+
+```sh
+coercer=$(mktemp -d)/coercer.clj
+curl -fsSL https://raw.githubusercontent.com/clojure-lsp/lsp4clj/1ff6c687f4e2af214d30df0d50749ea4a15b42c8/src/lsp4clj/coercer.clj -o "$coercer"
+just build
+target/release/parenox propose-contracts "$coercer" \
+  --spec :server-capabilities/code-lens-provider \
+  --spec :server-capabilities/signature-help-provider \
+  --spec :markup/kind
+just pilot-contract-smoke "$coercer"
+clojure -M tests/fixtures/spec-code-lens-provider.clj
+clojure -M tests/fixtures/spec-conditional-provider.clj
+clojure -M tests/fixtures/spec-signature-help-provider.clj
+```
+
+The smoke test imports generated EDN in a consumer with no provider source.
+It checks the exact output field type of the lens conformer, both branches
+of the vector conformers, the signature-help map and vector inputs, and a
+type error for `"html"` in place of
+`"markdown"`. In the editor, hover on a named spec declaration or a resolved
+type reference shows its inferred contract and source location.
+
 ### Comparing releases
 
 ```sh

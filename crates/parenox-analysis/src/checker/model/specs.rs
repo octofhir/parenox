@@ -80,8 +80,18 @@ impl Declarations {
             .filter(|name| {
                 let (namespace, local) = self.names.resolve_parts(name);
                 ((namespace == "clojure.core"
-                    && (matches!(local, "map" | "second" | "int" | "fn" | "name" | "=")
-                        || core_predicate_type(local).is_some()))
+                    && (matches!(
+                        local,
+                        "map"
+                            | "second"
+                            | "int"
+                            | "fn"
+                            | "name"
+                            | "when"
+                            | "cond"
+                            | "vector?"
+                            | "="
+                    ) || core_predicate_type(local).is_some()))
                     || (namespace == "clojure.spec.alpha"
                         && matches!(
                             local,
@@ -158,6 +168,22 @@ pub(crate) enum SpecProvider {
 }
 
 impl SpecProvider {
+    pub fn standalone_registration(&self) -> Option<&RegistrationSource> {
+        match self {
+            Self::Direct(source) => Some(source),
+            Self::LoadChecked {
+                direct: true,
+                sources,
+            } => {
+                let [source] = sources.as_ref() else {
+                    return None;
+                };
+                Some(source)
+            }
+            _ => None,
+        }
+    }
+
     pub fn is_self_contained(&self) -> bool {
         matches!(
             self,
@@ -171,6 +197,9 @@ impl SpecProvider {
 pub(crate) enum SpecConversion {
     CheckedInt32,
     Name,
+    WrapField(Arc<Type>),
+    VectorWrapField(Arc<Type>),
+    MapOrWrapField(Arc<Type>),
     String,
     Keyword,
     Identity,
@@ -202,6 +231,13 @@ pub(crate) struct MapFieldConversion {
 }
 
 impl SpecConversion {
+    pub fn is_field_conformer(&self) -> bool {
+        matches!(
+            self,
+            Self::WrapField(_) | Self::VectorWrapField(_) | Self::MapOrWrapField(_)
+        )
+    }
+
     /// The original input domain of a checked contract (successful validation).
     pub fn success_input(&self) -> Type {
         match self {
@@ -209,6 +245,7 @@ impl SpecConversion {
             // JVM Named can also be implemented by user classes. This
             // conversion supplies output and effects but no input contract.
             Self::Name => Type::Unknown,
+            Self::WrapField(_) | Self::VectorWrapField(_) | Self::MapOrWrapField(_) => Type::Any,
             Self::String => Type::String,
             Self::Keyword => Type::SpecKeyword,
             Self::Identity => Type::SpecTruthy,
@@ -246,6 +283,13 @@ impl SpecConversion {
             },
         }
     }
+
+    pub(crate) fn wrap_field(key: &Type, value: Type) -> Type {
+        Type::Map(MapType {
+            fields: [(key.clone(), Field::new(value, true))].into(),
+            extra: ExtraFields::Closed,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -261,6 +305,15 @@ pub(crate) struct SpecCache {
 }
 
 impl SpecCache {
+    pub fn unchecked_input(&self, name: &str) -> bool {
+        self.unchecked_inputs.contains(name)
+    }
+
+    pub fn standalone_namespace(&self, name: &str, path: &str) -> Option<&str> {
+        let source = self.providers.get(name)?.standalone_registration()?;
+        (source.path == path).then_some(source.namespace.as_str())
+    }
+
     pub fn update(
         &mut self,
         mut sources: Vec<SpecSource<'_>>,
@@ -435,7 +488,9 @@ impl<'a> Resolver<'a> {
             .cloned()
             .or_else(|| source_conversion(owner.names, body))
             .filter(|conversion| {
-                !self.project_core_namespace || !matches!(conversion, SpecConversion::Name)
+                !self.project_core_namespace
+                    || !(matches!(conversion, SpecConversion::Name)
+                        || conversion.is_field_conformer())
             })
             .or_else(|| self.collection_conversion(owner, registered_at, &mut required));
         if direct.is_some() {
@@ -499,16 +554,18 @@ impl<'a> Resolver<'a> {
             if let Some(ready) = local_ready_at {
                 self.local_conversions.insert(key, ready);
             }
-            if matches!(
-                conversion,
-                SpecConversion::Name
-                    | SpecConversion::IdentityDomain(_)
-                    | SpecConversion::TaggedChoice(_)
-                    | SpecConversion::TaggedOr(_)
-                    | SpecConversion::ProjectedCollection(_)
-                    | SpecConversion::StringKeyedMap(_)
-                    | SpecConversion::Enum { inverted: true, .. }
-            ) {
+            if conversion.is_field_conformer()
+                || matches!(
+                    conversion,
+                    SpecConversion::Name
+                        | SpecConversion::IdentityDomain(_)
+                        | SpecConversion::TaggedChoice(_)
+                        | SpecConversion::TaggedOr(_)
+                        | SpecConversion::ProjectedCollection(_)
+                        | SpecConversion::StringKeyedMap(_)
+                        | SpecConversion::Enum { inverted: true, .. }
+                )
+            {
                 required.insert(key);
             }
             self.conversions.insert(key.to_owned(), conversion);

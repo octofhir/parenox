@@ -399,7 +399,7 @@ impl Session {
         !self.has_source_namespace("clojure.test")
     }
 
-    fn has_source_namespace(&self, namespace: &str) -> bool {
+    pub(super) fn has_source_namespace(&self, namespace: &str) -> bool {
         self.files.values().any(|file| {
             file.snapshot == self.snapshot
                 && file

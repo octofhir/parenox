@@ -175,6 +175,10 @@ impl Declarations {
         &self.names.namespace
     }
 
+    pub(crate) fn has_namespace_declaration(&self) -> bool {
+        self.namespace_end.is_some()
+    }
+
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
@@ -191,6 +195,10 @@ impl Declarations {
                 Ok(spec.name)
             }
         })
+    }
+
+    pub(crate) fn spec_names(&self) -> impl Iterator<Item = &str> {
+        self.specs.keys().map(String::as_str)
     }
 
     pub(crate) fn qualified_reference<'a>(&'a self, symbol: &'a str) -> Option<(&'a str, &'a str)> {

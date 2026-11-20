@@ -58,7 +58,7 @@ fn changed(
     old: &ExternalDeclaration,
     new: &ExternalDeclaration,
 ) -> Option<(Change, Option<(usize, ExternMismatch)>)> {
-    use ExternalDeclaration::{Function, Literal, Macro};
+    use ExternalDeclaration::{Function, Literal, Macro, Spec};
     match (old, new) {
         (Function(old), Function(new)) => {
             if old.signatures.len() == new.signatures.len()
@@ -82,6 +82,9 @@ fn changed(
         (Literal(old), Literal(new)) => {
             (old.edn != new.edn).then_some((Change::ValueChanged, None))
         }
+        (Spec(old), Spec(new)) => (old.conversion != new.conversion
+            || old.registration.namespace != new.registration.namespace)
+            .then_some((Change::Unproven, None)),
         _ => Some((Change::Breaking, None)),
     }
 }
@@ -93,6 +96,17 @@ fn definition((extern_, span): (&ExternalDeclaration, Span)) -> ExternDefinition
         }
         ExternalDeclaration::Macro(MacroScope::LetLike(_)) => "{:macro :let-like}".into(),
         ExternalDeclaration::Literal(literal) => format!("{{:value {}}}", literal.edn),
+        ExternalDeclaration::Spec(spec) => {
+            let result = spec
+                .conversion
+                .proposal_result()
+                .expect("checked extern spec");
+            format!(
+                "{} -> {result} (registered by {})",
+                spec.conversion.success_input(),
+                spec.registration.namespace
+            )
+        }
     };
     ExternDefinition {
         origin: extern_.origin().clone(),

@@ -265,7 +265,7 @@ impl Checker<'_> {
 fn non_nil_compatibility(ty: &Type) -> Compatibility {
     match ty {
         Type::Nil => Compatibility::Mismatch,
-        Type::Unknown | Type::SpecValue => Compatibility::Unproven,
+        Type::Any | Type::Unknown | Type::SpecValue => Compatibility::Unproven,
         Type::Parameter(parameter) => parameter
             .upper
             .as_ref()

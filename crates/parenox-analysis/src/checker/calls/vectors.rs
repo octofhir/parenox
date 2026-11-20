@@ -5,7 +5,60 @@ use super::{
     sequences::{collection_emptiness, iteration_may_throw},
 };
 use crate::reader::{Form, Span};
-use crate::types::Type;
+use crate::types::{IntegerClass, IntegerType, Type};
+
+pub(in crate::checker) fn vector_predicate(input: &Type) -> Type {
+    match input {
+        Type::Never => Type::Never,
+        Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => Type::Bool(true),
+        Type::Nil
+        | Type::Bool(_)
+        | Type::Boolean
+        | Type::String
+        | Type::Str(_)
+        | Type::Character
+        | Type::Char(_)
+        | Type::Keyword
+        | Type::SpecKeyword
+        | Type::Key(_)
+        | Type::Symbol
+        | Type::SimpleSymbol
+        | Type::QualifiedSymbol
+        | Type::Pattern
+        | Type::Reduced(_)
+        | Type::ListTuple(_)
+        | Type::SeqTuple(_)
+        | Type::Integer(_)
+        | Type::Integral(IntegerType {
+            class: IntegerClass::Fixed,
+            ..
+        }) => Type::Bool(false),
+        Type::Union(parts) => Type::union(parts.iter().map(vector_predicate)),
+        Type::Parameter(parameter) => parameter
+            .upper
+            .as_ref()
+            .map_or(Type::Boolean, vector_predicate),
+        // These wider domains can contain a user-defined IPersistentVector.
+        _ => Type::Boolean,
+    }
+}
+
+pub(in crate::checker) fn narrow_vector_predicate(input: &Type, truth: bool) -> Type {
+    if let Type::Union(parts) = input {
+        return Type::union(
+            parts
+                .iter()
+                .map(|part| narrow_vector_predicate(part, truth)),
+        );
+    }
+    match vector_predicate(input) {
+        Type::Bool(result) if result != truth => Type::Never,
+        Type::Boolean if truth && !matches!(input, Type::Parameter(_)) => {
+            Type::Vector(Box::new(Type::Any))
+        }
+        _ => input.clone(),
+    }
+}
 
 impl Checker<'_> {
     pub(super) fn vector_transform(
@@ -113,6 +166,9 @@ impl Checker<'_> {
             "clojure.core/empty?" => narrow_emptiness(&element, true),
             "clojure.core/not-empty" => narrow_emptiness(&element, false),
             "clojure.core/identity" => element.truthy(),
+            "clojure.core/vector?" if !self.globals.project_namespaces.contains("clojure.core") => {
+                narrow_vector_predicate(&element, true)
+            }
             _ => match predicate_type(&name) {
                 Some(wanted) => narrow_by_type(&element, &wanted, true),
                 None => element,
@@ -137,7 +193,7 @@ pub(super) fn element_type(collection: Type) -> Result<Type, CollectionError> {
         Type::Nil | Type::Never => Ok(Type::Never),
         Type::Str(string) if string.is_empty() => Ok(Type::Never),
         Type::String | Type::Str(_) => Ok(Type::Character),
-        Type::Unknown => Ok(Type::Unknown),
+        Type::Any | Type::Unknown => Ok(collection),
         Type::SpecCollection(element) => Ok(*element),
         Type::Union(parts) => parts
             .into_iter()

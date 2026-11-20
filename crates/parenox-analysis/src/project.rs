@@ -1,5 +1,6 @@
 mod extern_export;
 mod navigation;
+mod spec_proposals;
 mod symbols;
 
 pub use navigation::{
@@ -8,6 +9,7 @@ pub use navigation::{
     SourceExport, SourceHover, SourceTestKind, SourceTestNode, VarDocumentation, VarInfo,
     namespace_documentation, namespace_exports,
 };
+pub use spec_proposals::{ContractProposals, SpecContractProposal};
 pub use symbols::{SourceSymbol, SourceSymbolKind};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -516,6 +518,40 @@ impl Session {
         for namespace in namespaces.keys() {
             globals.register_namespace(namespace);
         }
+        for (source, cache) in &mut entries[count..] {
+            if cache.parse_error.is_none()
+                && cache
+                    .model
+                    .as_mut()
+                    .is_none_or(|model| !model.refresh_external_inputs(&globals))
+            {
+                cache.model = Some(Model::externs(
+                    &cache.forms,
+                    source.path,
+                    &cache.source,
+                    &globals,
+                ));
+            }
+        }
+        self.externs.update(
+            entries[count..]
+                .iter()
+                .filter_map(|(_, cache)| cache.model.as_ref()?.extern_file()),
+        );
+        let trusted_paths = (mode == SnapshotMode::ValidateExterns && !dependencies.is_empty())
+            .then(|| {
+                let mut paths: BTreeSet<_> = dependencies.iter().map(|file| file.path).collect();
+                // A path being validated cannot also provide trusted declarations.
+                for file in externs {
+                    paths.remove(file.path);
+                }
+                paths
+            });
+        if matches!(mode, SnapshotMode::Check(_)) {
+            self.externs.publish_specs(&mut globals, None);
+        } else if let Some(paths) = &trusted_paths {
+            self.externs.publish_specs(&mut globals, Some(paths));
+        }
         if mode != SnapshotMode::ExternSurface {
             for index in order {
                 let (source, cache) = &mut entries[index];
@@ -537,26 +573,6 @@ impl Session {
                 }
             }
         }
-        for (source, cache) in &mut entries[count..] {
-            if cache.parse_error.is_none()
-                && cache
-                    .model
-                    .as_mut()
-                    .is_none_or(|model| !model.refresh_external_inputs(&globals))
-            {
-                cache.model = Some(Model::externs(
-                    &cache.forms,
-                    source.path,
-                    &cache.source,
-                    &globals,
-                ));
-            }
-        }
-        self.externs.update(
-            entries[count..]
-                .iter()
-                .filter_map(|(_, cache)| cache.model.as_ref()?.extern_file()),
-        );
         let source_literals =
             if mode == SnapshotMode::ValidateExterns && self.externs.has_literals() {
                 entries[..count]
@@ -574,15 +590,8 @@ impl Session {
             };
         if matches!(mode, SnapshotMode::Check(_)) {
             self.externs.publish(&mut globals);
-        } else if mode == SnapshotMode::ValidateExterns && !dependencies.is_empty() {
-            let mut trusted_paths: BTreeSet<_> =
-                dependencies.iter().map(|file| file.path).collect();
-            // Even an invalid snapshot must not make a checked path trusted.
-            for file in externs {
-                trusted_paths.remove(file.path);
-            }
-            self.externs
-                .publish_dependencies(&trusted_paths, &mut globals);
+        } else if let Some(paths) = &trusted_paths {
+            self.externs.publish_dependencies(paths, &mut globals);
         }
         let mut top_level_calls = BTreeMap::new();
         let mut checked_tests = BTreeMap::new();

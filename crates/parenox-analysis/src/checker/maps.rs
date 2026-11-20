@@ -68,10 +68,12 @@ pub(super) fn narrow_map_predicate(input: &Type, truth: bool) -> Type {
         Type::Union(parts) => {
             Type::union(parts.iter().map(|part| narrow_map_predicate(part, truth)))
         }
-        Type::Unknown | Type::SpecValue | Type::SpecTruthy if truth => Type::Map(MapType {
-            fields: BTreeMap::new(),
-            extra: ExtraFields::Open,
-        }),
+        Type::Any | Type::Unknown | Type::SpecValue | Type::SpecTruthy if truth => {
+            Type::Map(MapType {
+                fields: BTreeMap::new(),
+                extra: ExtraFields::Open,
+            })
+        }
         _ if map_predicate(input) == Type::Bool(!truth) => Type::Never,
         _ => input.clone(),
     }
@@ -125,7 +127,7 @@ impl Checker<'_> {
         if !keys_known {
             return Value::new(Type::Unknown);
         }
-        Value::new(Type::Map(MapType {
+        let mut literal = Value::new(Type::Map(MapType {
             fields,
             extra: if extra_keys.is_empty() {
                 ExtraFields::Closed
@@ -135,7 +137,9 @@ impl Checker<'_> {
                     Type::union(extra_values),
                 ]))
             },
-        }))
+        }));
+        literal.literal_map = true;
+        literal
     }
 
     pub(super) fn lookup(
@@ -230,6 +234,10 @@ impl Checker<'_> {
             | Type::String
             | Type::Str(_) => default_type,
             Type::Never => Type::Never,
+            Type::Any => {
+                self.may_throw();
+                Type::Any
+            }
             Type::Unknown | Type::Parameter(_) => Type::Unknown,
             Type::Union(xs) => {
                 let values = xs
@@ -330,7 +338,7 @@ impl Checker<'_> {
 
     fn contains_type(&mut self, ty: &Type, key: &Type, span: Span) -> Type {
         match key {
-            Type::Unknown => {
+            Type::Any | Type::Unknown => {
                 self.may_throw();
                 return Type::Unknown;
             }
@@ -341,7 +349,7 @@ impl Checker<'_> {
             _ => {}
         }
         match ty {
-            Type::Unknown => {
+            Type::Any | Type::Unknown => {
                 self.may_throw();
                 Type::Unknown
             }
@@ -381,7 +389,7 @@ impl Checker<'_> {
                 extra: ExtraFields::Closed,
             }),
             Type::Never => Err(Type::Never),
-            Type::Unknown => {
+            Type::Any | Type::Unknown => {
                 self.may_throw();
                 Err(Type::Unknown)
             }
@@ -478,7 +486,7 @@ impl Checker<'_> {
             Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
                 self.dissoc_type(upper, keys, span)
             }
-            Type::Unknown => {
+            Type::Any | Type::Unknown => {
                 self.may_throw();
                 Type::Unknown
             }

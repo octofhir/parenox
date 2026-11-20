@@ -13,6 +13,7 @@ mod reduction;
 mod sequences;
 mod strings;
 mod vectors;
+pub(super) use vectors::{narrow_vector_predicate, vector_predicate};
 
 pub(super) use sequences::{iteration_may_throw, narrow_emptiness};
 
@@ -562,6 +563,7 @@ impl<'model> Checker<'model> {
                         | "clojure.core/identity"
                         | "clojure.core/name"
                         | "clojure.core/map?"
+                        | "clojure.core/vector?"
                         | "clojure.core/any?"
                         | "clojure.core/dissoc"
                         | "clojure.core/find"
@@ -707,6 +709,13 @@ impl<'model> Checker<'model> {
                 return self.unsupported(span, "map? requires the standard clojure.core predicate");
             }
             "clojure.core/map?" => super::maps::map_predicate(&args[0].0.known),
+            "clojure.core/vector?" if self.globals.project_namespaces.contains("clojure.core") => {
+                self.may_throw();
+                return self
+                    .unsupported(span, "vector? requires the standard clojure.core predicate");
+            }
+            "clojure.core/vector?" if args[0].0.literal_map => Type::Bool(false),
+            "clojure.core/vector?" => vector_predicate(&args[0].0.known),
             "clojure.core/identity" => return args[0].0.clone(),
             "clojure.core/any?" => Type::Bool(true),
             "clojure.core/key" | "clojure.core/val" => {
@@ -920,6 +929,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/str"
             | "clojure.core/name"
             | "clojure.core/map?"
+            | "clojure.core/vector?"
             | "clojure.core/identity"
             | "clojure.core/any?"
             | "clojure.core/nil?"

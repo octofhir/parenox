@@ -47,6 +47,26 @@ impl ExternCache {
                         source.and_then(|exports| exports.functions.get(name)),
                         span,
                     ),
+                    ExternalDeclaration::Spec(promised) => {
+                        let registration = globals
+                            .spec_provider(name)
+                            .and_then(|provider| provider.standalone_registration());
+                        if registration.is_some_and(|source| {
+                            source.namespace == promised.registration.namespace
+                        }) && globals.spec_conversions.get(name) == Some(&promised.conversion)
+                        {
+                            None
+                        } else {
+                            Some(Diagnostic::new(
+                                "PNX9011",
+                                span,
+                                format!(
+                                    "Cannot verify extern spec {name} against the source registration in {}",
+                                    promised.registration.namespace
+                                ),
+                            ))
+                        }
+                    }
                     ExternalDeclaration::Macro(_) => Some(Diagnostic::new(
                         "PNX9011",
                         span,

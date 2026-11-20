@@ -110,6 +110,10 @@ impl Checker<'_> {
         };
         match collection {
             Type::Unknown | Type::Never => collection.clone(),
+            Type::Any => {
+                self.may_throw();
+                Type::Any
+            }
             Type::Nil => sequence_kind(conj_seq(&[], items), true),
             Type::ListTuple(previous) => sequence_kind(conj_seq(previous, items), true),
             Type::SeqTuple(previous) => conj_seq(previous, items),
@@ -209,7 +213,7 @@ impl Checker<'_> {
     fn read_map_component(&mut self, ty: &Type, name: &str, span: Span) -> Type {
         match ty {
             Type::Nil | Type::Never => ty.clone(),
-            Type::Unknown => {
+            Type::Any | Type::Unknown => {
                 self.may_throw();
                 Type::Unknown
             }
@@ -265,6 +269,10 @@ impl Checker<'_> {
     fn read_sequence(&mut self, op: ReadSequence, ty: &Type, name: &str, span: Span) -> Type {
         match ty {
             Type::Never | Type::Unknown => ty.clone(),
+            Type::Any => {
+                self.may_throw();
+                Type::Unknown
+            }
             Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
                 self.read_sequence(op, upper, name, span)
             }
@@ -381,7 +389,7 @@ fn sequence_kind(ty: Type, persistent_list: bool) -> Type {
 
 pub(in crate::checker) fn iteration_may_throw(ty: &Type) -> bool {
     match ty {
-        Type::Seq(_) | Type::Unknown | Type::SpecCollection(_) => true,
+        Type::Seq(_) | Type::Any | Type::Unknown | Type::SpecCollection(_) => true,
         Type::Union(parts) => parts.iter().any(iteration_may_throw),
         _ => false,
     }
@@ -391,7 +399,7 @@ pub(super) fn collection_emptiness(ty: &Type) -> Option<Type> {
     Some(match ty {
         Type::Nil => Type::Bool(true),
         Type::Never => Type::Never,
-        Type::Unknown | Type::SpecCollection(_) => Type::Boolean,
+        Type::Any | Type::Unknown | Type::SpecCollection(_) => Type::Boolean,
         Type::Parameter(parameter) => return collection_emptiness(parameter.upper.as_ref()?),
         Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => {
             Type::Bool(items.is_empty())

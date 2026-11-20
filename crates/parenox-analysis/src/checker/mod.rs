@@ -13,11 +13,11 @@ mod recur;
 
 use env::Env;
 use exceptions::Throws;
-use model::{Contract, DeclaredValue, Function, SpecConversion, VerifiedGuard};
+use model::{Contract, DeclaredValue, Function, VerifiedGuard};
 pub(crate) use model::{
     Declarations, DocumentReferences, EncodeError, ExternCache, Globals, InterfaceKey, Model,
-    ProjectCall, ScopedReference, SnapshotWriter, SpecCache, SpecFingerprint, SpecSource,
-    java_type_tag_at,
+    ProjectCall, ScopedReference, SnapshotWriter, SpecCache, SpecConversion, SpecFingerprint,
+    SpecSource, java_type_tag_at,
 };
 use recur::RecurTarget;
 
@@ -119,6 +119,8 @@ struct Value {
     notes: Vec<String>,
     contract: Option<Arc<ContractOrigin>>,
     guard: Option<Arc<VerifiedGuard>>,
+    // A map built by a literal cannot also implement IPersistentVector.
+    literal_map: bool,
 }
 
 impl Value {
@@ -129,6 +131,7 @@ impl Value {
             notes: Vec::new(),
             contract: None,
             guard: None,
+            literal_map: false,
         }
     }
 
@@ -164,13 +167,19 @@ impl Value {
         Self {
             contract,
             guard,
+            literal_map: self.literal_map && other.literal_map,
             ..Self::with_notes(self.known.join_values(other.known), self.notes)
         }
     }
 
     fn narrow(&mut self, known: Type) {
+        self.literal_map &= matches!(known, Type::Map(_));
         self.ty = known.inferred();
         self.known = known;
+    }
+
+    fn same_value_facts(&self, other: &Self) -> bool {
+        self.known == other.known && self.literal_map == other.literal_map
     }
 }
 
@@ -552,7 +561,7 @@ fn collection_element(types: Vec<Type>) -> Box<Type> {
 
 fn nil_part(ty: &Type) -> Type {
     match ty {
-        Type::Nil | Type::Unknown | Type::SpecValue => Type::Nil,
+        Type::Nil | Type::Any | Type::Unknown | Type::SpecValue => Type::Nil,
         Type::Parameter(parameter) => parameter.upper.as_ref().map_or(Type::Nil, nil_part),
         Type::Union(xs) if xs.iter().any(|t| nil_part(t) == Type::Nil) => Type::Nil,
         _ => Type::Never,

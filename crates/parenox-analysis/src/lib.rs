@@ -16,10 +16,11 @@ pub use extern_diff::{
 };
 pub use project::{
     ArchiveDeclarations, CallHierarchyCalls, CallHierarchyItem, CallSignature, CallSignatures,
-    Definition, ExternExport, FdefSuggestion, InspectedReference, PrivacyDeclaration,
-    ProjectReport, SemanticSymbol, SemanticSymbolKind, Session, Source, SourceEdit, SourceExport,
-    SourceHover, SourceSymbol, SourceSymbolKind, SourceTestKind, SourceTestNode, VarDocumentation,
-    VarInfo, compare_externs, namespace_documentation, namespace_exports,
+    ContractProposals, Definition, ExternExport, FdefSuggestion, InspectedReference,
+    PrivacyDeclaration, ProjectReport, SemanticSymbol, SemanticSymbolKind, Session, Source,
+    SourceEdit, SourceExport, SourceHover, SourceSymbol, SourceSymbolKind, SourceTestKind,
+    SourceTestNode, SpecContractProposal, VarDocumentation, VarInfo, compare_externs,
+    namespace_documentation, namespace_exports,
 };
 
 #[derive(Clone, Debug, Serialize)]

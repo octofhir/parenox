@@ -53,6 +53,12 @@ pub(in crate::checker::model) fn source_conversion(
     {
         return Some(SpecConversion::Name);
     }
+    if let [function] = stages
+        && resolves(names, head, "clojure.spec.alpha", "conformer")
+        && let Some(conversion) = wrapper_conversion(names, function)
+    {
+        return Some(conversion);
+    }
     if resolves(names, head, "clojure.spec.alpha", "coll-of")
         && let [element, options @ ..] = stages
         && resolves(names, element, "clojure.core", "any?")
@@ -94,6 +100,92 @@ pub(in crate::checker::model) fn source_conversion(
     (resolves(names, predicate, "clojure.core", "integer?")
         && resolves(names, function, "clojure.core", "int"))
     .then_some(SpecConversion::CheckedInt32)
+}
+
+fn wrapper_conversion(names: &Names, function: &Form) -> Option<SpecConversion> {
+    let Kind::List(items) = &function.kind else {
+        if let Kind::AnonymousFunction(function) = &function.kind
+            && function.required == 1
+            && !function.variadic
+        {
+            return conditional_wrapper(names, &function.body, "%1");
+        }
+        return None;
+    };
+    let [head, params, body] = items.as_slice() else {
+        return None;
+    };
+    let Kind::Vector(params) = &params.kind else {
+        return None;
+    };
+    let [param] = params.as_slice() else {
+        return None;
+    };
+    let Kind::Symbol(param) = &param.kind else {
+        return None;
+    };
+    if !matches!(head.kind, Kind::Symbol(_))
+        || !resolves(names, head, "clojure.core", "fn")
+        || param == "&"
+        || param.contains('/')
+    {
+        return None;
+    }
+    if let Kind::List(items) = &body.kind {
+        return conditional_wrapper(names, items, param);
+    }
+    wrapper_key(names, body, param).map(|key| SpecConversion::WrapField(Arc::new(key)))
+}
+
+fn conditional_wrapper(names: &Names, body: &[Form], param: &str) -> Option<SpecConversion> {
+    let core = |form: &Form, name| {
+        form.symbol() != Some(param) && resolves(names, form, "clojure.core", name)
+    };
+    let test = |form: &Form, name| {
+        matches!(&form.kind, Kind::List(items)
+            if matches!(items.as_slice(), [predicate, input]
+                if core(predicate, name) && is_wrapper_input(input, param)))
+    };
+    match body {
+        [head, vector, result] if core(head, "when") && test(vector, "vector?") => {
+            let key = wrapper_key(names, result, param)?;
+            Some(SpecConversion::VectorWrapField(Arc::new(key)))
+        }
+        [head, vector, wrapped, map, identity, fallback, otherwise]
+            if core(head, "cond")
+                && test(vector, "vector?")
+                && test(map, "map?")
+                && is_wrapper_input(identity, param)
+                && matches!(&fallback.kind, Kind::Keyword(key) if key == ":else") =>
+        {
+            let key = wrapper_key(names, wrapped, param)?;
+            (key == wrapper_key(names, otherwise, param)?)
+                .then(|| SpecConversion::MapOrWrapField(Arc::new(key)))
+        }
+        _ => None,
+    }
+}
+
+fn wrapper_key(names: &Names, result: &Form, param: &str) -> Option<Type> {
+    let Kind::Map(fields) = &result.kind else {
+        return None;
+    };
+    let [key, value] = fields.as_slice() else {
+        return None;
+    };
+    if !is_wrapper_input(value, param) {
+        return None;
+    }
+    match &key.kind {
+        Kind::Keyword(key) if key.starts_with("::") => names.validation_key(key).map(Type::Key),
+        Kind::Keyword(key) => Some(Type::Key(key.clone())),
+        Kind::String(key) => Some(Type::Str(key.clone())),
+        _ => None,
+    }
+}
+
+fn is_wrapper_input(form: &Form, param: &str) -> bool {
+    matches!(&form.kind, Kind::Symbol(value) | Kind::AnonymousArgument(value) if value == param)
 }
 
 fn compared_string<'a>(names: &Names, predicate: &'a Form) -> Option<&'a str> {

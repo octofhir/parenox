@@ -143,7 +143,7 @@ impl SnapshotWriter {
 
     // The prefix opens nonempty forms. Account for their deepest child before
     // visiting it. Atom writes (including empty collections) fit at depth + 1.
-    fn nested(
+    pub(super) fn nested(
         &mut self,
         levels: usize,
         prefix: &str,
@@ -231,12 +231,13 @@ impl SnapshotWriter {
         })
     }
 
-    fn ty(&mut self, ty: &Type) -> Encoded {
+    pub(crate) fn ty(&mut self, ty: &Type) -> Encoded {
         if let Some((predicate, value)) = exact_integer(ty) {
             return self.integer_set(predicate, std::iter::once(value));
         }
         let atom = match ty {
             Type::Never => "#{}",
+            Type::Any => "t/any",
             Type::Nil => "clojure.core/nil?",
             Type::Boolean => "clojure.core/boolean?",
             Type::SpecValue => "clojure.core/any?",
@@ -430,7 +431,7 @@ impl SnapshotWriter {
         Ok(())
     }
 
-    fn key(&mut self, ty: &Type) -> Encoded {
+    pub(super) fn key(&mut self, ty: &Type) -> Encoded {
         match ty {
             Type::Key(key) => Ok(self.write_str(key)?),
             // JSON's emitted string escapes are also accepted by the EDN reader.
@@ -441,7 +442,7 @@ impl SnapshotWriter {
         }
     }
 
-    fn separator(&mut self, index: usize) -> fmt::Result {
+    pub(super) fn separator(&mut self, index: usize) -> fmt::Result {
         if index != 0 {
             self.write_char(' ')?;
         }

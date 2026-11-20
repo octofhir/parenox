@@ -39,6 +39,17 @@ pub(crate) enum Command {
     ValidateExterns(CheckOptions),
     /// Write checked public signatures and literal values as EDN to stdout.
     ExportExterns(CheckOptions),
+    /// Propose named spec contracts, with source and inferred types, as EDN.
+    ProposeContracts {
+        #[command(flatten)]
+        options: CheckOptions,
+        /// Select a fully qualified spec keyword. Repeat to select multiple specs.
+        #[arg(long = "spec", value_name = "KEYWORD")]
+        specs: Vec<String>,
+        /// Emit the standalone extern map for generated entries.
+        #[arg(long)]
+        externs_only: bool,
+    },
     /// Format Clojure and EDN files using parenox.edn.
     Fmt(FmtOptions),
     /// Compare the public extern promises of two releases.

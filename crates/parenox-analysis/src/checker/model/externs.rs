@@ -2,10 +2,12 @@
 mod diff;
 mod encode;
 mod literals;
+mod specs;
 mod validation;
 
 pub(crate) use encode::{EncodeError, SnapshotWriter};
 use literals::LiteralExtern;
+use specs::SpecExtern;
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::Arc;
@@ -17,6 +19,7 @@ use crate::{ContractKind, ContractOrigin, Diagnostic};
 
 pub(super) struct Externs {
     pub(super) namespaces: BTreeMap<String, Arc<ExternalDeclarations>>,
+    has_specs: bool,
 }
 
 pub(super) type ExternalDeclarations = BTreeMap<String, ExternalDeclaration>;
@@ -39,6 +42,7 @@ pub(super) enum ExternalDeclaration {
     Function(Contract),
     Macro(MacroScope),
     Literal(Arc<LiteralExtern>),
+    Spec(Arc<SpecExtern>),
 }
 
 impl ExternalDeclaration {
@@ -47,6 +51,7 @@ impl ExternalDeclaration {
             Self::Function(contract) => &contract.origin,
             Self::Macro(scope) => scope.origin(),
             Self::Literal(literal) => &literal.origin,
+            Self::Spec(spec) => &spec.origin,
         }
     }
 }
@@ -83,22 +88,25 @@ impl Model {
             model.error(
                 "PNX9001",
                 forms.first().map_or(Span::default(), |f| f.span),
-                "Externs must be one EDN map of qualified names to signatures, literal values or macro scopes",
+                "Externs must be one EDN map of qualified names to signatures, literal values, macro scopes or named specs",
             );
             return model;
         };
         let mut namespaces = BTreeMap::<String, ExternalDeclarations>::new();
         let mut spans = BTreeMap::new();
+        let mut has_specs = false;
         for [name, declaration] in entries.as_chunks::<2>().0 {
-            let Some(name_string) = name.symbol().filter(|symbol| {
-                symbol
-                    .split_once('/')
-                    .is_some_and(|(namespace, local)| !namespace.is_empty() && !local.is_empty())
-            }) else {
+            let is_spec = name.keyword().is_some();
+            let entry = name.keyword().or_else(|| name.symbol()).and_then(|name| {
+                let qualified = name.strip_prefix(':').unwrap_or(name);
+                let (namespace, local) = qualified.split_once('/')?;
+                (!namespace.is_empty() && !local.is_empty()).then_some((name, namespace))
+            });
+            let Some((name_string, namespace)) = entry else {
                 model.error(
                     "PNX9001",
                     name.span,
-                    "Extern names must be qualified symbols",
+                    "Extern names must be qualified symbols or qualified spec keywords",
                 );
                 continue;
             };
@@ -112,7 +120,6 @@ impl Model {
                 model.diagnostics.push(diagnostic);
                 continue;
             }
-            let (namespace, _) = name_string.split_once('/').unwrap();
             let target = namespaces
                 .entry(namespace.into())
                 .or_default()
@@ -125,7 +132,9 @@ impl Model {
                 );
                 continue;
             };
-            let parsed = if let Some(entries) = declaration.map() {
+            let parsed = if is_spec {
+                model.read_extern_spec(name_string, declaration, path)
+            } else if let Some(entries) = declaration.map() {
                 match entries {
                     [kind, value] if kind.keyword() == Some(":value") => {
                         model.read_extern_literal(value, name_string, path, source, globals)
@@ -164,6 +173,7 @@ impl Model {
                     })
             };
             if let Some(parsed) = parsed {
+                has_specs |= matches!(parsed, ExternalDeclaration::Spec(_));
                 target.insert(parsed);
                 spans.insert(name_string.into(), name.span);
             }
@@ -175,6 +185,7 @@ impl Model {
                     .into_iter()
                     .map(|(name, functions)| (name, Arc::new(functions)))
                     .collect(),
+                has_specs,
             }),
             spans,
         }));
@@ -237,7 +248,10 @@ impl ExternCache {
                 (!subset.is_empty()).then(|| (name.clone(), Arc::new(subset)))
             })
             .collect();
-        globals.externs = Some(Arc::new(Externs { namespaces }));
+        globals.externs = Some(Arc::new(Externs {
+            namespaces,
+            has_specs: table.has_specs,
+        }));
     }
 
     pub fn diagnostics(&self, path: &str) -> &[Diagnostic] {
@@ -254,7 +268,7 @@ fn merge(
     // Report both sides of a collision regardless of the argument order.
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let mut by_namespace = BTreeMap::<_, Vec<_>>::new();
-    for file in files {
+    for file in &files {
         for (name, table) in &file.table.namespaces {
             by_namespace
                 .entry(name)
@@ -280,7 +294,10 @@ fn merge(
             Some((name.clone(), table))
         })
         .collect();
-    Externs { namespaces }
+    Externs {
+        namespaces,
+        has_specs: files.iter().any(|file| file.table.has_specs),
+    }
 }
 
 fn merge_namespace(

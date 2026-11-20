@@ -93,7 +93,7 @@ impl Checker<'_> {
                     self.reduce_kv_items(ty, Items::Indexed, call)
                 }
             }
-            Type::Unknown => {
+            Type::Any | Type::Unknown => {
                 self.may_throw();
                 self.call_prepared(call.callable, Vec::new(), call.span, call.env, false);
                 Value::new(Type::Unknown)

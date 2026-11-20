@@ -171,6 +171,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             return Type::Parameter(parameter.clone());
         }
         match &form.without_metadata().kind {
+            Kind::Symbol(s) if self.literal_shapes && s == "t/any" => Type::Any,
             Kind::Symbol(s) => predicate_type(self.names, s).unwrap_or_else(|| {
                 if self.names.spec_core_shadows.contains(s) {
                     self.diagnostics.push(Diagnostic::analysis_gap(
@@ -233,7 +234,12 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                     Some("clojure.spec.alpha/with-gen") if xs.len() == 3 => self.parse(&xs[1]),
                     Some("clojure.spec.alpha/and") => self.conjunction(form, &xs[1..]),
                     Some("clojure.spec.alpha/conformer") if matches!(xs.len(), 2 | 3) => {
-                        self.unchecked_conformer(form)
+                        match source_conversion(self.names, form) {
+                            Some(conversion) if conversion.is_field_conformer() => {
+                                conversion.success_input()
+                            }
+                            _ => self.unchecked_conformer(form),
+                        }
                     }
                     Some("clojure.spec.alpha/or") if xs.len() >= 3 && xs.len() % 2 == 1 => {
                         let mut types = Vec::new();

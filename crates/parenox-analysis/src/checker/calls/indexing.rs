@@ -64,6 +64,10 @@ impl Checker<'_> {
     ) -> Type {
         match key.0 {
             Type::Never | Type::Unknown => key.0.clone(),
+            Type::Any => {
+                self.may_throw();
+                Type::Unknown
+            }
             Type::Union(parts) => Type::union(
                 parts
                     .iter()
@@ -143,6 +147,10 @@ impl Checker<'_> {
         match ty {
             Type::Nil => return fallback.cloned().unwrap_or(Type::Nil),
             Type::Never | Type::Unknown => return ty.clone(),
+            Type::Any => {
+                self.may_throw();
+                return Type::Unknown;
+            }
             Type::Union(parts) => {
                 return Type::union(
                     parts

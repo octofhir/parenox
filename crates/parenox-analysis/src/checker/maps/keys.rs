@@ -134,7 +134,7 @@ impl Checker<'_> {
     fn find_type(&mut self, target: &Type, key: &(Value, Span), span: Span) -> Type {
         match target {
             Type::Nil | Type::Never => target.clone(),
-            Type::Unknown => {
+            Type::Any | Type::Unknown => {
                 self.may_throw();
                 Type::Unknown
             }

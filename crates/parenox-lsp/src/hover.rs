@@ -1,8 +1,29 @@
 //! Render checked types, arglists and Clojure docstrings for editor hover.
-use parenox_analysis::Session;
+use parenox_analysis::{Session, SpecContractProposal};
 use serde_json::{Value, json};
 
 use crate::{clojuredocs::ClojureDocs, completion::DependencyCompletions, text::Range};
+
+pub fn spec(proposal: &SpecContractProposal, markdown: bool, range: Option<Range>) -> Value {
+    let mut checked = Vec::new();
+    if let Some(input) = &proposal.input {
+        checked.push(format!("Input type {input}"));
+    }
+    if let Some(result) = &proposal.result {
+        checked.push(format!("Result type {result}"));
+    }
+    checked.extend(
+        proposal
+            .unknown
+            .iter()
+            .map(|part| format!("{part} is unknown")),
+    );
+    checked.push(format!(
+        "Inferred from s/def in {} at line {}",
+        proposal.path, proposal.span.start.line
+    ));
+    render(&proposal.name, &[], &checked, None, markdown, range, None)
+}
 
 pub fn dependency(
     session: &Session,

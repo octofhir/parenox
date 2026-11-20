@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{CommandFactory, Parser};
-use parenox::{Diagnostic, Report, Session, Source, output, reader};
+use parenox::{Diagnostic, ProjectReport, Report, Session, Source, output, reader};
 use serde_json::json;
 
 use cli::{CheckOptions, Cli, Color, Command, DefinitionOptions, Format};
@@ -53,6 +53,11 @@ fn run() -> Result<u8, String> {
         Some(Command::Definition(options)) => definition(options),
         Some(Command::ValidateExterns(options)) => check(options, CheckMode::ValidateExterns),
         Some(Command::ExportExterns(options)) => export_externs(options),
+        Some(Command::ProposeContracts {
+            options,
+            specs,
+            externs_only,
+        }) => propose_contracts(options, &specs, externs_only),
         Some(Command::Fmt(options)) => format_cli::run(options),
         Some(Command::DiffExterns(options)) => extern_diff_cli::run(options),
         Some(Command::Serve) => serve::run(),
@@ -245,37 +250,59 @@ fn check(options: CheckOptions, mode: CheckMode) -> Result<u8, String> {
 fn export_externs(options: CheckOptions) -> Result<u8, String> {
     let project = DiskProject::read(options.resolved_config()?)?;
     project.require_source_files()?;
-    let sources: Vec<_> = project
-        .files
-        .iter()
-        .map(|(path, source)| Source { path, source })
-        .collect();
-    let externs: Vec<_> = project
-        .externs
-        .iter()
-        .chain(&project.dependency_externs)
-        .map(FileSnapshot::as_source)
-        .collect();
+    let sources = project.sources();
+    let externs = project.all_externs();
     let export = Session::default().export_externs(&sources, &externs);
     if let Some(edn) = export.edn {
         print!("{edn}");
         return Ok(0);
     }
 
+    print_export_diagnostics(&options, &export.report, &sources, &externs)?;
+    if options.format() != Format::Json {
+        eprintln!("No externs exported: the check did not pass completely.");
+    }
+    Ok(1)
+}
+
+fn propose_contracts(
+    options: CheckOptions,
+    specs: &[String],
+    externs_only: bool,
+) -> Result<u8, String> {
+    let project = DiskProject::read(options.resolved_config()?)?;
+    project.require_source_files()?;
+    let sources = project.sources();
+    let externs = project.all_externs();
+    let result = Session::default().propose_contracts(&sources, &externs, specs)?;
+    let edn = if externs_only {
+        result.externs
+    } else {
+        result.edn
+    };
+    if let Some(edn) = edn {
+        print!("{edn}");
+        return Ok(0);
+    }
+    print_export_diagnostics(&options, &result.report, &sources, &externs)?;
+    Ok(1)
+}
+
+fn print_export_diagnostics(
+    options: &CheckOptions,
+    report: &ProjectReport,
+    sources: &[Source<'_>],
+    externs: &[Source<'_>],
+) -> Result<(), String> {
     let format = options.format();
     let color = format == Format::Pretty && options.color.enabled();
     match format {
         Format::Json => eprintln!(
             "{}",
-            serde_json::to_string(&export.report).map_err(|err| err.to_string())?
+            serde_json::to_string(&report).map_err(|err| err.to_string())?
         ),
         Format::Plain | Format::Pretty => {
-            for (file, source) in export
-                .report
-                .files
-                .iter()
-                .zip(sources.iter().chain(&externs))
-            {
+            for (file, source) in report.files.iter().zip(sources.iter().chain(externs)) {
                 match format {
                     Format::Pretty => {
                         eprint!("{}", output::file_diagnostics(file, source.source, color))
@@ -284,10 +311,9 @@ fn export_externs(options: CheckOptions) -> Result<u8, String> {
                     Format::Json => unreachable!(),
                 }
             }
-            eprintln!("No externs exported: the check did not pass completely.");
         }
     }
-    Ok(1)
+    Ok(())
 }
 
 impl Color {

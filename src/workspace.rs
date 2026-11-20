@@ -56,6 +56,21 @@ impl DiskProject {
         }
         Ok(())
     }
+
+    pub fn sources(&self) -> Vec<Source<'_>> {
+        self.files
+            .iter()
+            .map(|(path, source)| Source { path, source })
+            .collect()
+    }
+
+    pub fn all_externs(&self) -> Vec<Source<'_>> {
+        self.externs
+            .iter()
+            .chain(&self.dependency_externs)
+            .map(FileSnapshot::as_source)
+            .collect()
+    }
 }
 
 fn read_externs(paths: &[String]) -> Result<Vec<FileSnapshot>, String> {

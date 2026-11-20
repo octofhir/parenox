@@ -730,9 +730,12 @@ impl Workspace {
     ) -> Option<Value> {
         let (path, offset) = self.query_offset(params)?;
         let session = self.session_for(&path)?;
-        let range = session
-            .hover_symbol_span(&path, offset)
-            .and_then(|span| Lines::new(&self.documents.get(&path)?.source).range(span));
+        let source = &self.documents.get(&path)?.source;
+        let range = |span| Lines::new(source).range(span);
+        if let Some((proposal, span)) = session.hover_spec_at(&path, offset) {
+            return Some(hover::spec(&proposal, markdown, range(span)));
+        }
+        let range = session.hover_symbol_span(&path, offset).and_then(range);
         let Some(source) = session.hover_at(&path, offset) else {
             return hover::dependency(
                 session,

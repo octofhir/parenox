@@ -2,11 +2,12 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use super::SpecOperation;
+use super::{MapWrap, SpecOperation, map_wrap};
 use crate::checker::{
     Checker, Env, MAX_TUPLE_ITEMS, Value,
     calls::literal_equality,
     model::{MapFieldConversion, SpecConversion, StructuredConversion},
+    nil_part,
 };
 use crate::reader::{Form, Kind};
 use crate::types::{ExtraFields, Field, MapSlot, MapType, SPEC_INVALID, Type};
@@ -171,9 +172,11 @@ impl Checker<'_> {
         match conversion {
             StructuredConversion::Map(fields) => match input {
                 Type::Map(map) => self.conform_map(map, fields),
-                Type::Unknown | Type::SpecValue | Type::SpecTruthy | Type::SpecCollection(_) => {
-                    Err(MAP_GAP)
-                }
+                Type::Any
+                | Type::Unknown
+                | Type::SpecValue
+                | Type::SpecTruthy
+                | Type::SpecCollection(_) => Err(MAP_GAP),
                 _ => Ok(SpecOperation::Conform.invalid()),
             },
             StructuredConversion::Collection(element) => self.conform_collection(input, element),
@@ -202,6 +205,7 @@ impl Checker<'_> {
                 None => Err(COLLECTION_GAP),
             },
             Type::Unknown
+            | Type::Any
             | Type::SpecValue
             | Type::SpecTruthy
             | Type::SpecCollection(_)
@@ -263,6 +267,7 @@ impl Checker<'_> {
             }
             Type::Map(_)
             | Type::Unknown
+            | Type::Any
             | Type::SpecValue
             | Type::SpecTruthy
             | Type::SpecCollection(_) => {
@@ -463,7 +468,17 @@ impl Checker<'_> {
             {
                 Identity::Changed
             }
+            SpecConversion::VectorWrapField(_) if *input == Type::Nil => Identity::Same,
+            SpecConversion::VectorWrapField(_) if nil_part(input) == Type::Never => {
+                Identity::Changed
+            }
+            SpecConversion::MapOrWrapField(_) => match map_wrap(input) {
+                MapWrap::Wrap => Identity::Changed,
+                MapWrap::Keep => Identity::Same,
+                MapWrap::Either => Identity::Unknown,
+            },
             SpecConversion::Enum { .. }
+            | SpecConversion::WrapField(_)
             | SpecConversion::TaggedOr(_)
             | SpecConversion::ProjectedCollection(_) => Identity::Changed,
             SpecConversion::String

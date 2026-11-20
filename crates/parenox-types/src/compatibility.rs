@@ -87,8 +87,10 @@ impl Type {
     pub fn compatibility(&self, expected: &Type) -> Compatibility {
         use Compatibility::{Mismatch, Proven, Unproven};
         match (self, expected) {
-            (Type::Never, _) => Proven,
+            (Type::Never, _) | (_, Type::Any) => Proven,
             (Type::Unknown, _) | (_, Type::Unknown) => Unproven,
+            (Type::Any, Type::Never) => Mismatch,
+            (Type::Any, _) => Unproven,
             (Type::Union(parts), expected) => {
                 Compatibility::all(parts.iter().map(|actual| actual.compatibility(expected)))
             }

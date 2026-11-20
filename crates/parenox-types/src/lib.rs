@@ -128,6 +128,8 @@ impl fmt::Display for Signature {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type {
     Unknown,
+    /// Every Clojure value, including the spec-invalid keyword.
+    Any,
     /// A value other than the reserved spec-invalid keyword.
     SpecValue,
     /// A truthy value that can be returned by a spec predicate.
@@ -276,6 +278,9 @@ impl Type {
         if set.len() <= 1 {
             return set.pop_first().unwrap_or(Type::Never);
         }
+        if set.contains(&Type::Any) {
+            return Type::Any;
+        }
         if set.contains(&Type::Number) {
             set.retain(|t| !matches!(t, Type::Integral(_) | Type::Integer(_) | Type::NonIntegral));
         } else {
@@ -367,6 +372,11 @@ impl Type {
     pub fn without_nil(&self) -> Type {
         match self {
             Type::Nil => Type::Never,
+            Type::Any => Type::union([
+                Type::Key(SPEC_INVALID.into()),
+                Type::Bool(false),
+                Type::SpecTruthy,
+            ]),
             Type::SpecValue => Type::union([Type::Bool(false), Type::SpecTruthy]),
             Type::Union(xs) => Type::union(xs.iter().map(Type::without_nil)),
             t => t.clone(),
@@ -376,6 +386,7 @@ impl Type {
     pub fn truthy(&self) -> Type {
         match self {
             Type::Nil | Type::Bool(false) => Type::Never,
+            Type::Any => Type::union([Type::Key(SPEC_INVALID.into()), Type::SpecTruthy]),
             Type::SpecValue => Type::SpecTruthy,
             Type::Boolean => Type::Bool(true),
             Type::Union(xs) => Type::union(xs.iter().map(Type::truthy)),
@@ -389,7 +400,7 @@ impl Type {
 
     pub fn spec_value(&self) -> Option<Type> {
         match self {
-            Type::Unknown => Some(Type::SpecValue),
+            Type::Any | Type::Unknown => Some(Type::SpecValue),
             Type::Keyword => Some(Type::SpecKeyword),
             Type::Parameter(_) => None,
             Type::Key(key) if key == SPEC_INVALID => Some(Type::Never),
@@ -407,7 +418,9 @@ impl Type {
             Type::Nil => Type::Nil,
             Type::Boolean | Type::Bool(false) => Type::Bool(false),
             Type::Union(xs) => Type::union(xs.iter().map(Type::falsey)),
-            Type::Unknown | Type::SpecValue => Type::union([Type::Nil, Type::Bool(false)]),
+            Type::Any | Type::Unknown | Type::SpecValue => {
+                Type::union([Type::Nil, Type::Bool(false)])
+            }
             // Without a bound we cannot exclude either branch. Keep the
             // identity of the value when checking a polymorphic body.
             Type::Parameter(parameter)
@@ -469,6 +482,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Unknown => write!(f, "Unknown"),
+            Type::Any => write!(f, "Any"),
             Type::SpecValue => write!(f, "Spec value"),
             Type::SpecTruthy => write!(f, "Truthy spec value"),
             Type::SpecCollection(element) if **element == Type::SpecValue => {

@@ -5,7 +5,8 @@ mod conform;
 use crate::Diagnostic;
 use crate::checker::{
     Checker, Env, Value,
-    calls::{call_returns, iteration_may_throw},
+    calls::{call_returns, iteration_may_throw, vector_predicate},
+    maps::{map_predicate, narrow_map_predicate},
     model::{SpecConversion, SpecProvider},
 };
 use crate::reader::{Form, Span};
@@ -20,6 +21,20 @@ const SPEC_LOAD_GAP: &str = "Cannot prove the named spec and its registrations a
 enum SpecOperation {
     Valid,
     Conform,
+}
+
+enum MapWrap {
+    Wrap,
+    Keep,
+    Either,
+}
+
+fn map_wrap(input: &Type) -> MapWrap {
+    match (vector_predicate(input), map_predicate(input)) {
+        (Type::Bool(true), _) | (_, Type::Bool(false)) => MapWrap::Wrap,
+        (Type::Bool(false), Type::Bool(true)) => MapWrap::Keep,
+        _ => MapWrap::Either,
+    }
 }
 
 impl SpecOperation {
@@ -118,7 +133,15 @@ impl Checker<'_> {
                     SpecConversion::String | SpecConversion::Structured(_)
                 )
         }) {
-            let result = self.convert_spec(&values[1].0.known, &conversion, op);
+            let input = &values[1].0;
+            if matches!(op, SpecOperation::Conform) && input.literal_map {
+                match conversion {
+                    SpecConversion::MapOrWrapField(_) => return Some(input.clone()),
+                    SpecConversion::VectorWrapField(_) => return Some(Value::new(Type::Nil)),
+                    _ => {}
+                }
+            }
+            let result = self.convert_spec(&input.known, &conversion, op);
             return Some(match result {
                 Ok(ty) => Value::new(ty),
                 Err(reason) => self.unchecked_form(spec.span, reason),
@@ -162,7 +185,8 @@ impl Checker<'_> {
                 Ok(Type::union(outcomes))
             }
             Type::Parameter(parameter)
-                if !matches!(conversion, SpecConversion::Identity | SpecConversion::Any) =>
+                if !conversion.is_field_conformer()
+                    && !matches!(conversion, SpecConversion::Identity | SpecConversion::Any) =>
             {
                 self.convert_spec(
                     parameter.upper.as_ref().unwrap_or(&Type::Unknown),
@@ -172,6 +196,34 @@ impl Checker<'_> {
             }
             ty => Ok(match conversion {
                 SpecConversion::CheckedInt32 => self.convert_int32(ty, op),
+                SpecConversion::WrapField(key) => match op {
+                    SpecOperation::Valid => Type::Bool(true),
+                    SpecOperation::Conform => SpecConversion::wrap_field(key, ty.clone()),
+                },
+                SpecConversion::VectorWrapField(key) => match op {
+                    SpecOperation::Valid => Type::Bool(true),
+                    SpecOperation::Conform => match vector_predicate(ty) {
+                        Type::Bool(true) => SpecConversion::wrap_field(key, ty.clone()),
+                        Type::Bool(false) => Type::Nil,
+                        _ => SpecConversion::wrap_field(key, Type::Vector(Box::new(Type::Any)))
+                            .nilable(),
+                    },
+                },
+                SpecConversion::MapOrWrapField(key) => match op {
+                    SpecOperation::Valid => Type::Bool(true),
+                    SpecOperation::Conform => match map_wrap(ty) {
+                        MapWrap::Wrap => SpecConversion::wrap_field(key, ty.clone()),
+                        MapWrap::Keep => ty.clone(),
+                        MapWrap::Either => {
+                            let map = if map_predicate(ty) == Type::Bool(true) {
+                                ty.clone()
+                            } else {
+                                narrow_map_predicate(&Type::Any, true)
+                            };
+                            Type::union([map, SpecConversion::wrap_field(key, ty.clone())])
+                        }
+                    },
+                },
                 SpecConversion::Name => {
                     let result = self.name_result(ty);
                     if result == Type::Never {
@@ -344,6 +396,7 @@ fn convert_enum(input: &Type, entries: &[(Type, Type)], op: SpecOperation) -> Ty
 fn usable(ty: &Type) -> bool {
     match ty {
         Type::Never
+        | Type::Any
         | Type::SpecValue
         | Type::SpecTruthy
         | Type::Nil

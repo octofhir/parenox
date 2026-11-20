@@ -42,6 +42,10 @@ pilot-check format="pretty": build
     @test -f {{quote(pilot_deps)}} || { echo "Run just pilot-setup first." >&2; exit 2; }
     @./target/release/parenox check --deps {{quote(pilot_deps)}} --alias test --allow-incomplete --format {{quote(format)}}
 
+# Check generated contracts from the pinned lsp4clj source in an isolated consumer.
+pilot-contract-smoke coercer:
+    PARENOX_LSP4CLJ_COERCER={{quote(coercer)}} cargo test --locked --release --test spec_contract_proposals pinned_lsp4clj_proposals -- --ignored --nocapture
+
 # Verify formatting is lossless and idempotent on the local pilot without writing to it.
 pilot-format-smoke project="playground/clojure-lsp":
     PARENOX_FORMAT_PILOT={{quote(project)}} cargo test --locked --release --test formatter pilot_formatting_is_lossless_and_idempotent -- --ignored --nocapture
