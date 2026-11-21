@@ -191,6 +191,7 @@ impl<'model> Checker<'model> {
                     ret: result.known.clone(),
                     rest: None,
                     parameters: None,
+                    nil_preserving: false,
                 },
                 origin: None,
                 explicit_offset: None,

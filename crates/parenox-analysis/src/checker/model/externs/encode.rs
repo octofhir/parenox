@@ -175,6 +175,13 @@ impl SnapshotWriter {
     }
 
     fn signature(&mut self, signature: &Signature) -> Encoded {
+        if signature.nil_preserving {
+            return self.nested(2, "(t/nil-preserving [", "])", |out| {
+                out.ty(&signature.args[0].without_nil())?;
+                out.write_str(" :-> ")?;
+                out.ty(&signature.ret.without_nil())
+            });
+        }
         let Some(parameters) = &signature.parameters else {
             return self.signature_vector(signature);
         };

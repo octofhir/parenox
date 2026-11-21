@@ -19,19 +19,26 @@ fn output_evidence<'a>(
     let selected = callback
         .signature_at(expected.arity())
         .ok_or(Compatibility::Unproven)?;
-    if selected.parameters.is_some() {
-        // Only a generic named callback needs its input context substituted.
+    if selected.parameters.is_some() || selected.nil_preserving {
         let context = expected.with_type_arguments(parameters, evidence, None);
-        let selected = selected.specialize_callback(&context)?;
-        witness
-            .evidence(&selected.ret)
-            .map(|ty| Cow::Owned(ty.into_owned()))
-            .ok_or(Compatibility::Unproven)
-    } else {
-        witness
-            .evidence(&selected.ret)
-            .ok_or(Compatibility::Unproven)
+        let specialized = if selected.parameters.is_some() {
+            Some(selected.specialize_callback(&context)?)
+        } else {
+            context
+                .args
+                .first()
+                .and_then(|input| selected.specialize_nil_result(input))
+        };
+        if let Some(specialized) = specialized {
+            return witness
+                .evidence(&specialized.ret)
+                .map(|ty| Cow::Owned(ty.into_owned()))
+                .ok_or(Compatibility::Unproven);
+        }
     }
+    witness
+        .evidence(&selected.ret)
+        .ok_or(Compatibility::Unproven)
 }
 
 impl Checker<'_> {

@@ -1,6 +1,91 @@
 use super::*;
 
 #[test]
+fn a_nil_preserving_extern_tracks_guard_edits_in_hover_and_signatures() {
+    let fixture = Fixture::new("nil-preserving extern");
+    let path = fixture.0.join("src/fragment.clj");
+    let document = uri(&path);
+    fs::write(fixture.0.join("parenox.edn"), r#"{:externs ["uri.edn"]}"#).unwrap();
+    fs::write(
+        fixture.0.join("uri.edn"),
+        "{vendor.uri/decode (t/nil-preserving [string? :-> string?])}",
+    )
+    .unwrap();
+    let source = r#"(ns fragment (:require [clojure.spec.alpha :as s] [vendor.uri :as uri]))
+(defn encode {:t/sig '[string? :-> string?]} [text] text)
+(defn normalize {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]} [input]
+  (when-not (nil? input)
+    (let [decoded (uri/decode input)] (encode decoded))))"#;
+    fs::write(&path, source).unwrap();
+    let broken = source.replace("when-not", "when");
+    let position = |token| {
+        let row = source.lines().nth(4).unwrap();
+        let byte = row.rfind(token).unwrap();
+        row[..byte].encode_utf16().count()
+    };
+    let query = |id, method, token| {
+        json!({"jsonrpc":"2.0","id":id,"method":method,"params":{
+            "textDocument":{"uri":document},"position":{"line":4,"character":position(token)}
+        }})
+    };
+    let change = |version, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let responses = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"languageId":"clojure","version":1,"text":source
+        }}}),
+        query(2, "textDocument/hover", "decoded"),
+        query(3, "textDocument/signatureHelp", "input"),
+        change(2, &broken),
+        query(4, "textDocument/hover", "decoded"),
+        query(5, "textDocument/signatureHelp", "input"),
+        change(3, source),
+        query(6, "textDocument/hover", "decoded"),
+        query(7, "textDocument/signatureHelp", "input"),
+        json!({"jsonrpc":"2.0","id":8,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    for (hover, signature, ty) in [(2, 3, "String"), (4, 5, "Nil"), (6, 7, "String")] {
+        let result = |id| &responses.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+        assert_eq!(result(hover)["contents"]["value"], format!("decoded\n{ty}"));
+        assert_eq!(
+            result(signature)["signatures"][0]["label"],
+            format!("(vendor.uri/decode [{ty}]) -> {ty}")
+        );
+        assert_eq!(result(signature)["activeParameter"], 0);
+    }
+    for (version, count) in [(1, 0), (2, 1), (3, 0)] {
+        let published = responses
+            .iter()
+            .find(|reply| {
+                reply["method"] == "textDocument/publishDiagnostics"
+                    && reply["params"]["version"] == version
+            })
+            .unwrap();
+        let diagnostics = published["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), count, "{published}");
+        if let [finding] = diagnostics.as_slice() {
+            let start = position("decoded");
+            assert_eq!(finding["code"], "PNX2322");
+            assert_eq!(
+                finding["range"],
+                json!({"start":{"line":4,"character":start},"end":{"line":4,"character":start+7}})
+            );
+            assert!(
+                finding["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("expected String, got Nil")
+            );
+        }
+    }
+}
+
+#[test]
 fn hover_narrows_the_original_seed_in_later_some_thread_steps() {
     let fixture = Fixture::new("thread seed hover");
     let path = fixture.0.join("src/thread_get.clj");

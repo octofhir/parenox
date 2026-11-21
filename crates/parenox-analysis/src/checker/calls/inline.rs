@@ -494,10 +494,15 @@ impl<'model> Checker<'model> {
             });
         }
         let ty = match mode {
-            CallbackReturn::Check if result.known.subtype_of(&signature.ret) => expected.clone(),
+            CallbackReturn::Check
+                if !signature.nil_preserving && result.known.subtype_of(&signature.ret) =>
+            {
+                expected.clone()
+            }
             CallbackReturn::Infer => Type::Function(
                 [Signature {
                     ret: result.known,
+                    nil_preserving: false,
                     ..signature.clone()
                 }]
                 .into(),

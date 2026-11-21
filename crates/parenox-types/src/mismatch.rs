@@ -60,6 +60,7 @@ pub enum ExternMismatchReason {
     CallbackArity,
     GenericUnproven,
     GenericSpecialization,
+    NilPreservationUnproven,
     Unproven {
         expected: String,
         actual: String,
@@ -135,6 +136,9 @@ impl fmt::Display for ExternMismatch {
             }
             Reason::GenericSpecialization => {
                 f.write_str("generic signature cannot be specialized to the promised types")
+            }
+            Reason::NilPreservationUnproven => {
+                f.write_str("cannot prove that the result is Nil exactly when the argument is Nil")
             }
             Reason::Unproven { expected, actual } => {
                 write!(f, "cannot prove that {actual} fits {expected}")

@@ -358,6 +358,39 @@ impl Model {
         Some(signatures.into_values().collect())
     }
 
+    pub(super) fn parse_extern_signatures(
+        &mut self,
+        form: &Form,
+        source: &str,
+        owner: &str,
+        globals: &Globals,
+    ) -> Option<Vec<Signature>> {
+        let Kind::List(items) = &form.unquoted().without_metadata().kind else {
+            return self.parse_signatures(form, source, owner, globals);
+        };
+        if items.first().and_then(Form::symbol) != Some("t/nil-preserving") {
+            return self.parse_signatures(form, source, owner, globals);
+        }
+        let [_, signature] = items.as_slice() else {
+            self.error(
+                "PNX9001",
+                form.span,
+                "Expected (t/nil-preserving [Arg :-> Result])",
+            );
+            return None;
+        };
+        let signature = self.parse_signature(signature, source, None, globals)?;
+        let Some(signature) = signature.into_nil_preserving() else {
+            self.error(
+                "PNX9001",
+                form.span,
+                "t/nil-preserving needs one fixed argument and a result type, both excluding Nil",
+            );
+            return None;
+        };
+        Some(vec![signature])
+    }
+
     fn parse_generic_signature(
         &mut self,
         forms: &[Form],
@@ -589,6 +622,7 @@ impl Model {
             rest,
             ret,
             parameters,
+            nil_preserving: false,
         })
     }
 }

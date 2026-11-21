@@ -452,6 +452,7 @@ impl Signature {
             rest: self.rest.as_ref().map(|ty| ty.substitute(replacements)),
             ret: self.ret.substitute(replacements),
             parameters: None,
+            nil_preserving: self.nil_preserving,
         }
     }
 }

@@ -25,6 +25,27 @@ fn source_can_accept_more_inputs_return_a_narrower_type_and_offer_extra_arities(
 }
 
 #[test]
+fn a_nullable_source_signature_does_not_prove_nil_preservation() {
+    let report = validate(
+        "(ns api (:require [clojure.spec.alpha :as s]))
+         (defn label {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]} [_] nil)",
+        "{api/label (t/nil-preserving [string? :-> string?])}",
+    );
+    assert!(report.files[0].ok && report.files[0].complete);
+    let [finding] = report.files[1].diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX9011");
+    assert!(
+        finding
+            .notes
+            .iter()
+            .any(|note| note.contains("result is Nil exactly when the argument is Nil")),
+        "{finding:#?}"
+    );
+}
+
+#[test]
 fn an_extern_that_promises_a_wider_input_is_reported_at_the_edn_declaration() {
     let source = Source {
         path: "api.clj",

@@ -152,6 +152,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                     rest: None,
                     ret: ret.clone(),
                     parameters: None,
+                    nil_preserving: false,
                 })
                 .collect(),
         )
@@ -172,6 +173,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             rest,
             ret: self.parse(ret),
             parameters: None,
+            nil_preserving: false,
         })
     }
 

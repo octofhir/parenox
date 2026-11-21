@@ -43,12 +43,25 @@ pub(super) fn signature_failure(
     {
         return type_failure(e, a, outcome).at(Step::CallbackRest);
     }
-    debug_assert_eq!(actual.ret.compatibility(&expected.ret), outcome);
-    type_failure(&actual.ret, &expected.ret, outcome).at(if is_callback {
+    let specialized = expected
+        .args
+        .first()
+        .and_then(|input| actual.specialize_nil_result(input));
+    let result = specialized.as_ref().map_or(&actual.ret, |call| &call.ret);
+    let step = if is_callback {
         Step::CallbackResult
     } else {
         Step::Result
-    })
+    };
+    if outcome == Compatibility::Unproven
+        && expected.nil_preserving
+        && !actual.nil_preserving
+        && result.compatibility(&expected.ret) == Compatibility::Proven
+    {
+        return ExternMismatch::new(Reason::NilPreservationUnproven).at(step);
+    }
+    debug_assert_eq!(result.compatibility(&expected.ret), outcome);
+    type_failure(result, &expected.ret, outcome).at(step)
 }
 
 pub(super) fn type_failure(

@@ -272,6 +272,11 @@ fn signature(actual: &Signature, expected: &Signature) -> Compatibility {
             Compatibility::Unproven
         };
     }
+    let specialized = expected
+        .args
+        .first()
+        .and_then(|input| actual.specialize_nil_result(input));
+    let result = specialized.as_ref().map_or(&actual.ret, |call| &call.ret);
     Compatibility::from(actual.arity() == expected.arity())
         .and(|| positions(&expected.args, &actual.args))
         .and(|| {
@@ -281,7 +286,14 @@ fn signature(actual: &Signature, expected: &Signature) -> Compatibility {
                 .zip(actual.rest.as_ref())
                 .map_or(Compatibility::Proven, |(e, a)| e.compatibility(a))
         })
-        .and(|| actual.ret.compatibility(&expected.ret))
+        .and(|| result.compatibility(&expected.ret))
+        .and(|| {
+            if expected.nil_preserving && !actual.nil_preserving {
+                Compatibility::Unproven
+            } else {
+                Compatibility::Proven
+            }
+        })
 }
 
 /// Check the clause actually selected at every arity promised by an extern.
@@ -347,6 +359,7 @@ fn active_clause(signatures: &[Signature], count: usize) -> Option<Cow<'_, Signa
                 rest: None,
                 ret: signature.ret.clone(),
                 parameters: None,
+                nil_preserving: false,
             }))
         }
     }

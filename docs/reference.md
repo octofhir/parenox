@@ -311,6 +311,7 @@ implementations:
 
 ```edn
 {vendor.store/find [string? :-> (clojure.spec.alpha/nilable map?)]
+ vendor.uri/decode (t/nil-preserving [string? :-> string?])
  vendor.store/default-limit {:value 50}
  vendor.bindings/with-bindings {:macro :let-like}}
 ```
@@ -323,6 +324,13 @@ tail positions; such calls still report `PNX9009`.
 Known source macros with unknown scope report `PNX9001` at the call.
 Their arguments are treated as syntax until a supported scope describes
 how the macro binds them.
+
+Use `(t/nil-preserving [Arg :-> Result])` in an extern for a unary function
+whose result is Nil exactly when its input is Nil. Write the non-Nil input
+and result types in the vector. A call with a proven non-Nil argument returns
+the written result type. A call with Nil returns Nil. A call whose argument
+can be either retains the nullable signature. Extern validation requires
+evidence of the relation between the input and result.
 
 ### Validating library externs
 

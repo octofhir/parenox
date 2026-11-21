@@ -82,6 +82,8 @@ pub struct Signature {
     pub rest: Option<Type>,
     pub ret: Type,
     pub parameters: Option<Arc<Parameters>>,
+    /// A unary contract whose result is Nil exactly when its input is Nil.
+    pub nil_preserving: bool,
 }
 
 impl Signature {
@@ -95,10 +97,60 @@ impl Signature {
             .chain(self.rest.as_ref())
             .chain([&self.ret])
     }
+
+    pub fn into_nil_preserving(mut self) -> Option<Self> {
+        let [input] = self.args.as_mut_slice() else {
+            return None;
+        };
+        let non_nil = |ty: &Type| {
+            *ty != Type::Never
+                && !ty.contains_unknown()
+                && Type::Nil.compatibility(ty) == Compatibility::Mismatch
+        };
+        if self.rest.is_some()
+            || self.parameters.is_some()
+            || !non_nil(input)
+            || !non_nil(&self.ret)
+        {
+            return None;
+        }
+        *input = std::mem::replace(input, Type::Never).nilable();
+        self.ret = self.ret.nilable();
+        self.nil_preserving = true;
+        Some(self)
+    }
+
+    pub fn specialize_nil_result(&self, actual: &Type) -> Option<Self> {
+        if !self.nil_preserving {
+            return None;
+        }
+        let [input] = self.args.as_slice() else {
+            return None;
+        };
+        let (input, ret) = if *actual == Type::Nil {
+            (Type::Nil, Type::Nil)
+        } else {
+            let input = input.without_nil();
+            if actual.compatibility(&input) != Compatibility::Proven {
+                return None;
+            }
+            (input, self.ret.without_nil())
+        };
+        Some(Self {
+            args: vec![input],
+            rest: None,
+            ret,
+            parameters: None,
+            nil_preserving: false,
+        })
+    }
 }
 
 impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.nil_preserving {
+            f.write_str("nil-preserving ")?;
+        }
         let mut args = self
             .args
             .iter()

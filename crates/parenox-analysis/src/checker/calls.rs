@@ -569,15 +569,24 @@ impl<'model> Checker<'model> {
                 if signature.parameters.is_some() {
                     return self.call_generic(signature, function, arguments, span);
                 }
+                let specialized = args
+                    .first()
+                    .and_then(|(value, _)| signature.specialize_nil_result(&value.known));
+                let active = specialized.as_ref().unwrap_or(signature);
                 self.observe_call(
                     span,
                     arguments,
                     signature,
-                    signature,
+                    active,
                     function.contract.as_ref(),
                 );
                 self.check_call_arguments(signature, function, arguments);
-                Value::new(signature.ret.clone())
+                if signature.nil_preserving
+                    && args[0].0.known.compatibility(&signature.args[0]) != Compatibility::Proven
+                {
+                    return Value::new(Type::Unknown);
+                }
+                Value::new(active.ret.clone())
             }
             kind @ (Type::Key(_) | Type::Keyword | Type::SpecKeyword | Type::Map(_)) => {
                 let is_map = matches!(kind, Type::Map(_));
