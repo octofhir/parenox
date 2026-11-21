@@ -1,6 +1,7 @@
 //! Function resolution, call-site inference and built-in calls.
 mod apply;
 mod arithmetic;
+mod compose;
 mod comprehensions;
 mod diagnostics;
 mod forms;
@@ -32,6 +33,7 @@ use super::{
 use crate::reader::{Form, Span};
 use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
+use compose::Composition;
 use forms::CoreForm;
 use inline::{CallbackReturn, Fnil, InlineFunction, Partial};
 
@@ -40,6 +42,7 @@ enum Callable<'form, 'model> {
     Captured(Arc<CapturedInline>),
     Fnil(Box<Fnil<'form, 'model>>),
     Partial(Box<Partial<'form, 'model>>),
+    Composition(Composition<'form, 'model>),
     Private(&'model Function),
     Builtin(String),
     Value(Value),
@@ -51,6 +54,7 @@ impl Callable<'_, '_> {
             Self::Value(value) => value.known != Type::Never,
             Self::Fnil(wrapper) => wrapper.returns,
             Self::Partial(wrapper) => wrapper.returns,
+            Self::Composition(composition) => composition.returns,
             _ => true,
         }
     }
@@ -627,6 +631,9 @@ impl<'model> Checker<'model> {
                 let args = wrapper.prefix.iter().cloned().chain(args).collect();
                 self.call_prepared(&wrapper.target, args, span, env, invoked)
             }
+            Callable::Composition(composition) => {
+                self.call_composition(composition, args, span, env, invoked)
+            }
             _ if !invoked => Value::new(Type::Never),
             Callable::Private(function) => self.inferred_call(
                 function,
@@ -672,59 +679,62 @@ impl<'model> Checker<'model> {
             .iter()
             .any(|arity| arity.accepts(args.len()));
         let returns = call_returns(args);
-        let arithmetic = if arity_ok && returns {
-            arithmetic::fixed_result(name, args)
-        } else {
-            None
-        };
-        if self.throws.is_some()
-            && arithmetic.is_none()
-            && (!arity_ok
-                || (!matches!(
-                    name,
-                    "clojure.core/ex-info"
-                        | "clojure.lang.MapEntry/create"
-                        | "clojure.core/ex-data"
-                        | "clojure.core/identity"
-                        | "clojure.core/name"
-                        | "clojure.core/map?"
-                        | "clojure.core/vector?"
-                        | "clojure.core/any?"
-                        | "clojure.core/dissoc"
-                        | "clojure.core/find"
-                        | "clojure.core/list"
-                        | "clojure.core/cons"
-                        | "clojure.core/seq"
-                        | "clojure.core/first"
-                        | "clojure.core/next"
-                        | "clojure.core/rest"
-                        | "clojure.core/keys"
-                        | "clojure.core/vals"
-                        | "clojure.core/zipmap"
-                        | "clojure.core/reduced"
-                        | "clojure.core/reduced?"
-                        | "clojure.core/unreduced"
-                        | "clojure.core/ensure-reduced"
-                        | "clojure.core/nil?"
-                        | "clojure.core/some?"
-                        | "clojure.core/true?"
-                        | "clojure.core/false?"
-                        | "clojure.core/not"
-                ) && predicate_type(name).is_none()))
-            && returns
-        {
-            self.may_throw();
-        }
         if !arity_ok {
             self.error(
                 "PNX2554",
                 span,
                 format!("Invalid arity for {name}: {}", args.len()),
             );
+            if !returns {
+                return Value::new(Type::Never);
+            }
+            if name.starts_with("clojure.core/") || name.starts_with("clojure.string/") {
+                self.arity_error();
+                return Value::new(Type::Never);
+            }
+            self.may_throw();
             return Value::new(Type::Unknown);
         }
         if !returns {
             return Value::new(Type::Never);
+        }
+        let arithmetic = arithmetic::fixed_result(name, args);
+        if self.throws.is_some()
+            && arithmetic.is_none()
+            && !matches!(
+                name,
+                "clojure.core/ex-info"
+                    | "clojure.lang.MapEntry/create"
+                    | "clojure.core/ex-data"
+                    | "clojure.core/identity"
+                    | "clojure.core/name"
+                    | "clojure.core/map?"
+                    | "clojure.core/vector?"
+                    | "clojure.core/any?"
+                    | "clojure.core/dissoc"
+                    | "clojure.core/find"
+                    | "clojure.core/list"
+                    | "clojure.core/cons"
+                    | "clojure.core/seq"
+                    | "clojure.core/first"
+                    | "clojure.core/next"
+                    | "clojure.core/rest"
+                    | "clojure.core/keys"
+                    | "clojure.core/vals"
+                    | "clojure.core/zipmap"
+                    | "clojure.core/reduced"
+                    | "clojure.core/reduced?"
+                    | "clojure.core/unreduced"
+                    | "clojure.core/ensure-reduced"
+                    | "clojure.core/nil?"
+                    | "clojure.core/some?"
+                    | "clojure.core/true?"
+                    | "clojure.core/false?"
+                    | "clojure.core/not"
+            )
+            && predicate_type(name).is_none()
+        {
+            self.may_throw();
         }
         let ty = match name {
             "clojure.core/reduced"

@@ -25,6 +25,7 @@ enum InlineSyntax<'a> {
     Function(InlineFunction<'a>),
     Fnil(&'a [Form]),
     Partial(&'a [Form]),
+    Comp(&'a [Form]),
 }
 
 #[derive(Clone, Copy)]
@@ -89,6 +90,9 @@ impl<'model> Checker<'model> {
                 InlineSyntax::Fnil(parts) => self.prepare_fnil(parts, form.span, env),
                 InlineSyntax::Partial(parts) => {
                     return Some(self.prepare_partial(parts, form.span, env));
+                }
+                InlineSyntax::Comp(parts) => {
+                    return Some(self.prepare_composition(parts, form.span, env));
                 }
             }
         };
@@ -213,6 +217,9 @@ impl<'model> Checker<'model> {
             "clojure.core/fnil" => Some(InlineSyntax::Fnil(parts)),
             "clojure.core/partial" if self.model.can_use_standard_core(name, self.globals) => {
                 Some(InlineSyntax::Partial(parts))
+            }
+            "clojure.core/comp" if self.model.can_use_standard_core(name, self.globals) => {
+                Some(InlineSyntax::Comp(parts))
             }
             _ => None,
         }
@@ -452,13 +459,10 @@ impl<'model> Checker<'model> {
             );
             diagnostic.contract = site.callback.and_then(|callback| callback.origin.cloned());
             self.diagnostics.push(diagnostic);
+            self.arity_error();
         }
         let start = self.diagnostics.len();
-        let mut result = Value::new(if missing_arity {
-            Type::Unknown
-        } else {
-            Type::Never
-        });
+        let mut result = Value::new(Type::Never);
         for (arity, clause) in clauses {
             let selected = site.invoked && Some(arity) == selected_arity;
             let checked = self.check_path(selected, |checker| {

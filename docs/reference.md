@@ -560,6 +560,10 @@ Using that function as data leaves a coverage gap.
 `partial` can supply a callback to modeled calls such as `mapv` and `reduce`.
 Its saved arguments evaluate at construction and are checked against the
 target when it runs. A call to `partial` with just the target keeps that value.
+`comp` supplies a callback to modeled calls and can be called directly.
+It evaluates its functions in written order. At invocation, the rightmost
+function receives all the arguments and each remaining function receives
+the previous result, including nil or false.
 
 Vector `:pre` conditions are checked after parameter binding and on each
 `recur` iteration. Vector `:post` conditions run after a normal return, with
