@@ -64,7 +64,10 @@ impl Checker<'_> {
             let method = StringMethod::parse(head.strip_prefix('.')?)?;
             if env.contains_key(head)
                 || self.model.local_function(head).is_some()
-                || self.model.declared_value(head, self.globals).is_some()
+                || self
+                    .model
+                    .declared_value(head, self.globals, span.start.offset)
+                    .is_some()
             {
                 return None;
             }

@@ -555,7 +555,7 @@ impl Checker<'_> {
                     }
                     self.observe_local(s, form.span, value);
                     value.clone()
-                } else if self.model.local_function(s).is_some_and(Function::inferred) {
+                } else if self.model.local_function_at(s, form.span.start.offset).is_some_and(Function::inferred) {
                     self.error(
                         "PNX9002",
                         form.span,
@@ -564,7 +564,7 @@ impl Checker<'_> {
                         ),
                     );
                     Value::new(Type::Unknown)
-                } else if let Some(value) = self.model.declared_value(s, self.globals) {
+                } else if let Some(value) = self.model.declared_value(s, self.globals, form.span.start.offset) {
                     match value {
                         DeclaredValue::Literal(ty) => Value::new(ty.clone()),
                         DeclaredValue::ExternLiteral(ty, origin) if self.partial_contract_visible(origin) => Value::with_notes(
@@ -580,6 +580,13 @@ impl Checker<'_> {
                         DeclaredValue::Macro(scope) => self.macro_gap(
                             scope, form.span, format!("Macro {} is not a function value", scope.origin().name)
                         ),
+                        DeclaredValue::OpaqueMacro => self.unchecked_form(
+                            form.span, &format!("Macro {s} has no function value"),
+                        ),
+                        DeclaredValue::PrivateMacro => {
+                            self.error("PNX2304", form.span, format!("Unresolved or private value {s}"));
+                            Value::new(Type::Unknown)
+                        }
                     }
                 } else if self.partial_scope.is_some() {
                     Value::new(Type::Unknown)

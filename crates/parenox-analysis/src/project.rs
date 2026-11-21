@@ -639,8 +639,8 @@ impl Session {
                     let calls = declarations.top_level_call_diagnostics(
                         &file.forms,
                         |namespace, name| {
-                            provider(namespace).is_some_and(|(file, declarations)| {
-                                declarations.source_macro(&file.forms, name, None)
+                            provider(namespace).is_some_and(|(_, declarations)| {
+                                declarations.source_macro(name, None)
                             })
                         },
                         |namespace, name, actual| {

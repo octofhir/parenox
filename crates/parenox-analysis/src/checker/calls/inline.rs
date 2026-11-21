@@ -201,7 +201,10 @@ impl<'model> Checker<'model> {
         let name = head.symbol()?;
         if env.contains_key(name)
             || self.model.local_function(name).is_some()
-            || self.model.declared_value(name, self.globals).is_some()
+            || self
+                .model
+                .declared_value(name, self.globals, head.span.start.offset)
+                .is_some()
         {
             return None;
         }

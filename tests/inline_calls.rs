@@ -184,7 +184,7 @@ fn an_opaque_source_macro_can_shadow_partial_without_reusing_proofs() {
         shadowed
             .diagnostics
             .iter()
-            .any(|finding| finding.code == "PNX2304" && finding.message.contains("partial")),
+            .any(|finding| finding.code == "PNX9001" && finding.message.contains("Macro partial")),
         "{shadowed:#?}"
     );
     assert_eq!(shadowed.stats.checked_functions, 1);

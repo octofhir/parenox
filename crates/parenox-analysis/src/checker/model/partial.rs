@@ -74,7 +74,7 @@ impl Declarations {
             let has_extern_call = extern_calls
                 && !has_string_call
                 && !symbols_match(form, &mut |name| {
-                    !matches!(model.declared_value(name, globals),
+                    !matches!(model.declared_value(name, globals, form.span.start.offset),
                         Some(DeclaredValue::Function(contract))
                             if contract.origin.kind == ContractKind::Extern
                                 && model.partial_extern_available(globals, &contract.origin))
@@ -190,7 +190,10 @@ impl Checker<'_> {
         if modeled && !shadowed.contains(name) {
             return true;
         }
-        match self.model.declared_value(name, self.globals) {
+        match self
+            .model
+            .declared_value(name, self.globals, head.span.start.offset)
+        {
             Some(DeclaredValue::Function(contract)) => {
                 self.partial_contract_visible(&contract.origin)
             }

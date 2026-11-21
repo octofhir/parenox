@@ -100,6 +100,102 @@ fn local_and_source_functions_win_over_macro_scope_descriptions() {
 }
 
 #[test]
+fn source_macros_keep_their_payload_opaque_through_referrals_and_externs() {
+    let provider = Source {
+        path: "vendor/bindings.clj",
+        source: r#"(ns vendor.bindings)
+          (defmacro notice [_] nil)
+          (defmacro ^:private hidden [_] nil)"#,
+    };
+    let externs = Source {
+        path: "types/vendor.edn",
+        source: "{vendor.bindings/notice [number? :-> nil?] vendor.bindings/hidden [number? :-> nil?]}",
+    };
+    let cases = [
+        ("[vendor.bindings :as v]", "v/notice", "PNX9001"),
+        (
+            "[vendor.bindings :refer [notice] :rename {notice warn}]",
+            "warn",
+            "PNX9001",
+        ),
+        ("[vendor.bindings :refer :all]", "notice", "PNX9001"),
+        ("[vendor.bindings :as v]", "v/hidden", "PNX2304"),
+    ];
+    for (require, call, code) in cases {
+        let source = format!(
+            "(ns app (:require {require}))\n(defn label {{:t/sig '[string? :-> string?]}} [text] ({call} (inc text)) text)"
+        );
+        let consumer = Source {
+            path: "app.clj",
+            source: &source,
+        };
+        let report = Session::default().check_project(&[consumer, provider], Some(externs));
+        let [diagnostic] = report.files[0].diagnostics.as_slice() else {
+            panic!("{report:#?}")
+        };
+        assert_eq!(diagnostic.code, code, "{report:#?}");
+    }
+}
+
+#[test]
+fn replacing_a_macro_groups_calls_by_compilation_order() {
+    let provider = Source {
+        path: "vendor/bindings.clj",
+        source: r#"(ns vendor.bindings)
+          (defmacro notice [_] nil)
+          (defn before {:t/sig '[string? :-> nil?]} [text] (notice (inc text)))
+          (defn notice {:t/sig '[number? :-> number?]} [n] (notice (inc "syntax")) n)
+          (defn after {:t/sig '[string? :-> number?]} [text] (notice text))"#,
+    };
+    let consumer = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [vendor.bindings :refer :all]))
+          (defn call {:t/sig '[string? :-> number?]} [label] (notice label))"#,
+    };
+    let report = Session::default().check_project(&[consumer, provider], None);
+    let findings = |file: usize, source: &str| {
+        report.files[file]
+            .diagnostics
+            .iter()
+            .map(|d| {
+                let range = d.span.start.offset..d.span.end.offset;
+                (d.code.clone(), source[range].to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        findings(0, consumer.source),
+        [("PNX2322".into(), "label".into())]
+    );
+    assert_eq!(
+        findings(1, provider.source),
+        [
+            ("PNX9001".into(), "defmacro".into()),
+            ("PNX9001".into(), "notice".into()),
+            ("PNX9001".into(), "notice".into()),
+            ("PNX2322".into(), "text".into()),
+        ],
+    );
+}
+
+#[test]
+fn a_public_source_macro_can_use_its_declared_lexical_scope() {
+    let provider = Source {
+        path: "vendor/bindings.clj",
+        source: "(ns vendor.bindings) (defmacro with-bindings [bindings & body] (list* 'let bindings body))",
+    };
+    let report = Session::default().check_project(&[USE, provider], Some(EXTERNS));
+    let [diagnostic] = report.files[0].diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(diagnostic.code, "PNX9009");
+    assert_eq!(
+        diagnostic.contract.as_ref().unwrap().kind,
+        ContractKind::MacroScope
+    );
+}
+
+#[test]
 fn invalid_descriptions_and_invocations_report_their_own_spans() {
     for (source, code) in [
         ("{vendor/m {:macro :for-like}}", "PNX9001"),

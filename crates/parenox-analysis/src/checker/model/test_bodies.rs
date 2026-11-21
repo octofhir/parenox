@@ -82,7 +82,9 @@ impl Declarations {
                 || self.names.refers.contains_key(symbol)
                 || self.names.imports.contains_key(symbol)
                 || self.source_declarations(forms, symbol).next().is_some()
-                || model.declared_value(symbol, globals).is_some()
+                || model
+                    .declared_value(symbol, globals, form.span.start.offset)
+                    .is_some()
                 || known_core_var(symbol)
                 || is_modeled_call(&format!("clojure.core/{symbol}"))
                 || matches!(

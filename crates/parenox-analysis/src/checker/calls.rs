@@ -220,7 +220,10 @@ impl<'model> Checker<'model> {
         }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
-            && let Some(function) = self.model.local_function(name).filter(|f| f.inferred())
+            && let Some(function) = self
+                .model
+                .local_function_at(name, xs[0].span.start.offset)
+                .filter(|f| f.inferred())
         {
             let args = self
                 .eval_args(&xs[1..], env, true)
@@ -231,9 +234,24 @@ impl<'model> Checker<'model> {
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
         {
-            match self.model.declared_value(name, self.globals) {
+            match self
+                .model
+                .declared_value(name, self.globals, xs[0].span.start.offset)
+            {
                 Some(DeclaredValue::Macro(scope)) => {
                     return self.macro_scope(scope, &xs[1..], span, env);
+                }
+                Some(DeclaredValue::OpaqueMacro) => {
+                    return self
+                        .unchecked_form(xs[0].span, &format!("Macro {name} has no checked scope"));
+                }
+                Some(DeclaredValue::PrivateMacro) => {
+                    self.error(
+                        "PNX2304",
+                        xs[0].span,
+                        format!("Unresolved or private value {name}"),
+                    );
+                    return Value::new(Type::Unknown);
                 }
                 Some(DeclaredValue::UncheckedFunction(function)) => {
                     if let Some(arities) = &function.arities {
@@ -568,10 +586,18 @@ impl<'model> Checker<'model> {
         if let Some(name) = callee.symbol()
             && !env.contains_key(name)
         {
-            if let Some(function) = self.model.local_function(name).filter(|f| f.inferred()) {
+            if let Some(function) = self
+                .model
+                .local_function_at(name, callee.span.start.offset)
+                .filter(|f| f.inferred())
+            {
                 return prepare(Callable::Private(function));
             }
-            if self.model.declared_value(name, self.globals).is_none() {
+            if self
+                .model
+                .declared_value(name, self.globals, callee.span.start.offset)
+                .is_none()
+            {
                 let resolved = self.model.resolve(name);
                 if is_builtin(&resolved) {
                     return prepare(Callable::Builtin(resolved));

@@ -24,11 +24,11 @@ pub(crate) use declarations::Declarations;
 use declarations::Names;
 pub(super) use externs::MacroScope;
 pub(crate) use externs::{EncodeError, ExternCache, SnapshotWriter};
-use externs::{ExternFile, Externs};
+use externs::{ExternFile, ExternalDeclaration, Externs};
 pub(super) use guards::VerifiedGuard;
 pub(crate) use imports::java_type_tag_at;
 pub(crate) use interfaces::InterfaceKey;
-use interfaces::{Exports, LocalInterface, visible_value};
+use interfaces::{Exports, LocalInterface, source_macro_value, visible_value};
 pub(crate) use references::{DocumentReferences, ProjectCall, ScopedReference};
 pub(crate) use specs::{
     GuardedMapProjection, MapFieldConversion, SpecCache, SpecConversion, SpecFingerprint,
@@ -121,6 +121,8 @@ pub(super) enum DeclaredValue<'a> {
     Function(&'a Contract),
     UncheckedFunction(&'a UncheckedFunction),
     Macro(&'a MacroScope),
+    OpaqueMacro,
+    PrivateMacro,
 }
 
 #[derive(Clone, Default)]
@@ -174,6 +176,11 @@ impl Globals {
             },
             name,
         )
+    }
+
+    fn extern_declaration(&self, name: &str) -> Option<&ExternalDeclaration> {
+        let (namespace, _) = name.split_once('/')?;
+        self.externs.as_ref()?.namespaces.get(namespace)?.get(name)
     }
 }
 
@@ -379,8 +386,7 @@ impl Model {
 
     pub(super) fn can_use_standard_core(&self, name: &str, globals: &Globals) -> bool {
         !globals.project_namespaces.contains("clojure.core")
-            && (name.contains('/')
-                || (self.external_refers.is_empty() && !self.names.source_macros.contains(name)))
+            && (name.contains('/') || self.external_refers.is_empty())
     }
 
     pub(super) fn resolve(&self, name: &str) -> String {
@@ -621,7 +627,15 @@ impl Model {
         &'a self,
         name: &str,
         globals: &'a Globals,
+        offset: usize,
     ) -> Option<DeclaredValue<'a>> {
+        let local_macro = self.names.local_source_macros(name);
+        if let Some((local, declarations)) = local_macro
+            && declarations.iter().any(|entry| entry.active_at(offset))
+        {
+            let qualified = format!("{}/{local}", self.namespace());
+            return Some(source_macro_value(globals.extern_declaration(&qualified)));
+        }
         let qualified = self.function_name(name);
         if let Some(value) = self.literals.get(&qualified) {
             return Some(DeclaredValue::Literal(&value.ty));
@@ -633,9 +647,37 @@ impl Model {
         if let Some(function) = local.filter(|function| function.private) {
             return Some(DeclaredValue::UncheckedFunction(function));
         }
-        globals
-            .declared_value(&qualified)
+        let global_value = |candidate: &str| {
+            // The published table includes this file's later macro declarations.
+            if local_macro.is_some_and(|(_, declarations)| {
+                declarations
+                    .last()
+                    .is_some_and(|entry| entry.replaced.is_none())
+            }) && candidate
+                .split_once('/')
+                .is_some_and(|(ns, _)| ns == self.namespace())
+            {
+                None
+            } else {
+                globals.declared_value(candidate)
+            }
+        };
+        global_value(&qualified)
             .or_else(|| local.map(DeclaredValue::UncheckedFunction))
-            .or_else(|| globals.declared_value(&self.resolve(name)))
+            .or_else(|| global_value(&self.resolve(name)))
+    }
+
+    pub(super) fn local_function_at(&self, name: &str, offset: usize) -> Option<&Function> {
+        if self
+            .names
+            .local_source_macros(name)
+            .is_some_and(|(_, declarations)| {
+                declarations.iter().any(|entry| entry.active_at(offset))
+            })
+        {
+            None
+        } else {
+            self.local_function(name)
+        }
     }
 }

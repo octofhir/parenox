@@ -625,7 +625,10 @@ impl Checker<'_> {
         if !self.allows_partial_call(head, env)
             || env.contains_key(op)
             || self.model.local_function(op).is_some()
-            || self.model.declared_value(op, self.globals).is_some()
+            || self
+                .model
+                .declared_value(op, self.globals, head.span.start.offset)
+                .is_some()
         {
             return None;
         }
@@ -661,7 +664,8 @@ impl Checker<'_> {
                 let guard = if let Some(value) = env.get(name) {
                     value.guard.clone()
                 } else if let Some(DeclaredValue::Function(contract)) =
-                    self.model.declared_value(name, self.globals)
+                    self.model
+                        .declared_value(name, self.globals, head.span.start.offset)
                 {
                     contract.guard.clone()
                 } else {

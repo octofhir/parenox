@@ -111,7 +111,7 @@ fn an_opaque_macro_shadowing_get_in_has_no_standard_lookup_proof() {
     assert_eq!(use_site.code, "PNX9001");
     assert_eq!(
         &source[use_site.span.start.offset..use_site.span.end.offset],
-        "(get-in {} [:missing] :fallback)"
+        "get-in"
     );
 }
 
@@ -136,6 +136,34 @@ fn a_shadowed_get_in_cannot_narrow_the_map_in_a_branch() {
         panic!("expected a type for the leaf read");
     };
     assert_eq!(local.inferred_type, "Nil | String");
+}
+
+#[test]
+fn a_source_macro_shadows_core_lookups_after_its_definition() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn early {:t/sig '[:-> #{:present}]} [] (get {:path :present} :path))
+        (defmacro get [& _] true)
+        (defn late {:t/sig '[{:path (s/nilable string?)} :-> string?]} [m]
+          (if (get m :path) (subs (:path m) 0) "fallback"))
+        (defn qualified {:t/sig '[:-> #{:present}]} [] (clojure.core/get {:path :present} :path))"#;
+    let mut session = Session::default();
+    let report = session.check("lookup.clj", source);
+    let [declaration, macro_use, mismatch] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(declaration.code, "PNX9001");
+    assert_eq!(macro_use.code, "PNX9001");
+    assert_eq!(mismatch.code, "PNX2322");
+    assert_eq!(mismatch.actual.as_deref(), Some("Nil | String"));
+    let opaque = source.find("get m :path").unwrap() + "get m ".len();
+    assert!(session.document_hover_at("lookup.clj", opaque).is_none());
+    let early = source.find(":present} :path").unwrap() + ":present} ".len();
+    let Some(DocumentHover::Lookup { inferred_type, .. }) =
+        session.document_hover_at("lookup.clj", early)
+    else {
+        panic!("expected a type before the macro declaration");
+    };
+    assert_eq!(inferred_type, ":present");
 }
 
 #[test]

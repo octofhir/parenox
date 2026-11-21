@@ -64,12 +64,37 @@ pub(super) struct Names {
     pub(super) required_libraries: BTreeSet<String>,
     pub(super) core_only: Option<BTreeSet<String>>,
     pub(super) core_hidden: BTreeSet<String>,
-    pub(super) source_macros: BTreeSet<String>,
+    pub(super) source_macros: BTreeMap<String, Vec<SourceMacro>>,
     pub(super) spec_core_shadows: BTreeSet<String>,
     pub(super) spec_core_scope_known: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SourceMacro {
+    defined: usize,
+    pub(super) replaced: Option<usize>,
+    pub(super) private: bool,
+}
+
+impl SourceMacro {
+    pub(super) fn active_at(&self, offset: usize) -> bool {
+        self.defined <= offset && self.replaced.is_none_or(|end| offset < end)
+    }
+}
+
 impl Names {
+    pub(super) fn local_source_macros(&self, name: &str) -> Option<(&str, &[SourceMacro])> {
+        let local = if name.contains('/') && name != "/" {
+            let (namespace, local) = self.resolve_parts(name);
+            (namespace == self.namespace).then_some(local)?
+        } else {
+            name
+        };
+        self.source_macros
+            .get_key_value(local)
+            .map(|(name, declarations)| (name.as_str(), declarations.as_slice()))
+    }
+
     pub(super) fn resolve(&self, name: &str) -> String {
         let (namespace, local) = self.resolve_parts(name);
         format!("{namespace}/{local}")
@@ -536,17 +561,16 @@ impl Declarations {
         }
     }
 
-    pub(crate) fn source_macro(&self, forms: &[Form], name: &str, before: Option<usize>) -> bool {
-        let mut declarations = self.source_declarations(forms, name);
-        let Some(declaration @ SourceDeclaration::Value(items)) = declarations.next() else {
+    pub(crate) fn source_macro(&self, name: &str, before: Option<usize>) -> bool {
+        let Some(declarations) = self.names.source_macros.get(name) else {
             return false;
         };
-        declarations.next().is_none()
-            && self.names.resolve_parts(items[0].symbol().unwrap()) == ("clojure.core", "defmacro")
-            && match before {
-                Some(offset) => items[0].span.start.offset < offset,
-                None => !self.source_private(&declaration),
-            }
+        match before {
+            Some(offset) => declarations.iter().any(|entry| entry.active_at(offset)),
+            None => declarations
+                .last()
+                .is_some_and(|entry| entry.replaced.is_none() && !entry.private),
+        }
     }
 
     pub(crate) fn top_level_call_diagnostics(
@@ -567,7 +591,7 @@ impl Declarations {
                 let offset = form.span.start.offset;
                 let local = namespace == self.namespace()
                     || (!op.contains('/') && !self.names.refers.contains_key(op));
-                let known_macro = if local && self.source_macro(forms, name, Some(offset)) {
+                let known_macro = if local && self.source_macro(name, Some(offset)) {
                     true
                 } else {
                     namespace != self.namespace() && public_macro(namespace, name)
@@ -754,6 +778,11 @@ impl Declarations {
                 "ns" | "clojure.core/ns" => continue,
                 "def" => {
                     model.literal_vars.push(index);
+                    if let [_, name, ..] = xs.as_slice()
+                        && xs.len() <= 4
+                    {
+                        model.replace_source_macro(name, None, form.span);
+                    }
                     continue;
                 }
                 "set!" if compiler_flag_assignment(xs, &model.names) => {
@@ -761,6 +790,15 @@ impl Declarations {
                     continue;
                 }
                 _ => {}
+            }
+            if model
+                .names
+                .local_source_macros(op)
+                .and_then(|(_, declarations)| declarations.last())
+                .is_some_and(|entry| entry.active_at(form.span.start.offset))
+            {
+                model.read_unmodeled_call(index, op, form.span);
+                continue;
             }
             let resolved = model.names.resolve(op);
             match resolved.as_str() {
@@ -780,8 +818,30 @@ impl Declarations {
                         model.error("PNX9001", xs[1].span, "Spec name must be a keyword");
                     }
                 }
-                "clojure.core/defn" | "clojure.core/defn-" => model.functions.push(index),
-                "clojure.core/declare" => model.read_declare(&xs[1..]),
+                "clojure.core/defn" | "clojure.core/defn-" => {
+                    model.functions.push(index);
+                    if let [_, name, tail @ ..] = xs.as_slice()
+                        && name.symbol().is_some_and(|name| {
+                            model.source_macro(name, Some(form.span.start.offset))
+                        })
+                    {
+                        let (body, mut attributes) = function_parts(tail);
+                        if !function_clauses(body, form.span)
+                            .is_err_and(|diagnostic| diagnostic.severity == "error")
+                        {
+                            let marker = attributes.find_map(|[key, value]| {
+                                (key.keyword() == Some(":macro")).then_some(value)
+                            });
+                            model.replace_source_macro(name, marker, form.span);
+                        }
+                    }
+                }
+                "clojure.core/declare" => {
+                    model.read_declare(&xs[1..]);
+                    for name in &xs[1..] {
+                        model.replace_source_macro(name, None, form.span);
+                    }
+                }
                 "clojure.spec.alpha/fdef" => model.fdefs.push(index),
                 qualified if known_unsupported_declaration(qualified, xs) => {
                     match qualified {
@@ -822,12 +882,36 @@ impl Declarations {
                         "clojure.core/defmacro" => {
                             model.macros.push(index);
                             if let Some(name) = xs.get(1).and_then(Form::symbol) {
-                                model.names.source_macros.insert(name.into());
+                                let private = model.private_var(xs);
+                                let offset = form.span.end.offset;
+                                let declarations =
+                                    model.names.source_macros.entry(name.into()).or_default();
+                                if let Some(previous) = declarations.last_mut() {
+                                    previous.replaced.get_or_insert(offset);
+                                }
+                                declarations.push(SourceMacro {
+                                    defined: offset,
+                                    replaced: None,
+                                    private,
+                                });
                             }
                             model.opaque_var_surface = true;
                         }
                         "clojure.core/defonce" | "clojure.core/defmulti" => {
                             model.unchecked_vars.push(index);
+                            let marker = if qualified == "clojure.core/defmulti" {
+                                multimethod_parts(&xs[2..])
+                                    .0
+                                    .as_chunks::<2>()
+                                    .0
+                                    .iter()
+                                    .find_map(|[key, value]| {
+                                        (key.keyword() == Some(":macro")).then_some(value)
+                                    })
+                            } else {
+                                None
+                            };
+                            model.replace_source_macro(&xs[1], marker, form.span);
                             model.opaque_var_surface = true;
                         }
                         "clojure.test/deftest" | "clojure.test/deftest-" => {
@@ -848,14 +932,7 @@ impl Declarations {
                         .diagnostics
                         .push(Diagnostic::analysis_gap("PNX9001", xs[0].span, message));
                 }
-                _ => {
-                    model.unmodeled_calls.push(index);
-                    model.error(
-                        "PNX9001",
-                        form.span,
-                        format!("Unsupported top-level declaration {op}"),
-                    );
-                }
+                _ => model.read_unmodeled_call(index, op, form.span),
             }
         }
         if uses_spec_composition
@@ -865,6 +942,34 @@ impl Declarations {
             model.read_spec_core_scope(forms);
         }
         model
+    }
+
+    fn read_unmodeled_call(&mut self, index: usize, op: &str, span: Span) {
+        self.unmodeled_calls.push(index);
+        self.error(
+            "PNX9001",
+            span,
+            format!("Unsupported top-level declaration {op}"),
+        );
+    }
+
+    fn replace_source_macro(&mut self, name: &Form, marker: Option<&Form>, span: Span) {
+        let Some(previous) = name
+            .symbol()
+            .and_then(|name| self.names.source_macros.get_mut(name))
+            .and_then(|declarations| declarations.last_mut())
+        else {
+            return;
+        };
+        if marker
+            .or_else(|| name.metadata(":macro"))
+            .is_none_or(|value| {
+                matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
+            })
+        {
+            // The old macro is still visible while compiling the replacement.
+            previous.replaced.get_or_insert(span.end.offset);
+        }
     }
 
     fn read_scoped_functions(&mut self, forms: &[Form], enclosing: usize, items: &[Form]) {

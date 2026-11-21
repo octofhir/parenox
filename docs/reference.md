@@ -320,6 +320,9 @@ to replace a modeled built-in report `PNX2790`. Literal values describe the
 initializer, not later runtime changes. A `:let-like` description supplies
 lexical scope for sequential bindings, not the macro's result, effects, or
 tail positions; such calls still report `PNX9009`.
+Known source macros with unknown scope report `PNX9001` at the call.
+Their arguments are treated as syntax until a supported scope describes
+how the macro binds them.
 
 ### Validating library externs
 

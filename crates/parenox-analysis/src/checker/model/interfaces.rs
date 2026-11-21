@@ -18,6 +18,7 @@ pub(super) struct Exports {
     pub functions: Contracts,
     pub literals: BTreeMap<String, Type>,
     unchecked_functions: BTreeMap<String, UncheckedFunction>,
+    macros: BTreeMap<String, bool>,
     private_vars: BTreeSet<String>,
 }
 
@@ -33,6 +34,11 @@ impl Exports {
             .keys()
             .chain(self.literals.keys())
             .chain(self.unchecked_functions.keys())
+            .chain(
+                self.macros
+                    .iter()
+                    .filter_map(|(name, private)| (!private).then_some(name)),
+            )
             .map(|qualified| qualified.split_once('/').unwrap().1)
     }
 }
@@ -43,6 +49,13 @@ pub(super) fn visible_value<'a>(
     name: &str,
 ) -> Option<DeclaredValue<'a>> {
     if let Some(source) = source {
+        if let Some(private) = source.macros.get(name) {
+            return Some(if *private {
+                DeclaredValue::PrivateMacro
+            } else {
+                source_macro_value(externs().and_then(|table| table.get(name)))
+            });
+        }
         if let Some(ty) = source.literals.get(name) {
             return Some(DeclaredValue::Literal(ty));
         }
@@ -67,6 +80,13 @@ pub(super) fn visible_value<'a>(
         .unchecked_functions
         .get(name)
         .map(DeclaredValue::UncheckedFunction)
+}
+
+pub(super) fn source_macro_value(external: Option<&ExternalDeclaration>) -> DeclaredValue<'_> {
+    match external {
+        Some(ExternalDeclaration::Macro(scope)) => DeclaredValue::Macro(scope),
+        _ => DeclaredValue::OpaqueMacro,
+    }
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -303,6 +323,18 @@ impl Model {
                     .unchecked_functions
                     .insert(name.clone(), function.clone());
             }
+        }
+        for (local, declarations) in &self.names.source_macros {
+            let Some(declaration) = declarations.last().filter(|entry| entry.replaced.is_none())
+            else {
+                continue;
+            };
+            let name = format!("{}/{local}", self.namespace());
+            exports.functions.remove(&name);
+            exports.literals.remove(&name);
+            exports.unchecked_functions.remove(&name);
+            exports.private_vars.remove(&name);
+            exports.macros.insert(name, declaration.private);
         }
         self.exports = Arc::new(exports);
         self.local_interface = Arc::new(LocalInterface {
