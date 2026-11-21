@@ -1,7 +1,7 @@
 //! Function resolution, call-site inference and built-in calls.
 mod apply;
 mod arithmetic;
-mod compose;
+mod combinators;
 mod comprehensions;
 mod diagnostics;
 mod forms;
@@ -33,7 +33,7 @@ use super::{
 use crate::reader::{Form, Span};
 use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
-use compose::Composition;
+use combinators::CombinedCallable;
 use forms::CoreForm;
 use inline::{CallbackReturn, Fnil, InlineFunction, Partial};
 
@@ -42,7 +42,7 @@ enum Callable<'form, 'model> {
     Captured(Arc<CapturedInline>),
     Fnil(Box<Fnil<'form, 'model>>),
     Partial(Box<Partial<'form, 'model>>),
-    Composition(Composition<'form, 'model>),
+    Combined(CombinedCallable<'form, 'model>),
     Private(&'model Function),
     Builtin(String),
     Value(Value),
@@ -54,7 +54,7 @@ impl Callable<'_, '_> {
             Self::Value(value) => value.known != Type::Never,
             Self::Fnil(wrapper) => wrapper.returns,
             Self::Partial(wrapper) => wrapper.returns,
-            Self::Composition(composition) => composition.returns,
+            Self::Combined(combined) => combined.returns,
             _ => true,
         }
     }
@@ -441,6 +441,22 @@ impl<'model> Checker<'model> {
         if !call_returns(args) {
             return Value::new(Type::Never);
         }
+        if matches!(
+            function.known,
+            Type::Key(_) | Type::Keyword | Type::SpecKeyword
+        ) && !(1..=2).contains(&args.len())
+        {
+            self.error(
+                "PNX2554",
+                span,
+                format!(
+                    "Keyword invocation expects 1 or 2 arguments, got {}",
+                    args.len()
+                ),
+            );
+            self.arity_error();
+            return Value::new(Type::Never);
+        }
         if function.known != Type::Never {
             self.may_throw();
         }
@@ -492,13 +508,12 @@ impl<'model> Checker<'model> {
             }
             kind @ (Type::Key(_) | Type::Keyword | Type::SpecKeyword | Type::Map(_)) => {
                 let is_map = matches!(kind, Type::Map(_));
-                if !(1..=2).contains(&args.len()) {
-                    let kind = if is_map { "Map" } else { "Keyword" };
+                if is_map && !(1..=2).contains(&args.len()) {
                     self.error(
                         "PNX2554",
                         span,
                         format!(
-                            "{kind} invocation expects 1 or 2 arguments, got {}",
+                            "Map invocation expects 1 or 2 arguments, got {}",
                             args.len()
                         ),
                     );
@@ -631,9 +646,7 @@ impl<'model> Checker<'model> {
                 let args = wrapper.prefix.iter().cloned().chain(args).collect();
                 self.call_prepared(&wrapper.target, args, span, env, invoked)
             }
-            Callable::Composition(composition) => {
-                self.call_composition(composition, args, span, env, invoked)
-            }
+            Callable::Combined(combined) => self.call_combiner(combined, args, span, env, invoked),
             _ if !invoked => Value::new(Type::Never),
             Callable::Private(function) => self.inferred_call(
                 function,

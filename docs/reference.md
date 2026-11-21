@@ -566,6 +566,10 @@ target when it runs. A call to `partial` with just the target keeps that value.
 It evaluates its functions in written order. At invocation, the rightmost
 function receives all the arguments and each remaining function receives
 the previous result, including nil or false.
+`juxt` also evaluates its functions in written order. It invokes each one
+with the original arguments in that same order and returns their results
+in a vector. With a bounded number of functions, each position keeps its
+own result type.
 
 Vector `:pre` conditions are checked after parameter binding and on each
 `recur` iteration. Vector `:post` conditions run after a normal return, with

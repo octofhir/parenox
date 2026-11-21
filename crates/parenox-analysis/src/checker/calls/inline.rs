@@ -7,7 +7,7 @@ use super::super::{
     function_forms::{MAX_FIXED_PARAMETERS, function_clauses, pack_arguments},
     nil_part,
 };
-use super::{Callable, PreparedCallable, call_returns};
+use super::{Callable, PreparedCallable, call_returns, combinators::Combiner};
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
 use crate::types::{Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
@@ -25,7 +25,7 @@ enum InlineSyntax<'a> {
     Function(InlineFunction<'a>),
     Fnil(&'a [Form]),
     Partial(&'a [Form]),
-    Comp(&'a [Form]),
+    Combiner(Combiner, &'a [Form]),
 }
 
 #[derive(Clone, Copy)]
@@ -91,8 +91,8 @@ impl<'model> Checker<'model> {
                 InlineSyntax::Partial(parts) => {
                     return Some(self.prepare_partial(parts, form.span, env));
                 }
-                InlineSyntax::Comp(parts) => {
-                    return Some(self.prepare_composition(parts, form.span, env));
+                InlineSyntax::Combiner(combiner, parts) => {
+                    return Some(self.prepare_combiner(combiner, parts, form.span, env));
                 }
             }
         };
@@ -219,7 +219,10 @@ impl<'model> Checker<'model> {
                 Some(InlineSyntax::Partial(parts))
             }
             "clojure.core/comp" if self.model.can_use_standard_core(name, self.globals) => {
-                Some(InlineSyntax::Comp(parts))
+                Some(InlineSyntax::Combiner(Combiner::Comp, parts))
+            }
+            "clojure.core/juxt" if self.model.can_use_standard_core(name, self.globals) => {
+                Some(InlineSyntax::Combiner(Combiner::Juxt, parts))
             }
             _ => None,
         }
