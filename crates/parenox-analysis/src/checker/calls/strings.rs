@@ -1,5 +1,7 @@
 //! Type checks for JVM string functions with type-dependent behavior.
-use super::{Checker, Compatibility, Env, Span, Type, Value, call_returns};
+use super::{
+    Checker, Compatibility, Env, Span, Type, Value, arithmetic::excludes_number, call_returns,
+};
 use crate::Diagnostic;
 use crate::reader::{Form, Kind};
 use crate::types::MAX_TUPLE_ITEMS;
@@ -50,11 +52,28 @@ impl Checker<'_> {
 
     fn substring_value(&mut self, args: &[(Value, Span)]) -> Value {
         self.may_throw();
-        self.expect(&args[0].0, &Type::String, args[0].1, "subs text");
-        for (value, span) in &args[1..] {
-            self.expect(value, &Type::Number, *span, "subs index");
+        let start = self.diagnostics.len();
+        let (input, input_span) = &args[0];
+        if !input.rejected_call {
+            self.expect(input, &Type::String, *input_span, "subs text");
         }
-        let text = match &args[0].0.known {
+        for (value, span) in &args[1..] {
+            if !value.rejected_call {
+                self.expect(value, &Type::Number, *span, "subs index");
+            }
+        }
+        // A union with a valid String or Number path can still return.
+        // Bounds and result inference require operands that might be accepted.
+        let impossible_operand = self.diagnostics[start..]
+            .iter()
+            .any(|d| d.code == "PNX2322")
+            && (input.literal_container.is_some()
+                || input.known.known_intersection(&Type::String) == Some(Type::Never)
+                || args[1..].iter().any(|(index, _)| excludes_number(index)));
+        if impossible_operand || args.iter().any(|(value, _)| value.rejected_call) {
+            return Value::rejected_call();
+        }
+        let text = match &input.known {
             Type::Str(text) => Some(text),
             _ => None,
         };

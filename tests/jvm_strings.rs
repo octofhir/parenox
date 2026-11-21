@@ -92,6 +92,52 @@ fn substring_uses_utf16_bounds_and_marks_the_invalid_index() {
 }
 
 #[test]
+fn rejected_substring_operands_do_not_supply_a_result_or_a_bounds_error() {
+    let source = r#"(ns captures)
+        (defn invalid-text {:t/sig '[:-> t/any]} [] (inc (subs nil -1)))
+        (defn invalid-index {:t/sig '[:-> t/any]} [] (inc (subs "abc" \a)))
+        (defn nested-call {:t/sig '[:-> t/any]} []
+          (inc (subs (subs nil 0) :bad-index)))
+        (defn partial-text {:t/sig '[boolean? :-> t/any]} [flag]
+          (inc (subs (if flag "abc" nil) 0)))"#;
+    let mut session = Session::default();
+    let report = session.check("members.cljc", source);
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            ("PNX2322", "nil"),
+            ("PNX2322", "\\a"),
+            ("PNX2322", "nil"),
+            ("PNX2322", ":bad-index"),
+            ("PNX2322", "(subs (if flag \"abc\" nil) 0)"),
+            ("PNX2322", "(if flag \"abc\" nil)"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn a_rejected_substring_chain_keeps_assertion_coverage() {
+    let source = r#"(ns captures (:require [clojure.test :refer [deftest is]]))
+        (deftest bad-substring (is (= "a" (subs (subs false 0) 1))))"#;
+    let report = Session::default().check("members.clj", source);
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX2322");
+}
+
+#[test]
 fn unannotated_substring_checks_a_locally_computed_utf16_endpoint() {
     let source = r#"
 (ns arglist)
