@@ -533,8 +533,11 @@ impl Checker<'_> {
         let no_reachable = skipped != Type::Never;
         let narrow = |truth: bool, scope: &mut Env| {
             if first {
-                if let Some(value) = init.symbol().and_then(|symbol| scope.get_mut(symbol)) {
-                    value.narrow(narrow_emptiness(&value.known, !truth));
+                if self
+                    .model
+                    .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
+                {
+                    self.narrow_subject(init, scope, |ty| narrow_emptiness(ty, !truth));
                 }
             } else if non_nil {
                 self.narrow_subject(init, scope, |ty| {
@@ -711,6 +714,13 @@ impl Checker<'_> {
             ("clojure.core/empty?" | "clojure.core/not-empty", [operand]) => {
                 let empty = truth == (op == "clojure.core/empty?");
                 self.narrow_subject(operand, env, |ty| narrow_emptiness(ty, empty));
+            }
+            ("clojure.core/seq", [operand])
+                if self
+                    .model
+                    .can_use_standard_core(head.symbol().unwrap(), self.globals) =>
+            {
+                self.narrow_subject(operand, env, |ty| narrow_emptiness(ty, !truth));
             }
             ("clojure.core/nil?", [operand]) => {
                 self.narrow_subject(operand, env, |ty| narrow_by_type(ty, &Type::Nil, truth));

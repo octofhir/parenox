@@ -189,3 +189,64 @@ fn scalar_equality_keeps_only_possible_literal_branches() {
     let report = Session::default().check("status.clj", source);
     assert!(report.ok && report.complete, "{report:#?}");
 }
+
+#[test]
+fn seq_tests_keep_only_the_possible_values_in_each_branch() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+      (defn ensure-empty
+        {:t/sig '[(s/nilable #{""}) :-> (s/nilable #{""})]}
+        [candidate] candidate)
+      (defn read-path
+        {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]}
+        [path]
+        (if (seq path) (subs path 0) (ensure-empty path)))"#;
+    let mut session = Session::default();
+    let report = session.check("seq_guard.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let offset = source.find("path 0").unwrap();
+    let Some(parenox::DocumentHover::Local(hover)) =
+        session.document_hover_at("seq_guard.clj", offset)
+    else {
+        panic!("missing hover in seq guard");
+    };
+    assert_eq!(hover.inferred_type, "String");
+}
+
+#[test]
+fn a_shadowed_seq_does_not_prove_emptiness() {
+    let report = check(
+        r#"(defn read-path
+             {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]}
+             [path]
+             (let [seq (fn [ignored] true)]
+               (when (seq path) (subs path 0))))"#,
+    );
+    let [diagnostic] = &report.diagnostics[..] else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX2322");
+    assert_eq!(diagnostic.actual.as_deref(), Some("Nil | String"));
+}
+
+#[test]
+fn when_first_preserves_presence_of_the_saved_selector_and_the_falsey_head() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+      (s/def ::items (s/tuple (s/nilable (s/or :false #{false} :text string?))))
+      (defn assert-present {:t/sig '[::items :-> ::items]} [value] value)
+      (defn read-items
+        {:t/sig '[{:items (s/nilable ::items)} :-> any?]}
+        [row]
+        (let [saved row]
+          (when-first [first-item (get row :items)]
+            [(assert-present (:items saved)) first-item])))"#;
+    let mut session = Session::default();
+    let report = session.check("seq_guard.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let offset = source.rfind("first-item").unwrap();
+    let Some(parenox::DocumentHover::Local(hover)) =
+        session.document_hover_at("seq_guard.clj", offset)
+    else {
+        panic!("missing hover on head");
+    };
+    assert_eq!(hover.inferred_type, "Nil | false | String");
+}

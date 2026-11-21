@@ -540,7 +540,10 @@ immediately but defers traversal and the body. `doseq` is eager and normally
 returns nil; with no bindings or only `:let` clauses it returns the last body
 expression. `some->` and `some->>` skip the remaining steps on nil and pass
 false through. A stable read of the original input keeps the non-nil type
-in later steps. `recur` must target a supported tail position and analysis is
+in later steps. A standard `seq` guard narrows a stable local or map lookup by
+emptiness. `when-first` makes the same nonempty refinement inside its body
+and binds the first element, which can itself be nil or false.
+`recur` must target a supported tail position and analysis is
 bounded when argument types keep growing.
 
 When `if` chooses between two inline functions passed to `reduce` or
