@@ -99,25 +99,11 @@ impl Checker<'_> {
         let [operator, callback] = form.as_slice() else {
             return None;
         };
-        let name = operator.symbol()?;
-        let predicate = match self.model.resolve(name).as_str() {
+        let predicate = match self.standard_core_name(operator, env)?.as_str() {
             "clojure.core/map" => None,
             "clojure.core/filter" => Some(callback),
             _ => return None,
         };
-        if env.contains_key(name)
-            || self
-                .model
-                .local_function_at(name, operator.span.start.offset)
-                .is_some()
-            || self
-                .model
-                .declared_value(name, self.globals, operator.span.start.offset)
-                .is_some()
-            || !self.model.can_use_standard_core(name, self.globals)
-        {
-            return None;
-        }
 
         let callable = self.prepare_callable(callback, env);
         let input = self.infer_path(source, env, callable.returns(), false);

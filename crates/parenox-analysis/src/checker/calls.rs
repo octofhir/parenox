@@ -712,6 +712,23 @@ impl<'model> Checker<'model> {
             ) || self.model.can_use_standard_core(spelling, self.globals))
     }
 
+    fn standard_core_name(&self, head: &Form, env: &Env) -> Option<String> {
+        let name = head.symbol()?;
+        let resolved = self.model.resolve(name);
+        (resolved.starts_with("clojure.core/")
+            && self.model.can_use_standard_core(name, self.globals)
+            && !env.contains_key(name)
+            && self
+                .model
+                .local_function_at(name, head.span.start.offset)
+                .is_none()
+            && self
+                .model
+                .declared_value(name, self.globals, head.span.start.offset)
+                .is_none())
+        .then_some(resolved)
+    }
+
     pub(super) fn call_prepared(
         &mut self,
         callable: &PreparedCallable<'_, '_>,

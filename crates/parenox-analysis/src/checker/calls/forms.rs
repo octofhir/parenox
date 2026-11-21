@@ -126,7 +126,7 @@ impl Checker<'_> {
             CoreForm::MapTransform => self.map_transform(&xs[1..], span, env, name),
             CoreForm::GroupBy => self.group_by(&xs[1..], span, env),
             CoreForm::MergeWith => self.merge_with(&xs[1..], span, env),
-            CoreForm::Apply => self.apply_form(&xs[1..], span, env),
+            CoreForm::Apply => self.apply_form(xs, span, env),
             CoreForm::Reduce => self.reduce_form(&xs[1..], span, env),
             CoreForm::ReduceKv => self.reduce_kv_form(&xs[1..], span, env),
             CoreForm::PredicateSearch(search) => {

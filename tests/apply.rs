@@ -87,6 +87,63 @@ fn resolves_apply_and_evaluates_the_target_before_other_inputs() {
 }
 
 #[test]
+fn projects_fields_in_fixed_apply_arguments_through_concat() {
+    let source = r#"(ns command)
+(defn run-command {:t/sig '[string? {:settings {:clean {:automatic boolean?}}} :-> boolean?]}
+  [uri db] (get-in db [:settings :clean :automatic]))
+(defn directly-written {:t/sig '[:-> boolean?]} []
+  (apply run-command "file:///🦊" [{:settings {:clean {:automatic "false"}}}]))
+(defn combined {:t/sig '[:-> boolean?]} []
+  (let [db {:settings {:clean {:automatic "false"}}}]
+    (apply run-command "file:///🦊" (concat nil [db]))))"#;
+    let report = Session::default().check("command.clj", source);
+    assert!(report.complete, "{report:#?}");
+    let [literal, variable] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    let written =
+        |finding: &parenox::Diagnostic| &source[finding.span.start.offset..finding.span.end.offset];
+    assert_eq!(written(literal), "\"false\"");
+    assert_eq!(written(variable), "db");
+    assert_eq!(literal.mismatch_path, variable.mismatch_path);
+    assert!(literal.message.contains("Argument 2"));
+    assert!(
+        variable
+            .notes
+            .iter()
+            .any(|note| note.contains(":automatic"))
+    );
+}
+
+#[test]
+fn checks_concat_operands_before_spreading_and_requires_ordinary_vectors() {
+    let source = r#"(ns command (:require [clojure.spec.alpha :as s]))
+(defn eager {:t/sig '[:-> #{:operand}]} []
+  (try
+    (apply (fn [_] :callee)
+      (concat [:first] (throw (ex-info "late operand" {:part :operand}))))
+    (catch clojure.lang.ExceptionInfo error (:part (ex-data error)))))
+(defn concatenate {:t/sig '[:-> (s/and int? #{42})]} []
+  (apply inc (clojure.core/concat nil [41] [])))
+(defn shadowed {:t/sig '[:-> (s/and int? #{42})]} []
+  (let [concat (fn [_ _] [41])]
+    (apply inc (concat "raw" nil))))
+(defn structural {:t/sig '[(s/tuple string?) :-> any?]} [source]
+  (apply inc (concat source)))"#;
+    let report = Session::default().check("command.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    let [gap] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(gap.code, "PNX9001");
+    assert_eq!(gap.severity, "warning");
+    assert_eq!(
+        &source[gap.span.start.offset..gap.span.end.offset],
+        "source"
+    );
+}
+
+#[test]
 fn forwards_typed_rest_arguments_and_checks_every_reachable_overload() {
     let source = r#"
         (ns demo (:require [clojure.spec.alpha :as s]))

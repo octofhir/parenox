@@ -1,11 +1,12 @@
 //! Calls whose final input supplies zero or more positional arguments.
 use std::collections::BTreeSet;
 
+use super::super::LiteralContainer;
 use super::{
-    Callable, Checker, Env, PreparedCallable, Value, arity_counts, builtin_arities, call_returns,
-    vectors::CollectionError, vectors::element_type,
+    ArgumentForms, Callable, Checker, Env, PreparedCallable, Value, arity_counts, builtin_arities,
+    call_returns, vectors::CollectionError, vectors::element_type,
 };
-use crate::reader::{Form, Span};
+use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, Signature, Type};
 
 const MAX_SPREAD_ALTERNATIVES: usize = 16;
@@ -19,7 +20,7 @@ struct OpenSpread<'a> {
 
 impl Checker<'_> {
     pub(super) fn apply_form(&mut self, forms: &[Form], span: Span, env: &Env) -> Value {
-        let [callee, prefix @ .., spread] = forms else {
+        let [apply, callee, prefix @ .., spread] = forms else {
             self.error(
                 "PNX2554",
                 span,
@@ -34,7 +35,51 @@ impl Checker<'_> {
             // The literal's syntax supplies every position even for large vectors.
             args.extend(self.eval_args(items, env, reachable));
             let invoked = reachable && call_returns(&args);
-            return self.call_prepared(&callable, args, span, env, invoked);
+            let written: Vec<_> = prefix.iter().chain(items).map(Some).collect();
+            return self.call_prepared_with_forms(
+                &callable,
+                args,
+                ArgumentForms::Projected(&written),
+                span,
+                env,
+                invoked,
+            );
+        }
+        if apply
+            .symbol()
+            .is_some_and(|name| self.model.can_use_standard_core(name, self.globals))
+            && let Some(operands) = self.concat_operands(spread, env)
+        {
+            // concat constructs a lazy result only after evaluating all its
+            // operands. Traversing the proved vectors adds no effects.
+            let inputs: Vec<_> = self.eval_args(operands, env, reachable).collect();
+            if !reachable || !call_returns(&inputs) {
+                return self.call_prepared(&callable, args, span, env, false);
+            }
+            let mut projected: Vec<_> = prefix.iter().map(Some).collect();
+            if let Err(unproven) =
+                append_concat_arguments(&mut args, &mut projected, inputs, operands)
+            {
+                self.withhold_callback_facts(&callable);
+                self.call_prepared(&callable, Vec::new(), span, env, false);
+                return self.unchecked_form(
+                    unproven,
+                    "apply through concat currently needs proven ordinary vector or Nil operands",
+                );
+            }
+            let start = self.diagnostics.len();
+            let result = self.call_prepared_with_forms(
+                &callable,
+                args,
+                ArgumentForms::Projected(&projected),
+                span,
+                env,
+                true,
+            );
+            for form in operands.iter().filter(|form| form.vector().is_none()) {
+                self.explain_spread_elements(start, form.span);
+            }
+            return result;
         }
         let collection = self.infer_path(spread, env, reachable, false);
         if collection.known == Type::Never {
@@ -100,6 +145,14 @@ impl Checker<'_> {
             result = result.join(value);
         }
         result
+    }
+
+    fn concat_operands<'form>(&self, form: &'form Form, env: &Env) -> Option<&'form [Form]> {
+        let Kind::List(forms) = &form.kind else {
+            return None;
+        };
+        let (head, operands) = forms.split_first()?;
+        (self.standard_core_name(head, env)?.as_str() == "clojure.core/concat").then_some(operands)
     }
 
     fn apply_open(
@@ -283,4 +336,31 @@ impl Checker<'_> {
             }
         }
     }
+}
+
+fn append_concat_arguments<'form>(
+    args: &mut Vec<(Value, Span)>,
+    projected: &mut Vec<Option<&'form Form>>,
+    inputs: Vec<(Value, Span)>,
+    operands: &'form [Form],
+) -> Result<(), Span> {
+    for ((input, span), form) in inputs.into_iter().zip(operands) {
+        if input.known == Type::Nil {
+            continue;
+        }
+        let (Type::Tuple(items), Some(container @ LiteralContainer::Vector(_))) =
+            (input.known, input.literal_container)
+        else {
+            return Err(span);
+        };
+        let literal = form.vector().filter(|forms| forms.len() == items.len());
+        for (index, ty) in items.into_vec().into_iter().enumerate() {
+            let site = literal.map_or(form, |forms| &forms[index]);
+            let mut value = Value::with_notes(ty, input.notes.clone());
+            value.literal_container = container.vector_item(index).cloned();
+            args.push((value, site.span));
+            projected.push(Some(site));
+        }
+    }
+    Ok(())
 }
