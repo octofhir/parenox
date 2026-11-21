@@ -48,6 +48,8 @@ mod lookup_hover;
 mod medley_context;
 #[path = "lsp/multimethod_signature.rs"]
 mod multimethod_signature;
+#[path = "lsp/multimethod_types.rs"]
+mod multimethod_types;
 #[path = "lsp/namespace_definition.rs"]
 mod namespace_definition;
 #[path = "lsp/prefix_types.rs"]

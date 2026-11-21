@@ -24,6 +24,7 @@ pub(crate) use queries::CheckedCall;
 use queries::TypeQuery;
 use recur::RecurTarget;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -391,7 +392,9 @@ struct Checker<'a> {
     model: &'a Model,
     globals: &'a Globals,
     source: &'a str,
-    partial_scope: Option<&'a BTreeSet<&'a str>>,
+    partial_scope: Option<Cow<'a, BTreeSet<&'a str>>>,
+    partial_method_body: bool,
+    partial_method_opaque: bool,
     type_query: Option<TypeQuery<'a>>,
     diagnostics: Vec<Diagnostic>,
     has_declaration_findings: bool,
@@ -420,6 +423,8 @@ impl<'a> Checker<'a> {
             globals,
             source,
             partial_scope: None,
+            partial_method_body: false,
+            partial_method_opaque: false,
             type_query: None,
             diagnostics: Vec::new(),
             has_declaration_findings: !model.diagnostics.is_empty(),
@@ -667,6 +672,19 @@ impl Checker<'_> {
     }
 
     fn infer_position(&mut self, form: &Form, env: &Env, tail: bool) -> Value {
+        if self.partial_method_body
+            && matches!(
+                &form.kind,
+                Kind::Metadata(..)
+                    | Kind::Tagged(..)
+                    | Kind::AutoNamespacedMap { .. }
+                    | Kind::SyntaxQuote(_)
+                    | Kind::Unquote { .. }
+            )
+        {
+            self.partial_method_opaque = true;
+            return Value::new(Type::Unknown);
+        }
         match &form.kind {
             Kind::Nil => Value::new(Type::Nil),
             Kind::Bool(b) => Value::new(Type::Bool(*b)),
@@ -699,6 +717,8 @@ impl Checker<'_> {
                     }
                     self.observe_local(s, form.span, value);
                     value.clone()
+                } else if self.partial_method_body {
+                    Value::new(Type::Unknown)
                 } else if self.model.local_function_at(s, form.span.start.offset).is_some_and(Function::inferred) {
                     self.error(
                         "PNX9002",

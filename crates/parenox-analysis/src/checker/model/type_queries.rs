@@ -1,10 +1,12 @@
 //! Analyze the containing function clause for a focused type query.
-use super::{Declarations, DeclaredValue, Globals, Model, contracts::function_parts};
-use crate::checker::{
-    CheckedCall, Checker, Env, TypeQuery, Value, function_forms::function_clauses,
+use super::{
+    Declarations, DeclaredValue, Globals, Model,
+    partial::{untyped_clauses, uses_standard_partial_calls},
 };
+use crate::checker::{CheckedCall, Checker, TypeQuery};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 impl Declarations {
@@ -78,8 +80,8 @@ impl Declarations {
     }
 
     fn observe_at<'a>(
-        &self,
-        forms: &[Form],
+        &'a self,
+        forms: &'a [Form],
         model: &'a Model,
         globals: &'a Globals,
         source: &'a str,
@@ -91,6 +93,22 @@ impl Declarations {
         }
         let offset = query.span().start.offset;
         let index = forms.partition_point(|form| form.span.end.offset <= offset);
+        if self.static_method_scope
+            && self.method_forms.binary_search(&index).is_ok()
+            && !matches!(query, TypeQuery::Call(_))
+            && uses_standard_partial_calls(globals)
+        {
+            let clauses = untyped_clauses(&forms[index], true)?;
+            let clause = clauses.values().find(|clause| {
+                (clause.span.start.offset..clause.span.end.offset).contains(&offset)
+            })?;
+            let mut checker = Checker::new(model, globals, source);
+            checker.type_query = Some(query);
+            checker.partial_scope = Some(Cow::Owned(self.partial_shadowed(forms)));
+            checker.partial_method_body = true;
+            checker.untyped_clause(clause);
+            return checker.type_query;
+        }
         self.functions.binary_search(&index).ok()?;
         let form = &forms[index];
         let Kind::List(items) = &form.without_metadata().kind else {
@@ -109,20 +127,11 @@ impl Declarations {
             })?;
             checker.declared_function_body(function, signature);
         } else {
-            let clauses = function_clauses(function_parts(&items[2..]).0, form.span).ok()?;
+            let clauses = untyped_clauses(form, false)?;
             let clause = clauses.values().find(|clause| {
                 offset >= clause.span.start.offset && offset < clause.span.end.offset
             })?;
-            let params = clause.bindings();
-            let args = vec![Value::new(Type::Unknown); params.len()];
-            checker.function_body(
-                &params,
-                clause.conditions,
-                clause.body,
-                args,
-                &Env::new(),
-                clause.span,
-            );
+            checker.untyped_clause(clause);
         }
         checker.type_query
     }

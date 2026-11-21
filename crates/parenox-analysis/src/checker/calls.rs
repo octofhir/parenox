@@ -233,6 +233,7 @@ impl<'model> Checker<'model> {
 
     pub(super) fn list(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
         if !self.allows_partial_call(&xs[0], env) {
+            self.partial_method_opaque |= self.partial_method_body;
             return Value::new(Type::Unknown);
         }
         match xs[0].symbol() {

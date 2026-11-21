@@ -3,10 +3,15 @@ use super::contracts::function_parts;
 use super::declarations::symbols_match;
 use super::externs::ExternalDeclaration;
 use super::{Declarations, DeclaredValue, Globals, Model};
-use crate::checker::{Checker, Env, Value, function_forms::function_clauses};
+use crate::checker::{
+    Checker, Env, Value,
+    function_forms::{Clause, function_clauses},
+};
 use crate::reader::{Form, Kind};
-use crate::types::Type;
+use crate::types::{Arity, Type};
 use crate::{ContractKind, ContractOrigin, Diagnostic};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
 const STRING_OPERATORS: &[&str] = &[
     "upper-case",
@@ -46,17 +51,27 @@ impl Declarations {
         });
         if (!extern_calls && !string_namespace && !source.contains("subs") && !jvm_string)
             || !self.all_refers.is_empty()
-            || ["clojure.core", "clojure.string"]
-                .iter()
-                .any(|namespace| globals.project_namespaces.contains(*namespace))
+            || !uses_standard_partial_calls(globals)
         {
             return Vec::new();
         }
+        let methods = self.static_method_scope;
         let mut definitions = self.unchecked_definitions(forms, model).peekable();
-        if definitions.peek().is_none() || !self.has_known_var_surface(forms) {
+        let functions = definitions.peek().is_some() && self.has_known_var_surface(forms);
+        if !methods && !functions {
             return Vec::new();
         }
-        let shadowed = self.top_level_names(forms);
+        let shadowed = if methods {
+            self.partial_shadowed(forms)
+        } else {
+            self.top_level_names(forms)
+        };
+        let definitions = definitions.filter(|_| functions);
+        let methods = self
+            .method_forms
+            .iter()
+            .filter(|_| methods)
+            .map(|&index| &forms[index]);
         let operators: Vec<_> = STRING_OPERATORS
             .iter()
             .copied()
@@ -68,10 +83,14 @@ impl Declarations {
             }))
             .collect();
         let mut diagnostics = Vec::new();
-        for form in definitions {
+        for (form, method) in definitions
+            .map(|form| (form, false))
+            .chain(methods.map(|form| (form, true)))
+        {
             let text = &source[form.span.start.offset..form.span.end.offset];
             let has_string_call = operators.iter().any(|&operator| text.contains(operator));
             let has_extern_call = extern_calls
+                && !method
                 && !has_string_call
                 && !symbols_match(form, &mut |name| {
                     !matches!(model.declared_value(name, globals, form.span.start.offset),
@@ -82,28 +101,22 @@ impl Declarations {
             if !has_string_call && !has_extern_call {
                 continue;
             }
-            let Kind::List(items) = &form.without_metadata().kind else {
-                continue;
-            };
-            let Ok(clauses) = function_clauses(function_parts(&items[2..]).0, form.span) else {
+            let Some(clauses) = untyped_clauses(form, method) else {
                 continue;
             };
             let mut checker = Checker::new(model, globals, source);
-            checker.partial_scope = Some(&shadowed);
+            checker.partial_scope = Some(Cow::Borrowed(&shadowed));
+            checker.partial_method_body = method;
             for clause in clauses.values() {
-                let params = clause.bindings();
-                let args = vec![Value::new(Type::Unknown); params.len()];
-                checker.function_body(
-                    &params,
-                    clause.conditions,
-                    clause.body,
-                    args,
-                    &Env::new(),
-                    clause.span,
-                );
+                checker.untyped_clause(clause);
             }
             diagnostics.extend(checker.diagnostics.into_iter().filter(|diagnostic| {
                 diagnostic.contract.as_ref().is_some_and(|origin| {
+                    if method {
+                        return matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
+                            && origin.kind == ContractKind::Builtin
+                            && origin.name.starts_with("clojure.string/");
+                    }
                     (matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
                         && partial_string_operator(&origin.name))
                         || (diagnostic.code == "PNX2801"
@@ -120,6 +133,30 @@ impl Declarations {
         }
         diagnostics
     }
+
+    pub(super) fn partial_shadowed<'a>(&'a self, forms: &'a [Form]) -> BTreeSet<&'a str> {
+        let mut shadowed = self.top_level_names(forms);
+        shadowed.extend(self.forward_vars.keys().map(String::as_str));
+        shadowed
+    }
+}
+
+pub(super) fn uses_standard_partial_calls(globals: &Globals) -> bool {
+    ["clojure.core", "clojure.string"]
+        .iter()
+        .all(|namespace| !globals.project_namespaces.contains(*namespace))
+}
+
+pub(super) fn untyped_clauses(form: &Form, method: bool) -> Option<BTreeMap<Arity, Clause<'_>>> {
+    let Kind::List(items) = &form.without_metadata().kind else {
+        return None;
+    };
+    let body = if method {
+        items.get(3..)?
+    } else {
+        function_parts(items.get(2..)?).0
+    };
+    function_clauses(body, form.span).ok()
 }
 
 impl Model {
@@ -142,6 +179,26 @@ impl Model {
 }
 
 impl Checker<'_> {
+    pub(in crate::checker::model) fn untyped_clause(&mut self, clause: &Clause<'_>) {
+        let diagnostics_start = self.diagnostics.len();
+        self.partial_method_opaque = false;
+        let params = clause.bindings();
+        let args = vec![Value::new(Type::Unknown); params.len()];
+        self.function_body(
+            &params,
+            clause.conditions,
+            clause.body,
+            args,
+            &Env::new(),
+            clause.span,
+        );
+        // An opaque form may change which operations are reached or which vars are called.
+        if self.partial_method_opaque {
+            self.diagnostics.truncate(diagnostics_start);
+            self.type_query = None;
+        }
+    }
+
     pub(in crate::checker) fn partial_contract_visible(&self, origin: &ContractOrigin) -> bool {
         self.partial_scope.is_none()
             || !matches!(
@@ -152,19 +209,26 @@ impl Checker<'_> {
     }
 
     pub(in crate::checker) fn allows_partial_call(&self, head: &Form, env: &Env) -> bool {
-        let Some(shadowed) = self.partial_scope else {
+        let Some(shadowed) = self.partial_scope.as_deref() else {
             return true;
         };
         let Some(name) = head.symbol() else {
-            return head.keyword().is_some();
+            return !self.partial_method_body && head.keyword().is_some();
         };
-        if matches!(name, "if" | "do" | "quote" | ".")
-            || name
-                .strip_prefix('.')
-                .is_some_and(|member| STRING_MEMBERS.contains(&member))
-            || env.contains_key(name)
+        if self.partial_method_body && !matches!(&head.kind, Kind::Symbol(_)) {
+            return false;
+        }
+        if matches!(name, "if" | "do" | "quote" | "throw")
+            || (!self.partial_method_body
+                && (name == "."
+                    || name
+                        .strip_prefix('.')
+                        .is_some_and(|member| STRING_MEMBERS.contains(&member))))
         {
             return true;
+        }
+        if env.contains_key(name) {
+            return !self.partial_method_body;
         }
         let resolved = self.model.resolve(name);
         let modeled = partial_string_operator(&resolved)
@@ -207,6 +271,9 @@ impl Checker<'_> {
             );
         if modeled && !shadowed.contains(name) {
             return true;
+        }
+        if self.partial_method_body {
+            return false;
         }
         match self
             .model

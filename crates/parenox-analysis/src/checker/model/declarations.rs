@@ -1,4 +1,5 @@
 //! Source declarations and the namespace context used to read them.
+mod method_bodies;
 mod outline;
 mod protocol_implementations;
 mod reader_names;
@@ -183,6 +184,7 @@ pub(crate) struct Declarations {
     pub(super) test_forms: Vec<usize>,
     pub(crate) refers_to_assert_expr: bool,
     pub(super) method_forms: Vec<usize>,
+    pub(super) static_method_scope: bool,
     pub(super) literal_vars: Vec<usize>,
     pub(super) unchecked_vars: Vec<usize>,
     scoped_functions: Vec<ScopedFunction>,
@@ -978,6 +980,7 @@ impl Declarations {
         {
             model.read_spec_core_scope(forms);
         }
+        model.static_method_scope = model.has_static_method_scope(forms);
         model
     }
 

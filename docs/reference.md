@@ -42,6 +42,11 @@ A function body without a checked signature can still report a proved
 argument mismatch at a call to a required library with an EDN extern.
 The body retains its coverage warning. Unresolved macros and aliases
 that do not load a library do not establish an evaluated call.
+In a file with statically resolved `defmulti` and `defmethod` declarations,
+the checker also reports definite misuse of loaded `clojure.string` functions
+inside method bodies. Parameters start with unknown types. Hover can show
+types proved inside the method, and the diagnostic report marks dispatch and
+the rest of the body analysis as incomplete.
 
 ### Targeted suppressions
 
