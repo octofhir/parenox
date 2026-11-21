@@ -252,7 +252,7 @@ impl Checker<'_> {
         if self.partial_method_body && !matches!(&head.kind, Kind::Symbol(_)) {
             return false;
         }
-        if matches!(name, "if" | "do" | "quote" | "throw" | "let*")
+        if matches!(name, "if" | "do" | "quote" | "throw" | "let*" | "fn*")
             || (!self.partial_method_body
                 && (name == "."
                     || name

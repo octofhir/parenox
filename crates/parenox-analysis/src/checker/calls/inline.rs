@@ -6,7 +6,10 @@ use std::{collections::HashSet, ptr, sync::Arc};
 use super::super::{
     Checker, Env, Value,
     env::{CapturedFn, CapturedInline},
-    function_forms::{MAX_FIXED_PARAMETERS, function_clauses, letfn_definition, pack_arguments},
+    function_forms::{
+        MAX_FIXED_PARAMETERS, fn_star_clauses, function_clauses, letfn_definition, local_fn_name,
+        pack_arguments,
+    },
     metadata::MetadataTarget,
     nil_part,
     queries::InferredCall,
@@ -21,14 +24,14 @@ const MAX_LOCAL_INLINE_STEPS: usize = 128;
 
 #[derive(Clone, Copy)]
 pub(super) enum InlineFunction<'a> {
-    Function(&'a [Form]),
+    Function { parts: &'a [Form], raw: bool },
     Literal(&'a AnonymousFunction),
 }
 
 impl<'a> InlineFunction<'a> {
     fn name(self) -> Option<&'a str> {
         match self {
-            Self::Function(parts) => parts.first()?.symbol(),
+            Self::Function { parts, raw } => Some(local_fn_name(parts.first()?.symbol()?, raw)),
             Self::Literal(_) => None,
         }
     }
@@ -55,7 +58,10 @@ impl CapturedInline {
                 // Capture construction resolved the head in the definition scope.
                 let form = &function.form;
                 let function = match &form.without_metadata().kind {
-                    Kind::List(parts) => InlineFunction::Function(&parts[1..]),
+                    Kind::List(parts) => InlineFunction::Function {
+                        parts: &parts[1..],
+                        raw: parts[0].symbol() == Some("fn*"),
+                    },
                     Kind::AnonymousFunction(function) => InlineFunction::Literal(function),
                     _ => unreachable!("captured fn has no function syntax"),
                 };
@@ -64,7 +70,7 @@ impl CapturedInline {
             Self::Group { group, index } => {
                 let form = &group.definitions[*index].1;
                 let parts = letfn_definition(form).expect("validated letfn definition");
-                (form, InlineFunction::Function(parts))
+                (form, InlineFunction::Function { parts, raw: false })
             }
         }
     }
@@ -184,11 +190,13 @@ impl<'model> Checker<'model> {
         let (definition, function) = captured.syntax();
         let count = arguments.len();
         let labels = match function {
-            InlineFunction::Function(parts) => {
-                let clauses = function_clauses(
-                    &parts[usize::from(function.name().is_some())..],
-                    definition.span,
-                )
+            InlineFunction::Function { parts, raw } => {
+                let params = &parts[usize::from(function.name().is_some())..];
+                let clauses = if raw {
+                    fn_star_clauses(params, definition.span)
+                } else {
+                    function_clauses(params, definition.span)
+                }
                 .ok()?;
                 clauses
                     .get(&Arity::Fixed(count))?
@@ -353,6 +361,36 @@ impl<'model> Checker<'model> {
         }
     }
 
+    pub(super) fn fn_star_value(&mut self, parts: &[Form], span: Span, env: &Env) -> Value {
+        self.withhold_captured_facts(env.inline_functions());
+        let function = InlineFunction::Function { parts, raw: true };
+        let mut scope = env.clone();
+        if let Some(name) = function.name() {
+            scope.insert(name.into(), Value::new(Type::Unknown));
+        }
+        let start = self.diagnostics.len();
+        self.inspect_path(false, |checker| {
+            checker.check_inline(
+                function,
+                Vec::new(),
+                &scope,
+                InlineSite {
+                    constructor: span,
+                    call: span,
+                    invoked: false,
+                    callback: None,
+                },
+            )
+        });
+        if self.diagnostics.len() != start {
+            return Value::new(Type::Unknown);
+        }
+        self.unsupported(
+            span,
+            "fn* is currently supported in direct calls and inline callbacks",
+        )
+    }
+
     fn inline_syntax<'form>(&self, form: &'form Form, env: &Env) -> Option<InlineSyntax<'form>> {
         let forms = match &form.without_metadata().kind {
             Kind::List(forms) => forms,
@@ -363,6 +401,12 @@ impl<'model> Checker<'model> {
         };
         let (head, parts) = forms.split_first()?;
         let name = head.symbol()?;
+        if name == "fn*" {
+            return Some(InlineSyntax::Function(InlineFunction::Function {
+                parts,
+                raw: true,
+            }));
+        }
         if env.contains_key(name)
             || self.model.local_function(name).is_some()
             || self
@@ -373,7 +417,10 @@ impl<'model> Checker<'model> {
             return None;
         }
         match self.model.resolve(name).as_str() {
-            "clojure.core/fn" => Some(InlineSyntax::Function(InlineFunction::Function(parts))),
+            "clojure.core/fn" => Some(InlineSyntax::Function(InlineFunction::Function {
+                parts,
+                raw: false,
+            })),
             "clojure.core/fnil" => Some(InlineSyntax::Fnil(parts)),
             "clojure.core/partial" if self.model.can_use_standard_core(name, self.globals) => {
                 Some(InlineSyntax::Partial(parts))
@@ -614,7 +661,9 @@ impl<'model> Checker<'model> {
         site: InlineSite<'_>,
     ) -> Value {
         match callable {
-            InlineFunction::Function(parts) => self.call_inline_fn(parts, args, env, site),
+            InlineFunction::Function { parts, raw } => {
+                self.call_inline_fn(parts, args, env, site, raw)
+            }
             InlineFunction::Literal(function) => {
                 if function.required > MAX_FIXED_PARAMETERS {
                     self.error(
@@ -625,7 +674,7 @@ impl<'model> Checker<'model> {
                     return Value::new(Type::Unknown);
                 }
                 let clauses = literal_clause(function, site.constructor);
-                self.call_inline_fn(&clauses, args, env, site)
+                self.call_inline_fn(&clauses, args, env, site, false)
             }
         }
     }
@@ -636,11 +685,12 @@ impl<'model> Checker<'model> {
         args: Vec<(Value, Span)>,
         env: &Env,
         site: InlineSite<'_>,
+        raw: bool,
     ) -> Value {
         let parts = if let Some((head, parts)) = parts.split_first()
             && let Some(name) = head.symbol()
         {
-            if name.contains('/') && name != "/" {
+            if !raw && name.contains('/') && name != "/" {
                 self.error(
                     "PNX1001",
                     head.span,
@@ -652,7 +702,12 @@ impl<'model> Checker<'model> {
         } else {
             parts
         };
-        let clauses = match function_clauses(parts, site.constructor) {
+        let parsed = if raw {
+            fn_star_clauses(parts, site.constructor)
+        } else {
+            function_clauses(parts, site.constructor)
+        };
+        let clauses = match parsed {
             Ok(clauses) => clauses,
             Err(diagnostic) => {
                 self.diagnostics.push(*diagnostic);
@@ -665,15 +720,20 @@ impl<'model> Checker<'model> {
             .find(|arity| arity.accepts(args.len()));
         let missing_arity = site.invoked && selected_arity.is_none();
         if missing_arity {
-            let mut diagnostic = Diagnostic::new(
-                "PNX2554",
-                site.callback
-                    .map_or(site.call, |callback| callback.argument),
+            let message = if clauses.is_empty() {
+                format!("fn* has no callable arities, got {} arguments", args.len())
+            } else {
                 format!(
                     "fn expects {} arguments, got {}",
                     super::arity_counts(clauses.keys().copied()),
                     args.len()
-                ),
+                )
+            };
+            let mut diagnostic = Diagnostic::new(
+                "PNX2554",
+                site.callback
+                    .map_or(site.call, |callback| callback.argument),
+                message,
             );
             diagnostic.contract = site.callback.and_then(|callback| callback.origin.cloned());
             self.diagnostics.push(diagnostic);

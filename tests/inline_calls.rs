@@ -7,6 +7,80 @@ fn check(body: &str) -> Report {
 }
 
 #[test]
+fn raw_fn_uses_contextual_arguments_and_ordinary_body_maps() {
+    for (expression, contract) in [
+        (
+            r#"((fn* ^{:pre [false]} [text] {:pre [false] :post [false]} text) "value")"#,
+            "string?",
+        ),
+        (
+            r#"((fn* other/self [again] (if again (self false) "ok")) true)"#,
+            "string?",
+        ),
+        (
+            r#"((fn* & [again] (if again (& false) "ok")) true)"#,
+            "string?",
+        ),
+        (r#"((fn* .length [unused] (.length "abc")) nil)"#, "number?"),
+        (
+            r#"((fn* ([/ & more] (str / (first more)))) "a" "b")"#,
+            "string?",
+        ),
+        (
+            r#"(reduce (fn* ([acc item] (conj acc item))) [] ["one" "two"])"#,
+            "(s/tuple string? string?)",
+        ),
+        (r#"(let [fn* (fn [] 19)] ((fn* [] "inner")))"#, "string?"),
+        ("((fn* []))", "nil?"),
+    ] {
+        let report = check(&format!(
+            "(defn f {{:t/sig '[:-> {contract}]}} [] {expression})"
+        ));
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn raw_fn_checks_compiler_shape_even_without_invocation() {
+    for (expression, code) in [
+        ("((fn* [[value]] value) [1])", "PNX1001"),
+        ("((fn* [value & [remaining]] value) 1)", "PNX1001"),
+        ("(fn* [{:keys [value]}] value)", "PNX1001"),
+        ("(fn* [bad.name] bad.name)", "PNX1001"),
+        ("(fn* [] :first (missing-body-name))", "PNX2304"),
+        ("(fn* [] {:pre [(subs nil 0)]} 1)", "PNX9001"),
+        (
+            "(try ((fn*)) (catch clojure.lang.ArityException _ :caught))",
+            "PNX2554",
+        ),
+    ] {
+        let report = check(&format!("(defn f {{:t/sig '[:-> t/any]}} [] {expression})"));
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{expression}: {report:#?}");
+        };
+        assert_eq!(finding.code, code, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn raw_fn_names_remain_values_when_the_same_head_is_jvm_syntax() {
+    let direct = check(
+        r#"(defn f {:t/sig '[:-> string?]} [] ((fn* String. [unused] (String. "abc")) nil))"#,
+    );
+    let [finding] = direct.diagnostics.as_slice() else {
+        panic!("{direct:#?}");
+    };
+    assert_eq!(finding.code, "PNX9001");
+    assert!(finding.message.contains("JVM call"));
+
+    let value = check(
+        r#"(defn f {:t/sig '[:-> string?]} []
+             ((fn* String. [flag] (if flag (apply String. [false]) "closure")) true))"#,
+    );
+    assert!(value.ok && value.complete, "{value:#?}");
+}
+
+#[test]
 fn inline_parameters_capture_outer_locals_and_shadow_them_only_in_the_body() {
     for body in [
         r#"(defn f {:t/sig '[:-> number?]} []

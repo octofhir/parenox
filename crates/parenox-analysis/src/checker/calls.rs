@@ -248,6 +248,7 @@ impl<'model> Checker<'model> {
             Some("recur") => return self.recur_form(&xs[1..], span, env, tail),
             Some("let*") => return self.let_form(xs, span, env, tail, true),
             Some("loop*") => return self.loop_form(xs, span, env, true),
+            Some("fn*") => return self.fn_star_value(&xs[1..], span, env),
             Some("if") => return self.if_form(xs, span, env, Conditional::If, tail),
             Some("do") => return self.body(&xs[1..], env, tail),
             Some("quote") => return self.quote_form(&xs[1..], span),
@@ -262,9 +263,19 @@ impl<'model> Checker<'model> {
             }
             Some("throw") => return self.throw_form(&xs[1..], span, env),
             Some("try") => return self.try_form(&xs[1..], env, tail),
-            Some(name) if name.starts_with('.') => {
+            Some(name) if !name.contains('/') && (name.starts_with('.') || name.ends_with('.')) => {
                 if let Some(value) = self.jvm_string_call(name, &xs[1..], span, env) {
                     return value;
+                }
+                if env.inline_function(name).is_some() {
+                    if name != "." {
+                        let args: Vec<_> = self.eval_args(&xs[1..], env, true).collect();
+                        if !call_returns(&args) {
+                            return Value::new(Type::Never);
+                        }
+                    }
+                    return self
+                        .unchecked_form(span, "JVM call is outside the supported member set");
                 }
             }
             _ => {}

@@ -975,6 +975,12 @@ fn completes_only_visible_lexical_names_in_written_expressions() {
             "local-name",
             &[],
         ),
+        (
+            "(defn f [] (fn* owner/recurse [arg] (recu|rse arg)))",
+            "recurse",
+            &["recurse"],
+        ),
+        ("(defn f [] (fn* [[raw-name]] raw-na|me))", "raw-name", &[]),
     ];
     let initial = format!("{prefix}(defn f [] nil)\n");
     fs::write(&path, &initial).unwrap();

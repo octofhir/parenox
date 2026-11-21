@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use super::Value;
-use super::bindings::dotted_pattern_error;
+use super::bindings::{dotted_pattern_error, raw_local_symbol};
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, MAX_TUPLE_ITEMS, Type};
@@ -78,7 +78,21 @@ pub(super) fn lexical_fn_star_clauses(
     forms: &[Form],
     span: Span,
 ) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
-    read_function_clauses(forms, span, ClauseMode::FnStar)
+    read_function_clauses(forms, span, ClauseMode::LexicalFnStar)
+}
+
+pub(super) fn fn_star_clauses(
+    forms: &[Form],
+    span: Span,
+) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
+    read_function_clauses(forms, span, ClauseMode::CheckedFnStar)
+}
+
+pub(super) fn local_fn_name(name: &str, raw: bool) -> &str {
+    if raw && name != "/" {
+        return name.split_once('/').map_or(name, |(_, local)| local);
+    }
+    name
 }
 
 pub(super) fn fn_literal_binding_error(forms: &[Form], span: Span) -> Option<Diagnostic> {
@@ -100,7 +114,18 @@ pub(super) fn fn_literal_binding_error(forms: &[Form], span: Span) -> Option<Dia
 enum ClauseMode {
     Checked,
     Lexical,
-    FnStar,
+    CheckedFnStar,
+    LexicalFnStar,
+}
+
+impl ClauseMode {
+    fn raw(self) -> bool {
+        matches!(self, Self::CheckedFnStar | Self::LexicalFnStar)
+    }
+
+    fn checked(self) -> bool {
+        matches!(self, Self::Checked | Self::CheckedFnStar)
+    }
 }
 
 fn read_function_clauses(
@@ -131,7 +156,7 @@ fn read_function_clauses(
             ));
         }
     }
-    if clauses.is_empty() {
+    if clauses.is_empty() && !mode.raw() {
         return Err(error(
             "PNX1001",
             span,
@@ -183,7 +208,7 @@ fn function_clause(
     span: Span,
     mode: ClauseMode,
 ) -> Result<Clause<'_>, Box<Diagnostic>> {
-    let check_types = mode == ClauseMode::Checked;
+    let check_types = mode.checked();
     let [parameters, body @ ..] = forms else {
         return Err(error(
             "PNX1001",
@@ -201,6 +226,7 @@ fn function_clause(
     let (params, rest) = split_rest(params)
         .map_err(|span| error("PNX1001", span, "& requires exactly one rest binding"))?;
     if check_types
+        && !mode.raw()
         && let Some(rest) = rest
         && rest.map().is_some()
     {
@@ -211,6 +237,13 @@ fn function_clause(
         )));
     }
     for param in params.iter().chain(rest) {
+        if mode.raw() && raw_local_symbol(param).is_none() {
+            return Err(error(
+                "PNX1001",
+                param.without_metadata().span,
+                "fn* requires an unqualified symbol for each parameter",
+            ));
+        }
         if check_types && let Some(diagnostic) = dotted_pattern_error(param) {
             return Err(Box::new(diagnostic));
         }
@@ -234,7 +267,7 @@ fn function_clause(
             "Clojure/JVM supports at most 20 fixed parameters",
         ));
     }
-    let (conditions, body) = if mode != ClauseMode::FnStar
+    let (conditions, body) = if !mode.raw()
         && let [head, rest @ ..] = body
         && !rest.is_empty()
         && let Some(entries) = head.map()
@@ -244,7 +277,7 @@ fn function_clause(
         (None, body)
     };
     let condition = |name| {
-        if mode == ClauseMode::FnStar {
+        if mode.raw() {
             return None;
         }
         conditions

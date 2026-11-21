@@ -7,7 +7,7 @@ use crate::checker::bindings::{binding_names, dotted_binding_error, raw_local_sy
 use crate::checker::calls::arity_counts;
 use crate::checker::function_forms::{
     Clause, function_clauses, letfn_bindings, letfn_definition, lexical_fn_star_clauses,
-    lexical_function_clauses,
+    lexical_function_clauses, local_fn_name,
 };
 use crate::expand::Threading;
 use crate::reader::{Form, Kind, Span};
@@ -1119,6 +1119,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         let clauses = if let Some((name, tail)) = args.split_first()
             && let Some(symbol) = name.symbol()
         {
+            let symbol = local_fn_name(symbol, special_form);
             let span = name.without_metadata().span;
             if symbol.contains('.')
                 && let Purpose::Navigate {
@@ -1448,8 +1449,7 @@ fn plain_core_arguments(name: &str) -> bool {
 fn special_callee(name: &str) -> bool {
     matches!(
         name,
-        "&" | "."
-            | "case*"
+        "." | "case*"
             | "def"
             | "deftype*"
             | "do"
