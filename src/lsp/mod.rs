@@ -728,21 +728,21 @@ fn notification(
         }
         "textDocument/didSave" => {
             if let Ok(params) = serde_json::from_value(params)
-                && projects.save(params, output)?
+                && projects.save(params, inlay_refresh.active(), output)?
             {
                 inlay_refresh.request(output)?;
             }
         }
         "workspace/didChangeWatchedFiles" => {
             if let Ok(params) = serde_json::from_value(params)
-                && projects.changed_files(params, output)?
+                && projects.changed_files(params, inlay_refresh.active(), output)?
             {
                 inlay_refresh.request(output)?;
             }
         }
         "workspace/didRenameFiles" => {
             if let Ok(query) = serde_json::from_value::<RenameFiles>(params)
-                && projects.did_rename_files(&query.files, output)?
+                && projects.did_rename_files(&query.files, inlay_refresh.active(), output)?
             {
                 inlay_refresh.request(output)?;
             }

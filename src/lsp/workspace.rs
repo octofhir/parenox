@@ -398,7 +398,12 @@ impl Workspace {
             && in_source_roots(path, &self.source_roots, &self.source_aliases)
     }
 
-    pub fn save(&mut self, params: &DocumentParams, output: &mut impl Write) -> io::Result<bool> {
+    pub fn save(
+        &mut self,
+        params: &DocumentParams,
+        track_contract_changes: bool,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
         let Some(file) = file_path(&params.text_document.uri) else {
             return Ok(false);
         };
@@ -407,8 +412,11 @@ impl Workspace {
                 .document_key(&params.text_document.uri)
                 .and_then(|key| self.documents.get(&key))
                 .is_some_and(|doc| !doc.indexed && doc.editor.is_some());
-        if new_source || self.is_project_input(&file) {
-            return self.refresh(output);
+        if new_source
+            || self.is_project_input(&file)
+            || (self.is_changed_source(&file, 2) && file.is_file())
+        {
+            return self.refresh(track_contract_changes, output);
         }
         Ok(false)
     }
@@ -416,6 +424,7 @@ impl Workspace {
     pub fn changed_files(
         &mut self,
         params: &WatchedFiles,
+        track_contract_changes: bool,
         output: &mut impl Write,
     ) -> io::Result<bool> {
         for event in &params.changes {
@@ -425,7 +434,7 @@ impl Workspace {
             if matches!(event.kind, 1..=3)
                 && (self.is_project_input(&path) || self.is_changed_source(&path, event.kind))
             {
-                return self.refresh(output);
+                return self.refresh(track_contract_changes, output);
             }
         }
         Ok(false)
@@ -494,10 +503,15 @@ impl Workspace {
         Ok(())
     }
 
-    fn refresh(&mut self, output: &mut impl Write) -> io::Result<bool> {
+    fn refresh(
+        &mut self,
+        track_contract_changes: bool,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
         match self.reload() {
             Ok(externs_changed) => {
-                self.check(output)?;
+                let contracts_changed =
+                    self.check_with_contract_changes(track_contract_changes, None, output)?;
                 for (path, document) in &mut self.documents {
                     document.check_standalone(path, self.extern_buffers.as_ref(), output)?;
                 }
@@ -514,7 +528,7 @@ impl Workspace {
                         self.publish_test_tree(&path, output)?;
                     }
                 }
-                Ok(externs_changed)
+                Ok(externs_changed || contracts_changed)
             }
             Err(message) => {
                 log_load_error(output, &message)?;
@@ -551,7 +565,7 @@ impl Workspace {
         if standalone || !is_clojure_source(Path::new(&path)) {
             Ok(false)
         } else {
-            self.check_with_contract_changes(track_contract_changes.then_some(&path), output)
+            self.check_with_contract_changes(track_contract_changes, Some(&path), output)
         }
     }
 
@@ -1067,7 +1081,7 @@ impl Workspace {
             document.check_standalone(path, self.extern_buffers.as_ref(), output)?;
         } else {
             contracts_changed =
-                self.check_with_contract_changes(track_contract_changes.then_some(path), output)?;
+                self.check_with_contract_changes(track_contract_changes, Some(path), output)?;
         }
         self.publish_test_tree(path, output)?;
         Ok(contracts_changed)
@@ -1100,11 +1114,13 @@ impl Workspace {
     }
 
     fn check(&mut self, output: &mut impl Write) -> io::Result<()> {
-        self.check_with_contract_changes(None, output).map(|_| ())
+        self.check_with_contract_changes(false, None, output)
+            .map(|_| ())
     }
 
     fn check_with_contract_changes(
         &mut self,
+        track_contract_changes: bool,
         edited_path: Option<&str>,
         output: &mut impl Write,
     ) -> io::Result<bool> {
@@ -1123,7 +1139,7 @@ impl Workspace {
             }
         }
         let externs: Vec<_> = self.externs.iter().map(FileSnapshot::as_source).collect();
-        let track = edited_path.is_some_and(|edited| open.iter().any(|path| *path != edited));
+        let track = track_contract_changes && open.iter().any(|&path| Some(path) != edited_path);
         let (report, contracts_changed) = if track {
             self.session
                 .check_project_documents_with_contract_changes(&sources, &externs, &open)

@@ -149,11 +149,12 @@ impl Projects {
     pub fn did_rename_files(
         &mut self,
         files: &[FileRename],
+        track_contract_changes: bool,
         output: &mut impl Write,
     ) -> io::Result<bool> {
-        let mut externs_changed = false;
+        let mut hints_changed = false;
         for workspace in std::iter::once(&mut self.primary).chain(self.nested.values_mut()) {
-            externs_changed |= workspace.did_rename_files(files, output)?;
+            hints_changed |= workspace.did_rename_files(files, track_contract_changes, output)?;
         }
         for file in files {
             if let (Some(old), Some(new)) = (file_path(&file.old_uri), file_path(&file.new_uri))
@@ -167,7 +168,7 @@ impl Projects {
                 }
             }
         }
-        Ok(externs_changed)
+        Ok(hints_changed)
     }
 
     fn source_owner(&self, path: &Path) -> Option<&PathBuf> {
@@ -282,26 +283,32 @@ impl Projects {
         Ok(())
     }
 
-    pub fn save(&mut self, params: DocumentParams, output: &mut impl Write) -> io::Result<bool> {
+    pub fn save(
+        &mut self,
+        params: DocumentParams,
+        track_contract_changes: bool,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
         // A project input can be saved without a corresponding open buffer,
         // and two projects may intentionally share an input on disk.
-        let mut externs_changed = false;
+        let mut hints_changed = false;
         for workspace in std::iter::once(&mut self.primary).chain(self.nested.values_mut()) {
-            externs_changed |= workspace.save(&params, output)?;
+            hints_changed |= workspace.save(&params, track_contract_changes, output)?;
         }
-        Ok(externs_changed)
+        Ok(hints_changed)
     }
 
     pub fn changed_files(
         &mut self,
         params: WatchedFiles,
+        track_contract_changes: bool,
         output: &mut impl Write,
     ) -> io::Result<bool> {
-        let mut externs_changed = false;
+        let mut hints_changed = false;
         for workspace in std::iter::once(&mut self.primary).chain(self.nested.values_mut()) {
-            externs_changed |= workspace.changed_files(&params, output)?;
+            hints_changed |= workspace.changed_files(&params, track_contract_changes, output)?;
         }
-        Ok(externs_changed)
+        Ok(hints_changed)
     }
 
     fn owner(&self, uri: Option<&str>) -> Option<&PathBuf> {

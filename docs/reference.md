@@ -718,9 +718,9 @@ project, a buffer has no project context.
   Proven local types can help explain a mismatch with the declared return type.
   Complete functions before a reader error can still show hints in their
   checked prefix. The server requests a refresh from clients that support it
-  after a saved extern changes, or when an editor change affects a public
-  function signature, a verified guard, or the availability of an alias in
-  another open buffer in the same project.
+  after a saved extern changes. Editor changes and disk reloads also trigger
+  a refresh when they affect a public function signature, a verified guard,
+  or the availability of an alias for an open buffer in the project.
 - **ClojureDocs** downloads the public compact EDN export over HTTPS in
   the background when the cache is missing, invalid, or at least 24 hours old. The
   server uses the last valid snapshot while a refresh runs or fails. The

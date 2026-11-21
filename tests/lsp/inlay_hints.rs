@@ -409,6 +409,102 @@ fn source_contract_edits_refresh_hints_in_an_unchanged_caller() {
 }
 
 #[test]
+fn saved_source_contracts_refresh_inlay_hints_in_unchanged_buffers() {
+    let fixture = Fixture::new("closed source inlay refresh");
+    let caller_path = fixture.0.join("src/caller.clj");
+    let provider_path = fixture.0.join("src/provider.clj");
+    let caller = uri(&caller_path);
+    let provider = uri(&provider_path);
+    let consumer = r#"(ns caller (:require [provider :as p]))
+(defn read-value {:t/sig '[:-> t/any]} []
+  (let [value (p/value)] value))
+"#;
+    let publish = |result, value, suffix| {
+        let source =
+            format!("(ns provider)\n(defn value {{:t/sig '[:-> {result}]}} [] {value})\n{suffix}");
+        fs::write(&provider_path, source).unwrap();
+    };
+    publish("string?", "\"value\"", "");
+    fs::write(&caller_path, consumer).unwrap();
+    let mut child = lsp_server();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |request: Value, notifications: &[Value]| {
+        for notification in notifications {
+            send_message(&mut input, notification);
+        }
+        send_message(&mut input, &request);
+        let mut refreshes = 0;
+        loop {
+            let reply = read_message(&mut output).unwrap();
+            if reply["id"] == request["id"] {
+                assert!(reply.get("error").is_none(), "{reply}");
+                return (reply["result"].clone(), refreshes);
+            }
+            if reply["method"] == "workspace/inlayHint/refresh" {
+                assert!(
+                    reply["id"].is_string() && reply.get("params").is_none(),
+                    "{reply}"
+                );
+                refreshes += 1;
+                send_message(
+                    &mut input,
+                    &json!({"jsonrpc":"2.0","id":reply["id"],"result":null}),
+                );
+            }
+        }
+    };
+    exchange(
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),
+            "capabilities":{"workspace":{"inlayHint":{"refreshSupport":true}}}
+        }}),
+        &[],
+    );
+    let hints = |id| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/inlayHint","params":{
+            "textDocument":{"uri":caller},"range":{
+                "start":{"line":2,"character":0},"end":{"line":3,"character":0}
+            }
+        }})
+    };
+    let expected = |label| json!([{"position":{"line":2,"character":13},"kind":1,"label":label}]);
+    let watch = json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{
+        "changes":[{"uri":provider,"type":2}]
+    }});
+    let save = json!({"jsonrpc":"2.0","method":"textDocument/didSave","params":{
+        "textDocument":{"uri":provider}
+    }});
+    let initial = exchange(
+        hints(2),
+        &[
+            json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+                "uri":caller,"version":1,"languageId":"clojure","text":consumer
+            }}}),
+        ],
+    );
+    assert_eq!(initial, (expected(": String"), 0));
+    publish("number?", "42", "");
+    assert_eq!(
+        exchange(hints(3), std::slice::from_ref(&watch)),
+        (expected(": Number"), 1)
+    );
+    assert_eq!(
+        exchange(hints(4), std::slice::from_ref(&save)),
+        (expected(": Number"), 0)
+    );
+    publish("number?", "42", ";; Only documentation changed\n");
+    assert_eq!(exchange(hints(5), &[watch]), (expected(": Number"), 0));
+    publish("boolean?", "true", "");
+    assert_eq!(exchange(hints(6), &[save]), (expected(": Boolean"), 1));
+    exchange(json!({"jsonrpc":"2.0","id":7,"method":"shutdown"}), &[]);
+    send_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"}));
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn saved_extern_changes_refresh_inlay_hints_with_one_deferred_request() {
     let fixture = Fixture::new("inlay hint refresh");
     let file = fixture.0.join("src/types.clj");

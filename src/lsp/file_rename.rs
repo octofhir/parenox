@@ -104,6 +104,7 @@ impl Workspace {
     pub(in crate::lsp) fn did_rename_files(
         &mut self,
         files: &[FileRename],
+        track_contract_changes: bool,
         output: &mut impl Write,
     ) -> io::Result<bool> {
         let mut refresh = false;
@@ -146,7 +147,7 @@ impl Workspace {
             }
         }
         if refresh {
-            return self.refresh(output);
+            return self.refresh(track_contract_changes, output);
         }
         Ok(false)
     }
