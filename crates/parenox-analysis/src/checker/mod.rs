@@ -202,8 +202,15 @@ struct Value {
     guard: Option<Arc<VerifiedGuard>>,
     // Structural types do not prove ordinary JVM collection behavior.
     literal_container: Option<LiteralContainer>,
-    // The evaluator checked this call and reported a definite argument mismatch.
-    rejected_call: bool,
+    rejection: Option<CallRejection>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CallRejection {
+    // A declared contract failed, leaving the runtime result unproved.
+    Contract,
+    // The operation has no normal return for these arguments.
+    Runtime,
 }
 
 impl Value {
@@ -215,15 +222,30 @@ impl Value {
             contract: None,
             guard: None,
             literal_container: None,
-            rejected_call: false,
+            rejection: None,
         }
     }
 
     fn rejected_call() -> Self {
         Self {
-            rejected_call: true,
+            rejection: Some(CallRejection::Contract),
             ..Self::new(Type::Unknown)
         }
+    }
+
+    fn rejected_runtime_call() -> Self {
+        Self {
+            rejection: Some(CallRejection::Runtime),
+            ..Self::new(Type::Unknown)
+        }
+    }
+
+    fn is_rejected(&self) -> bool {
+        self.rejection.is_some()
+    }
+
+    fn stops_evaluation(&self) -> bool {
+        self.known == Type::Never || self.rejection == Some(CallRejection::Runtime)
     }
 
     fn with_notes(known: Type, notes: Vec<String>) -> Self {

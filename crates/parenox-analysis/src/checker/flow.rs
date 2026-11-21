@@ -563,7 +563,7 @@ impl Checker<'_> {
             tests.push((literal, result));
         }
 
-        let mut remaining = if value.rejected_call {
+        let mut remaining = if value.stops_evaluation() {
             Type::Never
         } else {
             value.known.clone()
@@ -612,7 +612,7 @@ impl Checker<'_> {
                 );
             }
         }
-        if value.rejected_call {
+        if value.is_rejected() {
             value
         } else {
             Value::union_branches(outcomes)

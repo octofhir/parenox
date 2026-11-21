@@ -1,6 +1,81 @@
 use parenox::{Session, Source};
 
 #[test]
+fn applies_str_to_realized_bounded_string_mappings() {
+    let source = r#"(ns demo (:refer-clojure :rename {map each partial prefix}))
+(defn suffix {:t/sig '[:-> #{" hey  end"}]} []
+  (let [args ["hey" nil "end"]]
+    (apply str (each (prefix str " ") args))))
+(defn plain {:t/sig '[:-> #{"xy"}]} []
+  (apply str (clojure.core/map str ["x" nil "y"])))
+(defn empty-input {:t/sig '[:-> #{""}]} []
+  (apply str (each (prefix str "ignored") nil)))
+(defn capture-first {:t/sig '[:-> #{:prefix}]} []
+  (try (apply str (each (prefix str (throw (ex-info "prefix" {:stage :prefix})))
+                       (throw (ex-info "source" {:stage :source}))))
+       (catch clojure.lang.ExceptionInfo error (:stage (ex-data error)))))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn forced_string_mapping_reports_its_written_source_and_requires_ordinary_traversal() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+(defn invalid {:t/sig '[:-> string?]} []
+  (apply str (map (partial str " ") 42)))
+(defn custom {:t/sig '[(s/tuple #{"x"} #{"y"}) :-> string?]} [items]
+  (apply str (map (partial str " ") items)))
+(defn abstract-source {:t/sig '[number? :-> string?]} [items]
+  (apply str (map str items)))
+(defn exact-value {:t/sig '[integer? :-> string?]} [items]
+  (case items 5 (apply str (map str items)) "fallback"))
+(defn possible-empty {:t/sig '[boolean? :-> string?]} [empty?]
+  (let [items (if empty? nil 42)]
+    (apply str (map str items))))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let mismatches: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.code == "PNX2322")
+        .collect();
+    let [mismatch] = mismatches.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(
+        &source[mismatch.span.start.offset..mismatch.span.end.offset],
+        "42"
+    );
+    assert!(
+        report.diagnostics.iter().any(|finding| {
+            finding.code == "PNX9001"
+                && &source[finding.span.start.offset..finding.span.end.offset] == "items"
+        }),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn string_mapping_stops_on_a_proven_capture_failure() {
+    let source = r#"(ns demo)
+(defn ignores-value {:t/sig '[number? :-> string?]} [_] "prefix")
+(defn contract-only {:t/sig '[:-> string?]} []
+  (apply str (map (partial str (ignores-value :wrong)) (subs 42 0))))
+(defn runtime-failure {:t/sig '[:-> string?]} []
+  (apply str (map (partial str (subs false 0)) (subs :unreachable 0))))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.code == "PNX2322")
+        .map(|finding| &source[finding.span.start.offset..finding.span.end.offset])
+        .collect();
+    assert_eq!(findings, [":wrong", "42", "false"], "{report:#?}");
+}
+
+#[test]
 fn spreads_nil_vectors_and_exact_seqs_across_project_namespaces() {
     let input = [
         Source {

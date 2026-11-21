@@ -626,6 +626,11 @@ narrow a local or stable map selector in the result expression. Tests run in
 source order and the first match wins. Dynamic predicates, numeric or computed
 tests, unknown subjects, and `:>>` clauses report incomplete analysis.
 
+Standard `apply str` can consume one `map` expression over a proven ordinary
+finite vector or nil when the mapper is `str` or `partial` applied to `str`.
+Captured arguments are evaluated before the collection. The consumer can keep
+the exact joined text when the mapped strings are known.
+
 Verified `:t/guard '[:then value string?]` narrows the argument after a true
 result. Use `:both` only if the checker can also verify the false branch.
 An unproved guard reports `PNX9008` and doesn't narrow callers. See

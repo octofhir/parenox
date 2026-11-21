@@ -7,9 +7,10 @@ use super::{
     call_returns, vectors::CollectionError, vectors::element_type,
 };
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, Signature, Type};
+use crate::types::{Arity, IntegerClass, IntegerType, Signature, Type};
 
 const MAX_SPREAD_ALTERNATIVES: usize = 16;
+const CORE_STR: &str = "clojure.core/str";
 
 struct OpenSpread<'a> {
     element: &'a Type,
@@ -31,6 +32,13 @@ impl Checker<'_> {
         let callable = self.prepare_callable(callee, env);
         let mut args: Vec<_> = self.eval_args(prefix, env, callable.returns()).collect();
         let reachable = callable.returns() && call_returns(&args);
+        if prefix.is_empty()
+            && matches!(&callable.kind, Callable::Builtin(name) if name == CORE_STR)
+            && self.standard_core_name(apply, env).as_deref() == Some("clojure.core/apply")
+            && let Some((mapper, source)) = self.string_mapping(spread, env)
+        {
+            return self.apply_string_mapping(mapper, source, env);
+        }
         if let Some(items) = spread.vector() {
             // The literal's syntax supplies every position even for large vectors.
             args.extend(self.eval_args(items, env, reachable));
@@ -150,6 +158,98 @@ impl Checker<'_> {
             result = result.join(value);
         }
         result
+    }
+
+    fn string_mapping<'form>(
+        &self,
+        spread: &'form Form,
+        env: &Env,
+    ) -> Option<(&'form Form, &'form Form)> {
+        let Kind::List(forms) = &spread.kind else {
+            return None;
+        };
+        let [operator, mapper, source] = forms.as_slice() else {
+            return None;
+        };
+        if self.standard_core_name(operator, env)?.as_str() != "clojure.core/map" {
+            return None;
+        }
+        let stringifier = match &mapper.kind {
+            Kind::Symbol(_) => mapper,
+            Kind::List(parts) => {
+                let [operator, target, ..] = parts.as_slice() else {
+                    return None;
+                };
+                if self.standard_core_name(operator, env)?.as_str() != "clojure.core/partial" {
+                    return None;
+                }
+                target
+            }
+            _ => return None,
+        };
+        (self.standard_core_name(stringifier, env)?.as_str() == CORE_STR)
+            .then_some((mapper, source))
+    }
+
+    fn apply_string_mapping(&mut self, mapper: &Form, source: &Form, env: &Env) -> Value {
+        let callable = self.prepare_callable(mapper, env);
+        let returns = callable.returns();
+        let mut arguments = match callable.kind {
+            Callable::Builtin(name) if name == CORE_STR => Vec::new(),
+            Callable::Partial(wrapper) if matches!(&wrapper.target.kind, Callable::Builtin(name) if name == CORE_STR) => {
+                wrapper.prefix
+            }
+            _ => {
+                return self.unchecked_form(mapper.span, "The mapped str callback is unconfirmed");
+            }
+        };
+        let stopped_prefix = arguments.iter().find(|(value, _)| value.stops_evaluation());
+        let input = self.infer_path(source, env, returns && stopped_prefix.is_none(), false);
+        if let Some((value, _)) = stopped_prefix {
+            return value.clone();
+        }
+        if input.known == Type::Never || input.is_rejected() {
+            return input;
+        }
+        if input.known.contains_unknown() {
+            self.may_throw();
+            return Value::new(Type::Unknown);
+        }
+        let items = match (&input.known, &input.literal_container) {
+            (Type::Nil, _) => &[][..],
+            (Type::Tuple(items), Some(LiteralContainer::Vector(_))) => items,
+            (ty, _) if definitely_not_seqable_for_mapping(ty) => {
+                self.error(
+                    "PNX2322",
+                    source.span,
+                    format!("map expects a seqable collection, got {}", ty.inferred()),
+                );
+                self.illegal_argument();
+                return Value::rejected_runtime_call();
+            }
+            _ => {
+                return self.unchecked_form(
+                    source.span,
+                    "apply str through map needs a proven ordinary finite vector or Nil",
+                );
+            }
+        };
+        if arguments.iter().any(|(value, _)| value.is_rejected()) {
+            return Value::rejected_call();
+        }
+        // The mapped values are already strings, so consuming each one cannot
+        // run a conversion before a later map invocation. The capture expressions
+        // were evaluated once even when the input is empty.
+        let mapped: Vec<_> = items
+            .iter()
+            .map(|item| {
+                arguments.push((Value::new(item.clone()), source.span));
+                let result = Value::new(self.str_result(&arguments));
+                arguments.pop();
+                (result, source.span)
+            })
+            .collect();
+        Value::new(self.str_result(&mapped))
     }
 
     fn concat_operands<'form>(&self, form: &'form Form, env: &Env) -> Option<&'form [Form]> {
@@ -344,6 +444,30 @@ impl Checker<'_> {
                 );
             }
         }
+    }
+}
+
+fn definitely_not_seqable_for_mapping(ty: &Type) -> bool {
+    match ty {
+        Type::Union(parts) => parts.iter().all(definitely_not_seqable_for_mapping),
+        Type::Bool(_)
+        | Type::Boolean
+        | Type::Char(_)
+        | Type::Character
+        | Type::Key(_)
+        | Type::Keyword
+        | Type::SpecKeyword
+        | Type::SimpleSymbol
+        | Type::QualifiedSymbol
+        | Type::Symbol
+        | Type::Sym(_)
+        | Type::Integer(_)
+        | Type::Integral(IntegerType {
+            class: IntegerClass::Fixed,
+            ..
+        }) => true,
+        // Custom Number and BigInteger subclasses may implement Seqable.
+        _ => false,
     }
 }
 

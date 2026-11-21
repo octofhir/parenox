@@ -192,7 +192,7 @@ impl Checker<'_> {
         let args: Vec<_> = self.eval_args(args, env, callable.returns()).collect();
         let covered = args
             .iter()
-            .all(|(value, _)| value.rejected_call || !value.known.contains_unknown());
+            .all(|(value, _)| value.is_rejected() || !value.known.contains_unknown());
         let invoked = call_returns(&args);
         self.call_prepared(&callable, args, form.span, env, invoked);
         covered

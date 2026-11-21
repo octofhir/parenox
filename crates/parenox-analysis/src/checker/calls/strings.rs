@@ -54,11 +54,11 @@ impl Checker<'_> {
         self.may_throw();
         let start = self.diagnostics.len();
         let (input, input_span) = &args[0];
-        if !input.rejected_call {
+        if !input.is_rejected() {
             self.expect(input, &Type::String, *input_span, "subs text");
         }
         for (value, span) in &args[1..] {
-            if !value.rejected_call {
+            if !value.is_rejected() {
                 self.expect(value, &Type::Number, *span, "subs index");
             }
         }
@@ -70,7 +70,10 @@ impl Checker<'_> {
             && (input.literal_container.is_some()
                 || input.known.known_intersection(&Type::String) == Some(Type::Never)
                 || args[1..].iter().any(|(index, _)| excludes_number(index)));
-        if impossible_operand || args.iter().any(|(value, _)| value.rejected_call) {
+        if impossible_operand || args.iter().any(|(value, _)| value.stops_evaluation()) {
+            return Value::rejected_runtime_call();
+        }
+        if args.iter().any(|(value, _)| value.is_rejected()) {
             return Value::rejected_call();
         }
         let text = match &input.known {
