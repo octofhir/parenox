@@ -377,6 +377,12 @@ impl Model {
         &self.names.namespace
     }
 
+    pub(super) fn can_use_standard_core(&self, name: &str, globals: &Globals) -> bool {
+        !globals.project_namespaces.contains("clojure.core")
+            && (name.contains('/')
+                || (self.external_refers.is_empty() && !self.names.source_macros.contains(name)))
+    }
+
     pub(super) fn resolve(&self, name: &str) -> String {
         self.names.resolve(name)
     }

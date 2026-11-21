@@ -113,6 +113,10 @@ impl Checker<'_> {
         let element = Value::with_notes(spread.element.clone(), spread.notes.to_vec());
         let start = self.diagnostics.len();
         let result = match &callable.kind {
+            Callable::Partial(wrapper) => {
+                let arguments: Vec<_> = wrapper.prefix.iter().chain(prefix).cloned().collect();
+                return self.apply_open(&wrapper.target, &arguments, spread, span);
+            }
             Callable::Value(function) => match &function.known {
                 Type::Function(signatures)
                     if signatures.iter().any(|sig| sig.parameters.is_some()) =>

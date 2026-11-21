@@ -64,6 +64,7 @@ pub(super) struct Names {
     pub(super) required_libraries: BTreeSet<String>,
     pub(super) core_only: Option<BTreeSet<String>>,
     pub(super) core_hidden: BTreeSet<String>,
+    pub(super) source_macros: BTreeSet<String>,
     pub(super) spec_core_shadows: BTreeSet<String>,
     pub(super) spec_core_scope_known: bool,
 }
@@ -820,6 +821,9 @@ impl Declarations {
                         }
                         "clojure.core/defmacro" => {
                             model.macros.push(index);
+                            if let Some(name) = xs.get(1).and_then(Form::symbol) {
+                                model.names.source_macros.insert(name.into());
+                            }
                             model.opaque_var_surface = true;
                         }
                         "clojure.core/defonce" | "clojure.core/defmulti" => {

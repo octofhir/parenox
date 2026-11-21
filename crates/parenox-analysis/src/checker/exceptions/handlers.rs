@@ -12,6 +12,7 @@ pub(super) enum ExceptionClass {
     Exception,
     RuntimeException,
     IllegalArgumentException,
+    ArityException,
     IllegalStateException,
     ClassCastException,
     NullPointerException,
@@ -24,8 +25,10 @@ pub(super) enum ExceptionClass {
 
 impl ExceptionClass {
     fn resolve(name: &str) -> Option<Self> {
-        if matches!(name, "ExceptionInfo" | "clojure.lang.ExceptionInfo") {
-            return Some(Self::ExceptionInfo);
+        match name {
+            "ExceptionInfo" | "clojure.lang.ExceptionInfo" => return Some(Self::ExceptionInfo),
+            "clojure.lang.ArityException" => return Some(Self::ArityException),
+            _ => {}
         }
         match name {
             "java.io.IOException" => return Some(Self::IOException),
@@ -53,6 +56,7 @@ impl ExceptionClass {
             Self::Throwable => None,
             Self::Error | Self::Exception => Some(Self::Throwable),
             Self::AssertionError => Some(Self::Error),
+            Self::ArityException => Some(Self::IllegalArgumentException),
             Self::RuntimeException | Self::IOException => Some(Self::Exception),
             Self::FileNotFoundException => Some(Self::IOException),
             _ => Some(Self::RuntimeException),

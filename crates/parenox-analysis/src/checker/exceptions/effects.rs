@@ -116,6 +116,12 @@ impl Checker<'_> {
         }
     }
 
+    pub(in crate::checker) fn arity_error(&mut self) {
+        if let Some(throws) = &mut self.throws {
+            throws.record(ExceptionClass::ArityException, Type::Throwable);
+        }
+    }
+
     pub(in crate::checker) fn arithmetic_exception(&mut self) {
         if let Some(throws) = &mut self.throws {
             throws.record(ExceptionClass::ArithmeticException, Type::Throwable);

@@ -1,4 +1,4 @@
-//! Contextual inference for inline and let-bound functions and fnil wrappers.
+//! Contextual inference for inline and let-bound functions and callable wrappers.
 use std::sync::Arc;
 
 use super::super::{
@@ -24,6 +24,7 @@ pub(super) enum InlineFunction<'a> {
 enum InlineSyntax<'a> {
     Function(InlineFunction<'a>),
     Fnil(&'a [Form]),
+    Partial(&'a [Form]),
 }
 
 #[derive(Clone, Copy)]
@@ -67,18 +68,33 @@ pub(super) struct Fnil<'form, 'model> {
     pub(super) returns: bool,
 }
 
+pub(super) struct Partial<'form, 'model> {
+    pub(super) target: PreparedCallable<'form, 'model>,
+    pub(super) prefix: Vec<(Value, Span)>,
+    pub(super) returns: bool,
+}
+
 impl<'model> Checker<'model> {
     pub(super) fn prepare_inline<'form>(
         &mut self,
         form: &'form Form,
         env: &Env,
-    ) -> Option<Callable<'form, 'model>> {
-        if let Some(function) = form.symbol().and_then(|name| env.inline_function(name)) {
-            return Some(Callable::Captured(function.clone()));
-        }
-        Some(match self.inline_syntax(form, env)? {
-            InlineSyntax::Function(function) => Callable::Inline(function),
-            InlineSyntax::Fnil(parts) => self.prepare_fnil(parts, form.span, env),
+    ) -> Option<PreparedCallable<'form, 'model>> {
+        let kind = if let Some(function) = form.symbol().and_then(|name| env.inline_function(name))
+        {
+            Callable::Captured(function.clone())
+        } else {
+            match self.inline_syntax(form, env)? {
+                InlineSyntax::Function(function) => Callable::Inline(function),
+                InlineSyntax::Fnil(parts) => self.prepare_fnil(parts, form.span, env),
+                InlineSyntax::Partial(parts) => {
+                    return Some(self.prepare_partial(parts, form.span, env));
+                }
+            }
+        };
+        Some(PreparedCallable {
+            kind,
+            span: form.span,
         })
     }
 
@@ -192,6 +208,9 @@ impl<'model> Checker<'model> {
         match self.model.resolve(name).as_str() {
             "clojure.core/fn" => Some(InlineSyntax::Function(InlineFunction::Function(parts))),
             "clojure.core/fnil" => Some(InlineSyntax::Fnil(parts)),
+            "clojure.core/partial" if self.model.can_use_standard_core(name, self.globals) => {
+                Some(InlineSyntax::Partial(parts))
+            }
             _ => None,
         }
     }
@@ -490,6 +509,38 @@ impl<'model> Checker<'model> {
             defaults,
             returns,
         }))
+    }
+
+    fn prepare_partial<'form>(
+        &mut self,
+        parts: &'form [Form],
+        span: Span,
+        env: &Env,
+    ) -> PreparedCallable<'form, 'model> {
+        let [callee, bound @ ..] = parts else {
+            self.error("PNX2554", span, "partial requires a function");
+            self.arity_error();
+            return PreparedCallable {
+                kind: Callable::Value(Value::new(Type::Never)),
+                span,
+            };
+        };
+        let target = self.prepare_callable(callee, env);
+        // The one-argument arity returns the original value, including
+        // non-callable values. Other arities return a deferred call wrapper.
+        if bound.is_empty() {
+            return target;
+        }
+        let prefix: Vec<_> = self.eval_args(bound, env, target.returns()).collect();
+        let returns = target.returns() && call_returns(&prefix);
+        PreparedCallable {
+            kind: Callable::Partial(Box::new(Partial {
+                target,
+                prefix,
+                returns,
+            })),
+            span,
+        }
     }
 
     pub(super) fn call_fnil(

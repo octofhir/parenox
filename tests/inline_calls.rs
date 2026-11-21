@@ -118,6 +118,104 @@ fn unused_let_bound_functions_compile_but_do_not_execute_and_expansion_is_bounde
 }
 
 #[test]
+fn partial_preserves_target_identity_and_checks_bound_arguments_at_invocation() {
+    for (expression, result) in [
+        ("((partial (fn [prefix] prefix) \"saved\"))", "#{\"saved\"}"),
+        ("((partial + 1 2 3 4) 5)", "number?"),
+        (
+            "((partial (partial (fn [a b] (str a b)) \"a\")) \"b\")",
+            "string?",
+        ),
+        ("(reduce (partial 42 :saved) 0 [])", "number?"),
+        (
+            "(mapv (partial (fn [a b] (+ a b)) \"unused\") [])",
+            "(s/coll-of number? :kind vector?)",
+        ),
+        (
+            "(let [partial (fn [a b] (str a b))] (partial 1 2))",
+            "string?",
+        ),
+    ] {
+        let report = check(&format!(
+            "(defn f {{:t/sig '[:-> {result}]}} [] {expression})"
+        ));
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let rejected_identity = check("(defn f {:t/sig '[:-> number?]} [] (reduce (partial 42) 0 []))");
+    assert_eq!(rejected_identity.diagnostics[0].code, "PNX2322");
+    let missing_target = check(
+        r#"
+        (defn f {:t/sig '[:-> #{:caught}]} []
+          (try ((partial) (inc "unused"))
+               (catch clojure.lang.ArityException _ :caught)
+               (catch IllegalArgumentException _ :wrong)))
+    "#,
+    );
+    let [arity] = missing_target.diagnostics.as_slice() else {
+        panic!("{missing_target:#?}")
+    };
+    assert_eq!(arity.code, "PNX2554");
+
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn label {:t/sig '[string? number? :-> string?]} [prefix n] (str prefix n))
+        (defn bad {:t/sig '[:-> (s/coll-of string? :kind vector?)]} []
+          (mapv (partial label 9) [1]))"#;
+    let report = Session::default().check("partial.clj", source);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(&source[error.span.start.offset..error.span.end.offset], "9");
+    assert_eq!(error.contract.as_ref().unwrap().name, "demo/label");
+}
+
+#[test]
+fn an_opaque_source_macro_can_shadow_partial_without_reusing_proofs() {
+    let body = "(defn f {:t/sig '[:-> number?]} [] ((partial + 1) 2))";
+    let path = "partial.clj";
+    let clean = format!("(ns demo)\n{body}");
+    let shadowed = format!("(ns demo)\n(defmacro partial [& _] :opaque)\n{body}");
+    let qualified = shadowed.replace("((partial +", "((clojure.core/partial +");
+    let mut session = Session::default();
+    assert!(session.check(path, &clean).complete);
+    let shadowed = session.check(path, &shadowed);
+    assert!(!shadowed.complete, "{shadowed:#?}");
+    assert!(
+        shadowed
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX2304" && finding.message.contains("partial")),
+        "{shadowed:#?}"
+    );
+    assert_eq!(shadowed.stats.checked_functions, 1);
+    let qualified = session.check(path, &qualified);
+    let [gap] = qualified.diagnostics.as_slice() else {
+        panic!("{qualified:#?}")
+    };
+    assert_eq!(gap.code, "PNX9001");
+    assert!(gap.message.contains("defmacro"));
+    let restored = session.check(path, &clean);
+    assert!(restored.ok && restored.complete);
+}
+
+#[test]
+fn partial_evaluates_its_target_and_captures_before_callback_input() {
+    let report = check(
+        r#"
+        (defn f {:t/sig '[:-> #{:bound}]} []
+          (try
+            ((partial (fn [x y] (throw (ex-info "body" {:where :body})))
+                      (throw (ex-info "bound" {:where :bound})))
+             (throw (ex-info "caller" {:where :caller})))
+            (catch clojure.lang.ExceptionInfo e (:where (ex-data e)))))
+        (defn total {:t/sig '[(s/coll-of number? :kind vector?) :-> number?]} [items]
+          (apply (partial + 2 3) items))
+    "#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
 fn inline_overloads_check_the_selected_body_and_compile_all_clauses() {
     for (expr, result) in [
         (r#"((fn ([] "ready") ([n] (inc n))))"#, "string?"),

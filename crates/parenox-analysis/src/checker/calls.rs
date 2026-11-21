@@ -32,12 +32,13 @@ use crate::reader::{Form, Span};
 use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use forms::CoreForm;
-use inline::{CallbackReturn, Fnil, InlineFunction};
+use inline::{CallbackReturn, Fnil, InlineFunction, Partial};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
     Captured(Arc<CapturedInline>),
     Fnil(Box<Fnil<'form, 'model>>),
+    Partial(Box<Partial<'form, 'model>>),
     Private(&'model Function),
     Builtin(String),
     Value(Value),
@@ -48,6 +49,7 @@ impl Callable<'_, '_> {
         match self {
             Self::Value(value) => value.known != Type::Never,
             Self::Fnil(wrapper) => wrapper.returns,
+            Self::Partial(wrapper) => wrapper.returns,
             _ => true,
         }
     }
@@ -277,11 +279,7 @@ impl<'model> Checker<'model> {
                 _ => {}
             }
         }
-        if let Some(kind) = self.prepare_inline(&xs[0], env) {
-            let callable = PreparedCallable {
-                kind,
-                span: xs[0].span,
-            };
+        if let Some(callable) = self.prepare_inline(&xs[0], env) {
             let args: Vec<_> = self.eval_args(&xs[1..], env, callable.returns()).collect();
             let invoked = call_returns(&args);
             return self.call_prepared(&callable, args, span, env, invoked);
@@ -561,7 +559,7 @@ impl<'model> Checker<'model> {
             span: callee.span,
         };
         if let Some(callable) = self.prepare_inline(callee, env) {
-            return prepare(callable);
+            return callable;
         }
         if let Some(name) = callee.symbol()
             && !env.contains_key(name)
@@ -594,6 +592,10 @@ impl<'model> Checker<'model> {
             }
             Callable::Captured(function) => self.call_captured(function, args, span, env, invoked),
             Callable::Fnil(wrapper) => self.call_fnil(wrapper, args, span, env, invoked),
+            Callable::Partial(wrapper) => {
+                let args = wrapper.prefix.iter().cloned().chain(args).collect();
+                self.call_prepared(&wrapper.target, args, span, env, invoked)
+            }
             _ if !invoked => Value::new(Type::Never),
             Callable::Private(function) => self.inferred_call(
                 function,

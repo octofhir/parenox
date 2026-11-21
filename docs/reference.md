@@ -547,6 +547,9 @@ An inline `fn` saved in `let` can specialize in direct calls and supported
 collection operations, including a checked callback contract. It retains
 the lexical bindings from its definition.
 Using that function as data leaves a coverage gap.
+`partial` can supply a callback to modeled calls such as `mapv` and `reduce`.
+Its saved arguments evaluate at construction and are checked against the
+target when it runs. A call to `partial` with just the target keeps that value.
 
 Vector `:pre` conditions are checked after parameter binding and on each
 `recur` iteration. Vector `:post` conditions run after a normal return, with
