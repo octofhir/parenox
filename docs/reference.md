@@ -690,6 +690,10 @@ project, a buffer has no project context.
   A keyword passed as a callback shows the combined type of its reached
   lookup results. An empty collection or an earlier stop can leave it
   uninvoked.
+  Contextual types inside local functions require evidence about how they
+  are called. A use outside checked calls can withhold these types in
+  that function, its captured local functions, and its peers in a
+  `letfn` group.
   A reader error later in the buffer can leave local types available in
   preceding complete functions. These prefix types are scoped to queries
   in that buffer. A named spec defined in the same file needs a complete

@@ -1,7 +1,7 @@
 //! Contextual inference for inline and let-bound functions and callable wrappers.
 mod letfn;
 
-use std::sync::Arc;
+use std::{collections::HashSet, ptr, sync::Arc};
 
 use super::super::{
     Checker, Env, Value,
@@ -135,6 +135,40 @@ pub(super) struct Partial<'form, 'model> {
 }
 
 impl<'model> Checker<'model> {
+    pub(in crate::checker) fn withhold_captured_facts<'a>(
+        &mut self,
+        functions: impl IntoIterator<Item = &'a CapturedInline>,
+    ) {
+        if self.type_query.is_none() || !self.path_reachable {
+            return;
+        }
+        // An unobserved invocation may call any peer or captured closure,
+        // including through a branch that the checked calls never reached.
+        let mut pending: Vec<_> = functions.into_iter().collect();
+        let mut visited = HashSet::new();
+        while let Some(function) = pending.pop() {
+            let scope = match function {
+                CapturedInline::Single(function) => &function.scope,
+                CapturedInline::Group { group, .. } => &group.scope,
+            };
+            if !visited.insert(ptr::from_ref(scope)) {
+                continue;
+            }
+            match function {
+                CapturedInline::Single(function) => self.withhold_type_facts(function.form.span),
+                CapturedInline::Group { group, .. } => {
+                    for (_, form) in &group.definitions {
+                        self.withhold_type_facts(form.span);
+                    }
+                }
+            }
+            if self.type_query.is_none() {
+                break;
+            }
+            pending.extend(scope.inline_functions());
+        }
+    }
+
     pub(super) fn local_call(
         &self,
         captured: &CapturedInline,

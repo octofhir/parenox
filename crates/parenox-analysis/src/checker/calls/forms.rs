@@ -115,13 +115,16 @@ impl Checker<'_> {
             CoreForm::GetIn => self.get_in(xs, span, env),
             CoreForm::Assoc => self.assoc(xs, span, env),
             CoreForm::AssocIn => self.assoc_in(xs, span, env),
-            CoreForm::Fn | CoreForm::Fnil => self.unsupported(
-                span,
-                format!(
-                    "{} is currently supported in direct calls and inline callbacks",
-                    &name["clojure.core/".len()..]
-                ),
-            ),
+            CoreForm::Fn | CoreForm::Fnil => {
+                self.withhold_captured_facts(env.inline_functions());
+                self.unsupported(
+                    span,
+                    format!(
+                        "{} is currently supported in direct calls and inline callbacks",
+                        &name["clojure.core/".len()..]
+                    ),
+                )
+            }
             CoreForm::Update => self.update(xs, span, env, name),
             CoreForm::MapTransform => self.map_transform(&xs[1..], span, env, name),
             CoreForm::GroupBy => self.group_by(&xs[1..], span, env),

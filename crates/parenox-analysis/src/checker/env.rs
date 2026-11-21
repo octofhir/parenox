@@ -102,6 +102,10 @@ impl Env {
         self.inline_functions.get(name)
     }
 
+    pub(super) fn inline_functions(&self) -> impl Iterator<Item = &CapturedInline> {
+        self.inline_functions.values()
+    }
+
     pub(super) fn mark_inline(&mut self, name: &str, function: CapturedInline) {
         self.inline_functions.insert(name.into(), function);
     }

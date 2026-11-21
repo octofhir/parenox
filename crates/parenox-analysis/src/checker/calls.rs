@@ -297,9 +297,11 @@ impl<'model> Checker<'model> {
                 .declared_value(name, self.globals, xs[0].span.start.offset)
             {
                 Some(DeclaredValue::Macro(scope)) => {
+                    self.withhold_captured_facts(env.inline_functions());
                     return self.macro_scope(scope, &xs[1..], span, env);
                 }
                 Some(DeclaredValue::OpaqueMacro) => {
+                    self.withhold_captured_facts(env.inline_functions());
                     return self
                         .unchecked_form(xs[0].span, &format!("Macro {name} has no checked scope"));
                 }
@@ -333,6 +335,8 @@ impl<'model> Checker<'model> {
                             self.may_throw();
                             return Value::new(Type::Unknown);
                         }
+                    } else {
+                        self.withhold_captured_facts(env.inline_functions());
                     }
                     return self.unchecked_function(name, xs[0].span);
                 }
@@ -388,6 +392,7 @@ impl<'model> Checker<'model> {
             && function.known == Type::Unknown
             && xs[0].symbol().is_some_and(|name| !env.contains_key(name));
         let observation = if opaque_arguments {
+            self.withhold_captured_facts(env.inline_functions());
             self.type_query.take()
         } else {
             None
@@ -771,21 +776,28 @@ impl<'model> Checker<'model> {
         )
     }
 
-    pub(super) fn withhold_callback_facts(&mut self, callback: &PreparedCallable<'_, '_>) {
+    pub(super) fn withhold_callback_facts(
+        &mut self,
+        callback: &PreparedCallable<'_, '_>,
+        env: &Env,
+    ) {
         if self.type_query.is_none() || !self.path_reachable {
             return;
         }
         match &callback.kind {
-            Callable::Inline(_) => self.withhold_type_facts(callback.span),
+            Callable::Inline(_) => {
+                self.withhold_type_facts(callback.span);
+                self.withhold_captured_facts(env.inline_functions());
+            }
             Callable::Captured { function, .. } => {
-                self.withhold_type_facts(function.syntax().0.span);
+                self.withhold_captured_facts(Some(function));
             }
             Callable::Private(function) => self.withhold_type_facts(function.span),
-            Callable::Fnil(wrapper) => self.withhold_callback_facts(&wrapper.target),
-            Callable::Partial(wrapper) => self.withhold_callback_facts(&wrapper.target),
+            Callable::Fnil(wrapper) => self.withhold_callback_facts(&wrapper.target, env),
+            Callable::Partial(wrapper) => self.withhold_callback_facts(&wrapper.target, env),
             Callable::Combined(combined) => {
                 for stage in &combined.stages {
-                    self.withhold_callback_facts(stage);
+                    self.withhold_callback_facts(stage, env);
                 }
             }
             Callable::Value(_) | Callable::Builtin(_) => {

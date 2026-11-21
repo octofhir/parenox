@@ -1,6 +1,118 @@
 use super::*;
 
 #[test]
+fn hover_withholds_invocation_types_when_a_local_closure_escapes() {
+    let fixture = Fixture::new("escaping local hover");
+    let file = fixture.0.join("src/closures.clj");
+    let document = uri(&file);
+    let source = r#"(ns closures (:require [fixture.uri :as uri]))
+(defmacro later [] '(outward {:field "later"}))
+(defn inspect {:t/sig '[:-> t/any]} []
+  (letfn [(inner [row]
+            (let [picked (:field row)]
+              (uri/forward picked)))
+          (outward [row] (inner row))]
+    (let [kept 42]
+      (outward {:field "first"})
+      (str kept)
+      nil)))
+"#;
+    fs::write(&file, source).unwrap();
+    fs::write(fixture.0.join("parenox.edn"), r#"{:externs ["uri.edn"]}"#).unwrap();
+    fs::write(
+        fixture.0.join("uri.edn"),
+        "{fixture.uri/forward (t/nil-preserving [string? :-> string?])}",
+    )
+    .unwrap();
+
+    let sites = [
+        ("textDocument/hover", 3, "row"),
+        ("textDocument/hover", 4, "row"),
+        ("textDocument/hover", 4, ":field"),
+        ("textDocument/hover", 7, "kept"),
+        ("textDocument/signatureHelp", 5, "picked"),
+    ];
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"version":1,"languageId":"clojure","text":source
+        }}}),
+    ];
+    let overlays = [
+        None,
+        Some("outward"),
+        Some("(later)"),
+        Some("(fn [input] (outward input))"),
+        Some("#(outward %)"),
+        Some("(if false outward nil)"),
+        Some("nil"),
+    ];
+    for (index, overlay) in overlays.iter().enumerate() {
+        if let Some(tail) = overlay {
+            let changed = source.replace("nil)))", &format!("{tail})))"));
+            requests.push(json!({
+                "jsonrpc":"2.0","method":"textDocument/didChange","params":{
+                    "textDocument":{"uri":document,"version":index+1},
+                    "contentChanges":[{"text":changed}]
+                }
+            }));
+        }
+        for (site, (method, line, token)) in sites.iter().enumerate() {
+            let row = source.lines().nth(*line).unwrap();
+            let start = row.find(token).unwrap();
+            let column = row[..start].encode_utf16().count();
+            requests.push(json!({"jsonrpc":"2.0","id":2+index*sites.len()+site,
+                "method":method,"params":{
+                    "textDocument":{"uri":document},"position":{"line":line,"character":column}
+                }
+            }));
+        }
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    let result = |index, site| {
+        &replies
+            .iter()
+            .find(|reply| reply["id"] == 2 + index * sites.len() + site)
+            .unwrap()["result"]
+    };
+    for index in [0, 5, 6] {
+        assert_eq!(
+            result(index, 0)["contents"]["value"],
+            result(index, 1)["contents"]["value"]
+        );
+        assert!(
+            result(index, 0)["contents"]["value"]
+                .as_str()
+                .is_some_and(|contents| contents.contains("first")),
+            "version {} binder: {}, lookup: {}, signature: {}",
+            index + 1,
+            result(index, 0),
+            result(index, 2),
+            result(index, 4)
+        );
+        assert_eq!(result(index, 2)["contents"]["value"], ":field\n\"first\"");
+        assert_eq!(
+            result(index, 4)["signatures"][0]["label"],
+            "(fixture.uri/forward [String]) -> String"
+        );
+    }
+    for index in 1..=4 {
+        for site in 0..3 {
+            assert!(result(index, site).is_null(), "{}", result(index, site));
+        }
+        assert_eq!(
+            result(index, 4)["signatures"][0]["label"],
+            "(fixture.uri/forward [Nil | String]) -> Nil | String"
+        );
+    }
+    for index in 0..overlays.len() {
+        assert_eq!(result(index, 3)["contents"]["value"], "kept\n42");
+    }
+}
+
+#[test]
 fn a_nil_preserving_extern_tracks_guard_edits_in_hover_and_signatures() {
     let fixture = Fixture::new("nil-preserving extern");
     let path = fixture.0.join("src/fragment.clj");

@@ -112,7 +112,7 @@ impl Checker<'_> {
             return Value::new(Type::Never);
         }
         if collection.unproven_tuple_traversal() {
-            self.withhold_callback_facts(callback);
+            self.withhold_callback_facts(callback, env);
             self.call_prepared(callback, Vec::new(), span, env, false);
             self.unchecked_tuple_traversal(search.qualified(), source.span);
             return search.unchecked_result();

@@ -60,7 +60,7 @@ impl Checker<'_> {
             if let Err(unproven) =
                 append_concat_arguments(&mut args, &mut projected, inputs, operands)
             {
-                self.withhold_callback_facts(&callable);
+                self.withhold_callback_facts(&callable, env);
                 self.call_prepared(&callable, Vec::new(), span, env, false);
                 return self.unchecked_form(
                     unproven,
@@ -86,7 +86,7 @@ impl Checker<'_> {
             return self.call_prepared(&callable, args, span, env, false);
         }
         if collection.unproven_tuple_traversal() {
-            self.withhold_callback_facts(&callable);
+            self.withhold_callback_facts(&callable, env);
             self.call_prepared(&callable, Vec::new(), span, env, false);
             return self.unchecked_tuple_traversal("clojure.core/apply", spread.span);
         }

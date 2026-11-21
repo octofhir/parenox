@@ -719,7 +719,8 @@ impl Checker<'_> {
             Kind::Keyword(k) => Value::new(Type::Key(self.model.key(k))),
             Kind::Symbol(s) | Kind::AnonymousArgument(s) => {
                 if let Some(value) = env.get(s) {
-                    if env.inline_function(s).is_some() {
+                    if let Some(function) = env.inline_function(s) {
+                        self.withhold_captured_facts(Some(function));
                         self.diagnostics.push(Diagnostic::analysis_gap(
                             "PNX9001", form.span,
                             "The type of a local fn is unchecked outside supported calls",
@@ -805,10 +806,13 @@ impl Checker<'_> {
             Kind::AutoNamespacedMap { .. } => self.unchecked_form(form.span, "Namespaced map needs source namespace context"),
             Kind::List(xs) if xs.is_empty() => Value::new(Type::empty_list()),
             Kind::List(xs) => self.list(xs, form.span, env, tail),
-            Kind::AnonymousFunction(_) => self.unsupported(
-                form.span,
-                "#() is currently supported in direct calls and inline callbacks",
-            ),
+            Kind::AnonymousFunction(_) => {
+                self.withhold_captured_facts(env.inline_functions());
+                self.unsupported(
+                    form.span,
+                    "#() is currently supported in direct calls and inline callbacks",
+                )
+            }
             Kind::Quote(inner) => self.quoted_data(inner),
             Kind::SyntaxQuote(_) | Kind::Unquote { .. } => self.unchecked_form(
                 form.span,

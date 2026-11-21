@@ -51,7 +51,7 @@ impl Checker<'_> {
             return Value::new(Type::Never);
         }
         if collection.unproven_tuple_traversal() {
-            self.withhold_callback_facts(&callable);
+            self.withhold_callback_facts(&callable, env);
             self.call_prepared(&callable, Vec::new(), span, env, false);
             return self.unchecked_tuple_traversal("clojure.core/reduce", source.span);
         }

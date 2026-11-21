@@ -273,7 +273,7 @@ impl Checker<'_> {
         }
         // A custom reducer can call this callback with different values. An
         // earlier ordinary visit cannot justify precise types for its body.
-        self.withhold_callback_facts(&callable);
+        self.withhold_callback_facts(&callable, env);
         self.call_prepared(&callable, Vec::new(), span, env, false);
         Some(self.unchecked_form(
             source.span,
@@ -346,7 +346,7 @@ impl Checker<'_> {
             .iter()
             .find(|(input, _)| input.unproven_tuple_traversal())
         {
-            self.withhold_callback_facts(&callable);
+            self.withhold_callback_facts(&callable, env);
             self.call_prepared(&callable, Vec::new(), span, env, false);
             self.unchecked_tuple_traversal(name, *source);
             return Value::new(Type::Vector(Box::new(Type::Unknown)));
