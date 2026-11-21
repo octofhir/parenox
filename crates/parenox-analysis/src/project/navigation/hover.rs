@@ -1,12 +1,15 @@
 //! Source-backed hover help without evaluating declarations or metadata.
 use crate::checker::Declarations;
 use crate::reader::{Form, Span};
+use crate::types::Type;
 
 use super::{
-    InspectedReference, ResolvedVar, ScopedReference, Session, SourceTarget, VarInfo,
+    FileCache, InspectedReference, ResolvedVar, ScopedReference, Session, SourceTarget, VarInfo,
     archive::namespace_declarations, declaration::top_level_reference, specs::keyword_at,
     symbol_at, symbol_form_at,
 };
+
+const MAX_HOVER_TYPES: usize = 128;
 
 #[derive(Default)]
 pub struct VarDocumentation {
@@ -61,17 +64,19 @@ impl Session {
         let (_, forms) = file.navigation_source()?;
         let Some(site) = symbol_form_at(forms, offset) else {
             let key = keyword_at(forms, offset)?;
-            let scope = self.typing_at(file, path, offset)?;
-            let ty = scope.declarations.lookup_type(
-                scope.forms,
-                scope.model,
-                scope.globals,
-                &file.source,
-                key,
-            )?;
+            let inferred_type = file.cached_hover_type(key.span, || {
+                let scope = self.typing_at(file, path, offset)?;
+                scope.declarations.lookup_type(
+                    scope.forms,
+                    scope.model,
+                    scope.globals,
+                    &file.source,
+                    key,
+                )
+            })?;
             return Some(DocumentHover::Lookup {
                 key: &file.source[key.span.start.offset..key.span.end.offset],
-                inferred_type: ty.to_string(),
+                inferred_type,
                 span: key.span,
             });
         };
@@ -81,17 +86,19 @@ impl Session {
         if symbol != "/" && symbol.contains('/') {
             return None;
         }
-        let scope = self.typing_at(file, path, offset)?;
-        let ty = scope.declarations.local_read_type(
-            scope.forms,
-            scope.model,
-            scope.globals,
-            &file.source,
-            site,
-        )?;
+        let inferred_type = file.cached_hover_type(site.span, || {
+            let scope = self.typing_at(file, path, offset)?;
+            scope.declarations.local_read_type(
+                scope.forms,
+                scope.model,
+                scope.globals,
+                &file.source,
+                site,
+            )
+        })?;
         Some(DocumentHover::Local(LocalHover {
             name: &file.source[site.span.start.offset..site.span.end.offset],
-            inferred_type: ty.to_string(),
+            inferred_type,
             span: site.span,
         }))
     }
@@ -179,6 +186,30 @@ impl Session {
     pub fn hover_symbol_span(&self, path: &str, offset: usize) -> Option<Span> {
         let (_, forms) = self.current_file(path)?.navigation_source()?;
         Some(symbol_form_at(forms, offset)?.span)
+    }
+}
+
+impl FileCache {
+    fn cached_hover_type(
+        &self,
+        site: Span,
+        infer: impl FnOnce() -> Option<Type>,
+    ) -> Option<String> {
+        let start = site.start.offset;
+        let cache = self.hover_types.get_or_init(Default::default);
+        if let Some(value) = cache.lock().unwrap().get(&start).cloned() {
+            return value;
+        }
+        let value = infer().map(|ty| ty.to_string());
+        let mut cache = cache.lock().unwrap();
+        if let Some(current) = cache.get(&start) {
+            return current.clone();
+        }
+        if cache.len() == MAX_HOVER_TYPES {
+            cache.pop_first();
+        }
+        cache.insert(start, value.clone());
+        value
     }
 }
 

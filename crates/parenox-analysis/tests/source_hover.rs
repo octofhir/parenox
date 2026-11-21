@@ -40,6 +40,42 @@ fn local_hover_uses_reachable_iterations_and_lexical_scope() {
 }
 
 #[test]
+fn repeated_hover_uses_current_externs_with_unchanged_source() {
+    let consumer = Source {
+        path: "client.clj",
+        source: r#"(ns client (:require [wire :as w]))
+          (defn read-path {:t/sig '[:-> t/any]} []
+            (let [path (:path (w/location))] path))"#,
+    };
+    let mut session = Session::default();
+    let key = consumer.source.find(":path").unwrap();
+    let read = consumer.source.rfind("path").unwrap();
+    for (externs, expected) in [
+        ("{wire/location [:-> {:path string?}]}", Some("String")),
+        ("{wire/location [:-> {:path number?}]}", Some("Number")),
+        ("{}", None),
+        ("{wire/location [:-> {:path string?}]}", Some("String")),
+    ] {
+        session.check_project(
+            &[consumer],
+            Some(Source {
+                path: "wire.edn",
+                source: externs,
+            }),
+        );
+        for position in [key, key + 1, read, read + 1, key, read] {
+            let ty = match session.document_hover_at(consumer.path, position) {
+                Some(DocumentHover::Lookup { inferred_type, .. }) => Some(inferred_type),
+                Some(DocumentHover::Local(local)) => Some(local.inferred_type),
+                Some(DocumentHover::Var(_)) => panic!("expected a value occurrence"),
+                None => None,
+            };
+            assert_eq!(ty.as_deref(), expected, "{externs} at byte {position}");
+        }
+    }
+}
+
+#[test]
 fn local_hover_withholds_types_from_unchecked_loop_iterations() {
     let branches: String = (0..16)
         .map(|step| {

@@ -14,7 +14,7 @@ pub use symbols::{SourceSymbol, SourceSymbolKind};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -120,6 +120,7 @@ struct FileCache {
     declarations: Option<Declarations>,
     known_var_surface: OnceLock<bool>,
     navigation_fallback: Option<Box<NavigationFallback>>,
+    hover_types: OnceLock<HoverTypes>,
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
     interface: Option<InterfaceKey>,
@@ -127,6 +128,8 @@ struct FileCache {
     functions: BTreeMap<String, CheckedFunction>,
     partial_diagnostics: Option<Vec<Diagnostic>>,
 }
+
+type HoverTypes = Mutex<BTreeMap<usize, Option<String>>>;
 
 struct CheckedFunction {
     ranges: Vec<Span>,
@@ -422,7 +425,8 @@ impl Session {
             };
             let mut cache = self.files.remove(source.path).unwrap_or_default();
             let parsed = cache.update(source.source, source.path, kind);
-            // An unchanged prefix can depend on externs or other edited files.
+            // Type queries can depend on externs or other edited files.
+            cache.hover_types.take();
             if let Some(fallback) = &mut cache.navigation_fallback {
                 fallback.checked_prefix.take();
             }
