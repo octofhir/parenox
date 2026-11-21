@@ -166,6 +166,7 @@ impl Checker<'_> {
                 resolved.as_str(),
                 "clojure.core/mapv"
                     | "clojure.core/count"
+                    | "clojure.core/first"
                     | "clojure.core/inc"
                     | "clojure.core/dec"
                     | "clojure.core/min"

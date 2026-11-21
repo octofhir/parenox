@@ -1,7 +1,7 @@
 //! Vector and sequence traversal and accumulation.
 use std::collections::BTreeMap;
 
-use super::super::{Checker, Value};
+use super::super::{Checker, LiteralContainer, Value};
 use crate::Diagnostic;
 use crate::reader::Span;
 use crate::types::{ExtraFields, IntegerType, MAX_TUPLE_ITEMS, MapType, Type};
@@ -185,9 +185,6 @@ impl Checker<'_> {
         value: &Value,
         span: Span,
     ) -> Value {
-        if iteration_may_throw(&value.known) {
-            self.may_throw();
-        }
         let operation = match name {
             "clojure.core/seq" => ReadSequence::Start,
             "clojure.core/first" => ReadSequence::Head,
@@ -195,6 +192,24 @@ impl Checker<'_> {
             "clojure.core/rest" => ReadSequence::Rest,
             _ => unreachable!(),
         };
+        if matches!(operation, ReadSequence::Head) {
+            if let (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) =
+                (&value.known, &value.literal_container)
+            {
+                let mut head = Value::with_notes(operation.fixed(items), value.notes.clone());
+                head.literal_container = vector.vector_item(0).cloned();
+                return head;
+            }
+            if self.partial_scope.is_some() && !matches!(value.known, Type::Nil | Type::Never) {
+                // A structural vector contract can constrain count and nth
+                // without constraining the sequence read by first.
+                self.may_throw();
+                return Value::new(Type::Unknown);
+            }
+        }
+        if iteration_may_throw(&value.known) {
+            self.may_throw();
+        }
         let result = self.read_sequence(operation, &value.known, name, span);
         Value::with_notes(result, value.notes.clone())
     }

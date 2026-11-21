@@ -1,4 +1,4 @@
-use parenox::Session;
+use parenox::{Session, Source};
 
 const SOURCE: &str = include_str!("../examples/jvm_strings.cljc");
 
@@ -121,6 +121,55 @@ fn unannotated_substring_checks_a_locally_computed_utf16_endpoint() {
             assert_eq!(finding.contract.as_ref().unwrap().name, "clojure.core/subs");
             assert_eq!(
                 &text[finding.span.start.offset..finding.span.end.offset],
+                "(dec (count raw-arglist))"
+            );
+        }
+    }
+}
+
+#[test]
+fn unannotated_arglist_reads_keep_ordinary_vector_elements() {
+    let source = r#"
+(ns demo (:require [arglists :as provider]))
+(defn local-arglist []
+  (let [fn-def {:arglist-strs (first [["[🦊]"]])}
+        raw-arglist (first (:arglist-strs fn-def))
+        arglist-contents (subs raw-arglist 1 (dec (count raw-arglist)))]
+    (re-matches #".*[\[\{].*" arglist-contents)))
+(defn structural-arglist []
+  (let [raw-arglist (first (provider/arglists))]
+    (subs raw-arglist 1 (dec (count raw-arglist)))))
+(defn shadowed [first]
+  (let [raw-arglist (first ["x"])]
+    (subs raw-arglist 1 (dec (count raw-arglist)))))
+"#;
+    let externs = Source {
+        path: "externs.edn",
+        source: r#"{arglists/arglists [:-> (clojure.spec.alpha/tuple #{"x"})]}"#,
+    };
+    let broken = source.replace("[🦊]", "x");
+    let mut session = Session::default();
+    for (source, expected) in [(source, 0), (broken.as_str(), 1), (source, 0)] {
+        let report = session.check_project(
+            &[Source {
+                path: "src/demo.clj",
+                source,
+            }],
+            Some(externs),
+        );
+        assert!(!report.complete, "{report:#?}");
+        let errors: Vec<_> = report.files[0]
+            .diagnostics
+            .iter()
+            .filter(|finding| finding.severity == "error")
+            .collect();
+        assert_eq!(errors.len(), expected, "{report:#?}");
+        if let [finding] = errors.as_slice() {
+            assert_eq!(finding.code, "PNX2801");
+            assert_eq!(finding.span.start.line, 6);
+            assert_eq!(finding.contract.as_ref().unwrap().name, "clojure.core/subs");
+            assert_eq!(
+                &source[finding.span.start.offset..finding.span.end.offset],
                 "(dec (count raw-arglist))"
             );
         }

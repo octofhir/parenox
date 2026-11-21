@@ -700,7 +700,10 @@ impl<'model> Checker<'model> {
         is_builtin(resolved)
             && (!matches!(
                 resolved,
-                "clojure.core/count" | "clojure.core/min" | "clojure.core/max"
+                "clojure.core/count"
+                    | "clojure.core/first"
+                    | "clojure.core/min"
+                    | "clojure.core/max"
             ) || self.model.can_use_standard_core(spelling, self.globals))
     }
 
