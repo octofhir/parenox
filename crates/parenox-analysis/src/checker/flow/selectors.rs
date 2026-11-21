@@ -3,6 +3,7 @@ use super::narrow_by_type;
 use crate::checker::{
     Checker, Env,
     env::{MAX_SELECTOR_KEYS, Selector},
+    quote::quoted_symbol,
 };
 use crate::reader::{Form, Kind};
 use crate::types::{Field, MapSlot, Type};
@@ -82,7 +83,7 @@ impl Checker<'_> {
             Kind::Bool(value) => Some(Type::Bool(*value)),
             Kind::Character(value) => Some(Type::Char(*value)),
             Kind::Keyword(_) | Kind::String(_) => self.literal_map_key(form),
-            _ => None,
+            _ => quoted_symbol(form).map(|symbol| Type::Sym(symbol.to_owned())),
         }
     }
 }

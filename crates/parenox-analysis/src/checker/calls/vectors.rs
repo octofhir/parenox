@@ -36,6 +36,7 @@ pub(in crate::checker) fn vector_predicate(input: &Type) -> Type {
         | Type::Symbol
         | Type::SimpleSymbol
         | Type::QualifiedSymbol
+        | Type::Sym(_)
         | Type::Pattern
         | Type::Reduced(_)
         | Type::ListTuple(_)

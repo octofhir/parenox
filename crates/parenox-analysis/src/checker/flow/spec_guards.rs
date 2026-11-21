@@ -535,7 +535,8 @@ fn usable(ty: &Type) -> bool {
         | Type::Key(_)
         | Type::Symbol
         | Type::SimpleSymbol
-        | Type::QualifiedSymbol => true,
+        | Type::QualifiedSymbol
+        | Type::Sym(_) => true,
         Type::SpecCollection(element) => usable(element),
         Type::Union(parts) => parts.iter().all(usable),
         Type::Map(map) => {

@@ -18,15 +18,24 @@ impl Checker<'_> {
         let mut tests = BTreeSet::new();
         let mut branches = Vec::with_capacity(pairs.len());
         for [constants, result] in pairs {
+            let mut quote = None;
             let constants = match &constants.without_metadata().kind {
                 Kind::List(forms) => forms.as_slice(),
+                Kind::Quote(quoted) => {
+                    // The reader expands 'x to (quote x), a case test group.
+                    quote = Some(Form {
+                        kind: Kind::Symbol("quote".into()),
+                        span: constants.span,
+                    });
+                    slice::from_ref(quoted.as_ref())
+                }
                 _ => slice::from_ref(constants),
             };
-            let mut keys = Vec::with_capacity(constants.len());
-            for constant in constants {
+            let mut keys = Vec::with_capacity(constants.len() + usize::from(quote.is_some()));
+            for constant in quote.iter().chain(constants) {
                 let Some(key) = self.case_constant(constant, env) else {
                     return self.unsupported(constant.span,
-                        "case analysis supports nil, booleans, characters, strings, keywords and integers in the signed long range");
+                        "case analysis supports nil, booleans, characters, strings, keywords, symbols and integers in the signed long range");
                 };
                 if !tests.insert(key.clone()) {
                     self.error(
@@ -115,6 +124,7 @@ impl Checker<'_> {
             Kind::Nil | Kind::Bool(_) | Kind::Character(_) | Kind::String(_) | Kind::Keyword(_) => {
                 Some(self.infer(form, env).known)
             }
+            Kind::Symbol(ref symbol) => Some(Type::Sym(symbol.clone())),
             // Dispatch compares the integer value. Refinement intersects the
             // label with the subject so its JVM numeric class is retained.
             Kind::Number => self
@@ -145,9 +155,13 @@ impl Checker<'_> {
 fn finite_tag(ty: &Type) -> bool {
     match ty {
         Type::Union(parts) => parts.iter().all(finite_tag),
-        Type::Nil | Type::Boolean | Type::Bool(_) | Type::Key(_) | Type::Str(_) | Type::Char(_) => {
-            true
-        }
+        Type::Nil
+        | Type::Boolean
+        | Type::Bool(_)
+        | Type::Key(_)
+        | Type::Str(_)
+        | Type::Char(_)
+        | Type::Sym(_) => true,
         _ => ty.exact_long_value().is_some(),
     }
 }

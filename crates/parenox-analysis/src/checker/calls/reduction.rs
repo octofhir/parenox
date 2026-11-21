@@ -335,6 +335,7 @@ fn reducer_argument(ty: &Type) -> bool {
         | Type::Symbol
         | Type::SimpleSymbol
         | Type::QualifiedSymbol
+        | Type::Sym(_)
         | Type::Key(_)
         | Type::Keyword
         | Type::SpecKeyword

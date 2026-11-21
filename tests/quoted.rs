@@ -1,4 +1,4 @@
-use parenox::{Session, Source};
+use parenox::{DocumentHover, Session, Source};
 
 #[test]
 fn checks_quoted_data_as_values_without_resolving_or_calling_their_symbols() {
@@ -9,6 +9,12 @@ fn checks_quoted_data_as_values_without_resolving_or_calling_their_symbols() {
         ("(nth '(missing \"literal\") 1)", "#{\"literal\"}"),
         ("(first ''command)", "symbol?"),
         ("(first (quote (other.ns/unresolved)))", "symbol?"),
+        (
+            "(= 'other.ns/unresolved '^:tag other.ns/unresolved)",
+            "#{true}",
+        ),
+        ("(= 'sample.source 'sample.dest)", "#{false}"),
+        ("(name 'clojure.core//)", "#{\"/\"}"),
         ("(if (symbol? 'flag) 7 (inc \"skipped\"))", "number?"),
         ("(first (:names '(:names (\"Ada\") :values [])))", "nil?"),
     ] {
@@ -54,6 +60,78 @@ fn symbol_qualification_is_checked_in_literals_guards_and_externs() {
     assert_eq!(diagnostic.code, "PNX2322");
     assert_eq!(diagnostic.expected.as_deref(), Some("SimpleSymbol"));
     assert_eq!(diagnostic.actual.as_deref(), Some("QualifiedSymbol"));
+}
+
+#[test]
+fn exact_symbols_export_and_check_a_consumer_without_the_provider_source() {
+    let provider = Source {
+        path: "symbols.clj",
+        source: r#"
+(ns symbols (:require [clojure.spec.alpha :as s]))
+(s/fdef accept :args (s/cat :operator #{'get-in}) :ret #{'get-in})
+(defn accept [operator] operator)
+(def get-op 'get-in)
+"#,
+    };
+    let mut session = Session::default();
+    let exported = session.export_externs(&[provider], &[]);
+    let edn = exported.edn.expect("expected verified symbol contracts");
+    assert!(edn.contains("#{(quote get-in)}"), "{edn}");
+    let externs = Source {
+        path: "symbols.edn",
+        source: &edn,
+    };
+    let consumer = r#"
+(ns consumer (:require [symbols :as ops]))
+(defn read-op {:t/sig '[:-> #{get-in}]} [] (ops/accept ops/get-op))
+"#;
+    let good = session.check_project(
+        &[Source {
+            path: "consumer.clj",
+            source: consumer,
+        }],
+        Some(externs),
+    );
+    assert!(good.ok && good.complete, "{good:#?}");
+
+    let changed = consumer.replace("ops/get-op", "'get");
+    let bad = session.check_project(
+        &[Source {
+            path: "consumer.clj",
+            source: &changed,
+        }],
+        Some(externs),
+    );
+    let [finding] = bad.files[0].diagnostics.as_slice() else {
+        panic!("{bad:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.expected.as_deref(), Some("'get-in"));
+    assert_eq!(finding.actual.as_deref(), Some("'get"));
+    let span = finding.span.start.offset..finding.span.end.offset;
+    assert_eq!(&changed[span], "'get");
+}
+
+#[test]
+fn large_quoted_collections_group_nested_symbol_keys_by_their_class() {
+    let rows = (0..33)
+        .map(|index| format!("{{leaf{index} :ok}}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let source = format!(
+        "(ns inventory)
+         (defn row {{:t/sig '[:-> any?]}} []
+           (let [sample (first '({rows}))] sample))"
+    );
+    let mut session = Session::default();
+    let report = session.check("inventory.clj", &source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let offset = source.find("sample (first").unwrap();
+    let Some(DocumentHover::Local(value)) = session.document_hover_at("inventory.clj", offset)
+    else {
+        panic!("expected hover on the quoted row");
+    };
+    assert_eq!(value.inferred_type, "Map<SimpleSymbol, :ok>");
 }
 
 #[test]

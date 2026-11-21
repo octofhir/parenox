@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Names;
 use crate::Diagnostic;
+use crate::checker::quote::quoted_symbol;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{ExtraFields, Field, IntegerType, MAX_TUPLE_ITEMS, MapType, Parameters, Type};
 
@@ -205,6 +206,8 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                         Kind::Keyword(k) => Type::Key(self.names.key(k)),
                         Kind::Bool(b) => Type::Bool(*b),
                         Kind::Nil => Type::Nil,
+                        Kind::Symbol(symbol) if self.literal_shapes => Type::Sym(symbol.clone()),
+                        _ if let Some(symbol) = quoted_symbol(x) => Type::Sym(symbol.to_owned()),
                         _ => {
                             self.error("PNX9001", x.span, "Unsupported literal union member");
                             Type::Unknown

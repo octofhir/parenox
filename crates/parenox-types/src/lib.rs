@@ -161,6 +161,7 @@ pub enum Type {
     Symbol,
     SimpleSymbol,
     QualifiedSymbol,
+    Sym(String),
     Map(MapType),
     MapEntry(Box<[Type; 2]>),
     Vector(Box<Type>),
@@ -199,11 +200,13 @@ impl Type {
         Self::ListTuple(Box::new([]))
     }
 
-    /// General expression type. Exact string values remain available separately as refinements.
+    /// General expression type. Exact string and symbol values remain as refinements.
     /// Keywords and booleans retain precision for Clojure lookup and truthiness semantics.
     pub fn inferred(&self) -> Type {
         match self {
             Type::Str(_) => Type::String,
+            Type::Sym(symbol) if qualified_symbol(symbol) => Type::QualifiedSymbol,
+            Type::Sym(_) => Type::SimpleSymbol,
             Type::Integer(_)
             | Type::Integral(IntegerType {
                 range:
@@ -241,6 +244,7 @@ impl Type {
     pub fn requires_precise_type(&self) -> bool {
         match self {
             Type::Str(_)
+            | Type::Sym(_)
             | Type::Char(_)
             | Type::Integral(_)
             | Type::Integer(_)
@@ -309,12 +313,20 @@ impl Type {
         } else if set.contains(&Type::SpecKeyword) {
             set.retain(|t| !matches!(t, Type::Key(key) if key != SPEC_INVALID));
         }
-        if set.contains(&Type::Symbol)
-            || (set.contains(&Type::SimpleSymbol) && set.contains(&Type::QualifiedSymbol))
-        {
-            set.remove(&Type::SimpleSymbol);
-            set.remove(&Type::QualifiedSymbol);
+        let simple_symbols = set.contains(&Type::SimpleSymbol);
+        let qualified_symbols = set.contains(&Type::QualifiedSymbol);
+        if set.contains(&Type::Symbol) || (simple_symbols && qualified_symbols) {
+            set.retain(|ty| {
+                !matches!(
+                    ty,
+                    Type::SimpleSymbol | Type::QualifiedSymbol | Type::Sym(_)
+                )
+            });
             set.insert(Type::Symbol);
+        } else if simple_symbols || qualified_symbols {
+            set.retain(
+                |ty| !matches!(ty, Type::Sym(name) if qualified_symbol(name) == qualified_symbols),
+            );
         }
         if set.contains(&Type::Boolean)
             || (set.contains(&Type::Bool(true)) && set.contains(&Type::Bool(false)))
@@ -478,6 +490,10 @@ impl Type {
     }
 }
 
+fn qualified_symbol(name: &str) -> bool {
+    name != "/" && name.contains('/')
+}
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -518,6 +534,7 @@ impl fmt::Display for Type {
             Type::Symbol => write!(f, "Symbol"),
             Type::SimpleSymbol => write!(f, "SimpleSymbol"),
             Type::QualifiedSymbol => write!(f, "QualifiedSymbol"),
+            Type::Sym(symbol) => write!(f, "'{symbol}"),
             Type::MapEntry(items) => write!(f, "MapEntry<{}, {}>", items[0], items[1]),
             Type::Vector(t) => write!(f, "Vector<{t}>"),
             Type::Seq(t) => write!(f, "Seq<{t}>"),

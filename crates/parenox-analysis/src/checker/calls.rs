@@ -1018,7 +1018,7 @@ pub(super) fn literal_equality(left: &Type, right: &Type) -> Option<bool> {
     fn is_atom(ty: &Type) -> bool {
         matches!(
             ty,
-            Type::Nil | Type::Bool(_) | Type::Key(_) | Type::Str(_) | Type::Char(_)
+            Type::Nil | Type::Bool(_) | Type::Key(_) | Type::Str(_) | Type::Char(_) | Type::Sym(_)
         ) || ty.exact_long_value().is_some()
     }
 

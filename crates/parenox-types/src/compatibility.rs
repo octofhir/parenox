@@ -144,9 +144,12 @@ impl Type {
             | (Type::Str(_), Type::String)
             | (Type::Char(_), Type::Character)
             | (Type::Key(_) | Type::SpecKeyword, Type::Keyword)
-            | (Type::SimpleSymbol | Type::QualifiedSymbol, Type::Symbol)
+            | (Type::SimpleSymbol | Type::QualifiedSymbol | Type::Sym(_), Type::Symbol)
             | (Type::ExceptionInfo(_), Type::Throwable)
             | (Type::Bool(_), Type::Boolean) => Proven,
+            (Type::Sym(_), Type::SimpleSymbol | Type::QualifiedSymbol) => {
+                (self.inferred() == *expected).into()
+            }
             (Type::Key(key), Type::SpecKeyword) => (key != SPEC_INVALID).into(),
             (Type::Keyword, Type::SpecKeyword) => Unproven,
             (Type::Number, Type::Integral(_) | Type::Integer(_)) => Unproven,
@@ -219,6 +222,7 @@ fn scalar_members(ty: &Type) -> Option<&[Type]> {
                     | Type::Symbol
                     | Type::SimpleSymbol
                     | Type::QualifiedSymbol
+                    | Type::Sym(_)
                     | Type::Pattern
             )
         })

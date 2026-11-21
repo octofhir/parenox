@@ -111,3 +111,34 @@ fn equivalent_integer_labels_conflict_and_missing_labels_are_reported() {
         assert_eq!(finding.code, code, "{expression}: {finding:#?}");
     }
 }
+
+#[test]
+fn symbolic_case_labels_are_data_and_narrow_the_tested_value() {
+    let source = r#"
+(ns thread-get)
+(defn use-get-in {:t/sig '[#{get-in} :-> #{:nested}]} [_] :nested)
+(defn dispatch {:t/sig '[symbol? :-> #{:nested :other}]} [operator]
+  (let [get-in :shadow]
+    (case operator get-in (use-get-in operator) :other)))
+(defn guard-dispatch {:t/sig '[symbol? :-> #{:nested :other}]} [operator]
+  (if (= operator (quote get-in)) (use-get-in operator) :other))
+"#;
+    let report = Session::default().check("thread_get.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for expression in [
+        "(case 'get-in (get get-in) :nested :other)",
+        "(case 'quote 'get-in :nested :other)",
+        "(case 'get-in 'get-in :nested :other)",
+        "(case 'clojure.core/get-in get-in :other :nested)",
+    ] {
+        let report = check(expression, "#{:nested}");
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+
+    let report = check("(case 'get 'get :first ^:meta get :duplicate)", "keyword?");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2790");
+}

@@ -77,6 +77,7 @@ fn has_no_keyword_lookup(input: &Type) -> bool {
             | Type::Symbol
             | Type::SimpleSymbol
             | Type::QualifiedSymbol
+            | Type::Sym(_)
             | Type::Integer(_)
             | Type::Integral(IntegerType {
                 class: IntegerClass::Fixed,

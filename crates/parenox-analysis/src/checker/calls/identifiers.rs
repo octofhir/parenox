@@ -6,8 +6,8 @@ impl Checker<'_> {
     pub(in crate::checker) fn name_result(&mut self, input: &Type) -> Type {
         match input {
             Type::Never | Type::Str(_) | Type::String => input.clone(),
-            Type::Key(keyword) => {
-                let spelling = keyword.strip_prefix(':').unwrap_or(keyword);
+            Type::Key(identifier) | Type::Sym(identifier) => {
+                let spelling = identifier.strip_prefix(':').unwrap_or(identifier);
                 let name = spelling
                     .split_once('/')
                     .filter(|(namespace, _)| !namespace.is_empty())

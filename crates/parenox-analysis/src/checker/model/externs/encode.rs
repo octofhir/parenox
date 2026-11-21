@@ -282,6 +282,9 @@ impl SnapshotWriter {
             Type::Key(_) | Type::Str(_) => {
                 return self.nested(1, "#{", "}", |out| out.key(ty));
             }
+            Type::Sym(symbol) => {
+                return self.nested(2, "#{(quote ", ")}", |out| Ok(out.write_str(symbol)?));
+            }
             Type::Parameter(parameter) => &parameter.name,
             Type::Map(map) => return self.map(map),
             Type::Set(item) => return self.collection(item, "set?"),

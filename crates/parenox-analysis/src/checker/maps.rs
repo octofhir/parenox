@@ -28,7 +28,7 @@ pub(super) enum Lookup<'a> {
 
 pub(super) enum MapLiteral<'a> {
     Expression(&'a Env),
-    Quoted,
+    Quoted { precise_symbols: bool },
 }
 
 pub(super) fn map_predicate(input: &Type) -> Type {
@@ -48,6 +48,7 @@ pub(super) fn map_predicate(input: &Type) -> Type {
         | Type::Symbol
         | Type::SimpleSymbol
         | Type::QualifiedSymbol
+        | Type::Sym(_)
         | Type::Integer(_)
         | Type::Integral(IntegerType {
             class: IntegerClass::Fixed,
@@ -100,7 +101,9 @@ impl Checker<'_> {
         for pair in xs.as_chunks::<2>().0 {
             let value = match context {
                 MapLiteral::Expression(env) => self.infer(&pair[1], env),
-                MapLiteral::Quoted => self.quoted_data(&pair[1]),
+                MapLiteral::Quoted { precise_symbols } => {
+                    self.quoted_data_with_symbols(&pair[1], precise_symbols)
+                }
             };
             returns &= value.known != Type::Never;
             if let Some(key) = self
@@ -116,8 +119,11 @@ impl Checker<'_> {
                 } else if let Some(container) = value.literal_container {
                     container_fields.insert(key, container);
                 }
-            } else if matches!(context, MapLiteral::Quoted) {
-                extra_keys.push(self.quoted_data(&pair[0]).known);
+            } else if let MapLiteral::Quoted { precise_symbols } = context {
+                extra_keys.push(
+                    self.quoted_data_with_symbols(&pair[0], precise_symbols)
+                        .known,
+                );
                 extra_values.push(value.known);
             } else {
                 self.unchecked_form(

@@ -115,7 +115,7 @@ fn filterv_preserves_the_positions_retained_by_malli_instrumentation() {
     };
     assert_eq!(
         actions.inferred_type,
-        "Tuple<QualifiedSymbol, QualifiedSymbol>"
+        "Tuple<'sample.instrument/run, 'sample.instrument/stop>"
     );
 
     let broken = source.replace("'sample.instrument/stop", "nil");
