@@ -162,6 +162,8 @@ impl Checker<'_> {
         }
         let resolved = self.model.resolve(name);
         let modeled = partial_string_operator(&resolved)
+            || (resolved == "clojure.core/mapv"
+                && self.model.can_use_standard_core(name, self.globals))
             || matches!(
                 resolved.strip_prefix("clojure.core/"),
                 Some(

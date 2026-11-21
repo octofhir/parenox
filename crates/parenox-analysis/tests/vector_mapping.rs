@@ -1,4 +1,4 @@
-use parenox_analysis::{DocumentHover, ExternPathStep, Session};
+use parenox_analysis::{DocumentHover, ExternPathStep, Session, Source};
 
 #[test]
 fn fixed_doc_rows_retain_their_positions_at_the_use_site() {
@@ -159,4 +159,65 @@ fn projected_literal_fields_keep_their_callback_argument_position() {
         finding.contract.as_ref().unwrap().name,
         "positions/line-delta"
     );
+}
+
+#[test]
+fn unannotated_mapv_checks_reached_literal_rows_against_the_loaded_extern() {
+    let provider = Source {
+        path: "fixture/shared.clj",
+        source: r#"
+(ns fixture.shared)
+(defn position->row-col [position]
+  [(inc (:line position)) (inc (:character position))])
+"#,
+    };
+    let externs = Source {
+        path: "positions.edn",
+        source: "{fixture.shared/position->row-col [{:line number? :character number?} :-> any?]}",
+    };
+    let good = r#"
+(ns selection (:require [fixture.shared :as shared]))
+(defn convert []
+  (mapv shared/position->row-col [{:line 0 :character 5}]))
+(defn shadowed [mapv]
+  (mapv shared/position->row-col [{:line "ignored" :character 5}]))
+(defn none []
+  (mapv shared/position->row-col [] [{:line "ignored" :character 5}]))
+"#;
+    let broken = good.replace(":line 0", ":line \"bad\"");
+    let mut session = Session::default();
+    for (source, contract, expected) in [
+        (good, Some(externs), 0),
+        (&broken, Some(externs), 1),
+        (&broken, None, 0),
+        (&broken, Some(externs), 1),
+        (good, Some(externs), 0),
+    ] {
+        let report = session.check_project(
+            &[
+                provider,
+                Source {
+                    path: "selection.clj",
+                    source,
+                },
+            ],
+            contract,
+        );
+        assert!(!report.complete, "{report:#?}");
+        let findings: Vec<_> = report
+            .files
+            .iter()
+            .flat_map(|file| &file.diagnostics)
+            .filter(|finding| finding.code == "PNX2322")
+            .collect();
+        assert_eq!(findings.len(), expected, "{report:#?}");
+        if let [finding] = findings.as_slice() {
+            let span = finding.span.start.offset..finding.span.end.offset;
+            assert_eq!(&source[span], r#""bad""#);
+            assert_eq!(
+                finding.contract.as_ref().unwrap().name,
+                "fixture.shared/position->row-col"
+            );
+        }
+    }
 }

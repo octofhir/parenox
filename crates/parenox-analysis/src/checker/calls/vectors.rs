@@ -6,6 +6,7 @@ use super::{
     ArgumentForms, Callable, PreparedCallable, call_returns, narrow_emptiness, predicate_type,
     sequences::{collection_emptiness, iteration_may_throw},
 };
+use crate::ContractKind;
 use crate::reader::{Form, Span};
 use crate::types::{IntegerClass, IntegerType, Type};
 
@@ -106,9 +107,15 @@ impl Checker<'_> {
             self.call_prepared(&callable, Vec::new(), span, env, false);
             return Value::new(Type::Never);
         }
-        if self
-            .model
-            .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
+        let partial = self.partial_scope.is_some();
+        let checked_callback = !partial
+            || matches!(&callable.kind, Callable::Value(value)
+                if matches!(value.known, Type::Function(_))
+                    && value.contract.as_ref().is_some_and(|origin| origin.kind == ContractKind::Extern));
+        if checked_callback
+            && self
+                .model
+                .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
         {
             let start = self.diagnostics.len();
             if let Some(result) = self.transform_fixed_vectors(
@@ -123,6 +130,11 @@ impl Checker<'_> {
                 self.dedup_diagnostics(start);
                 return result;
             }
+        }
+        if partial {
+            // Operand expressions were evaluated eagerly. Only the fixed walk
+            // above proves that mapv actually calls the extern on these items.
+            return Value::new(Type::Unknown);
         }
         let nonempty = inputs
             .iter()
