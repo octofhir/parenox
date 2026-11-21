@@ -231,7 +231,7 @@ impl Workspace {
         Ok(())
     }
 
-    fn reload(&mut self) -> Result<(), String> {
+    fn reload(&mut self) -> Result<bool, String> {
         let mut settings = self.options.load_for_format(&self.root)?;
         let format_options = settings.format.clone();
         let editable_roots = settings
@@ -259,6 +259,7 @@ impl Workspace {
             .collect();
         let mut project = DiskProject::read(settings)?;
         project.externs.append(&mut project.dependency_externs);
+        let externs_changed = self.externs != project.externs;
         let mut documents: BTreeMap<_, _> = project
             .files
             .into_iter()
@@ -313,7 +314,7 @@ impl Workspace {
         self.format_options = format_options;
         self.dependency_completions = completion::DependencyCompletions::new(classpath);
         self.session_ready = false;
-        Ok(())
+        Ok(externs_changed)
     }
 
     pub fn open(&mut self, params: Open, output: &mut impl Write) -> io::Result<()> {
@@ -387,9 +388,9 @@ impl Workspace {
             && in_source_roots(path, &self.source_roots, &self.source_aliases)
     }
 
-    pub fn save(&mut self, params: &DocumentParams, output: &mut impl Write) -> io::Result<()> {
+    pub fn save(&mut self, params: &DocumentParams, output: &mut impl Write) -> io::Result<bool> {
         let Some(file) = file_path(&params.text_document.uri) else {
-            return Ok(());
+            return Ok(false);
         };
         let new_source = is_clojure_source(&file)
             && self
@@ -397,16 +398,16 @@ impl Workspace {
                 .and_then(|key| self.documents.get(&key))
                 .is_some_and(|doc| !doc.indexed && doc.editor.is_some());
         if new_source || self.is_project_input(&file) {
-            self.refresh(output)?;
+            return self.refresh(output);
         }
-        Ok(())
+        Ok(false)
     }
 
     pub fn changed_files(
         &mut self,
         params: &WatchedFiles,
         output: &mut impl Write,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         for event in &params.changes {
             let Some(path) = file_path(&event.uri) else {
                 continue;
@@ -417,7 +418,7 @@ impl Workspace {
                 return self.refresh(output);
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     fn is_changed_source(&self, path: &Path, kind: u8) -> bool {
@@ -483,9 +484,9 @@ impl Workspace {
         Ok(())
     }
 
-    fn refresh(&mut self, output: &mut impl Write) -> io::Result<()> {
+    fn refresh(&mut self, output: &mut impl Write) -> io::Result<bool> {
         match self.reload() {
-            Ok(()) => {
+            Ok(externs_changed) => {
                 self.check(output)?;
                 for (path, document) in &mut self.documents {
                     document.check_standalone(path, self.extern_buffers.as_ref(), output)?;
@@ -503,9 +504,12 @@ impl Workspace {
                         self.publish_test_tree(&path, output)?;
                     }
                 }
-                Ok(())
+                Ok(externs_changed)
             }
-            Err(message) => log_load_error(output, &message),
+            Err(message) => {
+                log_load_error(output, &message)?;
+                Ok(false)
+            }
         }
     }
 

@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::config::ProjectConfig;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct FileSnapshot {
     pub path: String,

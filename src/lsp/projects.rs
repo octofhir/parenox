@@ -150,9 +150,10 @@ impl Projects {
         &mut self,
         files: &[FileRename],
         output: &mut impl Write,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
+        let mut externs_changed = false;
         for workspace in std::iter::once(&mut self.primary).chain(self.nested.values_mut()) {
-            workspace.did_rename_files(files, output)?;
+            externs_changed |= workspace.did_rename_files(files, output)?;
         }
         for file in files {
             if let (Some(old), Some(new)) = (file_path(&file.old_uri), file_path(&file.new_uri))
@@ -166,7 +167,7 @@ impl Projects {
                 }
             }
         }
-        Ok(())
+        Ok(externs_changed)
     }
 
     fn source_owner(&self, path: &Path) -> Option<&PathBuf> {
@@ -281,24 +282,26 @@ impl Projects {
         Ok(())
     }
 
-    pub fn save(&mut self, params: DocumentParams, output: &mut impl Write) -> io::Result<()> {
+    pub fn save(&mut self, params: DocumentParams, output: &mut impl Write) -> io::Result<bool> {
         // A project input can be saved without a corresponding open buffer,
         // and two projects may intentionally share an input on disk.
+        let mut externs_changed = false;
         for workspace in std::iter::once(&mut self.primary).chain(self.nested.values_mut()) {
-            workspace.save(&params, output)?;
+            externs_changed |= workspace.save(&params, output)?;
         }
-        Ok(())
+        Ok(externs_changed)
     }
 
     pub fn changed_files(
         &mut self,
         params: WatchedFiles,
         output: &mut impl Write,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
+        let mut externs_changed = false;
         for workspace in std::iter::once(&mut self.primary).chain(self.nested.values_mut()) {
-            workspace.changed_files(&params, output)?;
+            externs_changed |= workspace.changed_files(&params, output)?;
         }
-        Ok(())
+        Ok(externs_changed)
     }
 
     fn owner(&self, uri: Option<&str>) -> Option<&PathBuf> {

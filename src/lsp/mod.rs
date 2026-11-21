@@ -34,12 +34,52 @@ struct ServerState {
     workspace: Option<Projects>,
     shutdown: bool,
     edits: ApplyEdits,
+    inlay_refresh: InlayRefresh,
 }
 
 #[derive(Default)]
 struct ApplyEdits {
     next: u64,
     pending: BTreeMap<String, (Value, Value)>,
+}
+
+#[derive(Default)]
+struct InlayRefresh {
+    enabled: bool,
+    initialized: bool,
+    pending: Option<String>,
+    deferred: bool,
+    next: u64,
+}
+
+impl InlayRefresh {
+    fn request(&mut self, output: &mut impl Write) -> io::Result<()> {
+        if !self.enabled || !self.initialized {
+            return Ok(());
+        }
+        if self.pending.is_some() {
+            self.deferred = true;
+            return Ok(());
+        }
+        self.next += 1;
+        let id = format!("parenox/inlay-hint-refresh/{}", self.next);
+        write_message(
+            output,
+            &json!({
+                "jsonrpc":"2.0", "id":id, "method":"workspace/inlayHint/refresh"
+            }),
+        )?;
+        self.pending = Some(id);
+        Ok(())
+    }
+
+    fn acknowledge(&mut self, shutdown: bool, output: &mut impl Write) -> io::Result<()> {
+        self.pending = None;
+        if std::mem::take(&mut self.deferred) && !shutdown {
+            self.request(output)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -127,6 +167,13 @@ pub(super) fn run(options: LspOptions) -> Result<u8, String> {
                     }))
                     .map_err(|err| err.to_string())?;
                 }
+            } else if let Some(id) = message.id.as_ref().and_then(Value::as_str)
+                && state.inlay_refresh.pending.as_deref() == Some(id)
+            {
+                state
+                    .inlay_refresh
+                    .acknowledge(state.shutdown, &mut output)
+                    .map_err(|err| err.to_string())?;
             } else if let Some((request, edit)) = message
                 .id
                 .as_ref()
@@ -171,7 +218,13 @@ pub(super) fn run(options: LspOptions) -> Result<u8, String> {
         } else if !state.shutdown
             && let Some(workspace) = &mut state.workspace
         {
-            notification(&mut output, workspace, &method, message.params)
+            notification(
+                &mut output,
+                workspace,
+                &mut state.inlay_refresh,
+                &method,
+                message.params,
+            )
         } else {
             Ok(())
         };
@@ -192,6 +245,7 @@ fn request(
         workspace,
         shutdown,
         edits,
+        inlay_refresh,
     } = state;
     if *shutdown {
         return send_error(output, id, -32600, "Server is shut down");
@@ -211,6 +265,11 @@ fn request(
         let watch = init
             .capabilities
             .pointer("/workspace/didChangeWatchedFiles/dynamicRegistration")
+            .and_then(Value::as_bool)
+            == Some(true);
+        inlay_refresh.enabled = init
+            .capabilities
+            .pointer("/workspace/inlayHint/refreshSupport")
             .and_then(Value::as_bool)
             == Some(true);
         let versioned_edits = init
@@ -610,11 +669,15 @@ fn command_position(arguments: &[Value]) -> Option<(&str, text::Position)> {
 fn notification(
     output: &mut impl Write,
     projects: &mut Projects,
+    inlay_refresh: &mut InlayRefresh,
     method: &str,
     params: Value,
 ) -> io::Result<()> {
     match method {
-        "initialized" => projects.initialized(output)?,
+        "initialized" => {
+            projects.initialized(output)?;
+            inlay_refresh.initialized = true;
+        }
         "textDocument/didOpen" => {
             let uri = document_uri(&params).map(str::to_owned);
             if let Ok(params) = serde_json::from_value(params) {
@@ -645,18 +708,24 @@ fn notification(
             }
         }
         "textDocument/didSave" => {
-            if let Ok(params) = serde_json::from_value(params) {
-                projects.save(params, output)?;
+            if let Ok(params) = serde_json::from_value(params)
+                && projects.save(params, output)?
+            {
+                inlay_refresh.request(output)?;
             }
         }
         "workspace/didChangeWatchedFiles" => {
-            if let Ok(params) = serde_json::from_value(params) {
-                projects.changed_files(params, output)?;
+            if let Ok(params) = serde_json::from_value(params)
+                && projects.changed_files(params, output)?
+            {
+                inlay_refresh.request(output)?;
             }
         }
         "workspace/didRenameFiles" => {
-            if let Ok(query) = serde_json::from_value::<RenameFiles>(params) {
-                projects.did_rename_files(&query.files, output)?;
+            if let Ok(query) = serde_json::from_value::<RenameFiles>(params)
+                && projects.did_rename_files(&query.files, output)?
+            {
+                inlay_refresh.request(output)?;
             }
         }
         "clojure/serverInfo/log" => {

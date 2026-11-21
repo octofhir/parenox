@@ -105,7 +105,7 @@ impl Workspace {
         &mut self,
         files: &[FileRename],
         output: &mut impl Write,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         let mut refresh = false;
         for file in files {
             let (Some(old), Some(new)) = (file_path(&file.old_uri), file_path(&file.new_uri))
@@ -146,9 +146,9 @@ impl Workspace {
             }
         }
         if refresh {
-            self.refresh(output)?;
+            return self.refresh(output);
         }
-        Ok(())
+        Ok(false)
     }
 
     fn logical_source_path(&self, path: &Path) -> PathBuf {

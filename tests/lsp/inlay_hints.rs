@@ -127,3 +127,114 @@ fn inlay_hints_withhold_escaping_callback_types_and_keep_known_local_results() {
             .any(|diagnostic| diagnostic["code"] == "PNX2322")
     );
 }
+
+#[test]
+fn saved_extern_changes_refresh_inlay_hints_with_one_deferred_request() {
+    let fixture = Fixture::new("inlay hint refresh");
+    let file = fixture.0.join("src/types.clj");
+    let externs = fixture.0.join("externs.edn");
+    let source = "(ns types (:require [fixture.api :as api]))\n\
+        (defn render {:t/sig '[:-> t/any]} []\n  \
+        (let [result (api/normalize \"input\")] result))\n";
+    fs::write(&file, source).unwrap();
+    fs::write(
+        fixture.0.join("parenox.edn"),
+        r#"{:externs ["externs.edn"]}"#,
+    )
+    .unwrap();
+    let contract = |result| {
+        fs::write(
+            &externs,
+            format!("{{fixture.api/normalize [[string? :-> {result}]]}}"),
+        )
+        .unwrap();
+    };
+    contract("string?");
+    let mut child = lsp_server();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |request: Value, before: &[Value]| {
+        for frame in before {
+            send_message(&mut input, frame);
+        }
+        send_message(&mut input, &request);
+        let mut frames = Vec::new();
+        loop {
+            let reply = read_message(&mut output).expect("LSP response");
+            if reply["id"] == request["id"] {
+                assert!(reply.get("error").is_none(), "{reply}");
+                break (reply["result"].clone(), frames);
+            }
+            frames.push(reply);
+        }
+    };
+    exchange(
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),
+            "capabilities":{"workspace":{"inlayHint":{"refreshSupport":true}}}
+        }}),
+        &[],
+    );
+    let document = uri(&file);
+    let request = |id| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/inlayHint","params":{
+            "textDocument":{"uri":document},"range":{
+                "start":{"line":2,"character":0},"end":{"line":3,"character":0}
+            }
+        }})
+    };
+    let save = json!({"jsonrpc":"2.0","method":"textDocument/didSave","params":{
+        "textDocument":{"uri":uri(&externs)}
+    }});
+    let watch = json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{
+        "changes":[{"uri":uri(&externs),"type":2}]
+    }});
+    let (initial, _) = exchange(
+        request(2),
+        &[
+            json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+            json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+                "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
+            }}),
+        ],
+    );
+    assert_eq!(initial[0]["label"], ": String");
+    contract("number?");
+    let (number, frames) = exchange(request(3), std::slice::from_ref(&watch));
+    assert_eq!(number[0]["label"], ": Number");
+    let refreshes = |frames: Vec<Value>| -> Vec<Value> {
+        frames
+            .into_iter()
+            .filter(|frame| frame["method"] == "workspace/inlayHint/refresh")
+            .map(|frame| {
+                assert!(frame.get("params").is_none(), "{frame}");
+                assert!(frame["id"].is_string(), "{frame}");
+                frame["id"].clone()
+            })
+            .collect()
+    };
+    let first = refreshes(frames);
+    assert_eq!(first.len(), 1);
+    let (_, frames) = exchange(request(4), std::slice::from_ref(&save));
+    assert!(refreshes(frames).is_empty());
+    contract("boolean?");
+    let (boolean, frames) = exchange(request(5), std::slice::from_ref(&save));
+    assert_eq!(boolean[0]["label"], ": Boolean");
+    assert!(refreshes(frames).is_empty());
+    contract("string?");
+    let (restored, frames) = exchange(request(6), std::slice::from_ref(&watch));
+    assert_eq!(restored, initial);
+    assert!(refreshes(frames).is_empty());
+    let ack = |id: &Value| json!({"jsonrpc":"2.0","id":id,"result":null});
+    let (_, frames) = exchange(request(7), &[ack(&first[0])]);
+    assert_eq!(frames.len(), 1);
+    let second = refreshes(frames);
+    assert_eq!(second.len(), 1);
+    assert_ne!(first, second);
+    let (_, frames) = exchange(request(8), &[ack(&second[0]), watch]);
+    assert!(frames.is_empty());
+    exchange(json!({"jsonrpc":"2.0","id":9,"method":"shutdown"}), &[]);
+    send_message(&mut input, &json!({"jsonrpc":"2.0","method":"exit"}));
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
