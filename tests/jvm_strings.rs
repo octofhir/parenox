@@ -3,6 +3,58 @@ use parenox::{DocumentHover, Session, Source};
 const SOURCE: &str = include_str!("../examples/jvm_strings.cljc");
 
 #[test]
+fn eager_vector_inputs_stop_only_after_a_proven_runtime_failure() {
+    let source = r#"(ns demo)
+(defn accepts-at-runtime {:t/sig '[string? :-> string?]} [_] "a")
+(defn split-text {:t/sig '[:-> string?]} []
+  (let [[prefix suffix] [(subs nil 0 1) (subs "abcd" -2)]]
+    (str prefix suffix)))
+(defn compile-tail {:t/sig '[:-> t/any]} []
+  [(subs false 0) (subs "abcd" missing-offset)])
+(defn apply-spread {:t/sig '[:-> string?]} []
+  (apply str [(subs :bad-text 0) (subs "abcd" -3)]))
+(defn apply-prefix {:t/sig '[:-> string?]} []
+  (apply str (subs :bad-prefix 0) [(subs :skipped 0)]))
+(defn apply-target {:t/sig '[:-> string?]} []
+  (apply (subs :bad-target 0) [(subs :skipped 0)]))
+(defn preserves-possible-continuation {:t/sig '[:-> t/any]} []
+  [(accepts-at-runtime nil) (subs "abcd" -4)])
+(defn apply-captured {:t/sig '[:-> string?]} []
+  (apply str (map (partial str (subs true 0) (subs :skipped 0)) ["tail"])))
+(defn partial-target {:t/sig '[:-> string?]} []
+  ((partial (subs :bad-partial 0) (subs :skipped 0)) "tail"))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| matches!(finding.code.as_str(), "PNX2304" | "PNX2322" | "PNX2801"))
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", "nil"),
+            ("PNX2322", "false"),
+            ("PNX2304", "missing-offset"),
+            ("PNX2322", ":bad-text"),
+            ("PNX2322", ":bad-prefix"),
+            ("PNX2322", ":bad-target"),
+            ("PNX2322", "nil"),
+            ("PNX2801", "-4"),
+            ("PNX2322", "true"),
+            ("PNX2322", ":bad-partial"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn join_accepts_seqable_values_and_reports_the_invalid_collection_input() {
     let source = r#"(ns labels (:require [clojure.string :as str] [clojure.spec.alpha :as s]))
         (defn entries {:t/sig '[map? :-> string?]} [m] (str/join :entry m))

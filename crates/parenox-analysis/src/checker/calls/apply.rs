@@ -30,7 +30,9 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let callable = self.prepare_callable(callee, env);
-        let mut args: Vec<_> = self.eval_args(prefix, env, callable.returns()).collect();
+        let mut args: Vec<_> = self
+            .eval_eager_inputs(prefix, env, callable.returns())
+            .collect();
         let reachable = callable.returns() && call_returns(&args);
         if prefix.is_empty()
             && matches!(&callable.kind, Callable::Builtin(name) if name == CORE_STR)
@@ -41,7 +43,7 @@ impl Checker<'_> {
         }
         if let Some(items) = spread.vector() {
             // The literal's syntax supplies every position even for large vectors.
-            args.extend(self.eval_args(items, env, reachable));
+            args.extend(self.eval_eager_inputs(items, env, reachable));
             let invoked = reachable && call_returns(&args);
             let written: Vec<_> = prefix.iter().chain(items).map(Some).collect();
             return self.call_prepared_with_forms(

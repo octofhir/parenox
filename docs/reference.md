@@ -631,6 +631,11 @@ finite vector or nil when the mapper is `str` or `partial` applied to `str`.
 Captured arguments are evaluated before the collection. The consumer can keep
 the exact joined text when the mapped strings are known.
 
+Vector literals and bound arguments to standard `partial` are evaluated in
+source order. After a proven runtime failure, later expressions still get
+compiler checks such as name resolution. Their runtime types and diagnostics
+are withheld, including when a vector literal supplies `apply` arguments.
+
 Verified `:t/guard '[:then value string?]` narrows the argument after a true
 result. Use `:both` only if the checker can also verify the false branch.
 An unproved guard reports `PNX9008` and doesn't narrow callers. See

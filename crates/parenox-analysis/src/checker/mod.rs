@@ -718,6 +718,23 @@ impl Checker<'_> {
         })
     }
 
+    fn eval_eager_inputs<'a>(
+        &'a mut self,
+        forms: &'a [Form],
+        env: &'a Env,
+        mut reachable: bool,
+    ) -> impl Iterator<Item = (Value, Span)> + 'a {
+        // Remaining expressions still need compiler checks after a proved stop.
+        forms.iter().map(move |form| {
+            let mut value = self.infer_path(form, env, reachable, false);
+            reachable = !value.stops_evaluation();
+            if !reachable {
+                value.narrow(Type::Never);
+            }
+            (value, form.span)
+        })
+    }
+
     fn infer_position(&mut self, form: &Form, env: &Env, tail: bool) -> Value {
         if let Some(remaining) = self.untyped_binding_budget {
             if self.type_query.is_none()
@@ -841,7 +858,7 @@ impl Checker<'_> {
                 let prove_origin = xs.len() <= MAX_TUPLE_ITEMS
                     && !xs.iter().any(has_evaluated_metadata);
                 literal_vector_value(
-                    self.eval_args(xs, env, true).map(|(value, _)| value),
+                    self.eval_eager_inputs(xs, env, true).map(|(value, _)| value),
                     xs.len(),
                     prove_origin,
                 )

@@ -54,7 +54,7 @@ enum Callable<'form, 'model> {
 impl Callable<'_, '_> {
     fn returns(&self) -> bool {
         match self {
-            Self::Value(value) => value.known != Type::Never,
+            Self::Value(value) => !value.stops_evaluation(),
             Self::Fnil(wrapper) => wrapper.returns,
             Self::Partial(wrapper) => wrapper.returns,
             Self::Combined(combined) => combined.returns,
