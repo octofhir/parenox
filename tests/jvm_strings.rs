@@ -113,6 +113,54 @@ fn branch_joins_preserve_normal_results_and_proven_stops() {
 }
 
 #[test]
+fn sequential_bodies_keep_compiler_checks_and_skip_runtime_suffixes() {
+    let source = r#"(ns demo)
+(defn explicit {:t/sig '[:-> t/any]} []
+  (do (subs :bad-do 0) (subs :dead-do 0) missing-name))
+(defn implicit {:t/sig '[:-> t/any]} []
+  (subs :bad-body 0)
+  (subs :dead-body 0))
+(defn caught {:t/sig '[:-> #{:caught}]} []
+  (try (subs :bad-try 0) (subs :dead-try 0)
+       (catch Throwable _ :caught)))
+(defn cleanup {:t/sig '[:-> t/any]} []
+  (inc (try :normal (finally (subs :bad-finally 0)))))
+(defn assertions {:t/sig '[:-> t/any]} []
+  {:post [(subs :dead-post 0) missing-post]}
+  (subs :bad-post 0))
+(defn accepts-at-runtime {:t/sig '[string? :-> string?]} [_] "ok")
+(defn contract-only {:t/sig '[:-> t/any]} []
+  (do (accepts-at-runtime false) (subs "abc" -7)))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", ":bad-do"),
+            ("PNX2304", "missing-name"),
+            ("PNX2322", ":bad-body"),
+            ("PNX2322", ":bad-try"),
+            ("PNX2322", ":bad-finally"),
+            ("PNX2304", "missing-post"),
+            ("PNX2322", ":bad-post"),
+            ("PNX2322", "false"),
+            ("PNX2801", "-7"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn vector_metadata_effects_follow_elements_and_merge_before_checking() {
     let source = r#"(ns demo (:require [clojure.string :as string]) (:import java.util.UUID))
 (defn inert-class {:t/sig '[:-> #{"ab"}]} []

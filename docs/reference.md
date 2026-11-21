@@ -635,6 +635,9 @@ Vector literals and bound arguments to standard `partial` are evaluated in
 source order. After a proven runtime failure, later expressions still get
 compiler checks such as name resolution. Their runtime types and diagnostics
 are withheld, including when a vector literal supplies `apply` arguments.
+Sequential bodies apply the same rule to later forms and to function
+postconditions. A proven failure in `finally` also prevents a normal result
+from the enclosing `try`.
 Conditional expressions combine the types and collection facts of branches
 that can return a value. A proven runtime failure in the condition or dispatch
 expression leaves the results unavailable and still allows compiler checks.

@@ -694,7 +694,10 @@ impl Checker<'_> {
         });
         for (index, form) in body.iter().enumerate() {
             let tail = tail && index + 1 == body.len();
-            value = self.infer_path(form, env, value.known != Type::Never, tail);
+            value = self.infer_path(form, env, !value.stops_evaluation(), tail);
+        }
+        if value.known != Type::Never && value.stops_evaluation() {
+            value.narrow(Type::Never);
         }
         value
     }
