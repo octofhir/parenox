@@ -2,6 +2,7 @@
 use std::sync::Arc;
 
 use crate::checker::ProjectCall;
+use crate::core_names::known_core_function;
 
 use super::{Session, cached_type_query, symbol_form_at};
 
@@ -37,6 +38,7 @@ impl Session {
         let Some((declarations, forms)) = source else {
             return Vec::new();
         };
+        let mut standard_core = None;
         let names = declarations.lexical_completions_at(
             forms,
             token_start,
@@ -44,9 +46,14 @@ impl Session {
             limit,
             self.has_standard_test(),
             |namespace, local, actual| {
-                if self.query_globals.as_ref().is_some_and(|globals| {
-                    declarations.has_external_function(globals, namespace, local)
-                }) {
+                let core_function = namespace == "clojure.core"
+                    && known_core_function(local)
+                    && *standard_core.get_or_insert_with(|| !self.has_source_namespace(namespace));
+                if core_function
+                    || self.query_globals.as_ref().is_some_and(|globals| {
+                        declarations.has_external_function(globals, namespace, local)
+                    })
+                {
                     ProjectCall::Function {
                         expected_arity: None,
                     }

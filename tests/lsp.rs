@@ -914,6 +914,26 @@ fn completes_only_visible_lexical_names_in_written_expressions() {
         ("(defn f [if] (do i|f))", "if", &["if"]),
         ("(defn f [catch] (cat|ch))", "catch", &["catch"]),
         ("(defn f [/] (/| 1))", "/", &["/"]),
+        (
+            "(defn f [context] (into [] con|text))",
+            "context",
+            &["context"],
+        ),
+        (
+            "(defn f [context] (->> con|text (into [])))",
+            "context",
+            &["context"],
+        ),
+        (
+            "(defn f [context] (filterv some? con|text))",
+            "context",
+            &["context"],
+        ),
+        (
+            "(declare other into) (defn f [context] (into [] con|text))",
+            "context",
+            &[],
+        ),
     ];
     let initial = format!("{prefix}(defn f [] nil)\n");
     fs::write(&path, &initial).unwrap();
@@ -987,6 +1007,59 @@ fn completes_only_visible_lexical_names_in_written_expressions() {
     assert_eq!(eof[0]["code"], "PNX9000");
     assert_eq!(eof.as_array().unwrap().len(), 1);
     assert_eq!(fs::read_to_string(&path).unwrap(), initial);
+}
+
+#[test]
+fn completion_distinguishes_stock_and_project_owned_core_calls() {
+    let fixture = Fixture::new("source-owned core completion");
+    let path = fixture.0.join("src/app.clj");
+    let core = fixture.0.join("src/clojure/core.clj");
+    fs::create_dir_all(core.parent().unwrap()).unwrap();
+    let app = uri(&path);
+    let provider = uri(&core);
+    let source = "(ns app)\n(defn f [context] (into [] context))\n";
+    let row = source.lines().nth(1).unwrap();
+    let offset = row.rfind("context").unwrap() + 4;
+    let macro_source = "(ns clojure.core) (defmacro into [target input] nil)\n";
+    let function_source = "(ns clojure.core) (defn into [target input] input)\n";
+    fs::write(&path, source).unwrap();
+    fs::write(&core, macro_source).unwrap();
+    let query = |id| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/completion","params":{
+            "textDocument":{"uri":app},"position":{"line":1,"character":offset}
+        }})
+    };
+    let update = |version, body| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":provider,"version":version},"contentChanges":[{"text":body}]
+        }})
+    };
+    let replies = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":app,"languageId":"clojure","version":1,"text":source
+        }}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":provider,"languageId":"clojure","version":1,"text":macro_source
+        }}}),
+        query(2),
+        update(2, function_source),
+        query(3),
+        update(3, macro_source),
+        query(4),
+        json!({"jsonrpc":"2.0","id":5,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    for (id, count) in [(2, 0), (3, 1), (4, 0)] {
+        let items = replies.iter().find(|reply| reply["id"] == id).unwrap()["result"]["items"]
+            .as_array()
+            .unwrap();
+        assert_eq!(items.len(), count, "{items:#?}");
+        if let [item] = items.as_slice() {
+            assert_eq!(item["label"], "context");
+            assert_eq!(item["textEdit"]["newText"], "context");
+        }
+    }
 }
 
 #[test]

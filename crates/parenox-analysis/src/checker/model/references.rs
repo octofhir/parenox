@@ -805,10 +805,14 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         implicit: usize,
     ) -> bool {
         let qualified = self.names.qualified_reference(symbol);
-        if namespace == self.names.namespace()
-            || (qualified.is_none()
-                && (self.top_level_names.contains(symbol)
-                    || !self.names.names.refers.contains_key(symbol)))
+        let core_completion = self.completing_locals()
+            && self.trusted_core(symbol, namespace)
+            && (qualified.is_some() || !self.names.forward_vars.contains_key(symbol));
+        if !core_completion
+            && (namespace == self.names.namespace()
+                || (qualified.is_none()
+                    && (self.top_level_names.contains(symbol)
+                        || !self.names.names.refers.contains_key(symbol))))
         {
             if !matches!(
                 self.purpose,
