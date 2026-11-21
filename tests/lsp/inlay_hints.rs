@@ -326,6 +326,89 @@ fn inlay_hints_withhold_escaping_callback_types_and_keep_known_local_results() {
 }
 
 #[test]
+fn source_contract_edits_refresh_hints_in_an_unchanged_caller() {
+    let fixture = Fixture::new("source contract inlay refresh");
+    let caller_path = fixture.0.join("src/caller.clj");
+    let provider_path = fixture.0.join("src/provider.clj");
+    let caller = uri(&caller_path);
+    let provider = uri(&provider_path);
+    let consumer = r#"(ns caller (:require [provider :as p]))
+(defn read-value {:t/sig '[:-> t/any]} []
+  (let [value (p/value)] value))
+"#;
+    let original = r#"(ns provider)
+(defn value {:t/sig '[:-> string?]} [] "value")
+"#;
+    let shifted = format!(";; 🦊\n{original}\n(defn- internal [] 1)\n");
+    let changed = shifted
+        .replace("string?", "number?")
+        .replace("\"value\"", "9");
+    fs::write(&caller_path, consumer).unwrap();
+    fs::write(&provider_path, original).unwrap();
+
+    let open = |uri: &str, source: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri,"version":1,"languageId":"clojure","text":source}
+        }})
+    };
+    let edit = |version, text| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":provider,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let request = |id| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/inlayHint","params":{
+            "textDocument":{"uri":caller},"range":{
+                "start":{"line":2,"character":0},"end":{"line":3,"character":0}
+            }
+        }})
+    };
+    let replies = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),
+            "capabilities":{"workspace":{"inlayHint":{"refreshSupport":true}}}
+        }}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        open(&caller, consumer),
+        open(&provider, original),
+        request(2),
+        edit(2, &shifted),
+        request(3),
+        edit(3, &changed),
+        request(4),
+        json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{
+            "textDocument":{"uri":provider}
+        }}),
+        request(5),
+        json!({"jsonrpc":"2.0","id":6,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| replies.iter().position(|reply| reply["id"] == id).unwrap();
+    for (id, label) in [
+        (2, ": String"),
+        (3, ": String"),
+        (4, ": Number"),
+        (5, ": String"),
+    ] {
+        assert_eq!(
+            replies[response(id)]["result"],
+            json!([{"position":{"line":2,"character":13},"kind":1,"label":label}]),
+        );
+    }
+    let refresh: Vec<_> = replies
+        .iter()
+        .enumerate()
+        .filter(|(_, reply)| reply["method"] == "workspace/inlayHint/refresh")
+        .collect();
+    let [(index, request)] = refresh.as_slice() else {
+        panic!("expected one in-flight refresh, got {refresh:?}");
+    };
+    assert!((response(3)..response(4)).contains(index));
+    assert!(request["id"].is_string());
+    assert!(request.get("params").is_none());
+}
+
+#[test]
 fn saved_extern_changes_refresh_inlay_hints_with_one_deferred_request() {
     let fixture = Fixture::new("inlay hint refresh");
     let file = fixture.0.join("src/types.clj");

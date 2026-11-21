@@ -53,8 +53,12 @@ struct InlayRefresh {
 }
 
 impl InlayRefresh {
+    fn active(&self) -> bool {
+        self.enabled && self.initialized
+    }
+
     fn request(&mut self, output: &mut impl Write) -> io::Result<()> {
-        if !self.enabled || !self.initialized {
+        if !self.active() {
             return Ok(());
         }
         if self.pending.is_some() {
@@ -682,29 +686,44 @@ fn notification(
             let uri = document_uri(&params).map(str::to_owned);
             if let Ok(params) = serde_json::from_value(params) {
                 projects.track_open(uri.as_deref(), output)?;
-                projects
-                    .for_document_mut(uri.as_deref())
-                    .open(params, output)?;
+                let changed = projects.for_document_mut(uri.as_deref()).open(
+                    params,
+                    inlay_refresh.active(),
+                    output,
+                )?;
                 projects.update_extern_buffer(uri.as_deref(), output)?;
+                if changed {
+                    inlay_refresh.request(output)?;
+                }
             }
         }
         "textDocument/didChange" => {
             let uri = document_uri(&params).map(str::to_owned);
             if let Ok(params) = serde_json::from_value(params) {
-                projects
-                    .for_document_mut(uri.as_deref())
-                    .change(params, output)?;
+                let changed = projects.for_document_mut(uri.as_deref()).change(
+                    params,
+                    inlay_refresh.active(),
+                    output,
+                )?;
                 projects.update_extern_buffer(uri.as_deref(), output)?;
+                if changed {
+                    inlay_refresh.request(output)?;
+                }
             }
         }
         "textDocument/didClose" => {
             let uri = document_uri(&params).map(str::to_owned);
             if let Ok(params) = serde_json::from_value(params) {
-                projects
-                    .for_document_mut(uri.as_deref())
-                    .close(params, output)?;
+                let changed = projects.for_document_mut(uri.as_deref()).close(
+                    params,
+                    inlay_refresh.active(),
+                    output,
+                )?;
                 projects.update_extern_buffer(uri.as_deref(), output)?;
                 projects.track_close(uri.as_deref());
+                if changed {
+                    inlay_refresh.request(output)?;
+                }
             }
         }
         "textDocument/didSave" => {

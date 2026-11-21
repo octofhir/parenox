@@ -317,10 +317,15 @@ impl Workspace {
         Ok(externs_changed)
     }
 
-    pub fn open(&mut self, params: Open, output: &mut impl Write) -> io::Result<()> {
+    pub fn open(
+        &mut self,
+        params: Open,
+        track_contract_changes: bool,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
         let OpenDocument { uri, version, text } = params.text_document;
         let Some(path) = self.document_key(&uri) else {
-            return Ok(());
+            return Ok(false);
         };
         let indexed = self
             .documents
@@ -344,22 +349,27 @@ impl Workspace {
                 }),
             },
         );
-        self.check_document(&path, output)
+        self.check_document(&path, track_contract_changes, output)
     }
 
-    pub fn change(&mut self, params: Change, output: &mut impl Write) -> io::Result<()> {
+    pub fn change(
+        &mut self,
+        params: Change,
+        track_contract_changes: bool,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
         let VersionedUri { uri, version } = params.text_document;
         let Some(path) = self.document_key(&uri) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(document) = self.documents.get_mut(&path) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(editor) = &mut document.editor else {
-            return Ok(());
+            return Ok(false);
         };
         if version <= editor.version {
-            return Ok(());
+            return Ok(false);
         }
         // Each range refers to the source after the preceding change in this batch.
         let mut snapshot = None;
@@ -367,7 +377,7 @@ impl Workspace {
             if let Some(range) = change.range {
                 let source = snapshot.get_or_insert_with(|| document.source.clone());
                 let Some(bytes) = Lines::new(source).byte_range(range) else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 source.replace_range(bytes, &change.text);
             } else {
@@ -375,12 +385,12 @@ impl Workspace {
             }
         }
         let Some(snapshot) = snapshot else {
-            return Ok(());
+            return Ok(false);
         };
         document.source = snapshot;
         editor.version = version;
         editor.published = None;
-        self.check_document(&path, output)
+        self.check_document(&path, track_contract_changes, output)
     }
 
     pub fn contains_project_source(&self, path: &Path) -> bool {
@@ -513,15 +523,20 @@ impl Workspace {
         }
     }
 
-    pub fn close(&mut self, params: DocumentParams, output: &mut impl Write) -> io::Result<()> {
+    pub fn close(
+        &mut self,
+        params: DocumentParams,
+        track_contract_changes: bool,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
         let Some(path) = self.document_key(&params.text_document.uri) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(document) = self.documents.get_mut(&path) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(editor) = document.editor.take() else {
-            return Ok(());
+            return Ok(false);
         };
         let standalone = document.standalone.is_some();
         if document.indexed
@@ -534,9 +549,9 @@ impl Workspace {
         }
         publish(output, json!({"uri":editor.uri, "diagnostics":[]}))?;
         if standalone || !is_clojure_source(Path::new(&path)) {
-            Ok(())
+            Ok(false)
         } else {
-            self.check(output)
+            self.check_with_contract_changes(track_contract_changes.then_some(&path), output)
         }
     }
 
@@ -1034,19 +1049,28 @@ impl Workspace {
         )
     }
 
-    fn check_document(&mut self, path: &str, output: &mut impl Write) -> io::Result<()> {
+    fn check_document(
+        &mut self,
+        path: &str,
+        track_contract_changes: bool,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
         let document = self.documents.get_mut(path).unwrap();
+        let mut contracts_changed = false;
         if is_edn(Path::new(path)) {
             let diagnostic = validate_edn(&document.source).err().map(Diagnostic::from);
-            return document.publish(diagnostic.as_slice(), output);
+            document.publish(diagnostic.as_slice(), output)?;
+            return Ok(false);
         } else if !is_clojure_source(Path::new(path)) {
-            return Ok(());
+            return Ok(false);
         } else if document.standalone.is_some() {
             document.check_standalone(path, self.extern_buffers.as_ref(), output)?;
         } else {
-            self.check(output)?;
+            contracts_changed =
+                self.check_with_contract_changes(track_contract_changes.then_some(path), output)?;
         }
-        self.publish_test_tree(path, output)
+        self.publish_test_tree(path, output)?;
+        Ok(contracts_changed)
     }
 
     fn publish_test_tree(&mut self, path: &str, output: &mut impl Write) -> io::Result<()> {
@@ -1076,6 +1100,14 @@ impl Workspace {
     }
 
     fn check(&mut self, output: &mut impl Write) -> io::Result<()> {
+        self.check_with_contract_changes(None, output).map(|_| ())
+    }
+
+    fn check_with_contract_changes(
+        &mut self,
+        edited_path: Option<&str>,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
         let mut sources = Vec::new();
         let mut open = BTreeSet::new();
         for (path, doc) in &self.documents {
@@ -1091,9 +1123,17 @@ impl Workspace {
             }
         }
         let externs: Vec<_> = self.externs.iter().map(FileSnapshot::as_source).collect();
-        let report = self
-            .session
-            .check_project_documents(&sources, &externs, &open);
+        let track = edited_path.is_some_and(|edited| open.iter().any(|path| *path != edited));
+        let (report, contracts_changed) = if track {
+            self.session
+                .check_project_documents_with_contract_changes(&sources, &externs, &open)
+        } else {
+            (
+                self.session
+                    .check_project_documents(&sources, &externs, &open),
+                false,
+            )
+        };
         self.session_ready = true;
         let mut locations =
             ContractLocations::new(&self.session, &self.externs, self.extern_buffers.as_ref());
@@ -1112,7 +1152,7 @@ impl Workspace {
                     .publish_rendered(rendered, output)?;
             }
         }
-        Ok(())
+        Ok(contracts_changed)
     }
 }
 

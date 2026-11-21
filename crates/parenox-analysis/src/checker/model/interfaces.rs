@@ -39,6 +39,37 @@ impl Exports {
             )
             .map(|qualified| qualified.split_once('/').unwrap().1)
     }
+
+    fn same_function_contracts(&self, previous: &Self) -> bool {
+        self.functions.len() == previous.functions.len()
+            && self.functions.iter().zip(&previous.functions).all(
+                |((name, contract), (old_name, old))| {
+                    name == old_name
+                        && contract.signatures == old.signatures
+                        && contract.guard == old.guard
+                },
+            )
+    }
+}
+
+impl Globals {
+    pub(crate) fn same_source_function_contracts(&self, previous: &Self) -> bool {
+        let current = self
+            .exports
+            .iter()
+            .filter(|(_, ns)| !ns.functions.is_empty());
+        let before = previous
+            .exports
+            .iter()
+            .filter(|(_, ns)| !ns.functions.is_empty());
+        current.clone().count() == before.clone().count()
+            && current
+                .zip(before)
+                .all(|((name, namespace), (old_name, old))| {
+                    name == old_name
+                        && (Arc::ptr_eq(namespace, old) || namespace.same_function_contracts(old))
+                })
+    }
 }
 
 pub(super) fn visible_value<'a>(

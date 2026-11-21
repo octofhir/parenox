@@ -372,6 +372,22 @@ impl Session {
         self.check_snapshot(sources, externs, &[], SnapshotMode::Check(Some(paths)))
     }
 
+    /// Check open documents and report a change to the published source calling types.
+    pub fn check_project_documents_with_contract_changes(
+        &mut self,
+        sources: &[Source<'_>],
+        externs: &[Source<'_>],
+        paths: &BTreeSet<&str>,
+    ) -> (ProjectReport, bool) {
+        let previous = self.query_globals.take();
+        let report = self.check_project_documents(sources, externs, paths);
+        let changed = previous
+            .as_ref()
+            .zip(self.query_globals.as_ref())
+            .is_some_and(|(previous, current)| !current.same_source_function_contracts(previous));
+        (report, changed)
+    }
+
     /// The declaration key for an active extern function in the latest snapshot.
     pub fn extern_declaration_span(&self, origin: &ContractOrigin) -> Option<Span> {
         self.externs.declaration_span(origin)
