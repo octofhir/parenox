@@ -92,6 +92,42 @@ fn substring_uses_utf16_bounds_and_marks_the_invalid_index() {
 }
 
 #[test]
+fn unannotated_substring_checks_a_locally_computed_utf16_endpoint() {
+    let source = r#"
+(ns arglist)
+(defn contents []
+  (let [fn-def {:arglist-strs ["[🦊]"]}
+        raw-arglist (get (:arglist-strs fn-def) 0)]
+    (subs raw-arglist 1 (dec (count raw-arglist)))))
+(defn shadowed [count]
+  (subs "x" 1 (dec (count "x"))))
+(defn dead []
+  (if false (subs "x" 1 (dec (count "x"))) :skip))
+"#;
+    let broken = source.replace("[🦊]", "x");
+    let repaired = source.replace("[🦊]", "[]");
+    let mut session = Session::default();
+    for (text, expected) in [(source, 0), (&broken, 1), (&repaired, 0), (source, 0)] {
+        let report = session.check("arglist.clj", text);
+        assert!(!report.complete, "{report:#?}");
+        let errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|finding| finding.severity == "error")
+            .collect();
+        assert_eq!(errors.len(), expected, "{report:#?}");
+        if let [finding] = errors.as_slice() {
+            assert_eq!(finding.code, "PNX2801");
+            assert_eq!(finding.contract.as_ref().unwrap().name, "clojure.core/subs");
+            assert_eq!(
+                &text[finding.span.start.offset..finding.span.end.offset],
+                "(dec (count raw-arglist))"
+            );
+        }
+    }
+}
+
+#[test]
 fn checks_jvm_utf16_length_and_characters_after_nil_guards() {
     let mut session = Session::default();
     let report = session.check("jvm_strings.cljc", SOURCE);
