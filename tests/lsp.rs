@@ -4504,9 +4504,36 @@ fn dotted_source_function_uses_follow_jvm_class_lookup() {
         "{:t/sig '[string? :-> string?]}",
         "{:inline (fn [_] \"inlined\") :inline-arities #{1} :t/sig '[string? :-> string?]}",
     );
+    let class_value = source
+        .replace("convert.next", "java.util.UUID")
+        .replace("(#_\"🦊\" java.util.UUID 7)", "java.util.UUID");
     let column = |text: &str, token| {
         let row = text.lines().nth(3).unwrap();
         row[..row.find(token).unwrap()].encode_utf16().count()
+    };
+    let start = column(source, "convert.next");
+    let range = json!({
+        "start":{"line":3,"character":start},
+        "end":{"line":3,"character":start+"convert.next".len()}
+    });
+    let diagnostic = json!({
+        "source":"parenox","code":"PNX9001","severity":2,"range":range,
+        "message":"Clojure/JVM resolves unqualified convert.next as a class name. Use app/convert.next to refer to the var."
+    });
+    let mut forged = diagnostic.clone();
+    forged["message"] = json!(
+        "Clojure/JVM resolves unqualified convert.next as a class name. Use other/convert.next to refer to the var."
+    );
+    let class_start = column(&class_value, "java.util.UUID");
+    let class_range = json!({
+        "start":{"line":3,"character":class_start},
+        "end":{"line":3,"character":class_start+"java.util.UUID".len()}
+    });
+    let action = |id, range: &Value, diagnostics: Vec<Value>| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/codeAction","params":{
+            "textDocument":{"uri":file},"range":range,
+            "context":{"only":["quickfix"],"diagnostics":diagnostics}
+        }})
     };
     let query = |id, method, text: &str, token| {
         json!({"jsonrpc":"2.0","id":id,"method":method,"params":{
@@ -4519,7 +4546,9 @@ fn dotted_source_function_uses_follow_jvm_class_lookup() {
         }})
     };
     let messages = transcript(&[
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),"capabilities":{"workspace":{"workspaceEdit":{"documentChanges":true}}}
+        }}),
         json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
             "textDocument":{"uri":file,"version":1,"languageId":"clojure","text":source}
         }}),
@@ -4527,11 +4556,17 @@ fn dotted_source_function_uses_follow_jvm_class_lookup() {
         query(3, "textDocument/signatureHelp", source, "7"),
         query(4, "textDocument/hover", source, "picked))"),
         query(5, "textDocument/definition", source, "convert.next"),
+        action(20, &range, vec![diagnostic.clone()]),
+        action(21, &range, vec![forged]),
         change(2, &qualified),
+        action(22, &range, vec![diagnostic.clone()]),
         query(6, "textDocument/hover", &qualified, "picked))"),
         query(7, "textDocument/signatureHelp", &qualified, "\"valid\""),
         change(3, &inline),
         change(4, source),
+        action(23, &range, Vec::new()),
+        change(5, &class_value),
+        action(24, &class_range, Vec::new()),
         json!({"jsonrpc":"2.0","id":8,"method":"shutdown"}),
         json!({"jsonrpc":"2.0","method":"exit"}),
     ]);
@@ -4547,25 +4582,25 @@ fn dotted_source_function_uses_follow_jvm_class_lookup() {
             .as_array()
             .unwrap()
     };
-    let start = column(source, "convert.next");
     for version in [1, 4] {
         let [finding] = diagnostics(version).as_slice() else {
             panic!("unexpected diagnostics: {:#?}", diagnostics(version));
         };
-        assert_eq!(finding["code"], "PNX9001");
+        assert_eq!(finding, &diagnostic);
+    }
+    for (id, version) in [(20, 1), (23, 4)] {
         assert_eq!(
-            finding["range"],
-            json!({
-                "start":{"line":3,"character":start},
-                "end":{"line":3,"character":start+"convert.next".len()}
-            })
+            response(id),
+            &json!([{
+                "kind":"quickfix","title":"Qualify as app/convert.next","diagnostics":[diagnostic],
+                "edit":{"documentChanges":[{"textDocument":{"uri":file,"version":version},
+                    "edits":[{"range":range,"newText":"app/convert.next"}]}]}
+            }])
         );
-        assert!(
-            finding["message"]
-                .as_str()
-                .unwrap()
-                .contains("app/convert.next")
-        );
+    }
+    assert_eq!(diagnostics(5)[0]["range"], class_range);
+    for id in [21, 22, 24] {
+        assert_eq!(response(id), &json!([]));
     }
     assert!(diagnostics(2).is_empty());
     assert!(

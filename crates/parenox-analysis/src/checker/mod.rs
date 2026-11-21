@@ -37,6 +37,7 @@ use crate::{ContractOrigin, Diagnostic, Suggestion};
 
 pub(crate) struct FunctionCheck {
     pub diagnostics: Vec<Diagnostic>,
+    pub dotted_callable_sites: Box<[Span]>,
     pub checked_helpers: BTreeSet<String>,
     pub declaration_findings_sensitive: bool,
     specs: BTreeMap<String, SpecInput>,
@@ -85,6 +86,7 @@ impl Model {
         }
         FunctionCheck {
             diagnostics: checker.diagnostics,
+            dotted_callable_sites: checker.dotted_callable_sites.into_boxed_slice(),
             checked_helpers: checker
                 .specializations
                 .into_keys()
@@ -436,6 +438,7 @@ struct Checker<'a> {
     untyped_binding_budget: Option<usize>,
     literal_binding_query: bool,
     diagnostics: Vec<Diagnostic>,
+    dotted_callable_sites: Vec<Span>,
     has_declaration_findings: bool,
     has_unproven_expectation: bool,
     spec_inputs: BTreeMap<String, SpecInput>,
@@ -468,6 +471,7 @@ impl<'a> Checker<'a> {
             untyped_binding_budget: None,
             literal_binding_query: false,
             diagnostics: Vec::new(),
+            dotted_callable_sites: Vec::new(),
             has_declaration_findings: !model.diagnostics.is_empty(),
             has_unproven_expectation: false,
             spec_inputs: BTreeMap::new(),
@@ -804,7 +808,7 @@ impl Checker<'_> {
                     value.clone()
                 } else if self.partial_method_body {
                     Value::new(Type::Unknown)
-                } else if let Some(value) = self.dotted_function_class_use(s, form.span) {
+                } else if s.contains('.') && let Some(value) = self.dotted_function_class_use(s, form.span, false) {
                     value
                 } else if self.model.local_function_at(s, form.span.start.offset).is_some_and(Function::inferred) {
                     self.error(

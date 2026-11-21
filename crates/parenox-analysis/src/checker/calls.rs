@@ -135,18 +135,22 @@ impl From<Vec<(Value, Span)>> for EvaluatedArguments {
 }
 
 impl<'model> Checker<'model> {
-    pub(super) fn dotted_function_class_use(&mut self, name: &str, span: Span) -> Option<Value> {
+    #[cold]
+    pub(super) fn dotted_function_class_use(
+        &mut self,
+        name: &str,
+        span: Span,
+        callable: bool,
+    ) -> Option<Value> {
         let qualified =
             self.model
                 .ordinary_dotted_function_at(name, self.globals, span.start.offset)?;
-        let hint = self.model.qualified_var_spelling(qualified).map_or_else(
-            || format!("The matching var is {qualified}."),
-            |spelling| format!("Use {spelling} to refer to the var."),
-        );
-        Some(self.unchecked_form(
-            span,
-            &format!("Clojure/JVM resolves unqualified {name} as a class name. {hint}"),
-        ))
+        let spelling = self.model.qualified_var_spelling(qualified);
+        let message = super::Model::dotted_class_use_message(name, qualified, spelling.as_deref());
+        if callable {
+            self.dotted_callable_sites.push(span);
+        }
+        Some(self.unchecked_form(span, &message))
     }
 
     fn inferred_call(&mut self, function: &Function, args: Vec<Value>, span: Span) -> Value {
@@ -295,8 +299,10 @@ impl<'model> Checker<'model> {
             _ => {}
         }
         if let Some(name) = xs[0].symbol()
+            && name.contains('.')
             && !env.contains_key(name)
-            && let Some(value) = self.dotted_function_class_use(name, xs[0].without_metadata().span)
+            && let Some(value) =
+                self.dotted_function_class_use(name, xs[0].without_metadata().span, true)
         {
             self.eval_args(&xs[1..], env, false).for_each(drop);
             return value;
@@ -779,8 +785,9 @@ impl<'model> Checker<'model> {
         if let Some(name) = callee.symbol()
             && !env.contains_key(name)
         {
-            if let Some(value) =
-                self.dotted_function_class_use(name, callee.without_metadata().span)
+            if name.contains('.')
+                && let Some(value) =
+                    self.dotted_function_class_use(name, callee.without_metadata().span, true)
             {
                 return prepare(Callable::Value(value));
             }

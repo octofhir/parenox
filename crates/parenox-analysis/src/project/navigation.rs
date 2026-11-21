@@ -17,6 +17,9 @@ mod specs;
 mod test_tree;
 mod usages;
 
+use std::borrow::Cow;
+use std::ops::Range;
+
 pub use archive::ArchiveDeclarations;
 pub use call_hierarchy::{CallHierarchyCalls, CallHierarchyItem};
 pub use completion_docs::{SourceExport, namespace_exports};
@@ -158,6 +161,36 @@ impl Session {
             return None;
         };
         Some(target.info())
+    }
+
+    /// Find a safe qualified spelling for a checked class-resolution diagnostic.
+    pub fn dotted_var_fix(
+        &self,
+        path: &str,
+        range: Range<usize>,
+        message: &str,
+    ) -> Option<Cow<'_, str>> {
+        let file = self.current_file(path)?;
+        let (_, forms) = file.navigation_source()?;
+        let site = symbol_form_at(forms, range.start)?;
+        if (site.span.start.offset..site.span.end.offset) != range {
+            return None;
+        }
+        // A class object can be a valid value. Only offer the edit when the
+        // checker visited this occurrence as a call or a prepared callback.
+        if !file
+            .functions
+            .values()
+            .any(|function| function.result.dotted_callable_sites.contains(&site.span))
+        {
+            return None;
+        }
+        file.model.as_ref()?.dotted_var_fix(
+            site.symbol()?,
+            self.query_globals.as_ref()?,
+            range.start,
+            message,
+        )
     }
 
     pub fn complete_qualified_var(&self, path: &str, prefix: &str, limit: usize) -> Vec<String> {

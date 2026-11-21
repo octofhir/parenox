@@ -1,4 +1,5 @@
 //! Render findings and linked source locations for the editor.
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::ops::Range as ByteRange;
 
@@ -57,7 +58,7 @@ pub fn render(
 }
 
 /// Build edits from current server diagnostics and the document's lexical scope.
-pub fn local_spelling_actions(
+pub fn quick_fix_actions(
     session: &Session,
     path: &str,
     document: &Document<'_>,
@@ -71,7 +72,8 @@ pub fn local_spelling_actions(
     published
         .iter()
         .filter_map(|finding| {
-            if finding["source"] != "parenox" || finding["code"] != "PNX2304" {
+            let code = finding["code"].as_str()?;
+            if finding["source"] != "parenox" || !matches!(code, "PNX2304" | "PNX9001") {
                 return None;
             }
             if !requested.is_empty()
@@ -90,16 +92,28 @@ pub fn local_spelling_actions(
             } else {
                 span.start < selection.end && selection.start < span.end
             };
-            if !selected || !seen.insert((span.start, span.end)) {
+            let occurrence = (span.start, span.end);
+            if !selected || seen.contains(&occurrence) {
                 return None;
             }
-            let replacement = session.local_spelling_fix(path, span)?;
+            let (verb, replacement) = if code == "PNX2304" {
+                (
+                    "Replace with",
+                    Cow::Borrowed(session.local_spelling_fix(path, span)?),
+                )
+            } else {
+                (
+                    "Qualify as",
+                    session.dotted_var_fix(path, span, finding["message"].as_str()?)?,
+                )
+            };
+            seen.insert(occurrence);
             let edit = document.workspace_edit(
                 vec![json!({"range":range,"newText":replacement})],
                 versioned,
             );
             Some(json!({
-                "title": format!("Replace with {replacement}"),
+                "title": format!("{verb} {replacement}"),
                 "kind": QUICK_FIX_KIND,
                 "diagnostics": [finding],
                 "edit": edit,

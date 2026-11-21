@@ -981,7 +981,7 @@ impl Workspace {
                     .as_ref()
                     .and_then(|editor| editor.published.as_deref())
             {
-                actions.extend(diagnostics::local_spelling_actions(
+                actions.extend(diagnostics::quick_fix_actions(
                     session,
                     &path,
                     &editable,

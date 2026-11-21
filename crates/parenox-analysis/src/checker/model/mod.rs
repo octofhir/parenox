@@ -752,4 +752,32 @@ impl Model {
                 .then_some(Cow::Owned(spelling))
         })
     }
+
+    pub(super) fn dotted_class_use_message(
+        name: &str,
+        qualified: &str,
+        spelling: Option<&str>,
+    ) -> String {
+        let hint = spelling.map_or_else(
+            || format!("The matching var is {qualified}."),
+            |spelling| format!("Use {spelling} to refer to the var."),
+        );
+        format!("Clojure/JVM resolves unqualified {name} as a class name. {hint}")
+    }
+
+    pub(crate) fn dotted_var_fix<'a>(
+        &'a self,
+        name: &str,
+        globals: &'a Globals,
+        offset: usize,
+        message: &str,
+    ) -> Option<Cow<'a, str>> {
+        if self.known_java_class(name) {
+            return None;
+        }
+        let qualified = self.ordinary_dotted_function_at(name, globals, offset)?;
+        let spelling = self.qualified_var_spelling(qualified)?;
+        let expected = Self::dotted_class_use_message(name, qualified, Some(&spelling));
+        (message == expected).then_some(spelling)
+    }
 }

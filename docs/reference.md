@@ -805,6 +805,9 @@ project, a buffer has no project context.
 - **Local spelling quick fix** replaces an unresolved symbol reported as
   `PNX2304` when exactly one visible local name is one edit away. It uses the
   range of the current diagnostic.
+- **Qualify a dotted var** replaces the token at a class-resolution warning
+  in a checked call or callback. The edit uses a verified spelling for the
+  source function. Known JVM class names keep their own meaning.
 - **Keyword value completion** suggests literal values from the declared
   argument type of a checked call. Type `:` or a prefix such as
   `:fr` to complete the keyword in place. Threaded calls use the parameter
