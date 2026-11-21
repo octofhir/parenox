@@ -467,38 +467,67 @@ fn symbol_at(forms: &[Form], offset: usize) -> Option<&str> {
 }
 
 fn symbol_form_at(forms: &[Form], offset: usize) -> Option<&Form> {
-    source_symbol_form_at(forms, offset, false)
+    source_symbol_form_at(forms, offset, SymbolSite::Source)
 }
 
-fn source_symbol_form_at(forms: &[Form], offset: usize, type_hint: bool) -> Option<&Form> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SymbolSite {
+    Source,
+    TypeHint,
+    Hover,
+}
+
+fn source_symbol_form_at(forms: &[Form], offset: usize, site: SymbolSite) -> Option<&Form> {
     let index = forms.partition_point(|form| form.span.end.offset <= offset);
     let form = forms.get(index)?;
-    if type_hint && let Some(tag) = java_type_tag_at(form, offset) {
+    if site == SymbolSite::TypeHint
+        && let Some(tag) = java_type_tag_at(form, offset)
+    {
         return Some(tag);
     }
-    let form = form.without_metadata();
-    if offset < form.span.start.offset || offset >= form.span.end.offset {
+    let bare = form.without_metadata();
+    if site == SymbolSite::Hover
+        && offset < bare.span.start.offset
+        && matches!(&bare.kind, Kind::Vector(_))
+    {
+        // Find the written occurrence. The type query decides which metadata
+        // was evaluated after wrapper merging and reachability checks.
+        let mut wrapper = form;
+        while let Kind::Metadata(metadata, target) = &wrapper.kind {
+            if (metadata.span.start.offset..metadata.span.end.offset).contains(&offset) {
+                let Kind::Map(items) = &metadata.without_metadata().kind else {
+                    return None;
+                };
+                // The reader gives a shorthand tag and its synthetic key the
+                // same span. Search values to retain the tag at that position.
+                let pairs = items.as_chunks::<2>().0;
+                let index = pairs.partition_point(|[_, value]| value.span.end.offset <= offset);
+                let [_, value] = pairs.get(index)?;
+                return source_symbol_form_at(std::slice::from_ref(value), offset, site);
+            }
+            wrapper = target;
+        }
+    }
+    if offset < bare.span.start.offset || offset >= bare.span.end.offset {
         return None;
     }
-    match &form.kind {
-        Kind::Symbol(_) | Kind::AnonymousArgument(_) if !type_hint => Some(form),
+    match &bare.kind {
+        Kind::Symbol(_) | Kind::AnonymousArgument(_) if site != SymbolSite::TypeHint => Some(bare),
         Kind::List(items)
             if !matches!(
                 items.first().and_then(Form::symbol),
                 Some("ns" | "clojure.core/ns" | "quote")
             ) =>
         {
-            source_symbol_form_at(items, offset, type_hint)
+            source_symbol_form_at(items, offset, site)
         }
         Kind::Vector(items)
         | Kind::Map(items)
         | Kind::Set(items)
         | Kind::AutoNamespacedMap { entries: items, .. } => {
-            source_symbol_form_at(items, offset, type_hint)
+            source_symbol_form_at(items, offset, site)
         }
-        Kind::AnonymousFunction(function) => {
-            source_symbol_form_at(&function.body, offset, type_hint)
-        }
+        Kind::AnonymousFunction(function) => source_symbol_form_at(&function.body, offset, site),
         _ => None,
     }
 }

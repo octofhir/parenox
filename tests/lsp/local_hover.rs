@@ -507,6 +507,83 @@ fn hover_uses_the_type_at_a_local_read_after_an_unsaved_edit() {
 }
 
 #[test]
+fn hover_follows_narrowing_inside_evaluated_vector_metadata() {
+    let fixture = Fixture::new("vector metadata hover");
+    let path = fixture.0.join("src/vector_hover.clj");
+    let document = uri(&path);
+    let source = r#"(ns vector-hover (:require [clojure.spec.alpha :as s]))
+(defn render {:t/sig '[(s/nilable string?) :-> string?]} [label]
+  (let [^String replacement "!"]
+    (if (string? label)
+      (apply str ^{:stamp (do "🦊" label)} ^label ["x" replacement])
+      "fallback")))
+"#;
+    fs::write(&path, source).unwrap();
+    let nil_branch = source.replace("(string? label)", "(nil? label)");
+    let overwritten = source.replace(":stamp", ":tag");
+    let stopped = source.replace("\"x\" replacement", "(subs nil 0) replacement");
+    let range = |text: &str, line: usize, marker: &str, skip: usize, width: usize| {
+        let row = text.lines().nth(line).unwrap();
+        let start = row.find(marker).unwrap() + skip;
+        let character = row[..start].encode_utf16().count();
+        json!({
+            "start":{"line":line,"character":character},
+            "end":{"line":line,"character":character+width}
+        })
+    };
+    let change = |version, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let mut messages = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"languageId":"clojure","version":1,"text":source
+        }}}),
+    ];
+    let mut expected = Vec::new();
+    for (version, text, value_type, tag_type) in [
+        (1, source, Some("String"), Some("String")),
+        (2, &nil_branch, Some("Nil"), Some("Nil")),
+        (3, &overwritten, Some("String"), None),
+        (4, &stopped, None, None),
+        (5, source, Some("String"), Some("String")),
+    ] {
+        if version > 1 {
+            messages.push(change(version, text));
+        }
+        for (line, marker, skip, width, ty) in [
+            (4, "label)", 0, 5, value_type),
+            (4, "^label", 1, 5, tag_type),
+            (2, "^String", 1, 6, None),
+        ] {
+            let id = messages.len();
+            let range = range(text, line, marker, skip, width);
+            messages.push(
+                json!({"jsonrpc":"2.0","id":id,"method":"textDocument/hover","params":{
+                    "textDocument":{"uri":document},"position":range["start"]
+                }}),
+            );
+            expected.push((id, range, ty));
+        }
+    }
+    messages.push(json!({"jsonrpc":"2.0","id":messages.len(),"method":"shutdown"}));
+    messages.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&messages);
+    for (id, range, ty) in expected {
+        let result = &replies.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+        if let Some(ty) = ty {
+            assert_eq!(result["contents"]["value"], format!("label\n{ty}"));
+            assert_eq!(result["range"], range);
+        } else {
+            assert_eq!(result, &Value::Null);
+        }
+    }
+}
+
+#[test]
 fn hover_requires_a_valid_call_result_and_signature_help_keeps_the_declaration() {
     let fixture = Fixture::new("rejected call hover");
     let file = fixture.0.join("src/fragment.clj");

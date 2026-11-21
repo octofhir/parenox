@@ -6,9 +6,9 @@ use crate::reader::{Form, Span};
 use crate::types::Type;
 
 use super::{
-    FileCache, InspectedReference, ResolvedVar, ScopedReference, Session, SourceTarget, VarInfo,
-    archive::namespace_declarations, cached_type_query, declaration::top_level_reference,
-    specs::keyword_at, symbol_at, symbol_form_at,
+    FileCache, InspectedReference, ResolvedVar, ScopedReference, Session, SourceTarget, SymbolSite,
+    VarInfo, archive::namespace_declarations, cached_type_query, declaration::top_level_reference,
+    source_symbol_form_at, specs::keyword_at, symbol_at, symbol_form_at,
 };
 
 #[derive(Default)]
@@ -134,7 +134,7 @@ impl Session {
             return None;
         }
         let (_, forms) = file.navigation_source()?;
-        let Some(site) = symbol_form_at(forms, offset) else {
+        let Some(site) = source_symbol_form_at(forms, offset, SymbolSite::Hover) else {
             let key = keyword_at(forms, offset)?;
             let inferred_type = file.cached_hover_type(key.span, || {
                 let scope = self.typing_at(file, path, offset)?;

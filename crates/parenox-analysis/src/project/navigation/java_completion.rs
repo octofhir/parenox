@@ -1,5 +1,5 @@
 //! Resolve Java class names without loading a class.
-use super::{FileCache, Session, source_symbol_form_at, symbol_form_at};
+use super::{FileCache, Session, SymbolSite, source_symbol_form_at, symbol_form_at};
 
 impl Session {
     /// Return an imported Java class or a qualified class candidate for the
@@ -25,7 +25,7 @@ impl Session {
         let resolve =
             |namespace: &str, name: &str, arity| self.navigation_call(namespace, name, arity);
         let Some(form) = symbol_form_at(forms, offset) else {
-            let symbol = source_symbol_form_at(forms, offset, true)?.symbol()?;
+            let symbol = source_symbol_form_at(forms, offset, SymbolSite::TypeHint)?.symbol()?;
             let class = declarations.java_class_candidate(symbol)?;
             let evaluated = declarations.evaluated_java_class_at(
                 forms,
