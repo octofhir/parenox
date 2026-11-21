@@ -306,35 +306,43 @@ pub fn complete(
         }
     } else {
         let qualified = prefix.strip_prefix("clojure.core/");
-        CORE.iter()
-            .filter_map(|entry| {
-                if !entry.name.starts_with(qualified.unwrap_or(prefix))
-                    || (qualified.is_none()
-                        && !session.core_completion_visible(path, entry.name, offset))
-                {
-                    return None;
+        let locals = if qualified.is_none() {
+            session.complete_local(path, site.range.start, prefix, LIMIT + 1)
+        } else {
+            Vec::new()
+        };
+        let core = CORE.iter().filter_map(|entry| {
+            if !entry.name.starts_with(qualified.unwrap_or(prefix))
+                || (qualified.is_none()
+                    && (locals.contains(&entry.name)
+                        || !session.core_completion_visible(path, entry.name, offset)))
+            {
+                return None;
+            }
+            let label = qualified.map_or_else(
+                || entry.name.to_owned(),
+                |_| format!("clojure.core/{}", entry.name),
+            );
+            let mut text = label.clone();
+            let mut format = 1;
+            if snippets && let (Some(template), Some(closed)) = (entry.template, site.empty_call) {
+                text.push(' ');
+                text.push_str(template);
+                if !closed {
+                    text.push(')');
                 }
-                let label = qualified.map_or_else(
-                    || entry.name.to_owned(),
-                    |_| format!("clojure.core/{}", entry.name),
-                );
-                let mut text = label.clone();
-                let mut format = 1;
-                if snippets
-                    && let (Some(template), Some(closed)) = (entry.template, site.empty_call)
-                {
-                    text.push(' ');
-                    text.push_str(template);
-                    if !closed {
-                        text.push(')');
-                    }
-                    format = 2;
-                }
-                Some(
-                    json!({"label":label,"kind":if format == 2 {15} else {3},"detail":entry.detail,
+                format = 2;
+            }
+            Some(
+                json!({"label":label,"kind":if format == 2 {15} else {3},"detail":entry.detail,
                 "insertTextFormat":format,"textEdit":{"range":range,"newText":text}}),
-                )
-            })
+            )
+        });
+        locals
+            .iter()
+            .map(|name| json!({"label":name,"kind":6,"textEdit":{"range":range,"newText":name}}))
+            .chain(core)
+            .take(LIMIT + 1)
             .collect()
     };
     let incomplete = items.len() > LIMIT;

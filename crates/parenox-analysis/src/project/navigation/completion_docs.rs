@@ -3,6 +3,7 @@ use std::fmt::Write;
 
 use super::{FileCache, Session, archive::namespace_declarations};
 use crate::SourceSymbolKind;
+use crate::checker::ProjectCall;
 
 #[derive(Clone)]
 pub struct SourceExport {
@@ -45,6 +46,49 @@ pub fn namespace_exports(
 }
 
 impl Session {
+    /// Complete lexical names in a written expression, including forms with open delimiters at EOF.
+    pub fn complete_local(
+        &self,
+        path: &str,
+        token_start: usize,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<&str> {
+        let Some(file) = self.current_file(path) else {
+            return Vec::new();
+        };
+        let source = if file
+            .parse_error
+            .as_ref()
+            .is_some_and(|error| token_start >= error.span.start.offset)
+        {
+            self.recovered_delimited_forms(file, path)
+        } else {
+            file.navigation_source()
+        };
+        let Some((declarations, forms)) = source else {
+            return Vec::new();
+        };
+        declarations.lexical_completions_at(
+            forms,
+            token_start,
+            prefix,
+            limit,
+            self.has_standard_test(),
+            |namespace, local, actual| {
+                if self.query_globals.as_ref().is_some_and(|globals| {
+                    declarations.has_external_function(globals, namespace, local)
+                }) {
+                    ProjectCall::Function {
+                        expected_arity: None,
+                    }
+                } else {
+                    self.navigation_call(namespace, local, actual)
+                }
+            },
+        )
+    }
+
     /// Resolve a completion qualifier using the caller's namespace declaration.
     pub fn completion_namespace<'a>(&'a self, path: &str, qualifier: &'a str) -> Option<&'a str> {
         self.completion_namespace_at(path, qualifier, 0)

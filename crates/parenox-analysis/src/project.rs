@@ -123,6 +123,7 @@ struct FileCache {
     declarations: Option<Declarations>,
     known_var_surface: OnceLock<bool>,
     navigation_fallback: Option<Box<NavigationFallback>>,
+    recovered_delimited_forms: OnceLock<Option<(Declarations, Vec<Form>)>>,
     hover_types: TypeQueries<String>,
     checked_calls: TypeQueries<Arc<CheckedCall>>,
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
@@ -509,6 +510,7 @@ impl Session {
             // Type queries can depend on externs or other edited files.
             cache.hover_types.take();
             cache.checked_calls.take();
+            cache.recovered_delimited_forms.take();
             if let Some(fallback) = &mut cache.navigation_fallback {
                 fallback.checked_prefix.take();
                 fallback.recovered_keywords.take();

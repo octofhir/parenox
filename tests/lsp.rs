@@ -833,6 +833,162 @@ fn completes_incomplete_forms_project_vars_and_specs_from_closed_sources() {
 }
 
 #[test]
+fn completes_only_visible_lexical_names_in_written_expressions() {
+    let fixture = Fixture::new("lexical completion");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    fs::write(
+        fixture.0.join("src/api.clj"),
+        "(ns api) (defn echo [x] x)\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("src/opaque.clj"),
+        "(ns opaque) (defmacro omit [x] nil)\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("src/unloaded.clj"),
+        "(ns unloaded) (defn echo [x] x)\n",
+    )
+    .unwrap();
+    let prefix = "(ns app (:require [api :as api] [opaque :as opaque] [unloaded :as-alias data]))\n(defn- echo [x] x)\n";
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "(defn f [fragment] (do #_\"🦊\" (echo frag|meent)))",
+            "fragmeent",
+            &["fragment"],
+        ),
+        (
+            "(defn f [fragment] (do #_\"🦊\" (api/echo frag|meent",
+            "fragmeent",
+            &["fragment"],
+        ),
+        (
+            "(defn f [fragment] (opaque/omit frag|ment))",
+            "fragment",
+            &[],
+        ),
+        ("(defn f [fragment] (data/echo frag|ment))", "fragment", &[]),
+        ("(defn f [fragment] (quote frag|ment))", "fragment", &[]),
+        ("(defn f [fragment] (case 0 frag|ment 1))", "fragment", &[]),
+        ("(defn f [fragment] (var frag|ment))", "fragment", &[]),
+        ("(defn f [fragment] (new frag|ment))", "fragment", &[]),
+        (
+            "(defn f [fragment] (let [frag|ment nil] nil))",
+            "fragment",
+            &[],
+        ),
+        (
+            "(defn f [fragment] (let [fragment-length 3 fragment frag|] fragment))",
+            "frag",
+            &["fragment-length", "fragment"],
+        ),
+        (
+            "(defn f [fragment] (let [fragment \"\" fragment-length 3] frag|))",
+            "frag",
+            &["fragment-length", "fragment"],
+        ),
+        (
+            "(defn f [fragment] (if-let [decoded fragment] deco|ded nil))",
+            "decoded",
+            &["decoded"],
+        ),
+        (
+            "(defn f [fragment] (if-let [decoded fragment] nil deco|ded))",
+            "decoded",
+            &[],
+        ),
+        (
+            "(defn f [{:keys [fragment]}] (fn step [other] (step frag|ment)))",
+            "fragment",
+            &["fragment"],
+        ),
+        (
+            "(defn f [] (fn step [other] (ste|p other)))",
+            "step",
+            &["step"],
+        ),
+        ("(defn f [map] (ma|p))", "map", &["map"]),
+        ("(defn f [if] (i|f true :yes :no))", "if", &[]),
+        ("(defn f [if] (do i|f))", "if", &["if"]),
+        ("(defn f [catch] (cat|ch))", "catch", &["catch"]),
+    ];
+    let initial = format!("{prefix}(defn f [] nil)\n");
+    fs::write(&path, &initial).unwrap();
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),"capabilities":{"textDocument":{"completion":{"completionItem":{"snippetSupport":true}}}}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":file,"languageId":"clojure","version":1,"text":initial
+        }}}),
+    ];
+    let mut offsets = Vec::new();
+    for (index, &(marked, token, _)) in cases.iter().enumerate() {
+        let cursor = marked.find('|').unwrap();
+        let row = marked.replace('|', "");
+        let start = row
+            .match_indices(token)
+            .find(|(start, _)| (*start + 1..=*start + token.len()).contains(&cursor))
+            .map(|(start, _)| start)
+            .unwrap();
+        offsets.push((
+            row[..start].encode_utf16().count(),
+            row[..start + token.len()].encode_utf16().count(),
+        ));
+        let id = index + 2;
+        requests.push(json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":id},"contentChanges":[{"text":format!("{prefix}{row}")}]
+        }}));
+        requests.push(json!({"jsonrpc":"2.0","id":id,"method":"textDocument/completion","params":{
+            "textDocument":{"uri":file},"position":{"line":2,"character":row[..cursor].encode_utf16().count()}
+        }}));
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    for (index, ((marked, _, expected), (start, end))) in cases.iter().zip(offsets).enumerate() {
+        let reply = &replies
+            .iter()
+            .find(|reply| reply["id"] == index + 2)
+            .unwrap()["result"];
+        let items = reply["items"].as_array().unwrap();
+        let labels = items
+            .iter()
+            .filter(|item| item["kind"] == 6)
+            .map(|item| item["label"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, *expected, "{marked}");
+        for &name in *expected {
+            let matches = items
+                .iter()
+                .filter(|item| item["label"] == name)
+                .collect::<Vec<_>>();
+            let [item] = matches.as_slice() else {
+                panic!("{marked}: duplicate {name} in {reply:#?}");
+            };
+            assert_eq!(
+                item["textEdit"],
+                json!({"newText":name,"range":{
+                    "start":{"line":2,"character":start},"end":{"line":2,"character":end}
+                }}),
+                "{marked}"
+            );
+        }
+    }
+    let eof = &replies
+        .iter()
+        .find(|reply| {
+            reply["method"] == "textDocument/publishDiagnostics" && reply["params"]["version"] == 3
+        })
+        .unwrap()["params"]["diagnostics"];
+    assert_eq!(eof[0]["code"], "PNX9000");
+    assert_eq!(eof.as_array().unwrap().len(), 1);
+    assert_eq!(fs::read_to_string(&path).unwrap(), initial);
+}
+
+#[test]
 fn completes_literal_keywords_from_the_checked_argument_slot() {
     let fixture = Fixture::new("argument keyword completion");
     let path = fixture.0.join("src/app.clj");

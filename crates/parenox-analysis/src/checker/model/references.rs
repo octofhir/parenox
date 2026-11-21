@@ -210,8 +210,44 @@ impl Declarations {
         standard_test: bool,
         resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Option<bool> {
-        self.navigation_at(forms, offset, standard_test, true, Some(name), resolve)?
-            .lexical_binding
+        self.navigation_at(
+            forms,
+            offset,
+            standard_test,
+            true,
+            Some(LexicalQuery::Binding(name)),
+            resolve,
+        )?
+        .lexical_binding
+    }
+
+    pub(crate) fn lexical_completions_at<'a>(
+        &'a self,
+        forms: &'a [Form],
+        offset: usize,
+        prefix: &str,
+        limit: usize,
+        standard_test: bool,
+        mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
+    ) -> Vec<&'a str> {
+        self.navigation_at(
+            forms,
+            offset,
+            standard_test,
+            true,
+            Some(LexicalQuery::Completion { prefix, limit }),
+            |namespace, name, actual| {
+                if namespace != self.namespace() {
+                    return resolve(namespace, name, actual);
+                }
+                if self.source_var_before(forms, name, offset).is_some() {
+                    self.source_function_call(forms, name, actual, false)
+                } else {
+                    ProjectCall::Unknown
+                }
+            },
+        )
+        .map_or_else(Vec::new, |target| target.completions)
     }
 
     pub(crate) fn evaluated_java_class_at<'a>(
@@ -231,7 +267,7 @@ impl Declarations {
         offset: usize,
         standard_test: bool,
         include_top_level_expressions: bool,
-        binding_name: Option<&str>,
+        lexical: Option<LexicalQuery<'_>>,
         mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Option<NavigationTarget<'a>> {
         let index = forms.partition_point(|form| form.span.end.offset <= offset);
@@ -254,7 +290,7 @@ impl Declarations {
             resolve: &mut resolve,
             purpose: Purpose::Navigate {
                 offset,
-                binding_name,
+                lexical,
                 target: NavigationTarget::default(),
             },
         };
@@ -457,6 +493,12 @@ impl Model {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LexicalQuery<'a> {
+    Binding(&'a str),
+    Completion { prefix: &'a str, limit: usize },
+}
+
 enum Purpose<'source, 'query> {
     Check(&'query mut Vec<Diagnostic>),
     Collect(&'query mut DocumentReferences<'source>),
@@ -466,7 +508,7 @@ enum Purpose<'source, 'query> {
     },
     Navigate {
         offset: usize,
-        binding_name: Option<&'query str>,
+        lexical: Option<LexicalQuery<'query>>,
         target: NavigationTarget<'source>,
     },
 }
@@ -478,6 +520,7 @@ struct NavigationTarget<'source> {
     evaluated_symbol: Option<&'source str>,
     lexical_binding: Option<bool>,
     java_class: Option<&'source str>,
+    completions: Vec<&'source str>,
 }
 
 struct References<'source, 'query, F> {
@@ -577,7 +620,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         for form in forms {
             if let Purpose::Navigate {
                 offset,
-                binding_name,
+                lexical,
                 target,
             } = &mut self.purpose
             {
@@ -585,7 +628,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                     continue;
                 }
                 if form.without_metadata().span.start.offset == *offset
-                    && let Some(name) = binding_name
+                    && let Some(LexicalQuery::Binding(name)) = lexical
                 {
                     target.lexical_binding = Some(
                         (*name == "%" && self.post_result_scope.is_some())
@@ -609,6 +652,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 Kind::Symbol(symbol) => {
                     self.select_type_hint(form);
                     let span = form.without_metadata().span;
+                    self.complete_local_at(span, false);
                     if !self.check_runtime_alias(symbol, span, true) {
                         self.select_reference(symbol, span);
                     }
@@ -626,6 +670,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             return self.forms(items);
         };
         let span = head.without_metadata().span;
+        self.complete_local_at(span, true);
         if self.template_parameter(symbol) {
             // Substitution may turn an operator into a macro or special form.
             self.select_reference(symbol, span);
@@ -676,6 +721,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             "try" => return self.try_body(args),
             "let*" | "loop*" => return self.bindings(args, false),
             "fn*" => return self.function(args, head.span, true),
+            _ if self.completing_locals() && special_callee(symbol) => return,
             _ => {}
         }
         self.select_reference(symbol, span);
@@ -693,6 +739,9 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         }
         if self.is_local(symbol) {
             self.forms(args);
+            return;
+        }
+        if self.completing_locals() && self.names.runtime_alias_gap(symbol).is_some() {
             return;
         }
         if self.check_runtime_alias(symbol, span, false) {
@@ -739,7 +788,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 {
                     return collect_protocol_group_methods(args, None, method, targets);
                 }
-                _ if plain_core_arguments(local) => return self.forms(args),
+                _ if self.plain_core_arguments(local) => return self.forms(args),
                 _ => {}
             }
         }
@@ -764,7 +813,8 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             if !matches!(
                 self.purpose,
                 Purpose::Collect(_) | Purpose::ProtocolMethods { .. }
-            ) {
+            ) && !self.completing_locals()
+            {
                 return false;
             }
             namespace = self.names.namespace();
@@ -853,6 +903,9 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             }
             _ => {}
         }
+        if self.completing_locals() {
+            return;
+        }
         let hit = if let Some((namespace, name)) = self.names.qualified_reference(symbol) {
             ScopedReference::Referred(namespace, name)
         } else if allow_local
@@ -893,6 +946,50 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             Purpose::Collect(found) => found.uses.push((span, hit)),
             Purpose::Check(_) | Purpose::ProtocolMethods { .. } => unreachable!(),
         }
+    }
+
+    fn completing_locals(&self) -> bool {
+        matches!(
+            self.purpose,
+            Purpose::Navigate {
+                lexical: Some(LexicalQuery::Completion { .. }),
+                ..
+            }
+        )
+    }
+
+    fn plain_core_arguments(&self, name: &str) -> bool {
+        plain_core_arguments(name)
+            || (self.completing_locals()
+                && crate::checker::calls::is_builtin(&format!("clojure.core/{name}")))
+    }
+
+    fn complete_local_at(&mut self, span: Span, callee: bool) {
+        let Purpose::Navigate {
+            offset,
+            lexical: Some(LexicalQuery::Completion { prefix, limit }),
+            target,
+        } = &mut self.purpose
+        else {
+            return;
+        };
+        if span.start.offset != *offset || self.template_scope.is_some() {
+            return;
+        }
+        let mut seen = BTreeSet::new();
+        target.completions.extend(
+            self.locals
+                .iter()
+                .rev()
+                .map(|&(name, _)| name)
+                .filter(|name| {
+                    name.starts_with(*prefix)
+                        && (!name.contains('/') || *name == "/")
+                        && (!callee || !special_callee(name))
+                        && seen.insert(*name)
+                })
+                .take(*limit),
+        );
     }
 
     fn is_local(&self, symbol: &str) -> bool {
@@ -1221,17 +1318,23 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             return false;
         };
         let span = head.without_metadata().span;
+        self.complete_local_at(span, true);
         self.select_reference(symbol, span);
         if self.template_parameter(symbol) {
             return false;
         }
+        if self.completing_locals() && special_callee(symbol) {
+            return false;
+        }
         let (namespace, local) = self.names.names.resolve_parts(symbol);
         if self.is_local(symbol)
-            || (self.trusted_core(symbol, namespace) && plain_core_arguments(local))
+            || (self.trusted_core(symbol, namespace) && self.plain_core_arguments(local))
         {
             self.forms(args);
             true
-        } else if self.check_runtime_alias(symbol, span, false) {
+        } else if (self.completing_locals() && self.names.runtime_alias_gap(symbol).is_some())
+            || self.check_runtime_alias(symbol, span, false)
+        {
             false
         } else {
             // Only resolved function steps have a normal argument list.
@@ -1309,5 +1412,32 @@ fn plain_core_arguments(name: &str) -> bool {
             | "next"
             | "rest"
             | "count"
+    )
+}
+
+fn special_callee(name: &str) -> bool {
+    matches!(
+        name,
+        "&" | "."
+            | "case*"
+            | "def"
+            | "deftype*"
+            | "do"
+            | "fn*"
+            | "if"
+            | "let*"
+            | "letfn*"
+            | "loop*"
+            | "monitor-enter"
+            | "monitor-exit"
+            | "new"
+            | "quote"
+            | "recur"
+            | "reify*"
+            | "set!"
+            | "throw"
+            | "try"
+            | "var"
+            | "clojure.core/import*"
     )
 }

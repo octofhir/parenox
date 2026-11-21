@@ -774,6 +774,11 @@ project, a buffer has no project context.
   closed files and unsaved edits. Try hovering `provider/count-offset` and
   completing the `demo.arities.provider` libspec in
   [the arity example](../examples/arities/app.clj).
+- **Local completion** suggests visible parameters and bindings in supported
+  expression positions, including function operators. It follows the order of
+  `let` bindings and the scope of conditional bindings. A local that shadows a
+  core var appears once as a plain name. Missing closing delimiters at EOF can
+  be supplied for the query. Completion replaces the whole written symbol.
 - **Keyword value completion** suggests literal values from the declared
   argument type of a checked call. Type `:` or a prefix such as
   `:fr` to complete the keyword in place. Threaded calls use the parameter

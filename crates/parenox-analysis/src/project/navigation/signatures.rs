@@ -117,14 +117,9 @@ impl Session {
             };
         }
         caller.parse_error.as_ref()?;
-        let (declarations, forms) = recover_call(path, &caller.source)?;
-        let declarations = self
-            .query_globals
-            .as_ref()
-            .and_then(|globals| declarations.with_runtime_loads(&forms, &globals.runtime_loads))
-            .unwrap_or(declarations);
-        let site = call_at(&forms, offset)?;
-        let source = self.signatures_at(path, &declarations, &forms, &site);
+        let (declarations, forms) = self.recovered_delimited_forms(caller, path)?;
+        let site = call_at(forms, offset)?;
+        let source = self.signatures_at(path, declarations, forms, &site);
         let declared = self.query_globals.as_ref().and_then(|globals| {
             declarations.qualified_call_declaration(globals, site.head.symbol()?, site.wanted())
         });
@@ -132,6 +127,28 @@ impl Session {
             Some(signature) => Some(typed_signatures(&site, &signature, source)),
             None => source,
         }
+    }
+
+    pub(super) fn recovered_delimited_forms<'a>(
+        &self,
+        caller: &'a FileCache,
+        path: &str,
+    ) -> Option<(&'a Declarations, &'a [Form])> {
+        let (declarations, forms) = caller
+            .recovered_delimited_forms
+            .get_or_init(|| {
+                let (declarations, forms) = recover_delimited_forms(path, &caller.source)?;
+                let declarations = self
+                    .query_globals
+                    .as_ref()
+                    .and_then(|globals| {
+                        declarations.with_runtime_loads(&forms, &globals.runtime_loads)
+                    })
+                    .unwrap_or(declarations);
+                Some((declarations, forms))
+            })
+            .as_ref()?;
+        Some((declarations, forms))
     }
 
     fn checked_call(
@@ -515,7 +532,7 @@ fn call_in(form: &Form, offset: usize, top_level: bool) -> Option<CallSite<'_>> 
 }
 
 /// Repair missing closing delimiters at EOF for this query alone.
-fn recover_call(path: &str, source: &str) -> Option<(Declarations, Vec<Form>)> {
+fn recover_delimited_forms(path: &str, source: &str) -> Option<(Declarations, Vec<Form>)> {
     let repaired = close_eof_delimiters(source)?;
     let conditionals = if path.ends_with(".cljc") {
         Conditionals::Select(":clj")
