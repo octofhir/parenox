@@ -117,3 +117,138 @@ fn literal_vars_shadow_core_builtins_and_unsupported_initializers_are_explicit()
     assert_eq!(report.diagnostics.len(), 3, "{report:#?}");
     assert!(report.diagnostics.iter().all(|d| d.code == "PNX9001"));
 }
+
+#[test]
+fn folds_stock_str_initializers_in_definition_order() {
+    let source = r#"(ns demo.text (:require [wire.tags :as-alias wire]))
+(def jiofile-key (str "prefix😀" ::wire/file nil))
+(defn str {:t/sig '[t/any :-> keyword?]} [_] :shadow)
+(def qualified (clojure.core/str ::file))
+(def shadowed (str ::file))
+(defn invalid {:t/sig '[:-> number?]} [] (inc jiofile-key))
+"#;
+    let mut session = Session::default();
+    let report = session.check("text.clj", source);
+    assert_eq!(report.diagnostics.len(), 2, "{report:#?}");
+    let [unsupported, mismatch] = report.diagnostics.as_slice() else {
+        unreachable!();
+    };
+    assert_eq!(unsupported.code, "PNX9001");
+    assert_eq!(
+        &source[unsupported.span.start.offset..unsupported.span.end.offset],
+        "(str ::file)"
+    );
+    assert_eq!(mismatch.code, "PNX2322");
+    assert_eq!(
+        &source[mismatch.span.start.offset..mismatch.span.end.offset],
+        "jiofile-key"
+    );
+    for (var, value) in [
+        ("jiofile-key", "\"prefix😀:wire.tags/file\""),
+        ("qualified (", "\":demo.text/file\""),
+    ] {
+        let offset = source.find(var).unwrap();
+        let hover = session.hover_at("text.clj", offset).unwrap();
+        assert_eq!(hover.value_type.as_deref(), Some(value));
+    }
+
+    let declared_twice = "(ns demo.text)\n(declare str)\n(def key (str ::file))\n(declare str)";
+    let report = session.check("text.clj", declared_twice);
+    assert!(report.diagnostics.iter().any(|finding| {
+        finding.code == "PNX9001"
+            && &declared_twice[finding.span.start.offset..finding.span.end.offset] == "(str ::file)"
+    }));
+}
+
+#[test]
+fn does_not_fold_str_after_unchecked_top_level_effects() {
+    let mut session = Session::default();
+    for prefix in [
+        "",
+        "(ns demo.generated) (defmacro install [] '(def str (fn [& _] \"override\"))) (install)",
+        "(ns demo.generated) (do (defn str [& _] \"override\"))",
+        "(ns demo.generated) (def replacement (do (defn str [& _] \"override\")))",
+        "(ns demo.generated) (defn replacement [& _] \"override\")
+         (def ^{:on-load (.refer *ns* 'str #'replacement)} marker 0)",
+        "(ns demo.generated) (defn replacement [& _] \"override\")
+         (defn marker {:on-load (.refer *ns* 'str #'replacement)} [] nil)",
+    ] {
+        let source = format!("{prefix}\n(def token (str ::file))");
+        let report = session.check("effects.clj", &source);
+        assert!(
+            report.diagnostics.iter().any(|finding| {
+                finding.code == "PNX9001"
+                    && &source[finding.span.start.offset..finding.span.end.offset] == "(str ::file)"
+            }),
+            "{source}\n{report:#?}"
+        );
+        let hover = session.hover_at("effects.clj", source.find("token").unwrap());
+        assert!(
+            hover.and_then(|hover| hover.value_type).is_none(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn imported_macro_changes_invalidate_a_later_str_root() {
+    let source = Source {
+        path: "consumer.clj",
+        source: r#"(ns demo.consumer (:require [demo.provider :as p]))
+            (defn marker {:t/sig '[:-> nil?]} [] (p/install))
+            (def token (str ::file))"#,
+    };
+    let provider = Source {
+        path: "provider.clj",
+        source: "(ns demo.provider) (defn install {:t/sig '[:-> nil?]} [] nil)",
+    };
+    let expanded = Source {
+        source: r#"(ns demo.provider)
+            (defn replacement [& _] "override")
+            (defmacro install [] (.refer *ns* 'str #'replacement) nil)"#,
+        ..provider
+    };
+    let extern_macro = Source {
+        path: "vendor.edn",
+        source: "{demo.provider/install {:macro :let-like}}",
+    };
+    let mut session = Session::default();
+    let offset = source.source.find("token").unwrap();
+    for (inputs, externs, expected) in [
+        (
+            &[source, provider][..],
+            &[][..],
+            Some("\":demo.consumer/file\""),
+        ),
+        (&[source, expanded][..], &[][..], None),
+        (
+            &[source, provider][..],
+            &[][..],
+            Some("\":demo.consumer/file\""),
+        ),
+        (&[source][..], &[extern_macro][..], None),
+    ] {
+        let report = session.check_project_with_externs(inputs, externs);
+        let hover = session.hover_at(source.path, offset).unwrap();
+        assert_eq!(hover.value_type.as_deref(), expected, "{report:#?}");
+    }
+}
+
+#[test]
+fn folded_str_initializers_round_trip_as_literal_externs() {
+    let provider = Source {
+        path: "pod.clj",
+        source: "(ns demo.pod)\n(def jiofile-key (str ::file))\n(def empty-text (str))\n",
+    };
+    let generated = Session::default().export_externs(&[provider], &[]);
+    let encoded = generated
+        .edn
+        .unwrap_or_else(|| panic!("{:#?}", generated.report));
+    assert!(encoded.contains("\":demo.pod/file\""), "{encoded}");
+    let externs = Source {
+        path: "pod.edn",
+        source: &encoded,
+    };
+    let report = Session::default().validate_externs(&[provider], &[externs]);
+    assert!(report.ok && report.complete, "{report:#?}");
+}

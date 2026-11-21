@@ -682,8 +682,10 @@ impl Session {
             });
         if matches!(mode, SnapshotMode::Check(_)) {
             self.externs.publish_specs(&mut globals, None);
+            self.externs.publish(&mut globals);
         } else if let Some(paths) = &trusted_paths {
             self.externs.publish_specs(&mut globals, Some(paths));
+            self.externs.publish_dependencies(paths, &mut globals);
         }
         if mode != SnapshotMode::ExternSurface {
             for index in order {
@@ -725,11 +727,6 @@ impl Session {
             } else {
                 BTreeMap::new()
             };
-        if matches!(mode, SnapshotMode::Check(_)) {
-            self.externs.publish(&mut globals);
-        } else if let Some(paths) = &trusted_paths {
-            self.externs.publish_dependencies(paths, &mut globals);
-        }
         let mut top_level_calls = BTreeMap::new();
         let mut checked_tests = BTreeMap::new();
         if matches!(mode, SnapshotMode::Check(_)) {

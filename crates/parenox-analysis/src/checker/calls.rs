@@ -19,6 +19,7 @@ mod vectors;
 pub(super) use vectors::{narrow_vector_predicate, vector_predicate};
 
 pub(super) use sequences::{iteration_may_throw, narrow_emptiness, narrow_seq_emptiness};
+pub(super) use strings::concatenate_literal_strings;
 
 use super::flow::Conditional;
 use super::{

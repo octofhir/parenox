@@ -125,7 +125,7 @@ fn replace_values(
     Some(())
 }
 
-fn inert(form: &Form, quoted: bool) -> bool {
+pub(super) fn inert(form: &Form, quoted: bool) -> bool {
     match &form.kind {
         Kind::Nil
         | Kind::Bool(_)

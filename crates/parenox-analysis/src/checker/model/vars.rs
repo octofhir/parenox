@@ -1,7 +1,9 @@
 //! Literal values declared as source vars.
 mod initializers;
+mod strings;
 
 pub(super) use initializers::adjacent_literal_def;
+pub(super) use strings::LiteralStrScope;
 
 use super::super::{Checker, Env};
 use super::{Declarations, Globals, Model};

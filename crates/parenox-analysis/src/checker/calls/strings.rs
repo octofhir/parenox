@@ -8,6 +8,20 @@ use crate::types::MAX_TUPLE_ITEMS;
 
 const MAX_CONCATENATED_STRING_BYTES: usize = 1024;
 
+pub(in crate::checker) fn concatenate_literal_strings(
+    parts: impl IntoIterator<Item: AsRef<str>>,
+) -> Type {
+    let mut text = String::new();
+    for part in parts {
+        let part = part.as_ref();
+        if part.len() > MAX_CONCATENATED_STRING_BYTES - text.len() {
+            return Type::String;
+        }
+        text.push_str(part);
+    }
+    Type::Str(text)
+}
+
 impl Checker<'_> {
     pub(super) fn str_result(&mut self, args: &[(Value, Span)]) -> Type {
         if !args
@@ -17,16 +31,10 @@ impl Checker<'_> {
             self.may_throw();
             return Type::String;
         }
-        let mut text = String::new();
-        for (value, _) in args {
-            if let Type::Str(part) = &value.known {
-                if part.len() > MAX_CONCATENATED_STRING_BYTES - text.len() {
-                    return Type::String;
-                }
-                text.push_str(part);
-            }
-        }
-        Type::Str(text)
+        concatenate_literal_strings(args.iter().filter_map(|(value, _)| match &value.known {
+            Type::Str(part) => Some(part),
+            _ => None,
+        }))
     }
 
     pub(super) fn substring(

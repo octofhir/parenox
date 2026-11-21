@@ -26,6 +26,16 @@ pub(super) enum SourceDeclaration<'a> {
     Protocol(ProtocolVar<'a>),
 }
 
+impl<'a> SourceDeclaration<'a> {
+    fn name(&self) -> &'a Form {
+        match self {
+            Self::Function(items) | Self::Value(items) => &items[1],
+            Self::TypeFactory { name, .. } => name,
+            Self::Protocol(var) => var.name,
+        }
+    }
+}
+
 pub(crate) struct FunctionParameters<'a> {
     pub documentation: Option<&'a str>,
     pub clauses: BTreeMap<Arity, Vec<Span>>,
@@ -246,17 +256,32 @@ impl Declarations {
         &self.names.proven_alias_libraries
     }
 
+    fn static_namespace_end(&self, forms: &[Form]) -> Option<usize> {
+        let end = self.namespace_end?;
+        let first = forms.first()?;
+        (first.span.end.offset == end && static_namespace_prelude(first)).then_some(end)
+    }
+
     pub(super) fn has_static_requirements(&self, forms: &[Form]) -> bool {
-        self.namespace_end.is_some_and(|end| {
-            forms.first().is_some_and(|first| {
-                first.span.end.offset == end
-                    && static_namespace_prelude(first)
-                    && self
-                        .diagnostics
-                        .iter()
-                        .all(|finding| finding.span.start.offset >= end)
-            })
+        self.static_namespace_end(forms).is_some_and(|end| {
+            self.diagnostics
+                .iter()
+                .all(|finding| finding.span.start.offset >= end)
         })
+    }
+
+    pub(super) fn initializer_scope_end(&self, forms: &[Form]) -> usize {
+        let Some(namespace_end) = self.static_namespace_end(forms) else {
+            return 0;
+        };
+        self.diagnostics
+            .iter()
+            .filter(|finding| {
+                finding.severity == "error" || finding.span.start.offset >= namespace_end
+            })
+            .map(|finding| finding.span.start.offset)
+            .min()
+            .unwrap_or(usize::MAX)
     }
 
     pub(crate) fn runtime_alias_evidence(
@@ -371,6 +396,31 @@ impl Declarations {
                         && !self.forward_vars.contains_key(operator)
                         && self.source_declarations(forms, operator).next().is_none()))
         })
+    }
+
+    pub(super) fn core_operator_shadow_start(
+        &self,
+        forms: &[Form],
+        operator: &str,
+        name: &str,
+    ) -> Option<usize> {
+        if self.names.resolve_parts(operator) != ("clojure.core", name)
+            || self.runtime_alias_gap(operator).is_some()
+        {
+            return None;
+        }
+        if operator.contains('/') {
+            return Some(usize::MAX);
+        }
+        if !self.all_refers.is_empty() || self.forward_vars.contains_key(operator) {
+            return None;
+        }
+        Some(
+            self.source_declarations(forms, operator)
+                .map(|definition| definition.name().span.start.offset)
+                .min()
+                .unwrap_or(usize::MAX),
+        )
     }
 
     fn multimethod_clauses<'a>(
@@ -500,12 +550,7 @@ impl Declarations {
         if matches.next().is_some() || (public_only && self.source_private(&declaration)) {
             return None;
         }
-        let name = match declaration {
-            SourceDeclaration::Function(items) | SourceDeclaration::Value(items) => &items[1],
-            SourceDeclaration::TypeFactory { name, .. } => name,
-            SourceDeclaration::Protocol(var) => var.name,
-        };
-        Some(name.without_metadata().span)
+        Some(declaration.name().without_metadata().span)
     }
 
     pub(crate) fn source_var_before(

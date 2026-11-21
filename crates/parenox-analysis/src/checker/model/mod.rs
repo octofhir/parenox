@@ -197,6 +197,7 @@ pub(crate) struct Model {
     externs: Option<Arc<ExternFile>>,
     literals: BTreeMap<String, LiteralVar>,
     captured_initializers: BTreeMap<usize, Form>,
+    initializer_macros: BTreeMap<String, bool>,
     unchecked_functions: BTreeMap<String, UncheckedFunction>,
     exports: Arc<Exports>,
     local_interface: Arc<LocalInterface>,
@@ -281,6 +282,7 @@ impl Model {
             );
         }
         let project_set_namespace = globals.project_namespaces.contains("clojure.set");
+        let mut literal_strs = vars::LiteralStrScope::default();
         for &index in &declarations.literal_vars {
             let form = &forms[index];
             let Kind::List(xs) = &form.without_metadata().kind else {
@@ -294,7 +296,13 @@ impl Model {
             }
             let expanded = inverted.as_ref().filter(|_| !project_set_namespace);
             let captured = initializer.and_then(|value| {
-                model.capture_literal_root(declarations, forms, source, index, value)
+                model
+                    .capture_literal_root(declarations, forms, source, index, value)
+                    .or_else(|| {
+                        literal_strs
+                            .fold(declarations, forms, source, globals, value)
+                            .filter(|_| !model.check_project_core(globals))
+                    })
             });
             model.read_def(
                 xs,
@@ -307,6 +315,7 @@ impl Model {
                 model.captured_initializers.insert(index, captured);
             }
         }
+        model.initializer_macros = literal_strs.macro_inputs;
         for &index in &declarations.unchecked_vars {
             let Kind::List(xs) = &forms[index].without_metadata().kind else {
                 unreachable!()
@@ -453,6 +462,9 @@ impl Model {
             && self
                 .map_invert_in_project
                 .is_none_or(|present| present == globals.project_namespaces.contains("clojure.set"))
+            && self.initializer_macros.iter().all(|(qualified, previous)| {
+                globals.may_expand_initializer_macro(qualified) == *previous
+            })
             && self
                 .external_specs
                 .iter()

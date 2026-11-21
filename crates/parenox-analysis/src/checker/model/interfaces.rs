@@ -55,6 +55,19 @@ impl Exports {
 }
 
 impl Globals {
+    pub(super) fn may_expand_initializer_macro(&self, qualified: &str) -> bool {
+        let Some((namespace, _)) = qualified.split_once('/') else {
+            return false;
+        };
+        self.exports.get(namespace).map_or_else(
+            || self.project_namespaces.contains(namespace),
+            |source| source.macros.contains_key(qualified),
+        ) || matches!(
+            self.extern_declaration(qualified),
+            Some(ExternalDeclaration::Macro(_))
+        )
+    }
+
     pub(crate) fn proves_ordinary_dotted_function(&self, namespace: &str, name: &str) -> bool {
         self.exports.get(namespace).is_some_and(|source| {
             !source.ordinary_dotted_functions.is_empty()

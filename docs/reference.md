@@ -569,6 +569,11 @@ A tuple spec checks indexed positions. Sequence and reduction operations
 require evidence of ordinary vector behavior before they use those positions.
 For a structural tuple with unconfirmed traversal, Parenox reports a coverage
 gap and withholds exact callback types. Indexed reads retain the tuple contract.
+After a static `ns` declaration, Parenox can infer the exact string for a
+top-level `def` that calls standard `str` with literal strings, keywords and nil.
+Auto-resolved keywords use the initializer's namespace and its declared aliases.
+An opaque top-level effect ends this analysis for later initializers. The bounded
+result is a source literal that can be exported as EDN.
 In a direct map destructuring binding, Clojure 1.13 evaluates the `:or`
 defaults before the value to destructure. A default can run even when its
 key is present or unused. A proven runtime failure in a default or initializer
