@@ -52,13 +52,17 @@ fn a_recovered_prefix_cannot_replace_a_source_spec_with_an_extern_spec() {
         let report = session.check_project(&[Source { path, source: text }], Some(externs));
         assert_eq!(report.complete, complete, "{report:#?}");
         let hover = session.document_hover_at(path, offset);
+        let bindings = session.binding_types(path, 0..text.len());
         if complete {
             let Some(DocumentHover::Local(value)) = hover else {
                 panic!("expected local type")
             };
             assert_eq!(value.inferred_type, "String");
+            assert_eq!(bindings.len(), 1);
+            assert_eq!(bindings[0].inferred_type, "String");
         } else {
             assert!(hover.is_none());
+            assert!(bindings.is_empty());
         }
     }
 }
@@ -91,6 +95,13 @@ fn an_incomplete_tail_preserves_types_from_the_current_complete_prefix() {
             "textDocument":{"uri":document},"position":{"line":5,"character":22}
         }})
     };
+    let hints = |id, start, end, end_column| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/inlayHint","params":{
+            "textDocument":{"uri":document},"range":{
+                "start":{"line":start,"character":0},"end":{"line":end,"character":end_column}
+            }
+        }})
+    };
     let change = |version, text: &str| {
         json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
             "textDocument":{"uri":document,"version":version},"contentChanges":[{"text":text}]
@@ -103,15 +114,21 @@ fn an_incomplete_tail_preserves_types_from_the_current_complete_prefix() {
         }}}),
         query(2, "textDocument/hover"),
         query(3, "textDocument/signatureHelp"),
+        hints(11, 3, 6, 20),
+        hints(12, 6, 6, 20),
+        hints(13, 3, 4, 0),
         change(2, &changed),
         query(4, "textDocument/hover"),
         query(5, "textDocument/signatureHelp"),
+        hints(14, 3, 4, 0),
         change(3, &unresolved),
         query(6, "textDocument/hover"),
         query(7, "textDocument/signatureHelp"),
+        hints(15, 3, 6, 20),
         change(4, source),
         query(8, "textDocument/hover"),
         query(9, "textDocument/signatureHelp"),
+        hints(16, 3, 6, 0),
         json!({"jsonrpc":"2.0","id":10,"method":"shutdown"}),
         json!({"jsonrpc":"2.0","method":"exit"}),
     ]);
@@ -134,6 +151,20 @@ fn an_incomplete_tail_preserves_types_from_the_current_complete_prefix() {
     }
     assert_eq!(result(6), &Value::Null);
     assert_eq!(result(7), &Value::Null);
+    let row = source.lines().nth(3).unwrap();
+    let end = row.find("text").unwrap() + "text".len();
+    let position = json!({"line":3,"character":row[..end].encode_utf16().count()});
+    assert_eq!(
+        result(13),
+        &json!([{"position":position,"label":": String","kind":1}])
+    );
+    assert_eq!(
+        result(14),
+        &json!([{"position":position,"label":": Number","kind":1}])
+    );
+    assert_eq!(result(11), result(16));
+    assert_eq!(result(12), &json!([]));
+    assert_eq!(result(15), &json!([]));
     let diagnostics = |version| {
         &responses
             .iter()

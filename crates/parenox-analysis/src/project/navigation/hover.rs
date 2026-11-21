@@ -61,11 +61,15 @@ impl Session {
         let Some(file) = self.current_file(path) else {
             return Vec::new();
         };
-        if file.parse_error.is_some()
-            || range.is_empty()
-            || !file.source.is_char_boundary(range.start)
-            || !file.source.is_char_boundary(range.end)
-        {
+        if !file.source.is_char_boundary(range.start) || !file.source.is_char_boundary(range.end) {
+            return Vec::new();
+        }
+        let end = file
+            .parse_error
+            .as_ref()
+            .map_or(range.end, |error| range.end.min(error.span.start.offset));
+        let range = range.start..end;
+        if range.is_empty() {
             return Vec::new();
         }
         let Some(scope) = self.typing_at(file, path, range.start) else {
