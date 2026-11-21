@@ -7,9 +7,9 @@ mod require;
 use std::ops::Range;
 
 pub use dependencies::DependencyCompletions;
-use parenox_analysis::Session;
 use parenox_analysis::reader;
 use parenox_analysis::syntax::SyntaxKind;
+use parenox_analysis::{ArgumentKeyword, Session};
 use parenox_classpath::JavaMemberKind;
 use serde_json::{Value, json};
 
@@ -217,9 +217,26 @@ pub fn complete(
         {
             values
                 .into_iter()
-                .map(|value| {
-                    json!({"label":value,"kind":20,"detail":"Allowed argument value",
-                           "textEdit":{"range":range,"newText":value}})
+                .map(|suggestion| match suggestion {
+                    ArgumentKeyword::Value(value) => {
+                        json!({"label":value,"kind":20,"detail":"Allowed argument value",
+                               "textEdit":{"range":range,"newText":value}})
+                    }
+                    ArgumentKeyword::Field {
+                        keyword,
+                        required,
+                        value_type,
+                    } => {
+                        let role = if required {
+                            "Required key"
+                        } else {
+                            "Optional key"
+                        };
+                        let detail = value_type
+                            .map_or_else(|| role.to_owned(), |ty| format!("{role} · {ty}"));
+                        json!({"label":keyword,"kind":5,"detail":detail,
+                               "textEdit":{"range":range,"newText":keyword}})
+                    }
                 })
                 .collect()
         } else {

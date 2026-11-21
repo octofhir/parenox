@@ -943,6 +943,108 @@ fn completes_literal_keywords_from_the_checked_argument_slot() {
 }
 
 #[test]
+fn completes_declared_keys_and_keyword_values_in_map_arguments() {
+    let fixture = Fixture::new("map argument completion");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    let provider = r#"(ns typed-api (:require [clojure.spec.alpha :as s]))
+(s/def ::line number?)
+(s/def ::character number?)
+(s/def ::hint string?)
+(defn line-of {:t/sig '[(s/keys :req-un [::line ::character] :opt-un [::hint]) :-> number?]}
+  [position] (:line position))
+(defn register {:t/sig '[{:uri string? :level #{:error :info :warning}} :-> keyword?]}
+  [entry] (:level entry))
+"#;
+    fs::write(fixture.0.join("src/typed_api.clj"), provider).unwrap();
+    let source = |expression: &str| {
+        format!(
+            "(ns app (:require [typed-api :as api]))\n\
+             (defn use-api {{:t/sig '[:-> t/any]}} [] {expression})\n"
+        )
+    };
+    let cases = [
+        (
+            r#"(do "🦊" (api/line-of {:liar 0 :character 2}))"#,
+            ":liar",
+            3,
+        ),
+        ("(api/line-of {: 0 :character 2})", ":", 1),
+        (r#"(api/register {:uri "doc" :level :wa})"#, ":wa", 3),
+        (r#"(api/register {:uri "doc" :level [:wa]})"#, ":wa", 3),
+        ("(api/line-of #:other{:li 0 :character 2})", ":li", 3),
+        ("(let [k :line] (api/line-of {k 0 :li 2}))", ":li", 3),
+    ];
+    let first = source(cases[0].0);
+    fs::write(&path, &first).unwrap();
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":file,"languageId":"clojure","version":1,"text":first
+        }}}),
+    ];
+    let mut ranges = Vec::new();
+    for (index, (expression, token, prefix_length)) in cases.into_iter().enumerate() {
+        let text = source(expression);
+        if index > 0 {
+            requests.push(
+                json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+                    "textDocument":{"uri":file,"version":index+1},"contentChanges":[{"text":text}]
+                }}),
+            );
+        }
+        let row = text.lines().nth(1).unwrap();
+        let at = if token == ":" {
+            row.find("{: 0").unwrap() + 1
+        } else {
+            row.rfind(token).unwrap()
+        };
+        let start = row[..at].encode_utf16().count();
+        let end = start + token.encode_utf16().count();
+        requests.push(
+            json!({"jsonrpc":"2.0","id":index+2,"method":"textDocument/completion","params":{
+                "textDocument":{"uri":file},"position":{"line":1,"character":start+prefix_length}
+            }}),
+        );
+        ranges.push(json!({
+            "start":{"line":1,"character":start},"end":{"line":1,"character":end}
+        }));
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    let response = |id| &replies.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    for (index, expected) in [
+        &[(":line", 5, "Required key · Number")][..],
+        &[
+            (":line", 5, "Required key · Number"),
+            (":hint", 5, "Optional key · String"),
+        ],
+        &[(":warning", 20, "Allowed argument value")],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = response(index + 2);
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), expected.len(), "{result:#?}");
+        for (item, (label, kind, detail)) in items.iter().zip(expected) {
+            assert_eq!(item["label"], *label);
+            assert_eq!(item["kind"], *kind);
+            assert_eq!(item["detail"], *detail);
+            assert_eq!(
+                item["textEdit"],
+                json!({"range":ranges[index],"newText":label})
+            );
+        }
+    }
+    assert!(response(5).is_null());
+    assert!(response(6).is_null());
+    assert!(response(7).is_null());
+    assert_eq!(fs::read_to_string(&path).unwrap(), first);
+}
+
+#[test]
 fn completes_public_jvm_vars_from_dependency_jars() {
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 

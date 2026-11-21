@@ -26,7 +26,7 @@ pub use hover::{
 pub(super) use recovered_types::CheckedPrefix;
 pub use semantic::{InspectedReference, SemanticSymbol, SemanticSymbolKind};
 use serde::Serialize;
-pub use signatures::{CallSignature, CallSignatures};
+pub use signatures::{ArgumentKeyword, CallSignature, CallSignatures};
 pub use test_tree::{SourceTestKind, SourceTestNode};
 
 use crate::ContractOrigin;

@@ -1,12 +1,15 @@
 //! Argument positions and parameter lists for source calls.
 use std::sync::Arc;
-use std::{collections::BTreeMap, ops::Range};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+};
 
 use crate::ContractOrigin;
 use crate::checker::{CheckedCall, Declarations};
 use crate::reader::{self, Conditionals, Form, Kind, Span};
 use crate::syntax::SyntaxKind;
-use crate::types::{Arity, Type};
+use crate::types::{Arity, MapType, Type};
 
 use super::{FileCache, Session, SourceTarget, cached_type_query};
 
@@ -25,6 +28,15 @@ pub struct CallSignatures {
     pub active_parameter: Option<usize>,
 }
 
+pub enum ArgumentKeyword {
+    Value(String),
+    Field {
+        keyword: String,
+        required: bool,
+        value_type: Option<String>,
+    },
+}
+
 impl Session {
     /// Complete a written keyword with values from an observed call's declaration.
     pub fn complete_argument_keyword(
@@ -33,37 +45,40 @@ impl Session {
         token: Range<usize>,
         offset: usize,
         limit: usize,
-    ) -> Option<Vec<String>> {
+    ) -> Option<Vec<ArgumentKeyword>> {
         let caller = self.current_file(path)?;
         let prefix = caller.source.get(token.start..offset)?;
         if !prefix.starts_with(':') || prefix.starts_with("::") || offset > token.end {
             return None;
         }
-        let (_, forms) = caller.navigation_source()?;
+        let (declarations, forms) = caller.navigation_source()?;
         let site = call_at(forms, offset)?;
         let argument = site.written.get(site.argument)?;
-        if !matches!(argument.kind, Kind::Keyword(_))
-            || argument.span.start.offset != token.start
-            || argument.span.end.offset != token.end
+        let map_slot = if keyword_at_token(argument, &token) {
+            None
+        } else if let Kind::Map(entries) = &argument.kind
+            && caller.source.as_bytes().get(argument.span.start.offset) == Some(&b'{')
         {
+            Some((
+                entries,
+                entries
+                    .iter()
+                    .position(|form| keyword_at_token(form, &token))?,
+            ))
+        } else {
             return None;
-        }
+        };
         let checked = self.checked_call(caller, path, &site)?;
         let expected = checked.declared_argument_type(site.argument)?;
-        let mut values = Vec::new();
-        if !keyword_values(expected, &mut values) || values.is_empty() {
-            return None;
+        match map_slot {
+            None => complete_keyword_values(expected, prefix, limit),
+            Some((entries, index)) => {
+                let Type::Map(map) = expected else {
+                    return None;
+                };
+                complete_map_keyword(map, declarations, entries, index, prefix, limit)
+            }
         }
-        values.sort_unstable();
-        values.dedup();
-        Some(
-            values
-                .into_iter()
-                .filter(|value| value.starts_with(prefix))
-                .take(limit)
-                .map(str::to_owned)
-                .collect(),
-        )
     }
 
     /// Find the innermost source call whose argument list contains the cursor.
@@ -158,6 +173,33 @@ impl Session {
     }
 }
 
+fn keyword_at_token(form: &Form, token: &Range<usize>) -> bool {
+    matches!(form.kind, Kind::Keyword(_))
+        && form.span.start.offset == token.start
+        && form.span.end.offset == token.end
+}
+
+fn complete_keyword_values(
+    expected: &Type,
+    prefix: &str,
+    limit: usize,
+) -> Option<Vec<ArgumentKeyword>> {
+    let mut values = Vec::new();
+    if !keyword_values(expected, &mut values) || values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    values.dedup();
+    Some(
+        values
+            .into_iter()
+            .filter(|value| value.starts_with(prefix))
+            .take(limit)
+            .map(|value| ArgumentKeyword::Value(value.to_owned()))
+            .collect(),
+    )
+}
+
 fn keyword_values<'a>(ty: &'a Type, values: &mut Vec<&'a str>) -> bool {
     match ty {
         Type::Key(value) => {
@@ -167,6 +209,79 @@ fn keyword_values<'a>(ty: &'a Type, values: &mut Vec<&'a str>) -> bool {
         Type::Nil => true,
         Type::Union(parts) => parts.iter().all(|part| keyword_values(part, values)),
         _ => false,
+    }
+}
+
+fn complete_map_keyword(
+    map: &MapType,
+    declarations: &Declarations,
+    entries: &[Form],
+    index: usize,
+    prefix: &str,
+    limit: usize,
+) -> Option<Vec<ArgumentKeyword>> {
+    if index % 2 == 1 {
+        let key = literal_field_key(declarations, &entries[index - 1])?;
+        let expected = map.fields.get(&key)?.value_constraint()?;
+        return complete_keyword_values(expected, prefix, limit);
+    }
+
+    if !map.fields.keys().any(|key| matches!(key, Type::Key(_))) {
+        return None;
+    }
+    let mut present = BTreeSet::new();
+    for (other, form) in entries.iter().enumerate().step_by(2) {
+        if other == index {
+            continue;
+        }
+        if let Some(key) = literal_field_key(declarations, form) {
+            present.insert(key);
+        } else if !matches!(
+            &form.kind,
+            Kind::Nil
+                | Kind::Bool(_)
+                | Kind::Number
+                | Kind::SymbolicNumber(_)
+                | Kind::Character(_)
+                | Kind::Utf16String(_)
+        ) {
+            // Replacing the current key could duplicate a computed sibling.
+            return None;
+        }
+    }
+    let mut fields: Vec<_> = map
+        .fields
+        .iter()
+        .filter_map(|(key, field)| {
+            let Type::Key(keyword) = key else {
+                return None;
+            };
+            (field.ty != Type::Never && keyword.starts_with(prefix) && !present.contains(key))
+                .then_some((keyword, field))
+        })
+        .collect();
+    fields.sort_unstable_by_key(|(keyword, field)| (!field.required, *keyword));
+    Some(
+        fields
+            .into_iter()
+            .take(limit)
+            .map(|(keyword, field)| ArgumentKeyword::Field {
+                keyword: keyword.clone(),
+                required: field.required,
+                value_type: field.value_constraint().map(ToString::to_string),
+            })
+            .collect(),
+    )
+}
+
+fn literal_field_key(declarations: &Declarations, form: &Form) -> Option<Type> {
+    match &form.kind {
+        Kind::Keyword(keyword) if keyword.starts_with("::") => {
+            declarations.resolve_spec_keyword(keyword).map(Type::Key)
+        }
+        Kind::Keyword(keyword) => Some(Type::Key(keyword.clone())),
+        Kind::String(key) => Some(Type::Str(key.clone())),
+        _ => None,
     }
 }
 

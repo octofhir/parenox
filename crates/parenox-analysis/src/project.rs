@@ -4,10 +4,11 @@ mod spec_proposals;
 mod symbols;
 
 pub use navigation::{
-    ArchiveDeclarations, BindingType, CallHierarchyCalls, CallHierarchyItem, CallSignature,
-    CallSignatures, Definition, DocumentHover, InspectedReference, LocalHover, PrivacyDeclaration,
-    SemanticSymbol, SemanticSymbolKind, SourceExport, SourceHover, SourceTestKind, SourceTestNode,
-    VarDocumentation, VarInfo, namespace_documentation, namespace_exports,
+    ArchiveDeclarations, ArgumentKeyword, BindingType, CallHierarchyCalls, CallHierarchyItem,
+    CallSignature, CallSignatures, Definition, DocumentHover, InspectedReference, LocalHover,
+    PrivacyDeclaration, SemanticSymbol, SemanticSymbolKind, SourceExport, SourceHover,
+    SourceTestKind, SourceTestNode, VarDocumentation, VarInfo, namespace_documentation,
+    namespace_exports,
 };
 pub use spec_proposals::{ContractProposals, SpecContractProposal};
 pub use symbols::{SourceSymbol, SourceSymbolKind};
