@@ -54,6 +54,19 @@ fn a_named_fn_can_alias_itself_and_can_be_shadowed_by_its_parameter() {
 }
 
 #[test]
+fn a_named_fn_can_bind_ampersand_or_slash_as_its_self_name() {
+    for name in ["&", "/"] {
+        let source = format!(
+            "(ns demo)
+             (defn f {{:t/sig '[:-> #{{:self}}]}} []
+               ((fn {name} [again] (if again ({name} nil) :self)) :first))",
+        );
+        let report = Session::default().check("named.clj", &source);
+        assert!(report.ok && report.complete, "{report:#?}");
+    }
+}
+
+#[test]
 fn unfinished_recursion_does_not_publish_hover_from_a_prefix_of_the_calls() {
     let source = r#"(ns demo)
         (defn explore {:t/sig '[number? :-> t/any]} [n]

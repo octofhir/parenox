@@ -488,7 +488,7 @@ impl<'model> Checker<'model> {
         let parts = if let Some((head, parts)) = parts.split_first()
             && let Some(name) = head.symbol()
         {
-            if name == "&" || (name.contains('/') && name != "/") {
+            if name.contains('/') && name != "/" {
                 self.error(
                     "PNX1001",
                     head.span,
