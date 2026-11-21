@@ -143,6 +143,16 @@ impl Diagnostic {
         diagnostic.severity = "warning";
         diagnostic
     }
+
+    fn runtime_alias_gap(symbol: &str, namespace: &str, span: Span) -> Self {
+        Self::analysis_gap(
+            "PNX9003",
+            span,
+            format!(
+                "Runtime loading of {namespace} is unconfirmed for {symbol}. :as-alias only defines an alias."
+            ),
+        )
+    }
 }
 
 #[derive(Debug, Default, Serialize)]

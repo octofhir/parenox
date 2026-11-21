@@ -625,12 +625,19 @@ impl Model {
             .collect()
     }
 
+    pub(super) fn runtime_alias_gap(&self, symbol: &str) -> Option<&str> {
+        self.names.runtime_alias_gap(symbol)
+    }
+
     pub(super) fn declared_value<'a>(
         &'a self,
         name: &str,
         globals: &'a Globals,
         offset: usize,
     ) -> Option<DeclaredValue<'a>> {
+        if self.names.runtime_alias_gap(name).is_some() {
+            return None;
+        }
         let local_macro = self.names.local_source_macros(name);
         if let Some((local, declarations)) = local_macro
             && declarations.iter().any(|entry| entry.active_at(offset))

@@ -232,6 +232,13 @@ impl<'model> Checker<'model> {
     }
 
     pub(super) fn list(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
+        if let Some(name) = xs[0].symbol()
+            && !env.contains_key(name)
+            && let Some(value) =
+                self.unchecked_alias_value(name, xs[0].without_metadata().span, env)
+        {
+            return value;
+        }
         if !self.allows_partial_call(&xs[0], env) {
             self.partial_method_opaque |= self.partial_method_body;
             return Value::new(Type::Unknown);
@@ -706,6 +713,11 @@ impl<'model> Checker<'model> {
         if let Some(name) = callee.symbol()
             && !env.contains_key(name)
         {
+            if let Some(value) =
+                self.unchecked_alias_value(name, callee.without_metadata().span, env)
+            {
+                return prepare(Callable::Value(value));
+            }
             if let Some(function) = self
                 .model
                 .local_function_at(name, callee.span.start.offset)

@@ -172,6 +172,9 @@ impl Declarations {
         symbol: &str,
         wanted: usize,
     ) -> Option<CheckedCall> {
+        if self.runtime_alias_gap(symbol).is_some() {
+            return None;
+        }
         let (namespace, name) = self.qualified_reference(symbol)?;
         let DeclaredValue::Function(contract) =
             globals.declared_value(&format!("{namespace}/{name}"))?

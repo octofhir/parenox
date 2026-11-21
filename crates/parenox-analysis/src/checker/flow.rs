@@ -628,6 +628,7 @@ impl Checker<'_> {
         // Locals and project functions may shadow core predicates.
         if !self.allows_partial_call(head, env)
             || env.contains_key(op)
+            || self.model.runtime_alias_gap(op).is_some()
             || self.model.local_function(op).is_some()
             || self
                 .model

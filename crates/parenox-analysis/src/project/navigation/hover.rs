@@ -127,7 +127,7 @@ impl Session {
     pub fn document_hover_at(&self, path: &str, offset: usize) -> Option<DocumentHover<'_>> {
         let resolved = self.hover_target(path, offset);
         if let Some(SourceTarget::Var(target)) = resolved {
-            return Some(DocumentHover::Var(target.hover()));
+            return Some(DocumentHover::Var(self.source_hover(path, target)));
         }
         let file = self.current_file(path)?;
         if !file.source.is_char_boundary(offset) {
@@ -179,7 +179,24 @@ impl Session {
         let SourceTarget::Var(target) = self.hover_target(path, offset)? else {
             return None;
         };
-        Some(target.hover())
+        Some(self.source_hover(path, target))
+    }
+
+    fn source_hover(&self, path: &str, target: ResolvedVar<'_>) -> SourceHover {
+        let mut hover = target.hover();
+        let runtime_gap = self
+            .current_file(path)
+            .and_then(FileCache::navigation_source)
+            .is_some_and(|(declarations, _)| {
+                declarations
+                    .runtime_alias_gap_in(target.namespace)
+                    .is_some()
+            });
+        if runtime_gap {
+            hover.info.signatures.clear();
+            hover.info.contract = None;
+        }
+        hover
     }
 
     fn hover_target(&self, path: &str, offset: usize) -> Option<SourceTarget<'_>> {

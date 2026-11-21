@@ -201,6 +201,36 @@ fn aliases_auto_keywords_and_qualified_keys_are_resolved() {
 }
 
 #[test]
+fn alias_only_spec_and_test_macros_do_not_create_checked_declarations() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as-alias s] [clojure.test :as-alias t]))
+(s/def ::message string?)
+(defn echo {:t/sig '[:-> ::message]} [] 42)
+(t/deftest checks (t/is (= \"\" (subs false 0))))
+"#;
+    let mut session = Session::default();
+    let report = session.check("demo.clj", source);
+    let gaps: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.code == "PNX9003")
+        .map(|finding| &source[finding.span.start.offset..finding.span.end.offset])
+        .collect();
+    assert_eq!(gaps, ["s/def", "t/deftest"], "{report:#?}");
+    assert!(!report.diagnostics.iter().any(|item| item.code == "PNX2322"));
+
+    let loaded = source.replace(":as-alias", ":as");
+    let report = session.check("demo.clj", &loaded);
+    let mismatches: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.code == "PNX2322")
+        .map(|finding| &loaded[finding.span.start.offset..finding.span.end.offset])
+        .collect();
+    assert_eq!(mismatches, ["42", "false"], "{report:#?}");
+    assert!(!report.diagnostics.iter().any(|item| item.code == "PNX9003"));
+}
+
+#[test]
 fn vectors_are_checked_structurally() {
     assert_ok("(defn f {:t/sig '[:-> (s/coll-of string? :kind vector?)]} [] [\"a\" \"b\"])");
     let report = Session::default().check(

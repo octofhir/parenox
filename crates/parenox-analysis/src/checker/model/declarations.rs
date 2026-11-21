@@ -63,6 +63,7 @@ pub(super) struct Names {
     pub(super) aliases: BTreeMap<String, String>,
     pub(super) imports: BTreeMap<String, String>,
     pub(super) required_libraries: BTreeSet<String>,
+    pub(super) aliased_libraries: BTreeSet<String>,
     pub(super) core_only: Option<BTreeSet<String>>,
     pub(super) core_hidden: BTreeSet<String>,
     pub(super) source_macros: BTreeMap<String, Vec<SourceMacro>>,
@@ -117,6 +118,25 @@ impl Names {
         } else {
             (&self.namespace, name)
         }
+    }
+
+    pub(super) fn runtime_alias_gap(&self, symbol: &str) -> Option<&str> {
+        if self.aliased_libraries.is_empty() {
+            return None;
+        }
+        let (namespace, _) = self.resolve_parts(symbol);
+        self.runtime_alias_gap_in(namespace)
+    }
+
+    fn runtime_alias_gap_in(&self, namespace: &str) -> Option<&str> {
+        let namespace = self.aliased_libraries.get(namespace)?.as_str();
+        if namespace == self.namespace
+            || namespace == "clojure.core"
+            || self.required_libraries.contains(namespace)
+        {
+            return None;
+        }
+        Some(namespace)
     }
 
     pub(super) fn core_visible(&self, name: &str) -> bool {
@@ -201,6 +221,14 @@ pub(crate) struct Declarations {
 impl Declarations {
     pub fn namespace(&self) -> &str {
         &self.names.namespace
+    }
+
+    pub(crate) fn runtime_alias_gap_in(&self, namespace: &str) -> Option<&str> {
+        self.names.runtime_alias_gap_in(namespace)
+    }
+
+    pub(super) fn runtime_alias_gap(&self, symbol: &str) -> Option<&str> {
+        self.names.runtime_alias_gap(symbol)
     }
 
     pub(crate) fn has_namespace_declaration(&self) -> bool {
@@ -837,6 +865,13 @@ impl Declarations {
                 .is_some_and(|entry| entry.active_at(form.span.start.offset))
             {
                 model.read_unmodeled_call(index, op, form.span);
+                continue;
+            }
+            if let Some(namespace) = model.runtime_alias_gap(op) {
+                let finding =
+                    Diagnostic::runtime_alias_gap(op, namespace, xs[0].without_metadata().span);
+                model.opaque_var_surface = true;
+                model.diagnostics.push(finding);
                 continue;
             }
             let resolved = model.names.resolve(op);

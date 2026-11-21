@@ -1,6 +1,124 @@
 use super::*;
 
 #[test]
+fn alias_only_namespaces_keep_data_resolution_and_withhold_call_types() {
+    let fixture = Fixture::new("alias-only call types");
+    let file = fixture.0.join("src/consumer.clj");
+    let document = uri(&file);
+    let provider = fixture.0.join("src/provider.clj");
+    fs::write(
+        &provider,
+        "(ns provider)\n(defn normalize \"Normalize text.\" {:t/sig '[string? :-> string?]} [text] text)\n",
+    )
+    .unwrap();
+    let source = r#"(ns consumer (:require [provider :as-alias p]))
+(defn good {:t/sig '[:-> t/any]} []
+  (let [selected (p/normalize "four")] selected))
+(defn bad {:t/sig '[:-> t/any]} [] (p/normalize 42))
+(defn data {:t/sig '[:-> keyword?]} [] (let [key ::p/mode] key))
+"#;
+    fs::write(&file, source).unwrap();
+    let loaded = source.replace(
+        "[provider :as-alias p]",
+        "[provider] [provider :as-alias p]",
+    );
+    let position = |line: usize, text: &str| {
+        let row = source.lines().nth(line).unwrap();
+        json!({"line":line,"character":row.find(text).unwrap()})
+    };
+    let request = |id, method, position| {
+        json!({"jsonrpc":"2.0","id":id,"method":method,"params":{
+            "textDocument":{"uri":document},"position":position
+        }})
+    };
+    let queries = |id| {
+        [
+            request(id, "textDocument/hover", position(2, "selected")),
+            request(id + 1, "textDocument/hover", position(2, "p/normalize")),
+            request(
+                id + 2,
+                "textDocument/signatureHelp",
+                position(2, "\"four\""),
+            ),
+            request(
+                id + 3,
+                "textDocument/definition",
+                position(2, "p/normalize"),
+            ),
+            request(id + 4, "textDocument/hover", position(4, "key ::")),
+        ]
+    };
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"languageId":"clojure","version":1,"text":source
+        }}}),
+    ];
+    requests.extend(queries(2));
+    requests.push(
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":2},"contentChanges":[{"text":loaded}]
+        }}),
+    );
+    requests.extend(queries(7));
+    requests.push(json!({"jsonrpc":"2.0","id":12,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    let result = |id| &replies.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    assert!(result(2).is_null(), "{}", result(2));
+    assert_eq!(result(7)["contents"]["value"], "selected\nString");
+    let alias_hover = result(3)["contents"]["value"].as_str().unwrap();
+    assert!(alias_hover.contains("Normalize text."), "{alias_hover}");
+    assert!(!alias_hover.contains("String"), "{alias_hover}");
+    assert!(
+        result(8)["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("String")
+    );
+    assert!(
+        result(4)["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("text")
+    );
+    assert_eq!(
+        result(9)["signatures"][0]["label"],
+        "(normalize [text: String]) -> String"
+    );
+    assert_eq!(result(5)["uri"], uri(&provider));
+    assert_eq!(result(5), result(10));
+    assert_eq!(result(6)["contents"]["value"], "key\n:provider/mode");
+    assert_eq!(result(6), result(11));
+
+    let diagnostics = |version| {
+        replies
+            .iter()
+            .find(|reply| {
+                reply["method"] == "textDocument/publishDiagnostics"
+                    && reply["params"]["version"] == version
+            })
+            .unwrap()["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+    };
+    let alias_gaps: Vec<_> = diagnostics(1)
+        .iter()
+        .filter(|item| item["code"] == "PNX9003")
+        .collect();
+    assert_eq!(alias_gaps.len(), 2, "{:?}", diagnostics(1));
+    assert_eq!(alias_gaps[1]["range"]["start"], position(3, "p/normalize"));
+    assert_eq!(alias_gaps[1]["range"]["end"], position(3, " 42"));
+    assert!(diagnostics(1).iter().all(|item| item["code"] != "PNX2322"));
+    assert!(diagnostics(2).iter().all(|item| item["code"] != "PNX9003"));
+    let mismatch = diagnostics(2)
+        .iter()
+        .find(|item| item["code"] == "PNX2322")
+        .unwrap();
+    assert_eq!(mismatch["range"]["start"], position(3, "42"));
+}
+
+#[test]
 fn hover_withholds_invocation_types_when_a_local_closure_escapes() {
     let fixture = Fixture::new("escaping local hover");
     let file = fixture.0.join("src/closures.clj");

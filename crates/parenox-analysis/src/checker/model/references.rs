@@ -608,7 +608,10 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 Kind::AnonymousFunction(function) => self.call(&function.body),
                 Kind::Symbol(symbol) => {
                     self.select_type_hint(form);
-                    self.select_reference(symbol, form.without_metadata().span);
+                    let span = form.without_metadata().span;
+                    if !self.check_runtime_alias(symbol, span, true) {
+                        self.select_reference(symbol, span);
+                    }
                 }
                 _ => {}
             }
@@ -662,7 +665,10 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 if let [form] = args
                     && let Some(var) = form.symbol()
                 {
-                    self.record_reference(var, form.without_metadata().span, false);
+                    let span = form.without_metadata().span;
+                    if !self.check_runtime_alias(var, span, false) {
+                        self.record_reference(var, span, false);
+                    }
                 }
                 return;
             }
@@ -687,6 +693,9 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         }
         if self.is_local(symbol) {
             self.forms(args);
+            return;
+        }
+        if self.check_runtime_alias(symbol, span, false) {
             return;
         }
         if self.inside_test && self.standard_test && self.test_macro(symbol, args) {
@@ -803,6 +812,18 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
 
     fn select_reference(&mut self, symbol: &'a str, span: Span) {
         self.record_reference(symbol, span, true);
+    }
+
+    fn check_runtime_alias(&mut self, symbol: &str, span: Span, allow_local: bool) -> bool {
+        if matches!(self.purpose, Purpose::Check(_))
+            && let Some(namespace) = self.names.runtime_alias_gap(symbol)
+            && !(allow_local && self.is_local(symbol))
+            && let Purpose::Check(diagnostics) = &mut self.purpose
+        {
+            diagnostics.push(Diagnostic::runtime_alias_gap(symbol, namespace, span));
+            return true;
+        }
+        false
     }
 
     fn select_class(&mut self, symbol: &'a str, span: Span) {
@@ -1210,6 +1231,8 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         {
             self.forms(args);
             true
+        } else if self.check_runtime_alias(symbol, span, false) {
+            false
         } else {
             // Only resolved function steps have a normal argument list.
             self.source_call(symbol, (namespace, local), span, args, 1)

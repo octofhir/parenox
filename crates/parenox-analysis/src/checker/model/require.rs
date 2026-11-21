@@ -238,7 +238,9 @@ impl Declarations {
             .push((namespace.to_owned(), name.without_metadata().span));
         let alias_only =
             !refer_by_default && options.contains_key(":as-alias") && !options.contains_key(":as");
-        if !alias_only {
+        if alias_only {
+            self.names.aliased_libraries.insert(namespace.to_owned());
+        } else {
             self.names.required_libraries.insert(namespace.to_owned());
         }
         for key in [":as", ":as-alias"] {

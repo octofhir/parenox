@@ -179,6 +179,10 @@ set members leave an analysis gap.
   unknown field type still reports incomplete coverage. A missing spec
   referenced directly is an error. Named specs resolve across source files
   and via declared aliases, including `:as-alias`.
+- `:as-alias` also resolves auto-qualified keywords and supports navigation.
+  Runtime calls through an alias-only namespace report `PNX9003` until a
+  loading require is visible in the same namespace. The implicit `clojure.core`
+  namespace and references to the current namespace are already available.
 - Repeating a field with the same spec in `s/keys` preserves its type and
   required presence. Different unqualified specs that resolve to the same
   field still report a collision.

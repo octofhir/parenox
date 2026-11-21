@@ -207,6 +207,7 @@ fn trusted_name<'a>(
     let Kind::Symbol(name) = &form.kind else {
         return None;
     };
-    (name.contains('/') || !shadowed.contains(name.as_str()))
-        .then(|| model.names.resolve_parts(name))
+    (model.runtime_alias_gap(name).is_none()
+        && (name.contains('/') || !shadowed.contains(name.as_str())))
+    .then(|| model.names.resolve_parts(name))
 }

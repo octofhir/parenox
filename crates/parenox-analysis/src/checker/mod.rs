@@ -537,6 +537,17 @@ impl Checker<'_> {
         Value::new(Type::Unknown)
     }
 
+    fn unchecked_alias_value(&mut self, symbol: &str, span: Span, env: &Env) -> Option<Value> {
+        let namespace = self.model.runtime_alias_gap(symbol)?;
+        self.partial_method_opaque |= self.partial_method_body;
+        self.withhold_captured_facts(env.inline_functions());
+        self.withhold_literals_after_opaque_form();
+        self.diagnostics
+            .push(Diagnostic::runtime_alias_gap(symbol, namespace, span));
+        self.may_throw();
+        Some(Value::new(Type::Unknown))
+    }
+
     fn expect(&mut self, actual: &Value, expected: &Type, span: Span, context: &str) {
         if self.partial_scope.is_some() && actual.known.contains_unknown() {
             return;
@@ -755,6 +766,8 @@ impl Checker<'_> {
                         ),
                     );
                     Value::new(Type::Unknown)
+                } else if let Some(value) = self.unchecked_alias_value(s, form.span, env) {
+                    value
                 } else if let Some(value) = self.model.declared_value(s, self.globals, form.span.start.offset) {
                     match value {
                         DeclaredValue::Literal(ty) => Value {
