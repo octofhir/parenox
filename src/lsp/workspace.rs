@@ -844,9 +844,14 @@ impl Workspace {
             }
         };
         let mut checked = source.info.signatures;
-        checked.push(source.info.contract.as_ref().map_or_else(
-            || "Checked type information unavailable".into(),
-            contract_note,
+        checked.push(source.value_type.map_or_else(
+            || {
+                source.info.contract.as_ref().map_or_else(
+                    || "Checked type information unavailable".into(),
+                    contract_note,
+                )
+            },
+            |ty| format!("Value type {ty}"),
         ));
         Some(hover::render(
             &source.info.name,

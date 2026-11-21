@@ -15,6 +15,11 @@ pub(super) struct LiteralVar {
 }
 
 impl Model {
+    pub(crate) fn literal_root_type(&self, name: &str) -> Option<&Type> {
+        let ty = &self.literals.get(name)?.ty;
+        (!ty.contains_unknown()).then_some(ty)
+    }
+
     pub(super) fn capture_literal_root(
         &self,
         declarations: &Declarations,

@@ -19,6 +19,7 @@ pub struct VarDocumentation {
 
 pub struct SourceHover {
     pub info: VarInfo,
+    pub value_type: Option<String>,
     pub documentation: Option<String>,
     pub arglists: Vec<String>,
 }
@@ -125,7 +126,7 @@ impl Session {
     pub fn document_hover_at(&self, path: &str, offset: usize) -> Option<DocumentHover<'_>> {
         let resolved = self.hover_target(path, offset);
         if let Some(SourceTarget::Var(target)) = resolved {
-            return Some(DocumentHover::Var(self.source_hover(path, target)));
+            return Some(DocumentHover::Var(self.source_hover(path, offset, target)));
         }
         let file = self.current_file(path)?;
         if !file.source.is_char_boundary(offset) {
@@ -181,10 +182,10 @@ impl Session {
         let SourceTarget::Var(target) = self.hover_target(path, offset)? else {
             return None;
         };
-        Some(self.source_hover(path, target))
+        Some(self.source_hover(path, offset, target))
     }
 
-    fn source_hover(&self, path: &str, target: ResolvedVar<'_>) -> SourceHover {
+    fn source_hover(&self, path: &str, offset: usize, target: ResolvedVar<'_>) -> SourceHover {
         let mut hover = target.hover();
         let runtime_gap = self.current_file(path).is_some_and(|file| {
             file.navigation_source().is_some_and(|(declarations, _)| {
@@ -200,8 +201,49 @@ impl Session {
         if runtime_gap {
             hover.info.signatures.clear();
             hover.info.contract = None;
+            return hover;
+        }
+        if let Some(ty) = target
+            .source
+            .model
+            .as_ref()
+            .and_then(|model| model.literal_root_type(&hover.info.name))
+            && ((path == target.path
+                && (target.span.start.offset..target.span.end.offset).contains(&offset))
+                || self.evaluated_literal_read(path, offset, &target))
+        {
+            hover.value_type = Some(ty.to_string());
         }
         hover
+    }
+
+    fn evaluated_literal_read(&self, path: &str, offset: usize, target: &ResolvedVar<'_>) -> bool {
+        let Some((declarations, forms)) = self
+            .current_file(path)
+            .and_then(FileCache::navigation_source)
+        else {
+            return false;
+        };
+        let Some((spelling, reference)) = declarations.evaluated_reference_at(
+            forms,
+            offset,
+            self.has_standard_test(),
+            |namespace, name, actual| self.navigation_call(namespace, name, actual),
+        ) else {
+            return false;
+        };
+        if crate::checker::bare_dotted_name(spelling) {
+            return false;
+        }
+        match reference {
+            ScopedReference::InNamespace(name) => {
+                (declarations.namespace(), name) == (target.namespace, target.name)
+            }
+            ScopedReference::Referred(namespace, name) => {
+                (namespace, name) == (target.namespace, target.name)
+            }
+            ScopedReference::Local(_) => false,
+        }
     }
 
     fn hover_target(&self, path: &str, offset: usize) -> Option<SourceTarget<'_>> {
@@ -303,6 +345,7 @@ impl ResolvedVar<'_> {
         } = self.documentation();
         SourceHover {
             info: self.info(),
+            value_type: None,
             documentation,
             arglists,
         }

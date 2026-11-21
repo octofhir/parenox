@@ -735,7 +735,9 @@ project, a buffer has no project context.
 - **Hover** shows the var's docstring and argument lists from project source
   or a local dependency JAR. For `defmulti`, a literal `fn` dispatcher
   supplies argument lists unless the author specifies `:arglists`. Checked
-  signatures and their origin appear when available. Function parameters and
+  signatures and their origin appear when available. Source vars with checked
+  literal initializers show their value type at declarations and evaluated
+  reads. Function parameters and
   local bindings show the type inferred
   when they receive a value. Reads show the type proved at that occurrence,
   including narrowing in a branch. Markdown is used when the client prefers it.

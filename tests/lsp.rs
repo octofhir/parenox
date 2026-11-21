@@ -4793,6 +4793,102 @@ fn rename_and_definition_follow_the_binding_in_map_defaults() {
 }
 
 #[test]
+fn hover_shows_checked_literal_var_types_in_evaluated_positions() {
+    let fixture = Fixture::new("source literal value hover");
+    let provider = fixture.0.join("src/provider.clj");
+    let consumer = fixture.0.join("src/consumer.clj");
+    let provider_uri = uri(&provider);
+    let consumer_uri = uri(&consumer);
+    let source = concat!(
+        "(ns provider)\n",
+        "(def tags \"Protocol tags.\" #{:anchor :link})\n",
+        "(def ^:dynamic *mode* :normal)\n",
+        "(def computed (identity :unknown))\n",
+    );
+    let caller = concat!(
+        "(ns consumer (:require [provider :as p :refer [tags]]))\n",
+        "(defn reads {:t/sig '[:-> t/any]} [] [p/tags tags p/*mode* p/computed])\n",
+        "(defn local {:t/sig '[:-> t/any]} [] (let [tags :shadow] tags))\n",
+        "(defn opaque {:t/sig '[:-> t/any]} [] (unknown.macro/hold p/tags))\n",
+        "(defn quoted {:t/sig '[:-> t/any]} [] 'p/tags)\n",
+        "(defn var-object {:t/sig '[:-> t/any]} [] (var p/tags))\n",
+    );
+    fs::write(provider, source).unwrap();
+    fs::write(consumer, caller).unwrap();
+    let hover = |id, uri: &str, text: &str, line, marker: &str, skip| {
+        let row = text.lines().nth(line).unwrap();
+        let start = row.find(marker).unwrap() + skip;
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/hover","params":{
+            "textDocument":{"uri":uri},
+            "position":{"line":line,"character":row[..start].encode_utf16().count()}
+        }})
+    };
+    let open = |uri: &str, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":uri,"version":1,"languageId":"clojure","text":text
+        }}})
+    };
+    let edit = |uri: &str, version, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let changed = source.replace("#{:anchor :link}", "#{:path}");
+    let incomplete = format!("{changed}[");
+    let unloaded = caller.replace(":as p :refer [tags]", ":as-alias p");
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        open(&consumer_uri, caller),
+        hover(2, &provider_uri, source, 1, "tags", 0),
+        hover(3, &consumer_uri, caller, 1, "p/tags", 0),
+        hover(4, &consumer_uri, caller, 1, "p/tags tags", "p/tags ".len()),
+        hover(5, &consumer_uri, caller, 1, "p/*mode*", 0),
+        hover(6, &consumer_uri, caller, 1, "p/computed", 0),
+        hover(7, &consumer_uri, caller, 2, "tags))", 0),
+        hover(8, &consumer_uri, caller, 3, "p/tags", 0),
+        hover(9, &consumer_uri, caller, 4, "p/tags", 0),
+        hover(10, &consumer_uri, caller, 5, "p/tags", 0),
+        open(&provider_uri, &changed),
+        hover(11, &consumer_uri, caller, 1, "p/tags", 0),
+        edit(&provider_uri, 2, &incomplete),
+        hover(12, &consumer_uri, caller, 1, "p/tags", 0),
+        json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{
+            "textDocument":{"uri":provider_uri}
+        }}),
+        hover(13, &consumer_uri, caller, 1, "p/tags", 0),
+        edit(&consumer_uri, 2, &unloaded),
+        hover(14, &consumer_uri, &unloaded, 1, "p/tags", 0),
+        json!({"jsonrpc":"2.0","id":15,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    for (id, ty) in [
+        (2, "Set<:anchor | :link>"),
+        (3, "Set<:anchor | :link>"),
+        (4, "Set<:anchor | :link>"),
+        (11, "Set<:path>"),
+        (13, "Set<:anchor | :link>"),
+    ] {
+        let hover = response(id)["contents"]["value"].as_str().unwrap();
+        assert!(hover.contains(&format!("Value type {ty}")), "{id}: {hover}");
+        assert!(hover.contains("Protocol tags."), "{id}: {hover}");
+    }
+    for id in [5, 6, 8, 9, 10, 12, 14] {
+        assert!(
+            !response(id).to_string().contains("Value type"),
+            "{id}: {:#?}",
+            response(id)
+        );
+    }
+    assert!(
+        response(7)["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains(":shadow")
+    );
+}
+
+#[test]
 fn test_tree_notifications_follow_the_opted_in_buffer_and_resolved_test_scopes() {
     let fixture = Fixture::new("test tree");
     let path = fixture.0.join("src/example.clj");
