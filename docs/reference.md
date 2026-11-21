@@ -775,11 +775,13 @@ project, a buffer has no project context.
   completing the `demo.arities.provider` libspec in
   [the arity example](../examples/arities/app.clj).
 - **Keyword value completion** suggests literal values from the declared
-  argument type of a complete checked call. Type `:` or a prefix such as
+  argument type of a checked call. Type `:` or a prefix such as
   `:fr` to complete the keyword in place. Threaded calls use the parameter
   supplied by the written argument. Inside plain map arguments, completion
   shows known required and optional keys and finite keyword values for the
   field being edited. Keys already present elsewhere in the map are omitted.
+  The query can close open delimiters at EOF or supply a temporary value for
+  the last key in a plain map. Reader diagnostics describe the current buffer.
 - **Dependency completion** suggests public Clojure vars when typing an
   alias such as `str/` from `[clojure.string :as str]`. It reads source in
   cached JARs for direct `deps.edn` dependencies and selected aliases.

@@ -1045,6 +1045,100 @@ fn completes_declared_keys_and_keyword_values_in_map_arguments() {
 }
 
 #[test]
+fn completes_keywords_in_repaired_calls_without_changing_reader_diagnostics() {
+    let fixture = Fixture::new("recovered keyword completion");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    fs::write(
+        fixture.0.join("src/typed_api.clj"),
+        r#"(ns typed-api)
+(defn position {:t/sig '[{:line number? :character number?} :-> number?]} [pos]
+  (:character pos))
+(defn encode {:t/sig '[string? #{:fragment :query} :-> string?]} [text class] text)
+"#,
+    )
+    .unwrap();
+    let source = |tail: &str| {
+        format!(
+            "(ns app (:require [typed-api :as api]))\n\
+             (defn use-api {{:t/sig '[:-> t/any]}} [] {tail}"
+        )
+    };
+    let cases = [
+        (
+            "(do \"🦊\" (api/position {:line 0 :ch #_ :discard ; add value\n})))",
+            ":ch",
+            Some(":character"),
+        ),
+        ("(api/position {:line 0 :ch", ":ch", Some(":character")),
+        ("(api/encode \"text\" :fr", ":fr", Some(":fragment")),
+        ("(opaque.macro/ignore (api/encode \"text\" :fr", ":fr", None),
+        ("'(api/encode \"text\" :fr", ":fr", None),
+        ("(api/position {:line :ch :extra}))", ":ch", None),
+    ];
+    let first = source(cases[0].0);
+    fs::write(&path, &first).unwrap();
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":file,"languageId":"clojure","version":1,"text":first
+        }}}),
+    ];
+    let mut expected = Vec::new();
+    for (index, (tail, token, label)) in cases.into_iter().enumerate() {
+        let text = source(tail);
+        let version = index + 1;
+        if index > 0 {
+            requests.push(
+                json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+                    "textDocument":{"uri":file,"version":version},"contentChanges":[{"text":text}]
+                }}),
+            );
+        }
+        let row = text.lines().nth(1).unwrap();
+        let start = row[..row.rfind(token).unwrap()].encode_utf16().count();
+        let end = start + token.encode_utf16().count();
+        let id = index + 2;
+        requests.push(
+            json!({"jsonrpc":"2.0","id":id,"method":"textDocument/completion","params":{
+                "textDocument":{"uri":file},"position":{"line":1,"character":end}
+            }}),
+        );
+        expected.push((id, version, start, end, label));
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    for (id, version, start, end, label) in expected {
+        let diagnostics = &replies
+            .iter()
+            .find(|reply| {
+                reply["method"] == "textDocument/publishDiagnostics"
+                    && reply["params"]["version"] == version
+            })
+            .unwrap()["params"]["diagnostics"];
+        assert_eq!(diagnostics.as_array().unwrap().len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0]["code"], "PNX9000");
+        let result = &replies.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+        let Some(label) = label else {
+            assert!(result.is_null(), "{result:#?}");
+            continue;
+        };
+        let [item] = result["items"].as_array().unwrap().as_slice() else {
+            panic!("{result:#?}");
+        };
+        assert_eq!(item["label"], label);
+        assert_eq!(
+            item["textEdit"],
+            json!({"newText":label,"range":{
+                "start":{"line":1,"character":start},"end":{"line":1,"character":end}
+            }})
+        );
+    }
+    assert_eq!(fs::read_to_string(&path).unwrap(), first);
+}
+
+#[test]
 fn completes_public_jvm_vars_from_dependency_jars() {
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 

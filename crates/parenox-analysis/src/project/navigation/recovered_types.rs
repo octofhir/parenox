@@ -55,16 +55,42 @@ impl Session {
                 CheckedPrefix::read(file, fallback, path, cutoff, globals)
             })
             .as_ref()?;
-        Some(TypeScope {
-            declarations: &prefix.declarations,
-            forms: &prefix.forms,
-            model: &prefix.model,
-            globals: &prefix.globals,
-        })
+        Some(prefix.scope())
+    }
+
+    pub(super) fn repaired_type_scope(
+        &self,
+        file: &FileCache,
+        path: &str,
+        source: &str,
+    ) -> Option<CheckedPrefix> {
+        let fallback = file.navigation_fallback.as_deref()?;
+        let namespace = fallback.declarations.namespace();
+        if matches!(namespace, "clojure.core" | "clojure.set") {
+            return None;
+        }
+        let (_, provider, _, _) = self.navigation_provider(namespace)?;
+        if !std::ptr::eq(file, provider) {
+            return None;
+        }
+        let (read, error) = reader::read_for_check(source, conditionals(path), None);
+        if error.is_some() {
+            return None;
+        }
+        CheckedPrefix::from_read(read, source, path, namespace, self.query_globals.as_ref()?)
     }
 }
 
 impl CheckedPrefix {
+    pub(super) fn scope(&self) -> TypeScope<'_> {
+        TypeScope {
+            declarations: &self.declarations,
+            forms: &self.forms,
+            model: &self.model,
+            globals: &self.globals,
+        }
+    }
+
     fn read(
         file: &FileCache,
         fallback: &NavigationFallback,
@@ -78,12 +104,7 @@ impl CheckedPrefix {
         let complete = &fallback.forms[..count];
         let end = complete.last()?.span.end.offset;
         let source = file.source.get(..cutoff)?;
-        let conditionals = if path.ends_with(".cljc") {
-            Conditionals::Select(":clj")
-        } else {
-            Conditionals::Reject
-        };
-        let (mut read, _) = reader::read_for_check(source, conditionals, None);
+        let (mut read, _) = reader::read_for_check(source, conditionals(path), None);
         read.forms.truncate(count);
         if !read
             .forms
@@ -99,15 +120,29 @@ impl CheckedPrefix {
             };
             span.end.offset <= end
         });
+        Self::from_read(
+            read,
+            source,
+            path,
+            fallback.declarations.namespace(),
+            globals,
+        )
+    }
+
+    fn from_read(
+        mut read: reader::CheckRead,
+        source: &str,
+        path: &str,
+        namespace: &str,
+        globals: &Globals,
+    ) -> Option<Self> {
         let declarations = Declarations::read_source(source, &mut read).ok()?;
         let declarations = declarations
             .with_runtime_loads(&read.forms, &globals.runtime_loads)
             .unwrap_or(declarations);
         // The strict snapshot omits this file. A copied registry can contain
         // entries that its source declarations would hide or conflict with.
-        if declarations.namespace() != fallback.declarations.namespace()
-            || declarations.has_prefix_spec_conflict(globals)
-        {
+        if declarations.namespace() != namespace || declarations.has_prefix_spec_conflict(globals) {
             return None;
         }
         // Publish only in the environment owned by this recovered document.
@@ -122,5 +157,13 @@ impl CheckedPrefix {
             model,
             globals,
         })
+    }
+}
+
+fn conditionals(path: &str) -> Conditionals<'static> {
+    if path.ends_with(".cljc") {
+        Conditionals::Select(":clj")
+    } else {
+        Conditionals::Reject
     }
 }

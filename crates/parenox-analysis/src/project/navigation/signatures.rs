@@ -28,6 +28,7 @@ pub struct CallSignatures {
     pub active_parameter: Option<usize>,
 }
 
+#[derive(Clone)]
 pub enum ArgumentKeyword {
     Value(String),
     Field {
@@ -35,6 +36,14 @@ pub enum ArgumentKeyword {
         required: bool,
         value_type: Option<String>,
     },
+}
+
+impl ArgumentKeyword {
+    fn keyword(&self) -> &str {
+        match self {
+            Self::Value(keyword) | Self::Field { keyword, .. } => keyword,
+        }
+    }
 }
 
 impl Session {
@@ -51,34 +60,45 @@ impl Session {
         if !prefix.starts_with(':') || prefix.starts_with("::") || offset > token.end {
             return None;
         }
-        let (declarations, forms) = caller.navigation_source()?;
-        let site = call_at(forms, offset)?;
-        let argument = site.written.get(site.argument)?;
-        let map_slot = if keyword_at_token(argument, &token) {
-            None
-        } else if let Kind::Map(entries) = &argument.kind
-            && caller.source.as_bytes().get(argument.span.start.offset) == Some(&b'{')
+        if let Some((declarations, forms)) = caller.navigation_source()
+            && let Some(site) = call_at(forms, offset)
         {
-            Some((
-                entries,
-                entries
-                    .iter()
-                    .position(|form| keyword_at_token(form, &token))?,
-            ))
-        } else {
-            return None;
-        };
-        let checked = self.checked_call(caller, path, &site)?;
-        let expected = checked.declared_argument_type(site.argument)?;
-        match map_slot {
-            None => complete_keyword_values(expected, prefix, limit),
-            Some((entries, index)) => {
-                let Type::Map(map) = expected else {
-                    return None;
-                };
-                complete_map_keyword(map, declarations, entries, index, prefix, limit)
-            }
+            let slot = site.keyword_slot(&caller.source, &token)?;
+            let checked = self.checked_call(caller, path, &site)?;
+            let expected = checked.declared_argument_type(site.argument)?;
+            return slot.choices(expected, declarations, prefix, limit);
         }
+        let cutoff = caller.parse_error.as_ref()?.span.start.offset;
+        if token.start < cutoff {
+            return None;
+        }
+        let fallback = caller.navigation_fallback.as_deref()?;
+        let candidates = cached_type_query(&fallback.recovered_keywords, token.start, || {
+            let source = repair_keyword_source(&caller.source, &token)?;
+            let repaired = self.repaired_type_scope(caller, path, &source)?;
+            let scope = repaired.scope();
+            let site = call_at(scope.forms, token.end)?;
+            let slot = site.keyword_slot(&source, &token)?;
+            let checked = scope.declarations.checked_call(
+                scope.forms,
+                scope.model,
+                scope.globals,
+                &source,
+                site.span,
+                site.written,
+            )?;
+            let expected = checked.declared_argument_type(site.argument)?;
+            slot.choices(expected, scope.declarations, ":", usize::MAX)
+                .map(Arc::from)
+        })?;
+        Some(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.keyword().starts_with(prefix))
+                .take(limit)
+                .cloned()
+                .collect(),
+        )
     }
 
     /// Find the innermost source call whose argument list contains the cursor.
@@ -403,6 +423,48 @@ impl CallSite<'_> {
     fn wanted(&self) -> usize {
         self.written.len().max(self.argument + 1)
     }
+
+    fn keyword_slot(&self, source: &str, token: &Range<usize>) -> Option<KeywordSlot<'_>> {
+        let argument = self.written.get(self.argument)?;
+        if keyword_at_token(argument, token) {
+            return Some(KeywordSlot::Direct);
+        }
+        let Kind::Map(entries) = &argument.kind else {
+            return None;
+        };
+        if source.as_bytes().get(argument.span.start.offset) != Some(&b'{') {
+            return None;
+        }
+        let index = entries
+            .iter()
+            .position(|form| keyword_at_token(form, token))?;
+        Some(KeywordSlot::Map(entries, index))
+    }
+}
+
+enum KeywordSlot<'a> {
+    Direct,
+    Map(&'a [Form], usize),
+}
+
+impl KeywordSlot<'_> {
+    fn choices(
+        &self,
+        expected: &Type,
+        declarations: &Declarations,
+        prefix: &str,
+        limit: usize,
+    ) -> Option<Vec<ArgumentKeyword>> {
+        match self {
+            Self::Direct => complete_keyword_values(expected, prefix, limit),
+            Self::Map(entries, index) => {
+                let Type::Map(map) = expected else {
+                    return None;
+                };
+                complete_map_keyword(map, declarations, entries, *index, prefix, limit)
+            }
+        }
+    }
 }
 
 fn call_at(forms: &[Form], offset: usize) -> Option<CallSite<'_>> {
@@ -454,6 +516,21 @@ fn call_in(form: &Form, offset: usize, top_level: bool) -> Option<CallSite<'_>> 
 
 /// Repair missing closing delimiters at EOF for this query alone.
 fn recover_call(path: &str, source: &str) -> Option<(Declarations, Vec<Form>)> {
+    let repaired = close_eof_delimiters(source)?;
+    let conditionals = if path.ends_with(".cljc") {
+        Conditionals::Select(":clj")
+    } else {
+        Conditionals::Reject
+    };
+    let (mut read, error) = reader::read_for_check(&repaired, conditionals, None);
+    if error.is_some() {
+        return None;
+    }
+    let declarations = Declarations::read_source(&repaired, &mut read).ok()?;
+    Some((declarations, read.forms))
+}
+
+fn close_eof_delimiters(source: &str) -> Option<String> {
     use SyntaxKind::*;
     let tree = reader::parse(source).syntax();
     let mut closers = Vec::new();
@@ -475,15 +552,40 @@ fn recover_call(path: &str, source: &str) -> Option<(Declarations, Vec<Form>)> {
     let mut repaired = source.to_owned();
     repaired.push('\n');
     repaired.extend(closers.into_iter().rev());
-    let conditionals = if path.ends_with(".cljc") {
-        Conditionals::Select(":clj")
-    } else {
-        Conditionals::Reject
-    };
-    let (mut read, error) = reader::read_for_check(&repaired, conditionals, None);
-    if error.is_some() {
-        return None;
+    Some(repaired)
+}
+
+fn repair_keyword_source(source: &str, token: &Range<usize>) -> Option<String> {
+    if !is_last_key_without_value(source, token).unwrap_or(false) {
+        return close_eof_delimiters(source);
     }
-    let declarations = Declarations::read_source(&repaired, &mut read).ok()?;
-    Some((declarations, read.forms))
+    let mut repaired = source.to_owned();
+    repaired.insert_str(token.end, " nil");
+    close_eof_delimiters(&repaired).or(Some(repaired))
+}
+
+fn is_last_key_without_value(source: &str, range: &Range<usize>) -> Option<bool> {
+    use SyntaxKind::*;
+    let tree = reader::parse(source).syntax();
+    let token = tree
+        .token_at_offset(u32::try_from(range.start).ok()?.into())
+        .find(|token| {
+            let bytes = token.text_range();
+            token.kind() == Keyword
+                && usize::from(bytes.start()) == range.start
+                && usize::from(bytes.end()) == range.end
+        })?;
+    let parent = token.parent()?;
+    if parent.kind() != Error || parent.first_child_or_token()?.kind() != OpenBrace {
+        return Some(false);
+    }
+    let mut count = 0;
+    let mut last = None;
+    for entry in parent.children_with_tokens().skip(1).filter(|element| {
+        !element.kind().is_trivia() && !matches!(element.kind(), Discard | CloseBrace)
+    }) {
+        count += 1;
+        last = Some(entry);
+    }
+    Some(count % 2 == 1 && last?.into_token()? == token)
 }

@@ -144,6 +144,7 @@ struct NavigationFallback {
     forms: Vec<Form>,
     declarations: Declarations,
     checked_prefix: OnceLock<Option<navigation::CheckedPrefix>>,
+    recovered_keywords: TypeQueries<Arc<[ArgumentKeyword]>>,
 }
 
 impl CheckedFunction {
@@ -274,6 +275,7 @@ impl FileCache {
                             declarations: Declarations::read(&read.forms),
                             forms: read.forms,
                             checked_prefix: OnceLock::new(),
+                            recovered_keywords: OnceLock::new(),
                         }));
                     }
                 }
@@ -509,6 +511,7 @@ impl Session {
             cache.checked_calls.take();
             if let Some(fallback) = &mut cache.navigation_fallback {
                 fallback.checked_prefix.take();
+                fallback.recovered_keywords.take();
             }
             let mut diagnostics: Vec<_> = cache.parse_error.iter().cloned().collect();
             let unique = paths.insert(source.path);
