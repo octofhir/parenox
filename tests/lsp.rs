@@ -1066,9 +1066,16 @@ fn editor_merges_physical_buffers_with_linked_source_roots() {
     let fixture = Fixture::new("linked roots");
     let manifest = fixture.0.join("deps.edn");
     fs::write(&manifest, r#"{:paths ["linked"] :aliases {:test {}}}"#).unwrap();
+    fs::write(
+        fixture.0.join("parenox.edn"),
+        r#"{:dependency-sources ["linked-provider.clj"]}"#,
+    )
+    .unwrap();
     symlink("src", fixture.0.join("linked")).unwrap();
+    fs::create_dir_all(fixture.0.join("vendor")).unwrap();
+    symlink("vendor/provider.clj", fixture.0.join("linked-provider.clj")).unwrap();
     let caller = fixture.0.join("src/caller.cljc");
-    let provider = fixture.0.join("src/provider.clj");
+    let provider = fixture.0.join("vendor/provider.clj");
     let app = "(ns caller (:require [provider :as p]))\n(defn label {:t/sig '[:-> string?]} [] (p/label))";
     let library = "(ns provider)\n(defn label {:t/sig '[:-> string?]} [] \"ok\")";
     fs::write(&caller, app).unwrap();

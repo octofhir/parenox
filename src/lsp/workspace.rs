@@ -1086,7 +1086,11 @@ fn indexed_document(
     let through_alias = |path: &Path| {
         aliases.iter().find_map(|(physical, logical)| {
             let tail = path.strip_prefix(physical).ok()?;
-            indexed(&logical.join(tail))
+            if tail.as_os_str().is_empty() {
+                indexed(logical)
+            } else {
+                indexed(&logical.join(tail))
+            }
         })
     };
     indexed(path).or_else(|| through_alias(path)).or_else(|| {
