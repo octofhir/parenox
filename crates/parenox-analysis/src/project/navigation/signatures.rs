@@ -164,7 +164,11 @@ impl Session {
         let target = match self.source_target_in(path, head_offset, declarations, forms) {
             Some(SourceTarget::Var(target)) => target,
             None if site.top_level => {
-                let (namespace, name) = declarations.top_level_call(site.head.symbol()?);
+                let symbol = site.head.symbol()?;
+                if declarations.ordinary_dotted_function(forms, symbol) {
+                    return None;
+                }
+                let (namespace, name) = declarations.top_level_call(symbol);
                 let before = (namespace == declarations.namespace()).then_some(head_offset);
                 self.resolve_source_var(path, namespace, name, before)?
             }

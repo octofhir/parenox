@@ -268,6 +268,7 @@ impl Model {
             contract,
             contract_span,
             data_body_eligible,
+            ordinary_dotted: super::bare_dotted_name(symbol) && !opaque_callable(),
             span,
         };
         if let Some(guard) = guard {

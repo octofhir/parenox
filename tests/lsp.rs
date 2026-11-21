@@ -4488,6 +4488,105 @@ fn dotted_var_rename_requires_qualified_value_uses() {
 }
 
 #[test]
+fn dotted_source_function_uses_follow_jvm_class_lookup() {
+    let fixture = Fixture::new("dotted source function class lookup");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    let source = concat!(
+        "(ns app)\n",
+        "(defn convert.next {:t/sig '[string? :-> string?]} [text] text)\n",
+        "(defn worker {:t/sig '[:-> t/any]} []\n",
+        "  (let [picked (#_\"🦊\" convert.next 7)] picked))\n",
+    );
+    fs::write(&path, source).unwrap();
+    let qualified = source.replace("convert.next 7", "app/convert.next \"valid\"");
+    let inline = source.replace(
+        "{:t/sig '[string? :-> string?]}",
+        "{:inline (fn [_] \"inlined\") :inline-arities #{1} :t/sig '[string? :-> string?]}",
+    );
+    let column = |text: &str, token| {
+        let row = text.lines().nth(3).unwrap();
+        row[..row.find(token).unwrap()].encode_utf16().count()
+    };
+    let query = |id, method, text: &str, token| {
+        json!({"jsonrpc":"2.0","id":id,"method":method,"params":{
+            "textDocument":{"uri":file},"position":{"line":3,"character":column(text, token)}
+        }})
+    };
+    let change = |version, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"version":1,"languageId":"clojure","text":source}
+        }}),
+        query(2, "textDocument/hover", source, "convert.next"),
+        query(3, "textDocument/signatureHelp", source, "7"),
+        query(4, "textDocument/hover", source, "picked))"),
+        query(5, "textDocument/definition", source, "convert.next"),
+        change(2, &qualified),
+        query(6, "textDocument/hover", &qualified, "picked))"),
+        query(7, "textDocument/signatureHelp", &qualified, "\"valid\""),
+        change(3, &inline),
+        change(4, source),
+        json!({"jsonrpc":"2.0","id":8,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    let diagnostics = |version| {
+        messages
+            .iter()
+            .find(|reply| {
+                reply["method"] == "textDocument/publishDiagnostics"
+                    && reply["params"]["version"] == version
+            })
+            .unwrap()["params"]["diagnostics"]
+            .as_array()
+            .unwrap()
+    };
+    let start = column(source, "convert.next");
+    for version in [1, 4] {
+        let [finding] = diagnostics(version).as_slice() else {
+            panic!("unexpected diagnostics: {:#?}", diagnostics(version));
+        };
+        assert_eq!(finding["code"], "PNX9001");
+        assert_eq!(
+            finding["range"],
+            json!({
+                "start":{"line":3,"character":start},
+                "end":{"line":3,"character":start+"convert.next".len()}
+            })
+        );
+        assert!(
+            finding["message"]
+                .as_str()
+                .unwrap()
+                .contains("app/convert.next")
+        );
+    }
+    assert!(diagnostics(2).is_empty());
+    assert!(
+        diagnostics(3)
+            .iter()
+            .all(|finding| finding["code"] != "PNX9001")
+    );
+    for id in 2..=5 {
+        assert!(response(id).is_null(), "{id}: {:#?}", response(id));
+    }
+    assert!(response(6).to_string().contains("String"));
+    assert!(
+        response(7)["signatures"][0]["label"]
+            .as_str()
+            .unwrap()
+            .contains("String")
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
 fn rename_and_definition_follow_the_binding_in_map_defaults() {
     let fixture = Fixture::new("references in map destructuring defaults");
     let path = fixture.0.join("src/app.clj");

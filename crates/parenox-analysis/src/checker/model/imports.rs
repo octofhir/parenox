@@ -10,6 +10,10 @@ pub(crate) fn java_type_tag_at(form: &Form, offset: usize) -> Option<&Form> {
     .then_some(tag)
 }
 
+pub(crate) fn bare_dotted_name(name: &str) -> bool {
+    name.contains('.') && !name.contains('/') && !name.starts_with('.') && !name.ends_with('.')
+}
+
 impl Declarations {
     pub(crate) fn java_import_at(&self, offset: usize) -> Option<&str> {
         self.java_import_sites

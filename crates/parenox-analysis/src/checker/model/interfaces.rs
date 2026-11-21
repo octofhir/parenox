@@ -132,6 +132,7 @@ pub(super) struct LocalInterface {
 struct LocalFunction {
     contract: Option<Contract>,
     private: bool,
+    ordinary_dotted: bool,
 }
 
 pub(crate) struct InterfaceKey {
@@ -297,6 +298,7 @@ fn same_local_function(
         || allow_binder_renames
             && a.zip(b).is_some_and(|(a, b)| {
                 a.private == b.private
+                    && a.ordinary_dotted == b.ordinary_dotted
                     && a.contract
                         .as_ref()
                         .zip(b.contract.as_ref())
@@ -334,6 +336,7 @@ impl Model {
                 LocalFunction {
                     contract: f.contract.clone(),
                     private: f.private,
+                    ordinary_dotted: f.ordinary_dotted,
                 },
             );
         }

@@ -804,6 +804,8 @@ impl Checker<'_> {
                     value.clone()
                 } else if self.partial_method_body {
                     Value::new(Type::Unknown)
+                } else if let Some(value) = self.dotted_function_class_use(s, form.span) {
+                    value
                 } else if self.model.local_function_at(s, form.span.start.offset).is_some_and(Function::inferred) {
                     self.error(
                         "PNX9002",

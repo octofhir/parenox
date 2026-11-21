@@ -576,6 +576,10 @@ leaves later bindings and the body subject to compiler checks.
 On the JVM, a dot in a local parameter or binding name produces `PNX1001`
 on the written binding. Dots in destructuring keys are allowed when the local
 name is valid. A named `fn` can use dots in its own name.
+An unqualified name such as `step.next` can denote a JVM class. When the same
+file declares an ordinary function with that name, Parenox reports `PNX9001`
+at the bare use and withholds the function's type there. Qualify the var to
+use its contract. Lexical bindings and explicit Var operands keep their scope.
 `let*` checks its local bindings in order and inherits the enclosing tail
 position. The compiler form accepts symbol/value pairs in its binding vector.
 `recur` must target a supported tail position and analysis is

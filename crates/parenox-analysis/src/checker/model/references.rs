@@ -16,7 +16,7 @@ use crate::reader::{Form, Kind, Span};
 
 use super::contracts::function_parts;
 use super::declarations::{SourceDeclaration, collect_protocol_group_methods, symbols_match};
-use super::{Declarations, Model, java_type_tag_at};
+use super::{Declarations, Model, bare_dotted_name, java_type_tag_at};
 
 pub(crate) enum ProjectCall {
     Unknown,
@@ -42,6 +42,14 @@ pub(crate) struct DocumentReferences<'a> {
 }
 
 impl Declarations {
+    pub(crate) fn ordinary_dotted_function(&self, forms: &[Form], name: &str) -> bool {
+        bare_dotted_name(name)
+            && matches!(
+                self.source_function_call(forms, name, 0, false),
+                ProjectCall::Function { .. }
+            )
+    }
+
     /// An opaque top-level form or a known namespace mutation prevents
     /// diagnosing absence from the source declarations.
     pub(crate) fn has_known_var_surface(&self, forms: &[Form]) -> bool {
@@ -137,6 +145,7 @@ impl Declarations {
         let mut diagnostics = Vec::new();
         let mut visit = References {
             names: self,
+            source_forms: forms,
             top_level_names: &top_level_names,
             locals: Vec::new(),
             post_result_scope: None,
@@ -285,6 +294,7 @@ impl Declarations {
         let top_level_names = self.top_level_names(forms);
         let mut visit = References {
             names: self,
+            source_forms: forms,
             top_level_names: &top_level_names,
             locals: Vec::new(),
             post_result_scope: None,
@@ -415,6 +425,7 @@ impl Declarations {
         let names = self.top_level_names(forms);
         let mut visit = References {
             names: self,
+            source_forms: forms,
             top_level_names: &names,
             locals: Vec::new(),
             post_result_scope: None,
@@ -530,6 +541,7 @@ struct NavigationTarget<'source> {
 
 struct References<'source, 'query, F> {
     names: &'source Declarations,
+    source_forms: &'source [Form],
     top_level_names: &'query BTreeSet<&'source str>,
     locals: Vec<(&'source str, Span)>,
     post_result_scope: Option<usize>,
@@ -840,6 +852,13 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         args: &'a [Form],
         implicit: usize,
     ) -> bool {
+        if self
+            .names
+            .ordinary_dotted_function(self.source_forms, symbol)
+        {
+            self.forms(args);
+            return true;
+        }
         let qualified = self.names.qualified_reference(symbol);
         let core_completion = self.completing_locals()
             && self.trusted_core(symbol, namespace)
@@ -970,6 +989,15 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         } else {
             ScopedReference::InNamespace(symbol)
         };
+        if allow_local
+            && matches!(hit, ScopedReference::InNamespace(_))
+            && self
+                .names
+                .ordinary_dotted_function(self.source_forms, symbol)
+        {
+            self.select_class(symbol, span);
+            return;
+        }
         match &mut self.purpose {
             Purpose::Navigate { target, .. } => {
                 target.symbol = Some(hit);

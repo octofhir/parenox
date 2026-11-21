@@ -26,7 +26,7 @@ pub(super) use externs::MacroScope;
 pub(crate) use externs::{EncodeError, ExternCache, SnapshotWriter};
 use externs::{ExternFile, ExternalDeclaration, Externs};
 pub(super) use guards::VerifiedGuard;
-pub(crate) use imports::java_type_tag_at;
+pub(crate) use imports::{bare_dotted_name, java_type_tag_at};
 pub(crate) use interfaces::InterfaceKey;
 use interfaces::{Exports, LocalInterface, source_macro_value, visible_value};
 pub(crate) use references::{DocumentReferences, ProjectCall, ScopedReference};
@@ -50,6 +50,7 @@ pub(crate) struct Function {
     pub contract: Option<Contract>,
     pub(super) contract_span: Option<Span>,
     data_body_eligible: bool,
+    ordinary_dotted: bool,
     pub span: Span,
 }
 
@@ -695,5 +696,17 @@ impl Model {
         } else {
             self.local_function(name)
         }
+    }
+
+    pub(super) fn ordinary_dotted_function_at(
+        &self,
+        name: &str,
+        offset: usize,
+    ) -> Option<&Function> {
+        if !bare_dotted_name(name) {
+            return None;
+        }
+        self.local_function_at(name, offset)
+            .filter(|function| function.ordinary_dotted)
     }
 }

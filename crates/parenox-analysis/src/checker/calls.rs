@@ -135,6 +135,19 @@ impl From<Vec<(Value, Span)>> for EvaluatedArguments {
 }
 
 impl<'model> Checker<'model> {
+    pub(super) fn dotted_function_class_use(&mut self, name: &str, span: Span) -> Option<Value> {
+        let function = self
+            .model
+            .ordinary_dotted_function_at(name, span.start.offset)?;
+        Some(self.unchecked_form(
+            span,
+            &format!(
+                "Clojure/JVM resolves unqualified {name} as a class name. Use {} to refer to the var.",
+                function.name
+            ),
+        ))
+    }
+
     fn inferred_call(&mut self, function: &Function, args: Vec<Value>, span: Span) -> Value {
         let returns = args.iter().all(|arg| arg.known != Type::Never);
         let Some((&arity, clause)) = function
@@ -279,6 +292,13 @@ impl<'model> Checker<'model> {
                 }
             }
             _ => {}
+        }
+        if let Some(name) = xs[0].symbol()
+            && !env.contains_key(name)
+            && let Some(value) = self.dotted_function_class_use(name, xs[0].without_metadata().span)
+        {
+            self.eval_args(&xs[1..], env, false).for_each(drop);
+            return value;
         }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
@@ -758,6 +778,11 @@ impl<'model> Checker<'model> {
         if let Some(name) = callee.symbol()
             && !env.contains_key(name)
         {
+            if let Some(value) =
+                self.dotted_function_class_use(name, callee.without_metadata().span)
+            {
+                return prepare(Callable::Value(value));
+            }
             if let Some(value) =
                 self.unchecked_alias_value(name, callee.without_metadata().span, env)
             {

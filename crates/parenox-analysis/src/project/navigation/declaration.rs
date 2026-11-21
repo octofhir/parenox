@@ -68,6 +68,9 @@ pub(super) fn top_level_reference<'a>(
     spelling: &'a str,
     offset: usize,
 ) -> Option<ScopedReference<'a>> {
+    if declarations.ordinary_dotted_function(forms, spelling) {
+        return None;
+    }
     let index = forms.partition_point(|form| form.span.end.offset <= offset);
     let form = forms.get(index)?.without_metadata();
     match &form.kind {
