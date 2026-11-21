@@ -130,6 +130,7 @@ fn external_calls_in_untyped_bodies_recheck_overlays_and_extern_edits() {
             .collect();
         assert_eq!(invalid.len(), errors, "{publication}");
         if let [diagnostic] = invalid.as_slice() {
+            assert!(diagnostic.get("relatedInformation").is_none());
             assert_eq!(
                 diagnostic["range"],
                 json!({
@@ -143,4 +144,89 @@ fn external_calls_in_untyped_bodies_recheck_overlays_and_extern_edits() {
         }
     }
     assert_eq!(fs::read_to_string(path).unwrap(), SOURCE);
+}
+
+#[test]
+fn extern_locations_follow_the_saved_contract_and_hide_in_dirty_buffers() {
+    let fixture = Fixture::new("related externs");
+    let path = fixture.0.join("src/app.clj");
+    let externs = fixture.0.join("externs.edn");
+    let source = r#"(ns app (:require [vendor.words :as w]))
+(defn parse {:t/sig '[:-> string?]} [] (do "🦊" (w/read-word 42)))"#;
+    let saved = "{#_\"😀\" vendor.words/read-word [string? :-> string?]}\n";
+    fs::write(&path, source).unwrap();
+    fs::write(&externs, saved).unwrap();
+    fs::write(
+        fixture.0.join("parenox.edn"),
+        r#"{:externs ["externs.edn"]}"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    let edited = {
+        let alias = fixture.0.join("extern alias.edn");
+        std::os::unix::fs::symlink(&externs, &alias).unwrap();
+        alias
+    };
+    #[cfg(not(unix))]
+    let edited = externs.clone();
+    let document = uri(&path);
+    let edn = uri(&edited);
+    let change = |version, text| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":edn,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let responses = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),"capabilities":{"textDocument":{"publishDiagnostics":{"relatedInformation":true}}}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":edn,"languageId":"edn","version":1,"text":saved}
+        }}),
+        change(2, "{}"),
+        change(3, "\n{}"),
+        json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":edn}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let errors: Vec<_> = responses
+        .iter()
+        .filter(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"] == document
+        })
+        .flat_map(|message| {
+            assert_eq!(message["params"]["version"], 1);
+            message["params"]["diagnostics"].as_array().unwrap()
+        })
+        .filter(|finding| finding["code"] == "PNX2322")
+        .collect();
+    let [initial, dirty, restored] = errors.as_slice() else {
+        panic!("{responses:?}");
+    };
+    assert_eq!(initial, restored);
+    let related = initial["relatedInformation"].as_array().unwrap();
+    assert_eq!(related.len(), 1);
+    assert_eq!(
+        related[0]["location"],
+        json!({"uri":uri(&externs),"range":{
+            "start":{"line":0,"character":8},"end":{"line":0,"character":30}
+        }})
+    );
+    assert!(
+        related[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("vendor.words/read-word")
+    );
+    let mut without_location = (*initial).clone();
+    without_location
+        .as_object_mut()
+        .unwrap()
+        .remove("relatedInformation");
+    assert_eq!(&without_location, *dirty);
+    assert_eq!(fs::read_to_string(externs).unwrap(), saved);
 }

@@ -276,6 +276,31 @@ impl ExternCache {
     pub fn diagnostics(&self, path: &str) -> &[Diagnostic] {
         self.conflicts.get(path).map_or(&[], Vec::as_slice)
     }
+
+    pub(crate) fn declaration_span(&self, origin: &ContractOrigin) -> Option<Span> {
+        if origin.kind != ContractKind::Extern {
+            return None;
+        }
+        let ExternalDeclaration::Function(contract) = self
+            .table
+            .as_ref()?
+            .namespaces
+            .get(origin.name.split_once('/')?.0)?
+            .get(&origin.name)?
+        else {
+            return None;
+        };
+        if contract.origin.as_ref() != origin {
+            return None;
+        }
+        let path = origin.path.as_deref()?;
+        self.files
+            .iter()
+            .find(|file| file.path == path)?
+            .spans
+            .get(&origin.name)
+            .copied()
+    }
 }
 
 fn merge(

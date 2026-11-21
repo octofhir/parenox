@@ -25,7 +25,9 @@ use crate::checker::{
 };
 use crate::reader::{self, Form, Position, Span};
 use crate::suppressions::{MARKER, Suppressions};
-use crate::{Diagnostic, ExternChangeKind, ExternDiff, ExternSnapshot, Report, Stats};
+use crate::{
+    ContractOrigin, Diagnostic, ExternChangeKind, ExternDiff, ExternSnapshot, Report, Stats,
+};
 
 #[derive(Clone, Copy)]
 pub struct Source<'a> {
@@ -368,6 +370,11 @@ impl Session {
         paths: &BTreeSet<&str>,
     ) -> ProjectReport {
         self.check_snapshot(sources, externs, &[], SnapshotMode::Check(Some(paths)))
+    }
+
+    /// The declaration key for an active extern function in the latest snapshot.
+    pub fn extern_declaration_span(&self, origin: &ContractOrigin) -> Option<Span> {
+        self.externs.declaration_span(origin)
     }
 
     /// Checks library source without trusting the supplied extern promises and

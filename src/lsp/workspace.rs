@@ -18,6 +18,7 @@ use parenox::{
     output::{callback_contract_note, contract_note},
     reader::validate_edn,
 };
+use parenox_lsp::diagnostics::{self, RelatedInformation};
 use parenox_lsp::structural::{self, FoldingOptions};
 use parenox_lsp::{hover, lenses, project_tree, refactor, rename, semantic, signatures, test_tree};
 use serde::Deserialize;
@@ -25,6 +26,7 @@ use serde_json::{Value, json};
 
 use super::WATCH_REQUEST_ID;
 use super::completion;
+use super::extern_buffers::{ExternBuffers, ExternLocations, physical_path};
 use super::protocol::write_message;
 use super::symbols;
 use super::text::{Lines, Position, Range, file_path, file_uri, normalize};
@@ -44,6 +46,7 @@ pub(super) struct Workspace {
     dependency_completions: completion::DependencyCompletions,
     documents: BTreeMap<String, Document>,
     externs: Vec<FileSnapshot>,
+    extern_buffers: Option<ExternBuffers>,
     session: Session,
     session_ready: bool,
     load_error: Option<String>,
@@ -180,6 +183,7 @@ impl Workspace {
         register_watches: bool,
         versioned_edits: bool,
         test_tree: bool,
+        extern_buffers: Option<ExternBuffers>,
     ) -> Self {
         let mut workspace = Self {
             root,
@@ -194,6 +198,7 @@ impl Workspace {
             dependency_completions: completion::DependencyCompletions::default(),
             documents: BTreeMap::new(),
             externs: Vec::new(),
+            extern_buffers,
             session: Session::default(),
             session_ready: false,
             load_error: None,
@@ -441,10 +446,38 @@ impl Workspace {
                 .classpath
                 .as_ref()
                 .is_some_and(|path| normalize(&self.root.join(path)) == file)
-            || self
-                .externs
-                .iter()
-                .any(|snapshot| normalize(Path::new(&snapshot.path)) == file)
+            || self.extern_inputs(file).next().is_some()
+    }
+
+    fn extern_inputs<'a>(&'a self, file: &'a Path) -> impl Iterator<Item = &'a FileSnapshot> {
+        let physical = (!self.externs.is_empty() && is_edn(file)).then(|| physical_path(file));
+        self.externs.iter().filter(move |snapshot| {
+            let path = Path::new(&snapshot.path);
+            normalize(path) == file
+                || physical
+                    .as_ref()
+                    .is_some_and(|key| physical_path(path) == *key)
+        })
+    }
+
+    pub fn open_edn_source(&self, file: &Path) -> Option<&str> {
+        let document = self.documents.get(file.to_str()?)?;
+        document.editor.as_ref()?;
+        Some(&document.source)
+    }
+
+    pub fn extern_buffer_dirty(&self, file: &Path) -> bool {
+        self.extern_buffers.as_ref().is_some_and(|buffers| {
+            self.extern_inputs(file)
+                .any(|snapshot| buffers.is_dirty(Path::new(&snapshot.path), &snapshot.source))
+        })
+    }
+
+    pub fn refresh_extern_links(&mut self, output: &mut impl Write) -> io::Result<()> {
+        if self.session_ready {
+            self.check(output)?;
+        }
+        Ok(())
     }
 
     fn refresh(&mut self, output: &mut impl Write) -> io::Result<()> {
@@ -1046,9 +1079,13 @@ impl Workspace {
             .session
             .check_project_documents(&sources, &externs, &open);
         self.session_ready = true;
+        let mut locations =
+            ExternLocations::new(&self.session, &self.externs, self.extern_buffers.as_ref());
         for file in report.files {
             if let Some(document) = self.documents.get_mut(&file.path) {
-                document.publish(&file.diagnostics, output)?;
+                let rendered = document
+                    .render_diagnostics(&file.diagnostics, |finding| locations.related(finding));
+                document.publish_rendered(rendered, output)?;
             }
         }
         Ok(())
@@ -1115,18 +1152,39 @@ impl Document {
     }
 
     fn publish(&mut self, diagnostics: &[Diagnostic], output: &mut impl Write) -> io::Result<()> {
+        let rendered = self.render_diagnostics(diagnostics, |_| Vec::new());
+        self.publish_rendered(rendered, output)
+    }
+
+    fn render_diagnostics(
+        &self,
+        diagnostics: &[Diagnostic],
+        mut related: impl FnMut(&Diagnostic) -> Vec<RelatedInformation>,
+    ) -> Vec<Value> {
+        if self.editor.is_none() || diagnostics.is_empty() {
+            return Vec::new();
+        }
+        let lines = Lines::new(&self.source);
+        diagnostics
+            .iter()
+            .filter_map(|diagnostic| {
+                Some(diagnostics::render(
+                    lines.range(diagnostic.span)?,
+                    diagnostic,
+                    &diagnostic_message(diagnostic),
+                    related(diagnostic),
+                ))
+            })
+            .collect()
+    }
+
+    fn publish_rendered(
+        &mut self,
+        rendered: Vec<Value>,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
         let Some(editor) = &mut self.editor else {
             return Ok(());
-        };
-        let rendered = if diagnostics.is_empty() {
-            Vec::new()
-        } else {
-            let lines = Lines::new(&self.source);
-            diagnostics.iter().filter_map(|diagnostic| {
-                let range = lines.range(diagnostic.span)?;
-                let severity = if diagnostic.severity == "warning" { 2 } else { 1 };
-                Some(json!({"range":range,"severity":severity,"source":"parenox","code":diagnostic.code,"message":diagnostic_message(diagnostic)}))
-            }).collect()
         };
         if editor.published.as_ref() != Some(&rendered) {
             publish(
@@ -1165,7 +1223,7 @@ fn diagnostic_message(diagnostic: &Diagnostic) -> Cow<'_, str> {
     Cow::Owned(message)
 }
 
-fn is_edn(path: &Path) -> bool {
+pub(super) fn is_edn(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "edn")
 }
 

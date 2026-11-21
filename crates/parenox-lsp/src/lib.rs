@@ -2,6 +2,7 @@
 
 pub mod clojuredocs;
 pub mod completion;
+pub mod diagnostics;
 pub mod hover;
 pub mod lenses;
 pub mod project_tree;

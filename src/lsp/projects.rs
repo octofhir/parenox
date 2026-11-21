@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use parenox_lsp::{project_tree, structural::FoldingOptions};
 use serde_json::Value;
 
+use super::extern_buffers::{ExternBuffers, physical_path};
 use super::symbols;
 use super::text::{file_path, normalize};
 use super::workspace::file_rename::FileRename;
-use super::workspace::{DocumentParams, WatchedFiles, Workspace};
+use super::workspace::{DocumentParams, WatchedFiles, Workspace, is_edn};
 use crate::cli::ProjectOptions;
 use crate::workspace::is_clojure_source;
 
@@ -19,6 +20,7 @@ pub(super) struct Projects {
     nested: BTreeMap<PathBuf, Workspace>,
     owners: BTreeMap<PathBuf, PathBuf>,
     client: ClientFeatures,
+    extern_buffers: Option<ExternBuffers>,
 }
 
 pub(super) struct ClientFeatures {
@@ -29,6 +31,7 @@ pub(super) struct ClientFeatures {
     pub hierarchical_symbols: bool,
     pub folding: FoldingOptions,
     pub test_tree: bool,
+    pub related_information: bool,
 }
 
 impl Projects {
@@ -39,6 +42,7 @@ impl Projects {
         client: ClientFeatures,
     ) -> Self {
         let root = normalize(&root);
+        let extern_buffers = client.related_information.then(ExternBuffers::default);
         Self {
             primary: Workspace::load(
                 root.clone(),
@@ -46,11 +50,13 @@ impl Projects {
                 watch,
                 client.versioned_edits,
                 client.test_tree,
+                extern_buffers.clone(),
             ),
             root,
             nested: BTreeMap::new(),
             owners: BTreeMap::new(),
             client,
+            extern_buffers,
         }
     }
 
@@ -214,6 +220,7 @@ impl Projects {
                 false,
                 self.client.versioned_edits,
                 self.client.test_tree,
+                self.extern_buffers.clone(),
             );
             project.initialized(output)?;
             self.nested.insert(root.clone(), project);
@@ -230,6 +237,48 @@ impl Projects {
         {
             self.nested.remove(&root);
         }
+    }
+
+    pub fn update_extern_buffer(
+        &mut self,
+        uri: Option<&str>,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        let Some(buffers) = &self.extern_buffers else {
+            return Ok(());
+        };
+        let Some(path) = uri.and_then(file_path).filter(|path| is_edn(path)) else {
+            return Ok(());
+        };
+        let source = self
+            .for_document(uri)
+            .open_edn_source(&path)
+            .map(str::to_owned);
+        let previous = buffers
+            .previous_physical(&path)
+            .filter(|prior| *prior != physical_path(&path));
+        let dirty = |workspace: &Workspace| {
+            (
+                workspace.extern_buffer_dirty(&path),
+                previous
+                    .as_deref()
+                    .is_some_and(|prior| workspace.extern_buffer_dirty(prior)),
+            )
+        };
+        let before: Vec<_> = std::iter::once(&self.primary)
+            .chain(self.nested.values())
+            .map(dirty)
+            .collect();
+        buffers.update(path.clone(), source);
+        for (workspace, was_dirty) in std::iter::once(&mut self.primary)
+            .chain(self.nested.values_mut())
+            .zip(before)
+        {
+            if dirty(workspace) != was_dirty {
+                workspace.refresh_extern_links(output)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn save(&mut self, params: DocumentParams, output: &mut impl Write) -> io::Result<()> {

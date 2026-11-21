@@ -1,5 +1,6 @@
 //! Editor-facing LSP requests over stdin and stdout.
 mod clojuredocs;
+mod extern_buffers;
 mod projects;
 mod workspace;
 
@@ -216,6 +217,11 @@ fn request(
             .pointer("/workspace/workspaceEdit/documentChanges")
             .and_then(Value::as_bool)
             == Some(true);
+        let related_information = init
+            .capabilities
+            .pointer("/textDocument/publishDiagnostics/relatedInformation")
+            .and_then(Value::as_bool)
+            == Some(true);
         let apply_edit = init
             .capabilities
             .pointer("/workspace/applyEdit")
@@ -265,6 +271,7 @@ fn request(
                 hierarchical_symbols,
                 folding,
                 test_tree,
+                related_information,
             },
         ));
         let rename_files = json!({"filters":[{
@@ -609,12 +616,16 @@ fn notification(
                 projects
                     .for_document_mut(uri.as_deref())
                     .open(params, output)?;
+                projects.update_extern_buffer(uri.as_deref(), output)?;
             }
         }
         "textDocument/didChange" => {
-            let workspace = projects.for_document_mut(document_uri(&params));
+            let uri = document_uri(&params).map(str::to_owned);
             if let Ok(params) = serde_json::from_value(params) {
-                workspace.change(params, output)?;
+                projects
+                    .for_document_mut(uri.as_deref())
+                    .change(params, output)?;
+                projects.update_extern_buffer(uri.as_deref(), output)?;
             }
         }
         "textDocument/didClose" => {
@@ -623,6 +634,7 @@ fn notification(
                 projects
                     .for_document_mut(uri.as_deref())
                     .close(params, output)?;
+                projects.update_extern_buffer(uri.as_deref(), output)?;
                 projects.track_close(uri.as_deref());
             }
         }
