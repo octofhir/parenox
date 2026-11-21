@@ -51,7 +51,7 @@ pub fn namespace_documentation(
 }
 
 impl Session {
-    /// Hover a source var, evaluated local read or evaluated keyword lookup.
+    /// Hover a source var, evaluated local binding or read, or a keyword lookup.
     pub fn document_hover_at(&self, path: &str, offset: usize) -> Option<DocumentHover<'_>> {
         let resolved = self.hover_target(path, offset);
         if let Some(SourceTarget::Var(target)) = resolved {
@@ -88,7 +88,7 @@ impl Session {
         }
         let inferred_type = file.cached_hover_type(site.span, || {
             let scope = self.typing_at(file, path, offset)?;
-            scope.declarations.local_read_type(
+            scope.declarations.local_type(
                 scope.forms,
                 scope.model,
                 scope.globals,

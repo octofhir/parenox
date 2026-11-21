@@ -66,6 +66,7 @@ fn map_binding_name<'a>(form: &'a Form, names: &mut Vec<(&'a str, Span)>) {
 struct Defaults {
     locals: BTreeMap<String, (Value, Span)>,
     keys: BTreeMap<Type, (Value, Span)>,
+    stopped: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -123,7 +124,7 @@ impl Checker<'_> {
     }
 
     pub(super) fn bind(&mut self, form: &Form, value: Value, env: &mut Env) {
-        self.bind_selected(form, value, env, None);
+        self.bind_selected(form, value, env, None, None);
     }
 
     pub(super) fn bind_initializer(
@@ -133,10 +134,37 @@ impl Checker<'_> {
         value: Value,
         env: &mut Env,
     ) {
-        let source = (form.symbol().is_some() || form.map().is_some())
+        let source = self.binding_selector(form, init, env);
+        self.bind_selected(form, value, env, source, None);
+    }
+
+    pub(super) fn let_binding(
+        &mut self,
+        pattern: &Form,
+        init: &Form,
+        env: &mut Env,
+        reachable: bool,
+    ) -> bool {
+        // A direct map binding in Clojure 1.13 evaluates its defaults before
+        // its initializer. Call arguments and conditional tests may already
+        // reside in a temporary when their binding patterns are evaluated.
+        let defaults = pattern
+            .map()
+            .map(|entries| self.map_defaults(entries.as_chunks::<2>().0, env, reachable));
+        let reachable = reachable && defaults.as_ref().is_none_or(|defaults| !defaults.stopped);
+        let value = self.infer_path(init, env, reachable, false);
+        let returns = value.known != Type::Never;
+        self.inspect_path(returns, |checker| {
+            let source = checker.binding_selector(pattern, init, env);
+            checker.bind_selected(pattern, value, env, source, defaults);
+        });
+        returns && env.reachable()
+    }
+
+    fn binding_selector(&self, form: &Form, init: &Form, env: &Env) -> Option<Selector> {
+        (form.symbol().is_some() || form.map().is_some())
             .then(|| self.selector(init, env))
-            .flatten();
-        self.bind_selected(form, value, env, source);
+            .flatten()
     }
 
     fn bind_selected(
@@ -145,10 +173,12 @@ impl Checker<'_> {
         value: Value,
         env: &mut Env,
         source: Option<Selector>,
+        defaults: Option<Defaults>,
     ) {
-        match &form.without_metadata().kind {
+        let target = form.without_metadata();
+        match &target.kind {
             Kind::Symbol(name) | Kind::AnonymousArgument(name) => {
-                env.insert_selected(name.clone(), value, source);
+                self.bind_local(name, target.span, value, source, env);
                 // Class selection and non-nil evidence are independent.
                 if let Some(hint) = form.metadata(":tag").and_then(Form::symbol) {
                     env.set_java_hint(name, hint);
@@ -159,10 +189,34 @@ impl Checker<'_> {
                 self.bind_positions(xs, form.span, value, env);
             }
             Kind::Map(xs) => {
-                self.bind_map(xs.as_chunks::<2>().0, form.span, value, source, env);
+                self.bind_map(
+                    xs.as_chunks::<2>().0,
+                    form.span,
+                    value,
+                    source,
+                    defaults,
+                    env,
+                );
             }
             _ => self.error("PNX9001", form.span, "Unsupported binding pattern"),
         }
+    }
+
+    fn bind_local(
+        &mut self,
+        name: &str,
+        span: Span,
+        value: Value,
+        source: Option<Selector>,
+        env: &mut Env,
+    ) {
+        if env.reachable() {
+            self.observe_local(name, span, &value);
+        }
+        if value.known == Type::Never {
+            env.mark_impossible();
+        }
+        env.insert_selected(name.into(), value, source);
     }
 
     fn bind_map(
@@ -171,9 +225,9 @@ impl Checker<'_> {
         span: Span,
         value: Value,
         source: Option<Selector>,
+        defaults: Option<Defaults>,
         env: &mut Env,
     ) {
-        self.may_throw();
         // :missing changes checked lookups into collection of absent keys.
         if pairs.iter().any(|p| p[0].keyword() == Some(":missing")) {
             self.error(
@@ -183,12 +237,25 @@ impl Checker<'_> {
             );
             return;
         }
-        // Defaults run once in the outer scope. :as then precedes the field bindings.
-        let defaults = pairs
-            .iter()
-            .find(|p| p[0].keyword() == Some(":or"))
-            .map(|p| self.binding_defaults(&p[1], env))
-            .unwrap_or_default();
+        let defaults = defaults.unwrap_or_else(|| self.map_defaults(pairs, env, env.reachable()));
+        if defaults.stopped {
+            env.mark_impossible();
+        }
+        self.inspect_path(env.reachable(), |checker| {
+            checker.bind_map_fields(pairs, span, value, source, &defaults, env);
+        });
+    }
+
+    fn bind_map_fields(
+        &mut self,
+        pairs: &[[Form; 2]],
+        span: Span,
+        value: Value,
+        source: Option<Selector>,
+        defaults: &Defaults,
+        env: &mut Env,
+    ) {
+        self.may_throw();
         // Clojure can convert a sequence into a map while destructuring it.
         // Map and nil inputs retain the same value throughout the pattern.
         let value = if may_convert_sequence(&value.known) {
@@ -200,7 +267,7 @@ impl Checker<'_> {
             .then(|| source.unwrap_or_else(|| env.captured_selector(value.clone())));
         let input = MapBinding {
             value: &value,
-            defaults: &defaults,
+            defaults,
             source: source.as_ref(),
         };
         env.with_owner_pinned(input.source, |env| {
@@ -208,7 +275,7 @@ impl Checker<'_> {
                 .iter()
                 .find(|[kind, alias]| kind.keyword() == Some(":as") && alias.symbol().is_some())
             {
-                self.bind_selected(alias, value.clone(), env, source.clone());
+                self.bind_selected(alias, value.clone(), env, source.clone(), None);
             }
             for pair in pairs {
                 let directive = pair[0].keyword().map(|key| self.model.key(key));
@@ -275,7 +342,7 @@ impl Checker<'_> {
             Lookup::Optional(None)
         };
         let (field, source) = self.binding_value(input, key, pair[0].symbol(), mode, pair[1].span);
-        self.bind_selected(&pair[0], field, env, source);
+        self.bind_selected(&pair[0], field, env, source, None);
     }
 
     fn bind_keys(&mut self, directive: &str, form: &Form, input: MapBinding<'_>, env: &mut Env) {
@@ -385,15 +452,21 @@ impl Checker<'_> {
                 };
                 let (field, source) =
                     self.binding_value(input, key_type, Some(local), mode, key.span);
-                env.insert_selected(local.into(), field, source);
+                self.bind_local(local, key.without_metadata().span, field, source, env);
             } else if required {
                 self.binding_value(input, key_type, None, Lookup::Presence, key.span);
             }
         }
     }
 
-    fn binding_defaults(&mut self, form: &Form, env: &Env) -> Defaults {
-        let mut defaults = Defaults::default();
+    fn map_defaults(&mut self, pairs: &[[Form; 2]], env: &Env, reachable: bool) -> Defaults {
+        let mut defaults = Defaults {
+            stopped: !reachable,
+            ..Defaults::default()
+        };
+        let Some([_, form]) = pairs.iter().find(|[key, _]| key.keyword() == Some(":or")) else {
+            return defaults;
+        };
         let Some(entries) = form.map() else {
             self.error(
                 "PNX1001",
@@ -402,8 +475,19 @@ impl Checker<'_> {
             );
             return defaults;
         };
-        for pair in entries.as_chunks::<2>().0 {
-            let value = self.infer(&pair[1], env);
+        let pairs = entries.as_chunks::<2>().0;
+        // Alpha11 visits an array map's entries in order. Larger maps may
+        // visit any default first, while one definite failure still stops
+        // the whole binding before the initializer.
+        let ordered = pairs.len() <= 8;
+        for pair in pairs {
+            let value = self.infer_path(
+                &pair[1],
+                env,
+                reachable && (!ordered || !defaults.stopped),
+                false,
+            );
+            defaults.stopped |= value.known == Type::Never;
             let target = pair[0].span;
             let duplicate = if let Some(name) = pair[0].symbol() {
                 defaults

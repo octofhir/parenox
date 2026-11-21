@@ -29,6 +29,7 @@ fn local_hover_uses_reachable_iterations_and_lexical_scope() {
         .map(|(start, _)| start + "identity ".len())
         .collect();
     assert_eq!(ty(reads[0]), r#"Nil | "ready""#);
+    assert_eq!(ty(source.find("value nil").unwrap()), r#"Nil | "ready""#);
     assert_eq!(ty(reads[1]), "String");
     assert_eq!(ty(reads[2]), ":shadow");
     let unknown_scope = source.rfind("value").unwrap();
@@ -49,6 +50,7 @@ fn repeated_hover_uses_current_externs_with_unchanged_source() {
     };
     let mut session = Session::default();
     let key = consumer.source.find(":path").unwrap();
+    let binding = consumer.source.find("path (:path").unwrap();
     let read = consumer.source.rfind("path").unwrap();
     for (externs, expected) in [
         ("{wire/location [:-> {:path string?}]}", Some("String")),
@@ -63,7 +65,16 @@ fn repeated_hover_uses_current_externs_with_unchanged_source() {
                 source: externs,
             }),
         );
-        for position in [key, key + 1, read, read + 1, key, read] {
+        for position in [
+            key,
+            key + 1,
+            read,
+            read + 1,
+            binding,
+            binding + 1,
+            key,
+            read,
+        ] {
             let ty = match session.document_hover_at(consumer.path, position) {
                 Some(DocumentHover::Lookup { inferred_type, .. }) => Some(inferred_type),
                 Some(DocumentHover::Local(local)) => Some(local.inferred_type),
@@ -97,6 +108,8 @@ fn local_hover_withholds_types_from_unchecked_loop_iterations() {
         diagnostic.code == "PNX9001" && diagnostic.message.contains("recur type inference limit")
     }));
     assert!(session.document_hover_at("demo.clj", offset).is_none());
+    let binding = source.find("value :ready").unwrap();
+    assert!(session.document_hover_at("demo.clj", binding).is_none());
 }
 
 #[test]
@@ -272,4 +285,110 @@ fn resolves_literal_standalone_require_aliases_at_hover_time() {
         session.hover_archive_var("client.clj", archive),
         Some(("other.library", "render"))
     );
+}
+
+#[test]
+fn hovers_reached_callback_bindings_by_their_written_occurrence() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn paths
+          {:t/sig '[(s/coll-of {:path string?} :kind vector?) :-> any?]}
+          [items]
+          (let [read-path (fn [{:keys [^String path] :as entry}] [path entry])]
+            (mapv read-path items)))
+        (defn empty-input {:t/sig '[:-> any?]} []
+          (mapv (fn [unvisited] unvisited) []))
+        (defn shadowed {:t/sig '[string? :-> number?]} [path]
+          (let [path 42] (inc path)))"#;
+    let mut session = Session::default();
+    let report = session.check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let hover = |marker: &str| {
+        let offset = source.find(marker).unwrap();
+        match session.document_hover_at("demo.clj", offset) {
+            Some(DocumentHover::Local(local)) => Some(local.inferred_type),
+            Some(_) => panic!("expected local hover at {marker}"),
+            None => None,
+        }
+    };
+    assert_eq!(hover("path] :as").as_deref(), Some("String"));
+    assert_eq!(hover("entry}]").as_deref(), Some("{:path: String}"));
+    assert_eq!(hover("path]\n          (let").as_deref(), Some("String"));
+    assert_eq!(hover("path 42").as_deref(), Some("42"));
+    assert_eq!(hover("unvisited]"), None);
+}
+
+#[test]
+fn direct_let_visits_defaults_before_a_nonreturning_initializer() {
+    let source = r#"(ns demo)
+        (defn cancelled {:t/sig '[:-> #{:cancelled}]} []
+          (try
+            (let [{:keys [key]
+                   :or {key (let [visited "default"] visited)}}
+                  (throw (ex-info "cancelled" {}))]
+              key)
+            (catch clojure.lang.ExceptionInfo error :cancelled)))"#;
+    let mut session = Session::default();
+    let report = session.check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let offset = source.find("visited \"default\"").unwrap();
+    let Some(DocumentHover::Local(default)) = session.document_hover_at("demo.clj", offset) else {
+        panic!("missing hover in the reached default initializer");
+    };
+    assert_eq!(default.inferred_type, "\"default\"");
+    let binding = source.find("key]").unwrap();
+    assert!(session.document_hover_at("demo.clj", binding).is_none());
+}
+
+#[test]
+fn the_first_throwing_default_stops_later_defaults_and_the_initializer() {
+    let source = r#"(ns demo)
+        (defn stopped {:t/sig '[:-> #{:first}]} []
+          (try
+            (let [{:keys [bound]
+                   :or {unused (throw (ex-info "first" {:step :first}))
+                        bound (let [unvisited "second"]
+                                (throw (ex-info unvisited {:step :second})))}}
+                  (throw (ex-info "initializer" {:step :initializer}))]
+              bound)
+            (catch clojure.lang.ExceptionInfo error (:step (ex-data error)))))"#;
+    let mut session = Session::default();
+    let report = session.check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let offset = source.find("unvisited \"second\"").unwrap();
+    assert!(session.document_hover_at("demo.clj", offset).is_none());
+}
+
+#[test]
+fn a_throwing_default_stops_binding_even_for_a_present_key() {
+    let source = r#"(ns demo)
+        (defn stopped {:t/sig '[:-> #{:caught}]} []
+          (try
+            (let [{:keys [present]
+                   :or {present (throw (ex-info "eager default" {}))}}
+                  {:present "present key"}
+                  later 1]
+              [present later])
+            (catch clojure.lang.ExceptionInfo error :caught)))"#;
+    let mut session = Session::default();
+    let report = session.check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    for marker in ["present]", "later 1", "present later", "later])"] {
+        let offset = source.find(marker).unwrap();
+        assert!(session.document_hover_at("demo.clj", offset).is_none());
+    }
+}
+
+#[test]
+fn a_throwing_binding_does_not_return_nil_from_an_empty_body() {
+    let source = r#"(ns demo)
+        (defn conditional {:t/sig '[:-> #{:caught}]} []
+          (try
+            (when-let [{:keys [x] :or {x (throw (ex-info "default" {}))}} {:x :present}])
+            (catch clojure.lang.ExceptionInfo _ :caught)))
+        (defn callback {:t/sig '[:-> #{:caught}]} []
+          (try
+            ((fn [{:keys [x] :or {x (throw (ex-info "default" {}))}}]) {:x :present})
+            (catch clojure.lang.ExceptionInfo _ :caught)))"#;
+    let report = Session::default().check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
 }

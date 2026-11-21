@@ -177,11 +177,7 @@ impl Checker<'_> {
                 }
                 Binding::Let(pairs) => {
                     for [pattern, init] in *pairs {
-                        let value = self.infer_path(init, &local, reachable, false);
-                        reachable = value.known != Type::Never;
-                        self.inspect_path(reachable, |checker| {
-                            checker.bind_initializer(pattern, init, value, &mut local);
-                        });
+                        reachable = self.let_binding(pattern, init, &mut local, reachable);
                     }
                 }
                 Binding::Test(form) => {

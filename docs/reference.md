@@ -543,6 +543,9 @@ false through. A stable read of the original input keeps the non-nil type
 in later steps. A standard `seq` guard narrows a stable local or map lookup by
 emptiness. `when-first` makes the same nonempty refinement inside its body
 and binds the first element, which can itself be nil or false.
+In a direct map destructuring binding, Clojure 1.13 evaluates the `:or`
+defaults before the value to destructure. A default can run even when its
+key is present or unused.
 `recur` must target a supported tail position and analysis is
 bounded when argument types keep growing.
 
@@ -645,8 +648,9 @@ project, a buffer has no project context.
   declarations and usages. Opaque macro expansions are not indexed.
 - **Hover** shows the var's docstring and argument lists from project source
   or a local dependency JAR. Checked signatures and their origin appear when
-  available. Local reads show the type proved at that occurrence, including
-  narrowing in a branch. Markdown is used when the client prefers it.
+  available. Function parameters and local bindings show the type inferred
+  when they receive a value. Reads show the type proved at that occurrence,
+  including narrowing in a branch. Markdown is used when the client prefers it.
   A keyword used for a lookup shows the result type at that occurrence,
   including keyword calls, `get`, `req!`, and each segment of an inlined
   two-argument `get-in` with a literal path. With a default argument, the

@@ -492,7 +492,11 @@ impl Checker<'_> {
     }
 
     fn body(&mut self, body: &[Form], env: &Env, tail: bool) -> Value {
-        let mut value = Value::new(Type::Nil);
+        let mut value = Value::new(if env.reachable() {
+            Type::Nil
+        } else {
+            Type::Never
+        });
         for (index, form) in body.iter().enumerate() {
             let tail = tail && index + 1 == body.len();
             value = self.infer_path(form, env, value.known != Type::Never, tail);

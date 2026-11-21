@@ -377,11 +377,11 @@ impl Checker<'_> {
                 checked_inline = true;
                 continue;
             }
-            let value = self.infer_path(&pair[1], &local, reachable, false);
-            reachable = value.known != Type::Never;
-            self.bind_initializer(&pair[0], &pair[1], value, &mut local);
+            reachable = self.let_binding(&pair[0], &pair[1], &mut local, reachable);
         }
-        let value = self.check_path(reachable, |checker| checker.body(&xs[2..], &local, tail));
+        let value = self.check_path(reachable && local.reachable(), |checker| {
+            checker.body(&xs[2..], &local, tail)
+        });
         if checked_inline {
             self.dedup_diagnostics(start);
         }

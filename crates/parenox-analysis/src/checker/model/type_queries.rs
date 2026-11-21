@@ -8,7 +8,7 @@ use crate::types::Type;
 use std::sync::Arc;
 
 impl Declarations {
-    pub(crate) fn local_read_type(
+    pub(crate) fn local_type(
         &self,
         forms: &[Form],
         model: &Model,
