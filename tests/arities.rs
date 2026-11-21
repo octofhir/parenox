@@ -1,4 +1,4 @@
-use parenox::{Session, Source};
+use parenox::{DocumentHover, Session, Source};
 
 const PROVIDER: Source<'_> = Source {
     path: "provider.clj",
@@ -75,6 +75,66 @@ fn extern_overloads_support_multiple_signatures() {
     };
     let report = Session::default().check_project(&[app], Some(external));
     assert!(report.complete && report.ok, "{report:#?}");
+}
+
+#[test]
+fn runtime_arity_checks_require_arguments_to_return() {
+    for expression in [
+        "(subs (subs :bad 0))",
+        "(deref (subs :bad 0) :extra)",
+        "(do (subs :bad 0) (subs) (deref))",
+    ] {
+        let source = format!("(ns demo) (defn caller {{:t/sig '[:-> t/any]}} [] {expression})");
+        let report = Session::default().check("demo.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            ":bad"
+        );
+    }
+}
+
+#[test]
+fn reached_runtime_arity_errors_can_be_caught() {
+    for expression in ["(subs \"input\")", "(deref :input :extra)"] {
+        let source = format!(
+            "(ns demo) (defn caught {{:t/sig '[:-> #{{:arity}}]}} [] \
+             (let [result (try {expression} (catch clojure.lang.ArityException _ :arity))] result))"
+        );
+        let mut session = Session::default();
+        let report = session.check("demo.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(finding.code, "PNX2554");
+        let offset = source.rfind("result").unwrap();
+        let Some(DocumentHover::Local(hover)) = session.document_hover_at("demo.clj", offset)
+        else {
+            panic!("missing hover for the exception handler result");
+        };
+        assert_eq!(hover.inferred_type, ":arity");
+    }
+}
+
+#[test]
+fn compiler_arity_checks_still_run_when_an_argument_would_throw() {
+    for expression in [
+        "(inc (subs :bad 0) :extra)",
+        "(loop [state 0] (recur (subs :bad 0) :extra))",
+    ] {
+        let source = format!("(ns demo) (defn caller {{:t/sig '[:-> t/any]}} [] {expression})");
+        let report = Session::default().check("demo.clj", &source);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|finding| finding.code == "PNX2554"),
+            "{report:#?}"
+        );
+    }
 }
 
 #[test]

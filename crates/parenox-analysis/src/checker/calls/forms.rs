@@ -147,7 +147,12 @@ impl Checker<'_> {
             }
             CoreForm::VectorTransform => self.vector_transform(xs, span, env, name),
             CoreForm::RegexMatch => self.regex_match(&xs[1..], span, env, name),
-            CoreForm::Substring => self.substring(&xs[1..], span, env),
+            CoreForm::Substring => {
+                let stock = self
+                    .model
+                    .can_use_standard_core(xs[0].symbol().unwrap(), self.globals);
+                self.substring(&xs[1..], span, env, stock)
+            }
         }
     }
 }

@@ -29,9 +29,19 @@ impl Checker<'_> {
         Type::Str(text)
     }
 
-    pub(super) fn substring(&mut self, forms: &[Form], span: Span, env: &Env) -> Value {
+    pub(super) fn substring(
+        &mut self,
+        forms: &[Form],
+        span: Span,
+        env: &Env,
+        stock: bool,
+    ) -> Value {
         const NAME: &str = "clojure.core/subs";
         let args = self.typed_args(forms, env);
+        let returns = call_returns(&args);
+        if stock && (!returns || !self.path_reachable) {
+            return Value::new(Type::Never);
+        }
         let diagnostic_start = self.diagnostics.len();
         if !(2..=3).contains(&args.len()) {
             self.error(
@@ -40,9 +50,13 @@ impl Checker<'_> {
                 "subs requires a string, start and optional end",
             );
             self.note_builtin_contract(diagnostic_start, NAME);
+            if stock {
+                self.arity_error();
+                return Value::new(Type::Never);
+            }
             return Value::new(Type::Unknown);
         }
-        if !call_returns(&args) {
+        if !returns {
             return Value::new(Type::Never);
         }
         let value = self.substring_value(&args);

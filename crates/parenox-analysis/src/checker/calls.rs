@@ -356,7 +356,8 @@ impl<'model> Checker<'model> {
                         return value;
                     }
                     if resolved == "clojure.core/deref" {
-                        return self.deref_call(&xs[1..], span, env);
+                        let stock = self.model.can_use_standard_core(name, self.globals);
+                        return self.deref_call(&xs[1..], span, env, stock);
                     }
                     if resolved == "clojure.core/into"
                         && let Some(result) = self.collect_vector(xs, span, env)
@@ -442,11 +443,14 @@ impl<'model> Checker<'model> {
         Value::new(Type::Unknown)
     }
 
-    fn deref_call(&mut self, args: &[Form], span: Span, env: &Env) -> Value {
+    fn deref_call(&mut self, args: &[Form], span: Span, env: &Env, stock: bool) -> Value {
         let returns = self
             .eval_args(args, env, true)
             .last()
             .is_none_or(|(value, _)| value.known != Type::Never);
+        if stock && (!returns || !self.path_reachable) {
+            return Value::new(Type::Never);
+        }
         let actual = args.len();
         if !matches!(actual, 1 | 3) {
             self.error(
@@ -454,6 +458,10 @@ impl<'model> Checker<'model> {
                 span,
                 format!("deref expects 1 or 3 arguments, got {actual}"),
             );
+            if stock {
+                self.arity_error();
+                return Value::new(Type::Never);
+            }
             if returns {
                 self.may_throw();
             }

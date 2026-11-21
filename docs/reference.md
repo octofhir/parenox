@@ -637,6 +637,8 @@ standard `partial` are evaluated in source order. After a proven runtime failure
 later expressions still get compiler checks such as name resolution. Their
 runtime types and diagnostics are withheld, including when a vector literal
 supplies `apply` arguments.
+Standard `subs` and `deref` report wrong arity once their operands can return.
+A reached arity failure participates in `catch clojure.lang.ArityException`.
 With a fixed callback contract, contextual inference for plain or inertly
 annotated function literals and saved local functions runs after the eager
 operands can return. The compiler checks the closure even when the call is
