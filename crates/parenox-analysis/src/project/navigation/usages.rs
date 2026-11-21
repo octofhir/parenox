@@ -201,7 +201,9 @@ impl Session {
         provider.map_or(
             ProjectCall::Unknown,
             |(provider_path, _, declarations, forms)| {
-                declarations.source_function_call(forms, name, actual, provider_path != path)
+                declarations
+                    .source_function_call(forms, name, actual, provider_path != path)
+                    .with_source_proof(self.query_globals.as_ref(), namespace, name)
             },
         )
     }

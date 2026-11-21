@@ -13,9 +13,10 @@ use crate::types::{Arity, Type};
 
 pub(super) type Contracts = BTreeMap<String, Contract>;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Exports {
     pub functions: Contracts,
+    pub ordinary_dotted_functions: BTreeSet<String>,
     pub literals: BTreeMap<String, Type>,
     unchecked_functions: BTreeMap<String, UncheckedFunction>,
     macros: BTreeMap<String, bool>,
@@ -41,7 +42,8 @@ impl Exports {
     }
 
     fn same_function_contracts(&self, previous: &Self) -> bool {
-        self.functions.len() == previous.functions.len()
+        self.ordinary_dotted_functions == previous.ordinary_dotted_functions
+            && self.functions.len() == previous.functions.len()
             && self.functions.iter().zip(&previous.functions).all(
                 |((name, contract), (old_name, old))| {
                     name == old_name
@@ -53,6 +55,15 @@ impl Exports {
 }
 
 impl Globals {
+    pub(crate) fn proves_ordinary_dotted_function(&self, namespace: &str, name: &str) -> bool {
+        self.exports.get(namespace).is_some_and(|source| {
+            !source.ordinary_dotted_functions.is_empty()
+                && source
+                    .ordinary_dotted_functions
+                    .contains(&format!("{namespace}/{name}"))
+        })
+    }
+
     pub(crate) fn same_source_function_contracts(&self, previous: &Self) -> bool {
         let current = self
             .exports
@@ -152,6 +163,12 @@ struct Dependency {
 }
 
 impl Dependency {
+    fn proves_ordinary_dotted_function(&self, name: &str) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|source| source.ordinary_dotted_functions.contains(name))
+    }
+
     fn same_tables(&self, before: &Self) -> bool {
         fn same_arc<T>(this: &Option<Arc<T>>, before: &Option<Arc<T>>) -> bool {
             match (this, before) {
@@ -280,6 +297,8 @@ impl InterfaceChanges<'_> {
                     == old.unchecked_functions.get(&qualified)
         }) && external.is_none_or(|(current, old)| {
             current.in_project == old.in_project
+                && current.proves_ordinary_dotted_function(&qualified)
+                    == old.proves_ordinary_dotted_function(&qualified)
                 && same_visible_value(
                     current.value(&qualified),
                     old.value(&qualified),
@@ -330,6 +349,12 @@ impl Model {
                 exports.private_vars.insert(f.name.clone());
             } else if let Some(contract) = &f.contract {
                 exports.functions.insert(f.name.clone(), contract.clone());
+                if f.ordinary_dotted
+                    && !self.literals.contains_key(&f.name)
+                    && !self.unchecked_functions.contains_key(&f.name)
+                {
+                    exports.ordinary_dotted_functions.insert(f.name.clone());
+                }
             }
             functions.insert(
                 f.name.clone(),
@@ -363,6 +388,7 @@ impl Model {
             };
             let name = format!("{}/{local}", self.namespace());
             exports.functions.remove(&name);
+            exports.ordinary_dotted_functions.remove(&name);
             exports.literals.remove(&name);
             exports.unchecked_functions.remove(&name);
             exports.private_vars.remove(&name);
@@ -379,10 +405,16 @@ impl Model {
         });
     }
 
-    pub fn publish(&self, globals: &mut Globals) {
+    pub fn publish(&self, globals: &mut Globals, unambiguous: bool) {
+        let mut exports = self.exports.clone();
+        if !unambiguous && !exports.ordinary_dotted_functions.is_empty() {
+            Arc::make_mut(&mut exports)
+                .ordinary_dotted_functions
+                .clear();
+        }
         globals
             .exports
-            .insert(self.names.namespace.clone(), self.exports.clone());
+            .insert(self.names.namespace.clone(), exports);
     }
 
     pub fn interface_key(&self, globals: &Globals, has_declaration_findings: bool) -> InterfaceKey {

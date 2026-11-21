@@ -17,6 +17,7 @@ mod type_forms;
 mod type_queries;
 mod vars;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -378,6 +379,16 @@ impl Model {
                 );
             }
         }
+        if model
+            .functions
+            .values()
+            .any(|function| function.ordinary_dotted)
+            && declarations.has_var_metadata_writes(forms)
+        {
+            for function in model.functions.values_mut() {
+                function.ordinary_dotted = false;
+            }
+        }
         model.verify_guards(guards, declarations, forms, globals);
         model.check_data_functions(source, globals);
         model.collect_helpers();
@@ -698,15 +709,47 @@ impl Model {
         }
     }
 
-    pub(super) fn ordinary_dotted_function_at(
-        &self,
+    pub(super) fn ordinary_dotted_function_at<'a>(
+        &'a self,
         name: &str,
+        globals: &'a Globals,
         offset: usize,
-    ) -> Option<&Function> {
+    ) -> Option<&'a str> {
         if !bare_dotted_name(name) {
             return None;
         }
-        self.local_function_at(name, offset)
-            .filter(|function| function.ordinary_dotted)
+        if let Some(function) = self.local_function_at(name, offset) {
+            return function.ordinary_dotted.then_some(function.name.as_str());
+        }
+        if self.names.runtime_alias_gap(name).is_some() {
+            return None;
+        }
+        let referred = self.names.refers.get(name)?;
+        let (namespace, _) = referred.split_once('/')?;
+        globals
+            .exports
+            .get(namespace)?
+            .ordinary_dotted_functions
+            .get(referred)
+            .map(String::as_str)
+    }
+
+    pub(super) fn qualified_var_spelling<'a>(&self, qualified: &'a str) -> Option<Cow<'a, str>> {
+        let (namespace, name) = qualified.split_once('/')?;
+        if self.names.resolve_parts(qualified) == (namespace, name)
+            && self.names.runtime_alias_gap(qualified).is_none()
+        {
+            return Some(Cow::Borrowed(qualified));
+        }
+        self.names.aliases.iter().find_map(|(alias, target)| {
+            if target != namespace {
+                return None;
+            }
+            let spelling = format!("{alias}/{name}");
+            self.names
+                .runtime_alias_gap(&spelling)
+                .is_none()
+                .then_some(Cow::Owned(spelling))
+        })
     }
 }

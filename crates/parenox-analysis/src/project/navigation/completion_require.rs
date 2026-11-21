@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use crate::checker::{Declarations, ScopedReference};
 use crate::reader::{Form, Kind};
 
-use super::{Session, declaration::top_level_reference, symbol_at};
+use super::{Session, symbol_at};
 
 pub(super) enum LiteralRequireSite<'a> {
     Namespace(&'a str),
@@ -140,7 +140,7 @@ impl Session {
                 self.has_standard_test(),
                 |namespace, local, arity| self.navigation_call(namespace, local, arity),
             )
-            .or_else(|| top_level_reference(declarations, forms, name, offset))?;
+            .or_else(|| self.top_level_reference(declarations, forms, name, offset))?;
         if !matches!(reference, ScopedReference::InNamespace(_))
             || declarations
                 .source_var_before(forms, name, offset)

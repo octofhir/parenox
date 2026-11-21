@@ -442,7 +442,9 @@ impl Session {
                         .get_or_init(|| declarations.has_known_var_surface(forms))
             })
             .map_or(ProjectCall::Unknown, |(_, _, declarations, forms)| {
-                declarations.project_call(forms, local, actual)
+                declarations
+                    .project_call(forms, local, actual)
+                    .with_source_proof(self.query_globals.as_ref(), namespace, local)
             })
     }
 

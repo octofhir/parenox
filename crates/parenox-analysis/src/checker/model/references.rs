@@ -16,12 +16,41 @@ use crate::reader::{Form, Kind, Span};
 
 use super::contracts::function_parts;
 use super::declarations::{SourceDeclaration, collect_protocol_group_methods, symbols_match};
-use super::{Declarations, Model, bare_dotted_name, java_type_tag_at};
+use super::{Declarations, Globals, Model, bare_dotted_name, java_type_tag_at};
 
 pub(crate) enum ProjectCall {
     Unknown,
     Missing,
-    Function { expected_arity: Option<String> },
+    Function {
+        expected_arity: Option<String>,
+        ordinary_dotted: bool,
+    },
+}
+
+impl ProjectCall {
+    pub(crate) fn function(expected_arity: Option<String>) -> Self {
+        Self::Function {
+            expected_arity,
+            ordinary_dotted: false,
+        }
+    }
+
+    pub(crate) fn with_source_proof(
+        mut self,
+        globals: Option<&Globals>,
+        namespace: &str,
+        name: &str,
+    ) -> Self {
+        if let Self::Function {
+            ordinary_dotted, ..
+        } = &mut self
+            && bare_dotted_name(name)
+        {
+            *ordinary_dotted = globals
+                .is_some_and(|globals| globals.proves_ordinary_dotted_function(namespace, name));
+        }
+        self
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -48,6 +77,18 @@ impl Declarations {
                 self.source_function_call(forms, name, 0, false),
                 ProjectCall::Function { .. }
             )
+            && !self.has_var_metadata_writes(forms)
+    }
+
+    pub(super) fn has_var_metadata_writes(&self, forms: &[Form]) -> bool {
+        forms.iter().any(|form| {
+            !symbols_match(form, &mut |symbol| {
+                !matches!(
+                    self.names.resolve_parts(symbol),
+                    ("clojure.core", "alter-meta!" | "reset-meta!")
+                )
+            })
+        })
     }
 
     /// An opaque top-level form or a known namespace mutation prevents
@@ -126,7 +167,7 @@ impl Declarations {
                     .then(|| arity_counts(clauses.keys().copied()))
             }
         };
-        ProjectCall::Function { expected_arity }
+        ProjectCall::function(expected_arity)
     }
 
     pub(crate) fn check_untyped_references(
@@ -892,7 +933,14 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 }
                 false
             }
-            ProjectCall::Function { expected_arity } => {
+            ProjectCall::Function {
+                expected_arity,
+                ordinary_dotted,
+            } => {
+                if qualified.is_none() && ordinary_dotted && bare_dotted_name(symbol) {
+                    self.forms(args);
+                    return true;
+                }
                 if let Purpose::Collect(occurrences) = &mut self.purpose
                     && let Some(calls) = &mut occurrences.calls
                 {
@@ -989,12 +1037,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         } else {
             ScopedReference::InNamespace(symbol)
         };
-        if allow_local
-            && matches!(hit, ScopedReference::InNamespace(_))
-            && self
-                .names
-                .ordinary_dotted_function(self.source_forms, symbol)
-        {
+        if allow_local && bare_dotted_name(symbol) && self.ordinary_dotted_reference(symbol, hit) {
             self.select_class(symbol, span);
             return;
         }
@@ -1018,6 +1061,25 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 found.uses.push((span, hit));
             }
             Purpose::Check(_) | Purpose::ProtocolMethods { .. } => unreachable!(),
+        }
+    }
+
+    fn ordinary_dotted_reference(&mut self, symbol: &str, hit: ScopedReference<'_>) -> bool {
+        match hit {
+            ScopedReference::InNamespace(_) => self
+                .names
+                .ordinary_dotted_function(self.source_forms, symbol),
+            ScopedReference::Referred(namespace, name) => {
+                self.names.runtime_alias_gap(symbol).is_none()
+                    && matches!(
+                        (self.resolve)(namespace, name, 0),
+                        ProjectCall::Function {
+                            ordinary_dotted: true,
+                            ..
+                        }
+                    )
+            }
+            ScopedReference::Local(_) => false,
         }
     }
 

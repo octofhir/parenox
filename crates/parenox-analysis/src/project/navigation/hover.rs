@@ -7,8 +7,8 @@ use crate::types::Type;
 
 use super::{
     FileCache, InspectedReference, ResolvedVar, ScopedReference, Session, SourceTarget, SymbolSite,
-    VarInfo, archive::namespace_declarations, cached_type_query, declaration::top_level_reference,
-    source_symbol_form_at, specs::keyword_at, symbol_at, symbol_form_at,
+    VarInfo, archive::namespace_declarations, cached_type_query, source_symbol_form_at,
+    specs::keyword_at, symbol_at, symbol_form_at,
 };
 
 #[derive(Default)]
@@ -95,9 +95,7 @@ impl Session {
                         .declarations
                         .has_external_function(scope.globals, namespace, name) =>
                 {
-                    ProjectCall::Function {
-                        expected_arity: None,
-                    }
+                    ProjectCall::function(None)
                 }
                 call => call,
             },
@@ -255,7 +253,7 @@ impl Session {
                     |namespace, name, arity| self.navigation_call(namespace, name, arity),
                 )
                 .or_else(|| {
-                    top_level_reference(declarations, forms, symbol_at(forms, offset)?, offset)
+                    self.top_level_reference(declarations, forms, symbol_at(forms, offset)?, offset)
                 })?;
             match reference {
                 ScopedReference::Local(_) => return None,

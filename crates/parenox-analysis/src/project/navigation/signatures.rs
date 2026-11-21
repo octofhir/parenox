@@ -165,7 +165,7 @@ impl Session {
             Some(SourceTarget::Var(target)) => target,
             None if site.top_level => {
                 let symbol = site.head.symbol()?;
-                if declarations.ordinary_dotted_function(forms, symbol) {
+                if self.top_level_dotted_function(declarations, forms, symbol) {
                     return None;
                 }
                 let (namespace, name) = declarations.top_level_call(symbol);

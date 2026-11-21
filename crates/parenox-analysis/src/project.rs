@@ -702,7 +702,11 @@ impl Session {
                             &globals,
                         ));
                     }
-                    cache.model.as_ref().unwrap().publish(&mut globals);
+                    cache
+                        .model
+                        .as_ref()
+                        .unwrap()
+                        .publish(&mut globals, !ambiguous.contains(declarations.namespace()));
                 }
             }
         }
@@ -774,7 +778,8 @@ impl Session {
                             if matches!(
                                 call,
                                 ProjectCall::Function {
-                                    expected_arity: Some(_)
+                                    expected_arity: Some(_),
+                                    ..
                                 }
                             ) && known_provider(namespace).is_none()
                             {
@@ -804,7 +809,9 @@ impl Session {
                                 known_provider(namespace).map_or(
                                     ProjectCall::Unknown,
                                     |(provider, declarations)| {
-                                        declarations.project_call(&provider.forms, local, actual)
+                                        declarations
+                                            .project_call(&provider.forms, local, actual)
+                                            .with_source_proof(Some(&globals), namespace, local)
                                     },
                                 )
                             },

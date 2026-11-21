@@ -19,7 +19,7 @@ use model::{Contract, DeclaredValue, Function, VerifiedGuard};
 pub(crate) use model::{
     Declarations, DocumentReferences, EncodeError, ExternCache, Globals, InterfaceKey, Model,
     ProjectCall, RuntimeLoads, ScopedReference, SnapshotWriter, SpecCache, SpecConversion,
-    SpecFingerprint, SpecSource, java_type_tag_at,
+    SpecFingerprint, SpecSource, bare_dotted_name, java_type_tag_at,
 };
 pub(crate) use queries::CheckedCall;
 use queries::TypeQuery;

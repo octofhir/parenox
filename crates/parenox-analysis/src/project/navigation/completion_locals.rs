@@ -169,9 +169,7 @@ impl Session {
                         declarations.has_external_function(globals, namespace, local)
                     })
                 {
-                    ProjectCall::Function {
-                        expected_arity: None,
-                    }
+                    ProjectCall::function(None)
                 } else {
                     self.navigation_call(namespace, local, actual)
                 }

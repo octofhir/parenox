@@ -725,6 +725,7 @@ impl Declarations {
                     match public_call(namespace, name, actual) {
                         ProjectCall::Function {
                             expected_arity: Some(expected),
+                            ..
                         } => Diagnostic::new(
                             "PNX2554",
                             span,
@@ -732,6 +733,7 @@ impl Declarations {
                         ),
                         ProjectCall::Function {
                             expected_arity: None,
+                            ..
                         } => Diagnostic::analysis_gap(
                             "PNX9001",
                             span,

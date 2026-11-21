@@ -4587,6 +4587,101 @@ fn dotted_source_function_uses_follow_jvm_class_lookup() {
 }
 
 #[test]
+fn referred_dotted_function_uses_recheck_on_provider_changes() {
+    let fixture = Fixture::new("dotted function provider proof");
+    let provider = fixture.0.join("src/provider.clj");
+    let consumer = fixture.0.join("src/consumer.clj");
+    let duplicate = fixture.0.join("src/duplicate.clj");
+    let other = fixture.0.join("src/other.clj");
+    let provider_uri = uri(&provider);
+    let consumer_uri = uri(&consumer);
+    let duplicate_uri = uri(&duplicate);
+    let declaration =
+        "(ns provider)\n(defn step.next {:t/sig '[boolean? :-> boolean?]} [value] value)\n";
+    let inlined = declaration.replace(
+        "{:t/sig",
+        "{:inline (fn [_] true) :inline-arities #{1} :t/sig",
+    );
+    let mutated = format!(
+        "{declaration}(alter-meta! #'step.next assoc :inline (fn [_] true) :inline-arities #{{1}})\n"
+    );
+    let caller = concat!(
+        "(ns consumer (:require [provider :as intended :refer [step.next]] [other :as provider]))\n",
+        "(defn caller {:t/sig '[:-> t/any]} []\n",
+        "  (let [result (step.next false)] result))\n",
+    );
+    fs::write(provider, declaration).unwrap();
+    fs::write(consumer, caller).unwrap();
+    fs::write(other, "(ns other)\n(def step.next :unrelated)\n").unwrap();
+    let hover = |id| {
+        let character = caller.lines().nth(2).unwrap().rfind("result").unwrap();
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/hover","params":{
+            "textDocument":{"uri":consumer_uri},"position":{"line":2,"character":character}
+        }})
+    };
+    let open = |uri: &str, text| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":uri,"version":1,"languageId":"clojure","text":text}
+        }})
+    };
+    let close = |uri: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{
+            "textDocument":{"uri":uri}
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        open(&consumer_uri, caller),
+        hover(2),
+        open(&provider_uri, &inlined),
+        hover(3),
+        close(&provider_uri),
+        hover(4),
+        open(&duplicate_uri, declaration),
+        hover(5),
+        close(&duplicate_uri),
+        hover(6),
+        open(&provider_uri, &mutated),
+        hover(7),
+        close(&provider_uri),
+        hover(8),
+        json!({"jsonrpc":"2.0","id":9,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let diagnostics: Vec<_> = messages
+        .iter()
+        .filter(|reply| {
+            reply["method"] == "textDocument/publishDiagnostics"
+                && reply["params"]["uri"] == consumer_uri
+        })
+        .map(|reply| {
+            assert_eq!(reply["params"]["version"], 1);
+            reply["params"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| {
+                    let message = finding["message"].as_str().unwrap();
+                    let class_use =
+                        finding["code"] == "PNX9001" && message.contains("as a class name");
+                    if class_use {
+                        assert!(message.contains("Use intended/step.next to refer to the var."));
+                    }
+                    class_use
+                })
+        })
+        .collect();
+    assert_eq!(diagnostics, [true, false, true, false, true, false, true]);
+    let response = |id| &messages.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    for id in [2, 4, 6, 8] {
+        assert!(response(id).is_null(), "{id}: {:#?}", response(id));
+    }
+    for id in [3, 7] {
+        assert!(response(id).to_string().contains("Boolean"));
+    }
+}
+
+#[test]
 fn rename_and_definition_follow_the_binding_in_map_defaults() {
     let fixture = Fixture::new("references in map destructuring defaults");
     let path = fixture.0.join("src/app.clj");

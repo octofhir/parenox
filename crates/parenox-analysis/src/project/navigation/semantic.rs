@@ -70,9 +70,7 @@ impl Session {
             .iter()
             .find(|(span, _)| (span.start.offset..span.end.offset).contains(&offset))
             .map(|(_, reference)| *reference)
-            .or_else(|| {
-                super::declaration::top_level_reference(declarations, forms, spelling, offset)
-            });
+            .or_else(|| self.top_level_reference(declarations, forms, spelling, offset));
         let target = self
             .reference_target(path, offset, file, &references)
             .or_else(|| match reference? {

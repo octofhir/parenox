@@ -136,15 +136,16 @@ impl From<Vec<(Value, Span)>> for EvaluatedArguments {
 
 impl<'model> Checker<'model> {
     pub(super) fn dotted_function_class_use(&mut self, name: &str, span: Span) -> Option<Value> {
-        let function = self
-            .model
-            .ordinary_dotted_function_at(name, span.start.offset)?;
+        let qualified =
+            self.model
+                .ordinary_dotted_function_at(name, self.globals, span.start.offset)?;
+        let hint = self.model.qualified_var_spelling(qualified).map_or_else(
+            || format!("The matching var is {qualified}."),
+            |spelling| format!("Use {spelling} to refer to the var."),
+        );
         Some(self.unchecked_form(
             span,
-            &format!(
-                "Clojure/JVM resolves unqualified {name} as a class name. Use {} to refer to the var.",
-                function.name
-            ),
+            &format!("Clojure/JVM resolves unqualified {name} as a class name. {hint}"),
         ))
     }
 

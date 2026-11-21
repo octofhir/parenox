@@ -245,7 +245,7 @@ impl CheckedPrefix {
         let mut globals = globals.clone();
         globals.register_namespace(declarations.namespace());
         let model = Model::build(&declarations, &read.forms, source, path, &globals);
-        model.publish(&mut globals);
+        model.publish(&mut globals, true);
         Some(Self {
             declarations,
             forms: read.forms,
