@@ -1,5 +1,5 @@
 //! Strict indexing through clojure.core/nth and vector invocation.
-use super::super::{Checker, Value};
+use super::super::{Checker, LiteralContainer, Value};
 use crate::Diagnostic;
 use crate::reader::Span;
 use crate::types::{IndexedItem, IntegerRange, IntegerType, Type};
@@ -23,13 +23,47 @@ impl Checker<'_> {
     pub(super) fn nth(&mut self, args: &[(Value, Span)]) -> Value {
         let (collection, collection_span) = &args[0];
         let (key, key_span) = &args[1];
-        let fallback = args.get(2).map(|(value, _)| &value.known);
-        Value::new(self.nth_value(
+        let fallback = args.get(2).map(|(value, _)| value);
+        let index = match &key.known {
+            Type::Integer(index)
+            | Type::Integral(IntegerType {
+                range: IntegerRange::Exact(index),
+                ..
+            }) => Some(*index),
+            _ => None,
+        };
+        let proof = match (&collection.known, &collection.literal_container) {
+            (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) => {
+                Some((items, vector))
+            }
+            _ => None,
+        };
+        if self.partial_scope.is_some()
+            && (index.is_none() || (proof.is_none() && collection.known != Type::Nil))
+        {
+            return Value::new(Type::Unknown);
+        }
+        let mut result = Value::new(self.nth_value(
             (&collection.known, *collection_span),
             (&key.known, *key_span),
-            fallback,
+            fallback.map(|value| &value.known),
             IndexedAccess::Nth,
-        ))
+        ));
+        if let Some(index) = index {
+            let fallback_proof = || fallback.and_then(|value| value.literal_container.as_ref());
+            let selected = if collection.known == Type::Nil {
+                fallback_proof()
+            } else if let Some((items, vector)) = proof {
+                match usize::try_from(index) {
+                    Ok(index) if index < items.len() => vector.vector_item(index),
+                    _ => fallback_proof(),
+                }
+            } else {
+                None
+            };
+            result.literal_container = selected.cloned();
+        }
+        result
     }
 
     pub(super) fn vector_call(

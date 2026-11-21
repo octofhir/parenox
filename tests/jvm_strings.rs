@@ -177,6 +177,55 @@ fn unannotated_arglist_reads_keep_ordinary_vector_elements() {
 }
 
 #[test]
+fn unannotated_line_slice_checks_the_first_invalid_bound() {
+    let source = r#"
+(defn alias-text []
+  (let [lines (nth [["a🦊b"]] (dec 1))
+        name-end-row 1
+        name-end-col 2
+        alias-col 5]
+    (subs (nth lines (dec name-end-row))
+          (dec name-end-col) (dec alias-col))))
+(defn index-only [] (nth [] 3))
+"#;
+    let broken_column = source.replace("alias-col 5", "alias-col 6");
+    let broken_row = broken_column.replace("name-end-row 1", "name-end-row 2");
+    let mut session = Session::default();
+    for (text, expected) in [
+        (source, None),
+        (
+            &broken_column,
+            Some(("clojure.core/subs", "(dec alias-col)")),
+        ),
+        (
+            &broken_row,
+            Some(("clojure.core/nth", "(dec name-end-row)")),
+        ),
+        (source, None),
+    ] {
+        let report = session.check("aliases.clj", text);
+        assert!(!report.complete, "{report:#?}");
+        let errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|finding| finding.severity == "error")
+            .collect();
+        match (errors.as_slice(), expected) {
+            ([], None) => {}
+            ([finding], Some((origin, fragment))) => {
+                assert_eq!(finding.code, "PNX2801");
+                assert_eq!(finding.contract.as_ref().unwrap().name, origin);
+                assert_eq!(
+                    &text[finding.span.start.offset..finding.span.end.offset],
+                    fragment
+                );
+            }
+            _ => panic!("{report:#?}"),
+        }
+    }
+}
+
+#[test]
 fn checks_jvm_utf16_length_and_characters_after_nil_guards() {
     let mut session = Session::default();
     let report = session.check("jvm_strings.cljc", SOURCE);

@@ -53,6 +53,18 @@ fn read_fallbacks_distinguish_missing_from_present_nil() {
 }
 
 #[test]
+fn nth_preserves_proved_vector_elements_and_fallbacks() {
+    for expression in [
+        r#"(mapv first (nth [[["x"] ["y"]]] 0x0))"#,
+        r#"(mapv first (nth [] 1N [["x"] ["y"]]))"#,
+        r#"(mapv first (nth nil 1 [["x"] ["y"]]))"#,
+    ] {
+        let report = check(expression, r#"(clojure.spec.alpha/tuple #{"x"} #{"y"})"#);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
 fn keeps_unmodeled_numeric_indices_and_writes_explicit() {
     for (expression, code) in [
         ("(nth [:sku] 0.5)", "PNX9001"),

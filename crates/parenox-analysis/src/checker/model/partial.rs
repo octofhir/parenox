@@ -106,6 +106,9 @@ impl Declarations {
                 diagnostic.contract.as_ref().is_some_and(|origin| {
                     (matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
                         && partial_string_operator(&origin.name))
+                        || (diagnostic.code == "PNX2801"
+                            && origin.kind == ContractKind::Builtin
+                            && origin.name == "clojure.core/nth")
                         || (diagnostic.code == "PNX2322"
                             && origin.kind == ContractKind::Extern
                             && model.partial_extern_available(globals, origin))
@@ -167,6 +170,7 @@ impl Checker<'_> {
                 "clojure.core/mapv"
                     | "clojure.core/count"
                     | "clojure.core/first"
+                    | "clojure.core/nth"
                     | "clojure.core/inc"
                     | "clojure.core/dec"
                     | "clojure.core/min"

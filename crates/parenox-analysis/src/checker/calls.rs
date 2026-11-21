@@ -707,6 +707,7 @@ impl<'model> Checker<'model> {
                 resolved,
                 "clojure.core/count"
                     | "clojure.core/first"
+                    | "clojure.core/nth"
                     | "clojure.core/inc"
                     | "clojure.core/dec"
                     | "clojure.core/conj"
