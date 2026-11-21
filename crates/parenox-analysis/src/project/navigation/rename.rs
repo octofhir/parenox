@@ -78,6 +78,14 @@ impl Session {
                 if !plain_name(name) || implicit_key_binding(&token) {
                     return Err("This binding derives its name from a destructured key".into());
                 }
+                if let Some(replacement) =
+                    new_name.filter(|replacement| *replacement != name && replacement.contains('.'))
+                    && !origin.named_fn_bindings.contains(binding)
+                {
+                    return Err(format!(
+                        "Clojure/JVM local binding {replacement} cannot contain a dot"
+                    ));
+                }
                 (name, None, Some(bounds(top.span)))
             }
             SourceTarget::Var(target) => {

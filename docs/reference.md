@@ -854,7 +854,8 @@ project, a buffer has no project context.
   them. It covers ordinary source vars and lexical bindings. Linked editing
   covers proven lexical bindings within one file. Definition, references and
   rename follow reads in `:or` values of a direct map destructuring in `let`
-  or a function parameter.
+  or a function parameter. Dots are permitted when renaming the self-binding
+  of a named `fn` or `fn*`. Ordinary JVM locals require a name without dots.
 - **Call Hierarchy** groups source calls by resolved caller or callee.
   **Code Lens** resolves reference counts on source var declarations.
 - Semantic tokens work for the whole file or a specified range. Folding

@@ -35,6 +35,7 @@ pub(crate) enum ScopedReference<'a> {
 pub(crate) struct DocumentReferences<'a> {
     pub uses: Vec<(Span, ScopedReference<'a>)>,
     pub bindings: Vec<Span>,
+    pub named_fn_bindings: Vec<Span>,
     pub calls: Option<Vec<(Span, ScopedReference<'a>)>>,
     literal_bindings: Option<BTreeSet<usize>>,
 }
@@ -1165,6 +1166,12 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 target.dotted_fn_names.push(span.start.offset);
             }
             self.bind(symbol, span);
+            if let Purpose::Collect(occurrences) = &mut self.purpose
+                && occurrences.calls.is_none()
+                && occurrences.literal_bindings.is_none()
+            {
+                occurrences.named_fn_bindings.push(span);
+            }
             tail
         } else {
             args

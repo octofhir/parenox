@@ -4354,6 +4354,69 @@ fn rename_tracks_cross_file_vars_and_lexical_bindings_without_capture() {
 }
 
 #[test]
+fn rename_preserves_jvm_local_binding_name_rules() {
+    let fixture = Fixture::new("rename JVM local names");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    let source = concat!(
+        "(ns app)\n",
+        "(defn argument [input] input)\n",
+        "(defn binding [input] (let [value input] value))\n",
+        "(defn group [] (letfn [(worker [n] n)] (worker 2)))\n",
+        "(defn recursive [] ((fn walk [n] (if (= n 0) 0 (walk (dec n)))) 2))\n",
+        "(defn raw [] ((fn* walk [n] (if (= n 0) 0 (walk (dec n)))) 2))\n",
+        "(defn producer [value] value)\n",
+        "(defn caller [] (app/producer 2))\n",
+    );
+    fs::write(&path, source).unwrap();
+    let cases = [
+        (1, "input]", "input.next", false),
+        (2, "value input", "value.next", false),
+        (3, "worker [n]", "worker.next", false),
+        (4, "walk [n]", "walk.next", true),
+        (5, "walk [n]", "walk.next", true),
+        (7, "producer 2", "producer.next", true),
+    ];
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),"capabilities":{"workspace":{"workspaceEdit":{"documentChanges":true}}}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"version":3,"languageId":"clojure","text":source}
+        }}),
+    ];
+    for (index, (line, token, new_name, _)) in cases.iter().enumerate() {
+        let column = source.lines().nth(*line).unwrap().find(token).unwrap();
+        requests.push(json!({"jsonrpc":"2.0","id":index+2,"method":"textDocument/rename","params":{
+            "textDocument":{"uri":file},"position":{"line":line,"character":column},"newName":new_name
+        }}));
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":20,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let messages = transcript(&requests);
+    for (index, (_, _, name, allowed)) in cases.into_iter().enumerate() {
+        let response = messages
+            .iter()
+            .find(|reply| reply["id"] == index + 2)
+            .unwrap();
+        if allowed {
+            let document = &response["result"]["documentChanges"][0];
+            assert_eq!(document["textDocument"], json!({"uri":file,"version":3}));
+            let edits = document["edits"].as_array().unwrap();
+            assert_eq!(edits.len(), 2);
+            assert!(edits.iter().all(|edit| edit["newText"] == name));
+        } else {
+            assert_eq!(response["error"]["code"], -32602);
+            assert_eq!(
+                response["error"]["message"],
+                format!("Clojure/JVM local binding {name} cannot contain a dot")
+            );
+        }
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
 fn rename_and_definition_follow_the_binding_in_map_defaults() {
     let fixture = Fixture::new("references in map destructuring defaults");
     let path = fixture.0.join("src/app.clj");
