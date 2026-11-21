@@ -16,7 +16,6 @@ mod search;
 mod sequences;
 mod strings;
 mod vectors;
-use std::sync::Arc;
 pub(super) use vectors::{narrow_vector_predicate, vector_predicate};
 
 pub(super) use sequences::{iteration_may_throw, narrow_emptiness};
@@ -40,7 +39,7 @@ use inline::{CallbackReturn, Fnil, InlineFunction, Partial};
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
     Captured {
-        function: Arc<CapturedInline>,
+        function: CapturedInline,
         compile_when_uninvoked: bool,
     },
     Fnil(Box<Fnil<'form, 'model>>),

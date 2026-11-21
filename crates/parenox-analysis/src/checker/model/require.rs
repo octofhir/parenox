@@ -529,6 +529,7 @@ pub(super) fn known_core_var(name: &str) -> bool {
                 | "loop"
                 | "fn"
                 | "let"
+                | "letfn"
                 | "or"
                 | "and"
                 | "cond"

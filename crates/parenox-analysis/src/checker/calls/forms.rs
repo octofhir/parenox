@@ -8,6 +8,7 @@ pub(super) enum CoreForm {
     Thread(Threading),
     NamedThread,
     Let,
+    LetFn,
     Loop,
     Comprehension { lazy: bool },
     Cond,
@@ -40,6 +41,7 @@ impl CoreForm {
         Some(match name.strip_prefix("clojure.core/")? {
             "as->" => Self::NamedThread,
             "let" => Self::Let,
+            "letfn" => Self::LetFn,
             "loop" => Self::Loop,
             "for" => Self::Comprehension { lazy: true },
             "doseq" => Self::Comprehension { lazy: false },
@@ -91,6 +93,16 @@ impl Checker<'_> {
             CoreForm::Thread(threading) => self.thread_form(xs, span, env, threading, name, tail),
             CoreForm::NamedThread => self.named_thread(xs, span, env, tail),
             CoreForm::Let => self.let_form(xs, span, env, tail),
+            CoreForm::LetFn => {
+                if self
+                    .model
+                    .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
+                {
+                    self.letfn_form(&xs[1..], span, env, tail)
+                } else {
+                    self.unchecked_form(xs[0].span, "Standard clojure.core/letfn is unconfirmed")
+                }
+            }
             CoreForm::Loop => self.loop_form(xs, span, env, false),
             CoreForm::Comprehension { lazy } => self.comprehension(&xs[1..], span, env, lazy, tail),
             CoreForm::Cond => self.cond_form(&xs[1..], span, env, tail),

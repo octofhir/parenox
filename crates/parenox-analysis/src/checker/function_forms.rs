@@ -9,6 +9,23 @@ use crate::types::{Arity, MAX_TUPLE_ITEMS, Type};
 
 pub(super) const MAX_FIXED_PARAMETERS: usize = 20;
 
+pub(super) fn letfn_bindings(form: &Form) -> Option<&[Form]> {
+    match &form.without_metadata().kind {
+        Kind::List(forms) | Kind::Vector(forms) => Some(forms),
+        Kind::Nil => Some(&[]),
+        Kind::Map(forms) | Kind::Set(forms) if forms.is_empty() => Some(&[]),
+        Kind::String(text) if text.is_empty() => Some(&[]),
+        _ => None,
+    }
+}
+
+pub(super) fn letfn_definition(form: &Form) -> Option<&[Form]> {
+    match &form.without_metadata().kind {
+        Kind::List(forms) | Kind::Vector(forms) => Some(forms),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct FunctionConditions<'a> {
     pub pre: &'a [Form],

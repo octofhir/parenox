@@ -5,7 +5,8 @@ use crate::Diagnostic;
 use crate::checker::bindings::binding_names;
 use crate::checker::calls::arity_counts;
 use crate::checker::function_forms::{
-    Clause, function_clauses, lexical_fn_star_clauses, lexical_function_clauses,
+    Clause, function_clauses, letfn_bindings, letfn_definition, lexical_fn_star_clauses,
+    lexical_function_clauses,
 };
 use crate::expand::Threading;
 use crate::reader::{Form, Kind, Span};
@@ -960,15 +961,12 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         let [specs, body @ ..] = args else {
             return;
         };
-        let Some(specs) = specs.vector() else {
+        let Some(specs) = letfn_bindings(specs) else {
             return;
         };
         let mut functions = Vec::with_capacity(specs.len());
         for spec in specs {
-            let Kind::List(items) = &spec.without_metadata().kind else {
-                return;
-            };
-            let [name, tail @ ..] = items.as_slice() else {
+            let Some([name, tail @ ..]) = letfn_definition(spec) else {
                 return;
             };
             let Some(symbol) = name
@@ -986,10 +984,14 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         for &((name, span), _) in &functions {
             self.bind(name, span);
         }
-        for (_, clauses) in &functions {
+        for (binding, clauses) in &functions {
+            // A duplicate name can shadow the group binding. The named fn
+            // still sees its own definition within its clauses.
+            self.locals.push(*binding);
             for clause in clauses.values() {
                 self.clause(clause);
             }
+            self.locals.pop();
         }
         self.forms(body);
         self.locals.truncate(scope);

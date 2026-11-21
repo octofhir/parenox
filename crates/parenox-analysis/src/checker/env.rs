@@ -11,7 +11,7 @@ pub(super) const MAX_SELECTOR_KEYS: usize = 32;
 #[derive(Clone, Default)]
 pub(super) struct Env {
     bindings: BTreeMap<String, Binding>,
-    inline_functions: BTreeMap<String, Arc<CapturedInline>>,
+    inline_functions: BTreeMap<String, CapturedInline>,
     next_binding: usize,
     retained_owners: BTreeMap<BindingId, Value>,
     pinned_owners: Vec<BindingId>,
@@ -30,9 +30,23 @@ struct Binding {
     value: Value,
 }
 
-pub(super) struct CapturedInline {
+#[derive(Clone)]
+pub(super) enum CapturedInline {
+    Single(Arc<CapturedFn>),
+    Group {
+        group: Arc<LetFnGroup>,
+        index: usize,
+    },
+}
+
+pub(super) struct CapturedFn {
     pub form: Form,
     pub scope: Env,
+}
+
+pub(super) struct LetFnGroup {
+    pub scope: Env,
+    pub definitions: Box<[(String, Form)]>,
 }
 
 #[derive(Clone)]
@@ -84,11 +98,11 @@ impl Env {
         self.bindings.contains_key(name)
     }
 
-    pub(super) fn inline_function(&self, name: &str) -> Option<&Arc<CapturedInline>> {
+    pub(super) fn inline_function(&self, name: &str) -> Option<&CapturedInline> {
         self.inline_functions.get(name)
     }
 
-    pub(super) fn mark_inline(&mut self, name: &str, function: Arc<CapturedInline>) {
+    pub(super) fn mark_inline(&mut self, name: &str, function: CapturedInline) {
         self.inline_functions.insert(name.into(), function);
     }
 

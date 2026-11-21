@@ -1,10 +1,12 @@
 //! Contextual inference for inline and let-bound functions and callable wrappers.
+mod letfn;
+
 use std::sync::Arc;
 
 use super::super::{
     Checker, Env, Value,
-    env::CapturedInline,
-    function_forms::{MAX_FIXED_PARAMETERS, function_clauses, pack_arguments},
+    env::{CapturedFn, CapturedInline},
+    function_forms::{MAX_FIXED_PARAMETERS, function_clauses, letfn_definition, pack_arguments},
     nil_part,
 };
 use super::{Callable, PreparedCallable, call_returns, combinators::Combiner};
@@ -29,7 +31,7 @@ impl<'a> InlineFunction<'a> {
         }
     }
 
-    fn bind_name(self, function: &Arc<CapturedInline>, env: &mut Env) {
+    fn bind_name(self, function: &CapturedInline, env: &mut Env) {
         if let Some(name) = self.name() {
             env.insert(name.into(), Value::new(Type::Unknown));
             env.mark_inline(name, function.clone());
@@ -38,14 +40,41 @@ impl<'a> InlineFunction<'a> {
 }
 
 impl CapturedInline {
-    fn function(&self) -> InlineFunction<'_> {
-        // Capture construction has already resolved the head in the
-        // definition's lexical scope. Only ordinary and #() functions
-        // can be stored as captured inline functions.
-        match &self.form.without_metadata().kind {
-            Kind::List(parts) => InlineFunction::Function(&parts[1..]),
-            Kind::AnonymousFunction(function) => InlineFunction::Literal(function),
-            _ => unreachable!("captured fn has no function syntax"),
+    fn single(form: &Form, scope: &Env) -> Self {
+        Self::Single(Arc::new(CapturedFn {
+            form: form.clone(),
+            scope: scope.clone(),
+        }))
+    }
+
+    fn syntax(&self) -> (&Form, InlineFunction<'_>) {
+        match self {
+            Self::Single(function) => {
+                // Capture construction resolved the head in the definition scope.
+                let form = &function.form;
+                let function = match &form.without_metadata().kind {
+                    Kind::List(parts) => InlineFunction::Function(&parts[1..]),
+                    Kind::AnonymousFunction(function) => InlineFunction::Literal(function),
+                    _ => unreachable!("captured fn has no function syntax"),
+                };
+                (form, function)
+            }
+            Self::Group { group, index } => {
+                let form = &group.definitions[*index].1;
+                let parts = letfn_definition(form).expect("validated letfn definition");
+                (form, InlineFunction::Function(parts))
+            }
+        }
+    }
+
+    fn refine_scope(&self, caller: &Env) -> Env {
+        match self {
+            Self::Single(function) => function.scope.refine_capture(caller),
+            Self::Group { group, .. } => {
+                let mut scope = group.scope.refine_capture(caller);
+                group.bind_to(&mut scope);
+                scope
+            }
         }
     }
 }
@@ -120,10 +149,7 @@ impl<'model> Checker<'model> {
             match self.inline_syntax(form, env)? {
                 InlineSyntax::Function(function) if function.name().is_some() => {
                     Callable::Captured {
-                        function: Arc::new(CapturedInline {
-                            form: form.clone(),
-                            scope: env.clone(),
-                        }),
+                        function: CapturedInline::single(form, env),
                         compile_when_uninvoked: true,
                     }
                 }
@@ -157,10 +183,7 @@ impl<'model> Checker<'model> {
                     return false;
                 };
                 if self.local_inline_step(init.span) {
-                    let function = Arc::new(CapturedInline {
-                        form: init.clone(),
-                        scope: env.clone(),
-                    });
+                    let function = CapturedInline::single(init, env);
                     let scope = inline.name().map(|_| {
                         let mut scope = env.clone();
                         inline.bind_name(&function, &mut scope);
@@ -192,7 +215,7 @@ impl<'model> Checker<'model> {
 
     pub(super) fn call_captured(
         &mut self,
-        function: &Arc<CapturedInline>,
+        function: &CapturedInline,
         args: Vec<(Value, Span)>,
         call: Span,
         caller: &Env,
@@ -214,13 +237,13 @@ impl<'model> Checker<'model> {
                 format!("Local fn nesting limit ({MAX_CALLBACK_DEPTH}) exceeded"),
             );
         }
-        let inline = function.function();
+        let (constructor, inline) = function.syntax();
         // Binding IDs retain refinement only for locals still in the same
         // lexical scope. A later binding with the same name is a new value.
-        let mut scope = function.scope.refine_capture(caller);
+        let mut scope = function.refine_scope(caller);
         inline.bind_name(function, &mut scope);
         self.callback_depth += usize::from(invoked);
-        let result = self.call_inline(inline, args, function.form.span, call, &scope, invoked);
+        let result = self.call_inline(inline, args, constructor.span, call, &scope, invoked);
         self.callback_depth -= usize::from(invoked);
         result
     }
@@ -334,7 +357,7 @@ impl<'model> Checker<'model> {
         };
         let saved = form.symbol().and_then(|name| env.inline_function(name));
         let (constructor, function) = if let Some(closure) = saved {
-            (&closure.form, closure.function())
+            closure.syntax()
         } else {
             let InlineSyntax::Function(function) = self.inline_syntax(form, env)? else {
                 return None;
@@ -367,14 +390,10 @@ impl<'model> Checker<'model> {
         if saved.is_some() && !self.local_inline_step(form.span) {
             return Some(ContextualCallback::unchecked());
         }
-        let named = (saved.is_none() && function.name().is_some()).then(|| {
-            Arc::new(CapturedInline {
-                form: form.clone(),
-                scope: env.clone(),
-            })
-        });
+        let named = (saved.is_none() && function.name().is_some())
+            .then(|| CapturedInline::single(form, env));
         let scope = saved.or(named.as_ref()).map(|closure| {
-            let mut scope = closure.scope.refine_capture(env);
+            let mut scope = closure.refine_scope(env);
             function.bind_name(closure, &mut scope);
             scope
         });
