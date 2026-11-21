@@ -153,7 +153,7 @@ impl Checker<'_> {
             .map(|entries| self.map_defaults(entries.as_chunks::<2>().0, env, reachable));
         let reachable = reachable && defaults.as_ref().is_none_or(|defaults| !defaults.stopped);
         let value = self.infer_path(init, env, reachable, false);
-        let returns = value.known != Type::Never;
+        let returns = !value.stops_evaluation();
         self.inspect_path(returns, |checker| {
             let source = checker.binding_selector(pattern, init, env);
             checker.bind_selected(pattern, value, env, source, defaults);
@@ -487,7 +487,7 @@ impl Checker<'_> {
                 reachable && (!ordered || !defaults.stopped),
                 false,
             );
-            defaults.stopped |= value.known == Type::Never;
+            defaults.stopped |= value.stops_evaluation();
             let target = pair[0].span;
             let duplicate = if let Some(name) = pair[0].symbol() {
                 defaults

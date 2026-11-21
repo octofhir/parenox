@@ -406,7 +406,9 @@ impl Checker<'_> {
         let start = self.diagnostics.len();
         let mut checked_inline = false;
         for pair in bindings.as_chunks::<2>().0 {
-            if self.bind_inline(&pair[0], &pair[1], &mut local) {
+            if self.inspect_path(reachable && local.reachable(), |checker| {
+                checker.bind_inline(&pair[0], &pair[1], &mut local)
+            }) {
                 checked_inline = true;
                 continue;
             }

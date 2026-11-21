@@ -571,7 +571,8 @@ For a structural tuple with unconfirmed traversal, Parenox reports a coverage
 gap and withholds exact callback types. Indexed reads retain the tuple contract.
 In a direct map destructuring binding, Clojure 1.13 evaluates the `:or`
 defaults before the value to destructure. A default can run even when its
-key is present or unused.
+key is present or unused. A proven runtime failure in a default or initializer
+leaves later bindings and the body subject to compiler checks.
 `recur` must target a supported tail position and analysis is
 bounded when argument types keep growing.
 

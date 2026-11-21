@@ -161,6 +161,52 @@ fn sequential_bodies_keep_compiler_checks_and_skip_runtime_suffixes() {
 }
 
 #[test]
+fn let_stops_after_failed_initializers_and_eager_defaults() {
+    let source = r#"(ns demo)
+(defn initializer {:t/sig '[:-> t/any]} []
+  (let [stopped (subs :bad-init 0)
+        later (subs :dead-init 0)
+        callback (fn [_] missing-closure-name)]
+    (str later missing-body-name)))
+(defn direct-default {:t/sig '[:-> t/any]} []
+  (let [{:keys [left right]
+         :or {left (subs :bad-default 0)
+              right (subs :dead-default 0)}}
+        (subs :dead-map-init 0)]
+    (subs :dead-map-body 0)))
+(defn accepts-at-runtime {:t/sig '[string? :-> any?]} [_] :default)
+(defn contract-only {:t/sig '[:-> t/any]} []
+  (let [{:keys [left right]
+         :or {left (accepts-at-runtime false) right (subs "abc" -5)}}
+        {:left :present}]
+    [left right]))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", ":bad-init"),
+            ("PNX2304", "missing-closure-name"),
+            ("PNX2304", "missing-body-name"),
+            ("PNX2322", ":bad-default"),
+            ("PNX2322", "false"),
+            ("PNX2801", "-5"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn vector_metadata_effects_follow_elements_and_merge_before_checking() {
     let source = r#"(ns demo (:require [clojure.string :as string]) (:import java.util.UUID))
 (defn inert-class {:t/sig '[:-> #{"ab"}]} []
