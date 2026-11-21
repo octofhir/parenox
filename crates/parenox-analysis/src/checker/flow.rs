@@ -370,12 +370,22 @@ impl Checker<'_> {
         }
         let mut local = env.clone();
         let mut reachable = true;
+        let start = self.diagnostics.len();
+        let mut checked_inline = false;
         for pair in bindings.as_chunks::<2>().0 {
+            if self.bind_inline(&pair[0], &pair[1], &mut local) {
+                checked_inline = true;
+                continue;
+            }
             let value = self.infer_path(&pair[1], &local, reachable, false);
             reachable = value.known != Type::Never;
             self.bind_initializer(&pair[0], &pair[1], value, &mut local);
         }
-        self.check_path(reachable, |checker| checker.body(&xs[2..], &local, tail))
+        let value = self.check_path(reachable, |checker| checker.body(&xs[2..], &local, tail));
+        if checked_inline {
+            self.dedup_diagnostics(start);
+        }
+        value
     }
 
     pub(super) fn if_form(

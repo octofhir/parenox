@@ -14,6 +14,7 @@ mod reduction;
 mod sequences;
 mod strings;
 mod vectors;
+use std::sync::Arc;
 pub(super) use vectors::{narrow_vector_predicate, vector_predicate};
 
 pub(super) use sequences::{iteration_may_throw, narrow_emptiness};
@@ -21,6 +22,7 @@ pub(super) use sequences::{iteration_may_throw, narrow_emptiness};
 use super::flow::Conditional;
 use super::{
     Checker, Env, Value,
+    env::CapturedInline,
     exceptions::Throws,
     function_forms::pack_arguments,
     model::{DeclaredValue, Function},
@@ -34,6 +36,7 @@ use inline::{CallbackReturn, Fnil, InlineFunction};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
+    Captured(Arc<CapturedInline>),
     Fnil(Box<Fnil<'form, 'model>>),
     Private(&'model Function),
     Builtin(String),
@@ -589,6 +592,7 @@ impl<'model> Checker<'model> {
             Callable::Inline(parts) => {
                 self.call_inline(*parts, args, callable.span, span, env, invoked)
             }
+            Callable::Captured(function) => self.call_captured(function, args, span, env, invoked),
             Callable::Fnil(wrapper) => self.call_fnil(wrapper, args, span, env, invoked),
             _ if !invoked => Value::new(Type::Never),
             Callable::Private(function) => self.inferred_call(

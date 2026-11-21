@@ -1,4 +1,4 @@
-use parenox::{Report, Session};
+use parenox::{DocumentHover, Report, Session};
 
 fn check(body: &str) -> Report {
     let source =
@@ -21,6 +21,7 @@ fn inline_parameters_capture_outer_locals_and_shadow_them_only_in_the_body() {
         r#"(defn f {:t/sig '[:-> nil?]} [] ((fn [x]) 42))"#,
         r#"(defn f {:t/sig '[:-> number?]} [] ((fnil (fn [n] (inc n)) 0) nil))"#,
         r#"(defn f {:t/sig '[:-> number?]} [] (count ((fn [] {:pre [false]}))))"#,
+        r#"(defn f {:t/sig '[:-> number?]} [] (let [f (fn [x] (inc x))] (f 1)))"#,
     ] {
         let report = check(body);
         assert!(report.ok && report.complete, "{body}: {report:#?}");
@@ -38,11 +39,82 @@ fn diagnoses_original_fn_body_and_unsupported_callable_forms() {
         ("((fn walk [x] x) 1)", "PNX9001"),
         ("((fn [x] {:pre (false)} x) 1)", "PNX9001"),
         ("((fn ^{:post (false)} [x] x) 1)", "PNX9001"),
-        ("(let [f (fn [x] x)] (f 1))", "PNX9001"),
+        ("(let [f (fn [x] x)] (identity f))", "PNX9001"),
     ] {
         let report = check(&format!("(defn f {{:t/sig '[:-> number?]}} [] {expr})"));
         assert_eq!(report.diagnostics[0].code, code, "{expr}: {report:#?}");
     }
+}
+
+#[test]
+fn let_bound_callables_keep_their_captures_and_are_specialized_per_use() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+      (defn picked {:t/sig '[string? number? :-> string?]} [word n]
+        (let [last-item (fn [_ item] item)
+              reducer last-item]
+          (str (subs (reduce reducer "" [word]) 0) (inc (reduce reducer 0 [n])))))
+      (defn shadowed {:t/sig '[:-> string?]} []
+        (let [prefix "first" step (fn [_ n] (subs prefix n)) prefix 7]
+          (reduce step "" [0])))
+      (defn guarded {:t/sig '[(s/nilable string?) :-> string?]} [prefix]
+        (let [step (fn [_ n] (subs prefix n))]
+          (if (some? prefix) (reduce step "" [0]) "")))"#;
+    let mut session = Session::default();
+    let report = session.check("saved.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    for (offset, ty) in [
+        (
+            source.find("item] item").unwrap() + "item] ".len(),
+            "Number | String",
+        ),
+        (source.rfind("prefix n").unwrap(), "String"),
+    ] {
+        let Some(DocumentHover::Local(local)) = session.document_hover_at("saved.clj", offset)
+        else {
+            panic!("expected local type at byte {offset}");
+        };
+        assert_eq!(local.inferred_type, ty);
+    }
+}
+
+#[test]
+fn unused_let_bound_functions_compile_but_do_not_execute_and_expansion_is_bounded() {
+    let report = check(
+        r#"
+        (defn ready {:t/sig '[:-> string?]} []
+          (try
+            (let [step (fn [_ _] (throw (ex-info "unreachable" {:stage :body})))]
+              (reduce step "ready" []))
+            (catch clojure.lang.ExceptionInfo _ 7)))
+    "#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+    let report = check("(defn f {:t/sig '[:-> number?]} [] (let [bad (fn [x] (unbound x))] 0))");
+    let [unbound] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(unbound.code, "PNX2304");
+
+    let mut source =
+        String::from("(ns demo) (defn run {:t/sig '[:-> number?]} [] (let [f0 (fn [x] (inc x))");
+    for index in 1..16 {
+        let previous = index - 1;
+        source.push_str(&format!(
+            " f{index} (fn [x] (+ (f{previous} x) (f{previous} x)))"
+        ));
+    }
+    source.push_str("] (f15 0)))");
+    let mut session = Session::default();
+    let report = session.check("many.clj", &source);
+    assert!(!report.complete, "{report:#?}");
+    assert!(
+        report.diagnostics.iter().any(|finding| {
+            finding.code == "PNX9001" && finding.message.contains("Local fn analysis limit")
+        }),
+        "{report:#?}"
+    );
+    let offset = source.find("inc x").unwrap() + "inc ".len();
+    assert!(session.document_hover_at("many.clj", offset).is_none());
 }
 
 #[test]

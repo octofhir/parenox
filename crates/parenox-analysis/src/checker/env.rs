@@ -1,5 +1,6 @@
 //! Lexical locals and presence facts scoped to the current bindings.
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::Value;
 use crate::reader::Form;
@@ -10,6 +11,7 @@ pub(super) const MAX_SELECTOR_KEYS: usize = 32;
 #[derive(Clone, Default)]
 pub(super) struct Env {
     bindings: BTreeMap<String, Binding>,
+    inline_functions: BTreeMap<String, Arc<CapturedInline>>,
     next_binding: usize,
     retained_owners: BTreeMap<BindingId, Value>,
     pinned_owners: Vec<BindingId>,
@@ -26,6 +28,11 @@ struct BindingId(usize);
 struct Binding {
     id: BindingId,
     value: Value,
+}
+
+pub(super) struct CapturedInline {
+    pub form: Form,
+    pub scope: Env,
 }
 
 #[derive(Clone)]
@@ -77,11 +84,41 @@ impl Env {
         self.bindings.contains_key(name)
     }
 
+    pub(super) fn inline_function(&self, name: &str) -> Option<&Arc<CapturedInline>> {
+        self.inline_functions.get(name)
+    }
+
+    pub(super) fn mark_inline(&mut self, name: &str, function: Arc<CapturedInline>) {
+        self.inline_functions.insert(name.into(), function);
+    }
+
+    pub(super) fn refine_capture(&self, caller: &Self) -> Self {
+        let mut scope = self.clone();
+        for (name, binding) in &mut scope.bindings {
+            let current = caller
+                .bindings
+                .get(name)
+                .filter(|current| current.id == binding.id)
+                .map(|current| &current.value)
+                .or_else(|| caller.retained_owners.get(&binding.id));
+            if let Some(value) = current {
+                binding.value = value.clone();
+            }
+        }
+        for (id, value) in &mut scope.retained_owners {
+            if let Some(current) = caller.retained_owners.get(id) {
+                *value = current.clone();
+            }
+        }
+        scope
+    }
+
     pub(super) fn insert(&mut self, name: String, value: Value) {
         self.insert_selected(name, value, None);
     }
 
     pub(super) fn insert_selected(&mut self, name: String, value: Value, source: Option<Selector>) {
+        self.inline_functions.remove(&name);
         self.java_hints.remove(&name);
         self.presence
             .retain(|fact| fact.collection != name && fact.key != name);

@@ -83,10 +83,7 @@ fn resolves_apply_and_evaluates_the_target_before_other_inputs() {
           (let [apply (fn [a b] (+ a b))]
             (apply 1 2)))"#;
     let report = Session::default().check("apply.clj", source);
-    // Inline fn as a stored value is a known gap. A local variable still shadows core apply.
-    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
-    assert_eq!(report.diagnostics[0].code, "PNX9001");
-    assert!(report.diagnostics[0].message.starts_with("fn is currently"));
+    assert!(report.ok && report.complete, "{report:#?}");
 }
 
 #[test]

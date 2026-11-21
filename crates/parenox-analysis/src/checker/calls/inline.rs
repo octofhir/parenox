@@ -1,6 +1,9 @@
-//! Contextual inference for directly applied functions and fnil wrappers.
+//! Contextual inference for inline and let-bound functions and fnil wrappers.
+use std::sync::Arc;
+
 use super::super::{
     Checker, Env, Value,
+    env::CapturedInline,
     function_forms::{MAX_FIXED_PARAMETERS, function_clauses, pack_arguments},
     nil_part,
 };
@@ -10,6 +13,7 @@ use crate::types::{Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 
 const MAX_CALLBACK_DEPTH: usize = 16;
+const MAX_LOCAL_INLINE_STEPS: usize = 128;
 
 #[derive(Clone, Copy)]
 pub(super) enum InlineFunction<'a> {
@@ -68,10 +72,104 @@ impl<'model> Checker<'model> {
         form: &'form Form,
         env: &Env,
     ) -> Option<Callable<'form, 'model>> {
+        if let Some(function) = form.symbol().and_then(|name| env.inline_function(name)) {
+            return Some(Callable::Captured(function.clone()));
+        }
         Some(match self.inline_syntax(form, env)? {
             InlineSyntax::Function(function) => Callable::Inline(function),
             InlineSyntax::Fnil(parts) => self.prepare_fnil(parts, form.span, env),
         })
+    }
+
+    pub(in crate::checker) fn bind_inline(
+        &mut self,
+        binder: &Form,
+        init: &Form,
+        env: &mut Env,
+    ) -> bool {
+        let Some(name) = binder.symbol() else {
+            return false;
+        };
+        let function =
+            if let Some(function) = init.symbol().and_then(|name| env.inline_function(name)) {
+                Some(function.clone())
+            } else {
+                let Some(InlineSyntax::Function(function)) = self.inline_syntax(init, env) else {
+                    return false;
+                };
+                if self.local_inline_step(init.span) {
+                    // The compiler checks every clause when creating a function.
+                    // Its body contributes no runtime effects until it is called.
+                    self.inspect_path(false, |checker| {
+                        checker.call_inline(function, Vec::new(), init.span, init.span, env, false);
+                    });
+                    Some(Arc::new(CapturedInline {
+                        form: init.clone(),
+                        scope: env.clone(),
+                    }))
+                } else {
+                    None
+                }
+            };
+        self.bind(binder, Value::new(Type::Unknown), env);
+        if let Some(function) = function {
+            env.mark_inline(name, function);
+        }
+        true
+    }
+
+    pub(super) fn call_captured(
+        &mut self,
+        function: &CapturedInline,
+        args: Vec<(Value, Span)>,
+        call: Span,
+        caller: &Env,
+        invoked: bool,
+    ) -> Value {
+        if !invoked || !self.path_reachable {
+            return Value::new(Type::Never);
+        }
+        if !self.local_inline_step(call) {
+            self.may_throw();
+            return Value::new(Type::Unknown);
+        }
+        if self.callback_depth >= MAX_CALLBACK_DEPTH {
+            self.type_query = None;
+            return self.unsupported(
+                call,
+                format!("Local fn nesting limit ({MAX_CALLBACK_DEPTH}) exceeded"),
+            );
+        }
+        let Some(InlineSyntax::Function(inline)) =
+            self.inline_syntax(&function.form, &function.scope)
+        else {
+            unreachable!("saved inline function was already resolved")
+        };
+        // Binding IDs retain refinement only for locals still in the same
+        // lexical scope. A later binding with the same name is a new value.
+        let scope = function.scope.refine_capture(caller);
+        self.callback_depth += 1;
+        let result = self.call_inline(inline, args, function.form.span, call, &scope, true);
+        self.callback_depth -= 1;
+        result
+    }
+
+    fn local_inline_step(&mut self, span: Span) -> bool {
+        if self.local_inline_steps >= MAX_LOCAL_INLINE_STEPS {
+            if self.local_inline_steps == MAX_LOCAL_INLINE_STEPS {
+                self.error(
+                    "PNX9001",
+                    span,
+                    format!("Local fn analysis limit ({MAX_LOCAL_INLINE_STEPS} steps) exceeded"),
+                );
+                self.local_inline_steps += 1;
+            }
+            self.type_query = None;
+            false
+        } else {
+            self.local_inline_steps += 1;
+            true
+        }
     }
 
     fn inline_syntax<'form>(&self, form: &'form Form, env: &Env) -> Option<InlineSyntax<'form>> {

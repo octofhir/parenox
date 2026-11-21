@@ -270,6 +270,7 @@ struct Checker<'a> {
     reduction_steps: usize,
     map_callback_checks: usize,
     callback_depth: usize,
+    local_inline_steps: usize,
     macro_scope_depth: usize,
     throws: Option<Throws>,
 }
@@ -295,6 +296,7 @@ impl<'a> Checker<'a> {
             reduction_steps: 0,
             map_callback_checks: 0,
             callback_depth: 0,
+            local_inline_steps: 0,
             macro_scope_depth: 0,
             throws: None,
         }
@@ -545,6 +547,12 @@ impl Checker<'_> {
             Kind::Keyword(k) => Value::new(Type::Key(self.model.key(k))),
             Kind::Symbol(s) | Kind::AnonymousArgument(s) => {
                 if let Some(value) = env.get(s) {
+                    if env.inline_function(s).is_some() {
+                        self.diagnostics.push(Diagnostic::analysis_gap(
+                            "PNX9001", form.span,
+                            "The type of a let-bound fn is unchecked outside supported calls",
+                        ));
+                    }
                     self.observe_local(s, form.span, value);
                     value.clone()
                 } else if self.model.local_function(s).is_some_and(Function::inferred) {
