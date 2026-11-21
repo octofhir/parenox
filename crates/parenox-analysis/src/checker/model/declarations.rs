@@ -338,14 +338,48 @@ impl Declarations {
         name: &'a str,
     ) -> Option<FunctionParameters<'a>> {
         let mut declarations = self.source_declarations(forms, name);
-        let SourceDeclaration::Function([head, name, tail @ ..]) = declarations.next()? else {
-            return None;
-        };
+        let declaration = declarations.next()?;
         if declarations.next().is_some() {
             return None;
         }
-        let documentation = var_documentation::function_docstring(name, tail);
-        let clauses = lexical_function_clauses(function_parts(tail).0, head.span).ok()?;
+        let (documentation, parameters, span) = match declaration {
+            SourceDeclaration::Function([head, declared, tail @ ..]) => (
+                var_documentation::function_docstring(declared, tail),
+                function_parts(tail).0,
+                head.span,
+            ),
+            SourceDeclaration::Value([_, declared, tail @ ..])
+                if self.is_source_multimethod(forms, name, declared.without_metadata().span) =>
+            {
+                let dispatcher = multimethod_parts(tail).1.first()?;
+                let Kind::List(items) = &dispatcher.without_metadata().kind else {
+                    return None;
+                };
+                let [operator, body @ ..] = items.as_slice() else {
+                    return None;
+                };
+                let symbol = operator.symbol()?;
+                if self.names.resolve_parts(symbol) != ("clojure.core", "fn")
+                    || (!symbol.contains('/')
+                        && (!self.all_refers.is_empty()
+                            || self.forward_vars.contains_key(symbol)
+                            || self.source_declarations(forms, symbol).next().is_some()))
+                {
+                    return None;
+                }
+                let parameters = match body {
+                    [head, remainder @ ..] if head.symbol().is_some() => remainder,
+                    _ => body,
+                };
+                (
+                    var_documentation::multimethod_docstring(declared, tail),
+                    parameters,
+                    dispatcher.span,
+                )
+            }
+            _ => return None,
+        };
+        let clauses = lexical_function_clauses(parameters, span).ok()?;
         Some(FunctionParameters {
             documentation,
             clauses: clauses

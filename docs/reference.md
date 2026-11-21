@@ -716,7 +716,9 @@ project, a buffer has no project context.
   See [the Java completion example](../examples/java_import_completion.clj)
   and [Clojure's Java interop reference](https://clojure.org/reference/java_interop#_member_access).
 - **Signature Help** shows parameters, docstrings, overloads and the active
-  argument for calls to source functions. Checked calls can specialize
+  argument for calls to source functions. For a resolved `defmulti` with a
+  literal `fn` dispatcher, it uses the dispatcher's parameter lists.
+  Checked calls can specialize
   generic parameters from the actual arguments, including in threading
   forms. The tooltip includes the result type and the contract's origin.
   Complete functions before a reader error can still show specialized calls.

@@ -46,6 +46,8 @@ mod local_hover;
 mod lookup_hover;
 #[path = "lsp/medley_context.rs"]
 mod medley_context;
+#[path = "lsp/multimethod_signature.rs"]
+mod multimethod_signature;
 #[path = "lsp/namespace_definition.rs"]
 mod namespace_definition;
 #[path = "lsp/prefix_types.rs"]

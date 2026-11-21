@@ -1,5 +1,7 @@
 //! Literal var help extracted from already resolved declarations.
-use super::{Declarations, SourceDeclaration, function_parts, lexical_function_clauses};
+use super::{
+    Declarations, SourceDeclaration, function_parts, lexical_function_clauses, multimethod_parts,
+};
 use crate::reader::{Form, Kind, Span};
 
 pub(crate) struct SourceDocumentation<'a> {
@@ -111,6 +113,16 @@ pub(super) fn function_docstring<'a>(name: &'a Form, tail: &'a [Form]) -> Option
     docstring(
         attribute(attrs, ":doc")
             .or_else(|| tail.first().filter(|form| form.is_string()))
+            .or_else(|| name.metadata(":doc")),
+    )
+}
+
+pub(super) fn multimethod_docstring<'a>(name: &'a Form, tail: &'a [Form]) -> Option<&'a str> {
+    let (attrs, _) = multimethod_parts(tail);
+    docstring(
+        tail.first()
+            .filter(|form| form.is_string())
+            .or_else(|| attribute(attrs.as_chunks::<2>().0.iter(), ":doc"))
             .or_else(|| name.metadata(":doc")),
     )
 }
