@@ -12,6 +12,13 @@ use crate::types::{IntegerClass, IntegerType, Type};
 
 const MAX_VECTOR_TRANSFORM_STEPS: usize = 128;
 
+#[derive(Clone, Copy)]
+enum VectorOperation<'form> {
+    Map,
+    Filter(&'form Form),
+    Keep,
+}
+
 struct FixedVector<'a> {
     items: &'a [Type],
     notes: &'a [String],
@@ -99,9 +106,10 @@ impl Checker<'_> {
         let [operator, callback] = form.as_slice() else {
             return None;
         };
-        let predicate = match self.standard_core_name(operator, env)?.as_str() {
-            "clojure.core/map" => None,
-            "clojure.core/filter" => Some(callback),
+        let operation = match self.standard_core_name(operator, env)?.as_str() {
+            "clojure.core/map" => VectorOperation::Map,
+            "clojure.core/filter" => VectorOperation::Filter(callback),
+            "clojure.core/keep" => VectorOperation::Keep,
             _ => return None,
         };
 
@@ -121,7 +129,7 @@ impl Checker<'_> {
             &callable,
             &[(input, source.span)],
             sources,
-            predicate,
+            operation,
             span,
             env,
         ) {
@@ -135,7 +143,7 @@ impl Checker<'_> {
         self.call_prepared(&callable, Vec::new(), span, env, false);
         Some(self.unchecked_form(
             source.span,
-            "into with map or filter currently needs a proven ordinary vector or Nil source",
+            "into needs a proven ordinary vector or Nil source for this transducer",
         ))
     }
 
@@ -182,14 +190,14 @@ impl Checker<'_> {
                 .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
         {
             let start = self.diagnostics.len();
-            if let Some(result) = self.transform_fixed_vectors(
-                &callable,
-                &inputs,
-                collections,
-                filter.then_some(callback),
-                span,
-                env,
-            ) {
+            let operation = if filter {
+                VectorOperation::Filter(callback)
+            } else {
+                VectorOperation::Map
+            };
+            if let Some(result) =
+                self.transform_fixed_vectors(&callable, &inputs, collections, operation, span, env)
+            {
                 self.explain_projected_arguments(start, collections);
                 self.dedup_diagnostics(start);
                 return result;
@@ -229,7 +237,7 @@ impl Checker<'_> {
         callable: &PreparedCallable<'_, '_>,
         inputs: &[(Value, Span)],
         collections: &[Form],
-        predicate: Option<&Form>,
+        operation: VectorOperation<'_>,
         span: Span,
         env: &Env,
     ) -> Option<Value> {
@@ -299,11 +307,14 @@ impl Checker<'_> {
                     (value, span)
                 })
                 .collect();
-            let selection = predicate.map(|form| (form, args[0].0.clone()));
+            let selection = match operation {
+                VectorOperation::Filter(form) => Some((form, args[0].0.clone())),
+                _ => None,
+            };
             let forms = projected
                 .as_deref()
                 .map_or(ArgumentForms::Unavailable, ArgumentForms::Projected);
-            let result = self.call_prepared_with_forms(callable, args, forms, span, env, true);
+            let mut result = self.call_prepared_with_forms(callable, args, forms, span, env, true);
             if result.known == Type::Never {
                 return Some(result);
             }
@@ -316,6 +327,16 @@ impl Checker<'_> {
                 item.narrow(kept);
                 output.push(item);
             } else {
+                if matches!(operation, VectorOperation::Keep)
+                    && nil_part(&result.known) != Type::Never
+                {
+                    let kept = narrow_by_type(&result.known, &Type::Nil, false);
+                    if kept == Type::Never {
+                        continue;
+                    }
+                    exact_positions = false;
+                    result.narrow(kept);
+                }
                 output.push(result);
             }
         }

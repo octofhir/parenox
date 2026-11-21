@@ -86,6 +86,23 @@ fn into_checks_reached_callback_uses_and_leaves_custom_traversal_open() {
 }
 
 #[test]
+fn into_keep_retains_false_and_narrows_optional_results() {
+    let report = check(
+        r#"
+(defn kept {:t/sig '[:-> (s/tuple #{false} #{:reachable})]} []
+  (into [] (keep :generator) [{:generator false} {} {:generator :reachable}]))
+(defn optional {:t/sig '[boolean? :-> (s/coll-of #{false} :kind vector?)]} [include?]
+  (into [] (keep #(when include? %)) [false]))
+(defn keeps-reduced {:t/sig '[:-> #{true}]} []
+  (reduced? (first (into [] (keep reduced) [:first]))))
+(defn empty-source {:t/sig '[:-> #{:empty}]} []
+  (when (empty? (into [] (keep (fn [item] (inc "unused"))) nil)) :empty))
+"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
 fn unchecked_into_visits_withhold_only_callback_hovers() {
     let source = r#"(ns traversal (:require [clojure.spec.alpha :as s]))
 (defn inline {:t/sig '[(s/tuple keyword?) :-> any?]} [custom]
