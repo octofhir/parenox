@@ -39,7 +39,7 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let input = self.infer(target, env);
-        let target_returns = input.known != Type::Never;
+        let target_returns = !input.stops_evaluation();
         let callable = self.inspect_path(target_returns, |checker| {
             checker.prepare_callable(updater, env)
         });

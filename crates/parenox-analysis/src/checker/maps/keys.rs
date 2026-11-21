@@ -22,6 +22,9 @@ impl Checker<'_> {
         allow_index: bool,
     ) -> Option<Type> {
         let key = self.infer(form, env);
+        if key.stops_evaluation() {
+            return Some(Type::Never);
+        }
         self.validate_map_key(key, form.span, name, allow_index)
     }
 

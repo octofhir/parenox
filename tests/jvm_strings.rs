@@ -278,6 +278,91 @@ fn an_unresolved_operator_does_not_prove_an_argument_is_evaluated() {
 }
 
 #[test]
+fn literal_function_metadata_runs_at_preparation_and_let_binding() {
+    let source = r#"(ns demo)
+(defn direct {:t/sig '[:-> t/any]} []
+  (^{:label (subs :bad-direct 0)}
+   (fn self [value] (self value) missing-direct)
+   (subs :dead-direct-argument 0)))
+(defn apply-target {:t/sig '[:-> t/any]} []
+  (apply ^{:label (subs :bad-apply 0)}
+         #(str % missing-apply)
+         [(subs :dead-apply-argument 0)]))
+(defn bound {:t/sig '[:-> t/any]} []
+  (let [callback ^{:label (subs :bad-bind 0)} (fn [value] (str value missing-bound))
+        late (subs :dead-initializer 0)]
+    (callback late missing-argument)))
+(defn formed {:t/sig '[:-> #{"word!"}]} []
+  (apply ^{:label :present} #(str % "!") ["word"]))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", ":bad-direct"),
+            ("PNX2304", "missing-direct"),
+            ("PNX2322", ":bad-apply"),
+            ("PNX2304", "missing-apply"),
+            ("PNX2322", ":bad-bind"),
+            ("PNX2304", "missing-bound"),
+            ("PNX2304", "missing-argument"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn failed_map_operands_stop_before_preparing_updater_metadata() {
+    let source = r#"(ns demo)
+(defn map-target {:t/sig '[:-> t/any]} []
+  (update-vals (subs :bad-target 0)
+               ^{:label (subs :dead-transform-meta 0)} #(str % missing-body)))
+(defn key-expression {:t/sig '[:-> t/any]} []
+  (update {:value "x"} (subs :bad-key 0)
+          ^{:label (subs :dead-update-meta 0)} #(str %)))
+(defn path-formation {:t/sig '[:-> t/any]} []
+  (update-in {:value "x"} ^{:label (subs :bad-path-meta 0)} [:value]
+             ^{:label (subs :dead-update-in-meta 0)} #(str %)))
+(defn inline-path {:t/sig '[:-> #{"x"}]} []
+  (get-in {:value "x"} ^{:label (subs :ignored-inline-meta 0)} [:value]))
+(defn eager-path {:t/sig '[:-> t/any]} []
+  (get-in {:value "x"} ^{:label (subs :bad-eager-meta 0)} [:value] "fallback"))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", ":bad-target"),
+            ("PNX2304", "missing-body"),
+            ("PNX2322", ":bad-key"),
+            ("PNX2322", ":bad-path-meta"),
+            ("PNX2322", ":bad-eager-meta"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn vector_metadata_effects_follow_elements_and_merge_before_checking() {
     let source = r#"(ns demo (:require [clojure.string :as string]) (:import java.util.UUID))
 (defn inert-class {:t/sig '[:-> #{"ab"}]} []

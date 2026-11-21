@@ -640,9 +640,10 @@ supplies `apply` arguments.
 Standard `subs` and `deref` report wrong arity once their operands can return.
 A reached arity failure participates in `catch clojure.lang.ArityException`.
 With a fixed or generic callback contract, a function literal evaluates its
-metadata at the argument position. Contextual inference runs after the eager
-operands can return. Compiler checks still cover the closure when the call is
-unreachable.
+metadata at the argument position. Inline callees, prepared callbacks and
+`let` initializers follow the same evaluation order. Contextual inference
+runs after the eager operands can return. Compiler checks still cover the
+closure when the call is unreachable.
 Sequential bodies apply the same rule to later forms and to function
 postconditions. A proven failure in `finally` also prevents a normal result
 from the enclosing `try`.

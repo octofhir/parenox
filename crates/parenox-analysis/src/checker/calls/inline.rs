@@ -230,13 +230,28 @@ impl<'model> Checker<'model> {
             }
         } else {
             match self.inline_syntax(form, env)? {
-                InlineSyntax::Function(function) if function.name().is_some() => {
-                    Callable::Captured {
-                        function: CapturedInline::single(form, env),
-                        compile_when_uninvoked: true,
+                InlineSyntax::Function(function) => {
+                    if let Some(value) = self
+                        .literal_metadata_outcome(
+                            form,
+                            env,
+                            env.reachable(),
+                            MetadataTarget::Function,
+                        )
+                        .filter(Value::stops_evaluation)
+                    {
+                        let closure = CapturedInline::single(form, env);
+                        self.call_captured(&closure, Vec::new(), form.span, env, false, true);
+                        Callable::Value(value)
+                    } else if function.name().is_some() {
+                        Callable::Captured {
+                            function: CapturedInline::single(form, env),
+                            compile_when_uninvoked: true,
+                        }
+                    } else {
+                        Callable::Inline(function)
                     }
                 }
-                InlineSyntax::Function(function) => Callable::Inline(function),
                 InlineSyntax::Fnil(parts) => self.prepare_fnil(parts, form.span, env),
                 InlineSyntax::Partial(parts) => {
                     return Some(self.prepare_partial(parts, form.span, env));
@@ -258,39 +273,28 @@ impl<'model> Checker<'model> {
         let Some(name) = binder.symbol() else {
             return false;
         };
-        let function =
+        let (function, value) =
             if let Some(function) = init.symbol().and_then(|name| env.inline_function(name)) {
-                Some(function.clone())
+                (Some(function.clone()), Value::new(Type::Unknown))
             } else {
-                let Some(InlineSyntax::Function(inline)) = self.inline_syntax(init, env) else {
+                let Some(InlineSyntax::Function(_)) = self.inline_syntax(init, env) else {
                     return false;
                 };
-                if self.local_inline_step(init.span) {
+                let value = self
+                    .literal_metadata_outcome(init, env, env.reachable(), MetadataTarget::Function)
+                    .unwrap_or_else(|| Value::new(Type::Unknown));
+                let function = self.local_inline_step(init.span).then(|| {
                     let function = CapturedInline::single(init, env);
-                    let scope = inline.name().map(|_| {
-                        let mut scope = env.clone();
-                        inline.bind_name(&function, &mut scope);
-                        scope
-                    });
                     // The compiler checks every clause when creating a function.
                     // Its body contributes no runtime effects until it is called.
-                    self.inspect_path(false, |checker| {
-                        checker.call_inline(
-                            inline,
-                            Vec::new(),
-                            init.span,
-                            init.span,
-                            scope.as_ref().unwrap_or(env),
-                            false,
-                        );
-                    });
-                    Some(function)
-                } else {
-                    None
-                }
+                    self.call_captured(&function, Vec::new(), init.span, env, false, true);
+                    function
+                });
+                (function, value)
             };
-        self.bind(binder, Value::new(Type::Unknown), env);
-        if let Some(function) = function {
+        let returns = !value.stops_evaluation();
+        self.bind(binder, value, env);
+        if returns && let Some(function) = function {
             env.mark_inline(name, function);
         }
         true

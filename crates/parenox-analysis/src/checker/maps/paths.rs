@@ -1,5 +1,5 @@
 //! Source-mapped key paths and nested map operations.
-use super::super::{Checker, Env, Value, calls::call_returns};
+use super::super::{Checker, Env, Value, calls::call_returns, metadata::MetadataTarget};
 use super::Lookup;
 use crate::reader::{Form, Span};
 use crate::types::{MapSlot, MapType, Type};
@@ -45,6 +45,11 @@ impl Checker<'_> {
                     }
                 }
             }
+            if let Some(value) =
+                self.literal_metadata_outcome(form, env, reachable, MetadataTarget::Vector)
+            {
+                return Err(value.known);
+            }
             if !reachable {
                 return Err(Type::Never);
             }
@@ -55,7 +60,11 @@ impl Checker<'_> {
                 Err(Type::Unknown)
             };
         }
-        let inferred = self.infer(form, env).known;
+        let value = self.infer(form, env);
+        if value.stops_evaluation() {
+            return Err(Type::Never);
+        }
+        let inferred = value.known;
         if let Type::Union(parts) = inferred {
             let alternatives = parts
                 .into_iter()
@@ -157,7 +166,7 @@ impl Checker<'_> {
             return self.inline_get_in(target, keys, env);
         }
         let value = self.infer(&xs[1], env);
-        let target_returns = value.known != Type::Never;
+        let target_returns = !value.stops_evaluation();
         let path = self.inspect_path(target_returns, |checker| {
             checker.key_paths(&xs[2], env, "get-in", false)
         });
@@ -165,11 +174,7 @@ impl Checker<'_> {
         let default = xs
             .get(3)
             .map(|form| self.infer_path(form, env, path_returns, false));
-        if !path_returns
-            || default
-                .as_ref()
-                .is_some_and(|value| value.known == Type::Never)
-        {
+        if !path_returns || default.as_ref().is_some_and(Value::stops_evaluation) {
             return Value::new(Type::Never);
         }
         match path {
@@ -204,7 +209,7 @@ impl Checker<'_> {
         // Each lookup runs before the next key expression is evaluated.
         let mut value = self.infer(target, env);
         for (index, key) in keys.iter().enumerate() {
-            let reachable = value.known != Type::Never;
+            let reachable = !value.stops_evaluation();
             let ty = self.inspect_path(reachable, |checker| {
                 checker.read_map_key(key, env, "get-in", true)
             });
@@ -304,7 +309,7 @@ impl Checker<'_> {
             env.presence(target, key)
         };
         let target = self.infer(target, env);
-        let target_returns = target.known != Type::Never;
+        let target_returns = !target.stops_evaluation();
         let path = self.inspect_path(target_returns, |checker| {
             if nested {
                 checker.key_paths(key, env, name, true)
@@ -392,13 +397,13 @@ impl Checker<'_> {
             .and_then(|keys| keys.first())
             .and_then(|key| env.presence(&xs[1], key));
         let target = self.infer(&xs[1], env);
-        let target_returns = target.known != Type::Never;
+        let target_returns = !target.stops_evaluation();
         let path = self.inspect_path(target_returns, |checker| {
             checker.key_paths(&xs[2], env, "assoc-in", true)
         });
         let path_returns = target_returns && !matches!(path, Err(Type::Never));
         let value = self.infer_path(&xs[3], env, path_returns, false);
-        if value.known == Type::Never {
+        if value.stops_evaluation() {
             return value;
         }
         let path = match path {
