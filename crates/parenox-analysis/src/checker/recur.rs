@@ -2,7 +2,7 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use super::function_forms::FunctionConditions;
-use super::{Checker, Env, Value};
+use super::{Checker, Env, Value, has_evaluated_metadata};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{ExtraFields, IntegerType, Type};
 
@@ -144,6 +144,18 @@ impl Checker<'_> {
         env: &Env,
         span: Span,
     ) -> Value {
+        if self.path_reachable
+            && self.untyped_binding_budget.is_some()
+            && params
+                .iter()
+                .chain(conditions.pre)
+                .chain(conditions.post.into_iter().flatten())
+                .chain(body)
+                .any(has_evaluated_metadata)
+        {
+            self.type_query = None;
+            return Value::new(Type::Unknown);
+        }
         self.recur_body("fn", span, args, |checker, state| {
             let local = checker.bind_parameters(env.clone(), params, |index| state[index].clone());
             let mut active = (!conditions.pre.is_empty()).then(|| local.clone());

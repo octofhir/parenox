@@ -15,7 +15,13 @@ pub(super) enum TypeQuery<'a> {
 
 pub(super) struct BindingQueries {
     enclosing: Span,
-    types: BTreeMap<usize, (Span, Option<Type>)>,
+    types: BTreeMap<usize, BindingObservation>,
+}
+
+struct BindingObservation {
+    span: Span,
+    ty: Option<Type>,
+    literal_initializer: bool,
 }
 
 pub(super) struct CallQuery<'a> {
@@ -92,9 +98,21 @@ impl<'a> TypeQuery<'a> {
         }
     }
 
-    pub(super) fn bindings(enclosing: Span, spans: impl Iterator<Item = Span>) -> Option<Self> {
-        let types: BTreeMap<_, _> = spans
-            .map(|span| (span.start.offset, (span, Some(Type::Never))))
+    pub(super) fn bindings(
+        enclosing: Span,
+        sites: impl Iterator<Item = (Span, bool)>,
+    ) -> Option<Self> {
+        let types: BTreeMap<_, _> = sites
+            .map(|(span, literal_initializer)| {
+                (
+                    span.start.offset,
+                    BindingObservation {
+                        span,
+                        ty: Some(Type::Never),
+                        literal_initializer,
+                    },
+                )
+            })
             .collect();
         (!types.is_empty()).then_some(Self::Bindings(BindingQueries { enclosing, types }))
     }
@@ -125,14 +143,23 @@ impl<'a> TypeQuery<'a> {
         }
     }
 
-    pub(super) fn into_binding_types(self) -> impl Iterator<Item = (Span, Type)> {
+    pub(super) fn includes_literal_bindings(&self) -> bool {
+        matches!(self, Self::Bindings(query)
+            if query.types.values().any(|binding| binding.literal_initializer))
+    }
+
+    pub(super) fn into_binding_types(
+        self,
+        literal_only: bool,
+    ) -> impl Iterator<Item = (Span, Type)> {
         let types = match self {
             Self::Bindings(query) => query.types,
             _ => BTreeMap::new(),
         };
-        types.into_values().filter_map(|(span, ty)| {
-            let ty = ty?;
-            (ty != Type::Never).then_some((span, ty))
+        types.into_values().filter_map(move |binding| {
+            let ty = binding.ty?;
+            (ty != Type::Never && (!literal_only || binding.literal_initializer))
+                .then_some((binding.span, ty))
         })
     }
 }
@@ -142,18 +169,34 @@ impl<'model> Checker<'model> {
         self.observe_local(name, span, value);
         if self.path_reachable
             && let Some(TypeQuery::Bindings(query)) = &mut self.type_query
-            && let Some((binding, ty)) = query.types.get_mut(&span.start.offset)
-            && *binding == span
-            && let Some(previous) = ty
+            && let Some(binding) = query.types.get_mut(&span.start.offset)
+            && binding.span == span
+            && let Some(previous) = &mut binding.ty
         {
             if value.known == Type::Any || value.known.contains_unknown() {
-                *ty = None;
+                binding.ty = None;
             } else if *previous != value.known {
                 let combined = Type::union([
                     std::mem::replace(previous, Type::Never),
                     value.known.clone(),
                 ]);
-                *ty = (!combined.contains_unknown() && combined != Type::Any).then_some(combined);
+                binding.ty =
+                    (!combined.contains_unknown() && combined != Type::Any).then_some(combined);
+            }
+        }
+    }
+
+    pub(super) fn withhold_literals_after_opaque_form(&mut self) {
+        if self.path_reachable
+            && self.literal_binding_query
+            && let Some(TypeQuery::Bindings(query)) = &mut self.type_query
+        {
+            // An opaque form can alter which following expressions are
+            // evaluated in this lexical body.
+            for binding in query.types.values_mut() {
+                if binding.literal_initializer && binding.ty == Some(Type::Never) {
+                    binding.ty = None;
+                }
             }
         }
     }
@@ -268,12 +311,12 @@ impl<'model> Checker<'model> {
         }
         if let Some(query) = &mut self.type_query {
             if let TypeQuery::Bindings(batch) = query {
-                for (_, (span, ty)) in batch
+                for (_, binding) in batch
                     .types
                     .range_mut(enclosing.start.offset..enclosing.end.offset)
                 {
-                    if span.end.offset <= enclosing.end.offset {
-                        *ty = None;
+                    if binding.span.end.offset <= enclosing.end.offset {
+                        binding.ty = None;
                     }
                 }
                 return;

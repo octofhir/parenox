@@ -298,10 +298,12 @@ impl<'model> Checker<'model> {
             {
                 Some(DeclaredValue::Macro(scope)) => {
                     self.withhold_captured_facts(env.inline_functions());
+                    self.withhold_literals_after_opaque_form();
                     return self.macro_scope(scope, &xs[1..], span, env);
                 }
                 Some(DeclaredValue::OpaqueMacro) => {
                     self.withhold_captured_facts(env.inline_functions());
+                    self.withhold_literals_after_opaque_form();
                     return self
                         .unchecked_form(xs[0].span, &format!("Macro {name} has no checked scope"));
                 }
@@ -337,6 +339,7 @@ impl<'model> Checker<'model> {
                         }
                     } else {
                         self.withhold_captured_facts(env.inline_functions());
+                        self.withhold_literals_after_opaque_form();
                     }
                     return self.unchecked_function(name, xs[0].span);
                 }
@@ -393,6 +396,7 @@ impl<'model> Checker<'model> {
             && xs[0].symbol().is_some_and(|name| !env.contains_key(name));
         let observation = if opaque_arguments {
             self.withhold_captured_facts(env.inline_functions());
+            self.withhold_literals_after_opaque_form();
             self.type_query.take()
         } else {
             None

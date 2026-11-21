@@ -34,7 +34,7 @@ impl Declarations {
         model: &Model,
         globals: &Globals,
         source: &str,
-        bindings: impl Iterator<Item = Span>,
+        bindings: impl Iterator<Item = (Span, bool)>,
     ) -> Vec<(Span, Type)> {
         if !globals
             .exports
@@ -43,7 +43,9 @@ impl Declarations {
         {
             return Vec::new();
         }
-        let bindings: BTreeMap<_, _> = bindings.map(|span| (span.start.offset, span)).collect();
+        let bindings: BTreeMap<_, _> = bindings
+            .map(|(span, literal)| (span.start.offset, (span, literal)))
+            .collect();
         if bindings.is_empty() {
             return Vec::new();
         }
@@ -102,11 +104,15 @@ impl Declarations {
                     continue;
                 };
                 for clause in clauses.values() {
+                    if matches!(clause.parameter_vector.kind, Kind::Metadata(..)) {
+                        continue;
+                    }
                     let Some(query) = query_for(clause.span) else {
                         continue;
                     };
                     let mut checker = Checker::new(model, globals, source);
                     checker.untyped_binding_budget = Some(MAX_UNTYPED_BINDING_STEPS);
+                    checker.literal_binding_query = query.includes_literal_bindings();
                     checker.type_query = Some(query);
                     checker.untyped_clause(clause);
                     types.extend(checker.binding_query_results());
@@ -245,10 +251,26 @@ impl Declarations {
 }
 
 impl Checker<'_> {
+    pub(in crate::checker) fn clean_binding_check(&self) -> bool {
+        self.diagnostics.is_empty() && !self.has_unproven_expectation
+    }
+
+    pub(in crate::checker) fn can_keep_literal_bindings(&self) -> bool {
+        self.literal_binding_query
+            && self.diagnostics.iter().all(|finding| {
+                matches!(
+                    finding.code.as_str(),
+                    "PNX9002" | "PNX9003" | "PNX9004" | "PNX9009"
+                ) || (finding.code == "PNX9001" && finding.severity == "warning")
+            })
+    }
+
     fn binding_query_results(self) -> impl Iterator<Item = (Span, Type)> {
+        let clean = self.clean_binding_check();
+        let keep = clean || self.can_keep_literal_bindings();
         self.type_query
-            .filter(|_| self.diagnostics.is_empty() && !self.has_unproven_expectation)
+            .filter(|_| keep)
             .into_iter()
-            .flat_map(TypeQuery::into_binding_types)
+            .flat_map(move |query| query.into_binding_types(!clean))
     }
 }

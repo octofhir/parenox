@@ -88,6 +88,76 @@ fn unannotated_functions_show_proven_bindings_in_the_requested_arity() {
 }
 
 #[test]
+fn literal_inlays_survive_eager_coverage_gaps_and_respect_opaque_forms() {
+    let fixture = Fixture::new("literal inlays through coverage gaps");
+    let file = fixture.0.join("src/literals.clj");
+    let deps = fixture.0.join("src/fixture");
+    fs::create_dir(&deps).unwrap();
+    fs::write(deps.join("api.clj"), "(ns fixture.api)\n(defn fetch [x] x)").unwrap();
+    fs::write(
+        deps.join("macros.clj"),
+        "(ns fixture.macros)\n(defmacro stop [] '(throw (Exception.)))",
+    )
+    .unwrap();
+    let source = r#"(ns literals (:require [fixture.api :as api] [fixture.macros :as macros]))
+(defn ordinary [input]
+  (let [fetched (api/fetch input)
+        title "Done"
+        rendered (str input)]
+    [title rendered fetched]))
+(defn opaque []
+  (let [before "before"]
+    (macros/stop)
+    (let [after "after"] after)))
+(defn evaluated-metadata []
+  ^{:effect (throw (Exception.))} []
+  (let [unreachable "metadata"] unreachable))
+(defn hard-error []
+  (subs nil 0)
+  (let [invalid "error"] invalid))
+(defn dead-branch []
+  (when false (let [never "dead"] never)))
+(defn- opaque-helper [] (macros/stop))
+(defn after-opaque-helper []
+  (opaque-helper)
+  (let [later "opaque helper"] later))
+(defn- metadata-helper [] ^{:effect (throw (Exception.))} [])
+(defn after-metadata-helper []
+  (let [ignored (metadata-helper)
+        later "metadata helper"]
+    [ignored later]))
+"#;
+    fs::write(&file, source).unwrap();
+    let document = uri(&file);
+    let replies = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"version":1,"languageId":"clojure","text":source
+        }}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"textDocument/inlayHint","params":{
+            "textDocument":{"uri":document},"range":{
+                "start":{"line":0,"character":0},"end":{"line":source.lines().count(),"character":0}
+            }
+        }}),
+        json!({"jsonrpc":"2.0","id":3,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let hint = |line: usize, name: &str, label: &str| {
+        let row = source.lines().nth(line).unwrap();
+        let end = row.find(name).unwrap() + name.len();
+        json!({"position":{"line":line,"character":end},"kind":1,"label":label})
+    };
+    let result = &replies.iter().find(|reply| reply["id"] == 2).unwrap()["result"];
+    assert_eq!(
+        result,
+        &json!([
+            hint(3, "title", ": \"Done\""),
+            hint(7, "before", ": \"before\"")
+        ]),
+    );
+}
+
+#[test]
 fn unannotated_inlay_queries_leave_out_overgrown_conditional_types() {
     let fixture = Fixture::new("inlay conditional growth");
     let file = fixture.0.join("src/actions.clj");

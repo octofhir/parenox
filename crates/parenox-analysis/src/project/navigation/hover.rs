@@ -104,7 +104,7 @@ impl Session {
         );
         let bindings = bindings
             .into_iter()
-            .filter(|span| range.contains(&span.end.offset));
+            .filter(|(span, _)| range.contains(&span.end.offset));
         scope
             .declarations
             .binding_types(

@@ -705,7 +705,9 @@ project, a buffer has no project context.
   types. Their extern references require a loaded provider, and any available
   source arities must support the extern contract. The query leaves out
   unannotated clauses that exceed its analysis budget.
-  Hints use clauses whose body check found no error or coverage gap.
+  A reached simple binding with a direct literal initializer can retain its
+  hint through gaps in other parts of an unannotated clause. Other hints use
+  clauses whose body check found no error or coverage gap.
   Proven local types can help explain a mismatch with the declared return type.
   Complete functions before a reader error can still show hints in their
   checked prefix. When saved extern contracts change, the server requests a

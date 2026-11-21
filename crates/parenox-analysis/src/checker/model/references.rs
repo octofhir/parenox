@@ -34,6 +34,7 @@ pub(crate) struct DocumentReferences<'a> {
     pub uses: Vec<(Span, ScopedReference<'a>)>,
     pub bindings: Vec<Span>,
     pub calls: Option<Vec<(Span, ScopedReference<'a>)>>,
+    literal_bindings: Option<BTreeSet<usize>>,
 }
 
 impl Declarations {
@@ -322,8 +323,11 @@ impl Declarations {
         forms: &'a [Form],
         functions: &[usize],
         resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
-    ) -> Vec<Span> {
-        let mut occurrences = DocumentReferences::default();
+    ) -> Vec<(Span, bool)> {
+        let mut occurrences = DocumentReferences {
+            literal_bindings: Some(BTreeSet::new()),
+            ..DocumentReferences::default()
+        };
         self.collect_source_forms(
             forms,
             false,
@@ -331,7 +335,12 @@ impl Declarations {
             Purpose::Collect(&mut occurrences),
             Some(functions),
         );
-        occurrences.bindings
+        let literal_bindings = occurrences.literal_bindings.unwrap();
+        occurrences
+            .bindings
+            .into_iter()
+            .map(|span| (span, literal_bindings.contains(&span.start.offset)))
+            .collect()
     }
 
     pub(crate) fn reify_method_targets<'a>(
@@ -659,7 +668,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             }
             "if" | "do" | "recur" | "throw" => return self.forms(args),
             "try" => return self.try_body(args),
-            "let*" | "loop*" => return self.bindings(args),
+            "let*" | "loop*" => return self.bindings(args, false),
             "fn*" => return self.function(args, head.span, true),
             _ => {}
         }
@@ -702,7 +711,8 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 return self.thread(args, thread);
             }
             match local {
-                "let" | "loop" => return self.bindings(args),
+                "let" => return self.bindings(args, true),
+                "loop" => return self.bindings(args, false),
                 "if-let" | "if-some" => return self.conditional_binding(args, true),
                 "when-let" | "when-some" | "when-first" => {
                     return self.conditional_binding(args, false);
@@ -1036,7 +1046,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         self.locals.truncate(scope);
     }
 
-    fn bindings(&mut self, args: &'a [Form]) {
+    fn bindings(&mut self, args: &'a [Form], stock_let: bool) {
         if self.template_scope.is_some() {
             return;
         }
@@ -1048,6 +1058,23 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             for [pattern, value] in pairs {
                 self.forms(std::slice::from_ref(value));
                 self.bind_pattern(pattern);
+                if stock_let
+                    && matches!(&pattern.kind, Kind::Symbol(_))
+                    && matches!(
+                        &value.kind,
+                        Kind::Nil
+                            | Kind::Bool(_)
+                            | Kind::Number
+                            | Kind::SymbolicNumber(_)
+                            | Kind::String(_)
+                            | Kind::Utf16String(_)
+                            | Kind::Character(_)
+                    )
+                    && let Purpose::Collect(occurrences) = &mut self.purpose
+                    && let Some(literals) = &mut occurrences.literal_bindings
+                {
+                    literals.insert(pattern.span.start.offset);
+                }
             }
             self.forms(body);
             self.locals.truncate(scope);

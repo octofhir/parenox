@@ -407,6 +407,7 @@ struct Checker<'a> {
     partial_method_opaque: bool,
     type_query: Option<TypeQuery<'a>>,
     untyped_binding_budget: Option<usize>,
+    literal_binding_query: bool,
     diagnostics: Vec<Diagnostic>,
     has_declaration_findings: bool,
     has_unproven_expectation: bool,
@@ -438,6 +439,7 @@ impl<'a> Checker<'a> {
             partial_method_opaque: false,
             type_query: None,
             untyped_binding_budget: None,
+            literal_binding_query: false,
             diagnostics: Vec::new(),
             has_declaration_findings: !model.diagnostics.is_empty(),
             has_unproven_expectation: false,
@@ -684,16 +686,17 @@ impl Checker<'_> {
     }
 
     fn infer_position(&mut self, form: &Form, env: &Env, tail: bool) -> Value {
-        if let Some(remaining) = &mut self.untyped_binding_budget {
+        if let Some(remaining) = self.untyped_binding_budget {
             if self.type_query.is_none()
-                || *remaining == 0
+                || remaining == 0
                 || (self.path_reachable
-                    && (!self.diagnostics.is_empty() || self.has_unproven_expectation))
+                    && !self.clean_binding_check()
+                    && !self.can_keep_literal_bindings())
             {
                 self.type_query = None;
                 return Value::new(Type::Unknown);
             }
-            *remaining -= 1;
+            self.untyped_binding_budget = Some(remaining - 1);
         }
         if self.partial_method_body
             && matches!(
@@ -827,10 +830,10 @@ impl Checker<'_> {
                 )
             }
             Kind::Quote(inner) => self.quoted_data(inner),
-            Kind::SyntaxQuote(_) | Kind::Unquote { .. } => self.unchecked_form(
-                form.span,
-                "Syntax quote and unquote expansion is not supported",
-            ),
+            Kind::SyntaxQuote(_) | Kind::Unquote { .. } => {
+                self.withhold_literals_after_opaque_form();
+                self.unchecked_form(form.span, "Syntax quote and unquote expansion is not supported")
+            }
         }
     }
 }
