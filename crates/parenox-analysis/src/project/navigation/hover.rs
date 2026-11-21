@@ -5,11 +5,9 @@ use crate::types::Type;
 
 use super::{
     FileCache, InspectedReference, ResolvedVar, ScopedReference, Session, SourceTarget, VarInfo,
-    archive::namespace_declarations, declaration::top_level_reference, specs::keyword_at,
-    symbol_at, symbol_form_at,
+    archive::namespace_declarations, cached_type_query, declaration::top_level_reference,
+    specs::keyword_at, symbol_at, symbol_form_at,
 };
-
-const MAX_HOVER_TYPES: usize = 128;
 
 #[derive(Default)]
 pub struct VarDocumentation {
@@ -195,21 +193,9 @@ impl FileCache {
         site: Span,
         infer: impl FnOnce() -> Option<Type>,
     ) -> Option<String> {
-        let start = site.start.offset;
-        let cache = self.hover_types.get_or_init(Default::default);
-        if let Some(value) = cache.lock().unwrap().get(&start).cloned() {
-            return value;
-        }
-        let value = infer().map(|ty| ty.to_string());
-        let mut cache = cache.lock().unwrap();
-        if let Some(current) = cache.get(&start) {
-            return current.clone();
-        }
-        if cache.len() == MAX_HOVER_TYPES {
-            cache.pop_first();
-        }
-        cache.insert(start, value.clone());
-        value
+        cached_type_query(&self.hover_types, site.start.offset, || {
+            infer().map(|ty| ty.to_string())
+        })
     }
 }
 

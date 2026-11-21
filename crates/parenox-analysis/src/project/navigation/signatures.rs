@@ -1,5 +1,6 @@
 //! Argument positions and parameter lists for source calls.
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::ContractOrigin;
 use crate::checker::{CheckedCall, Declarations};
@@ -7,7 +8,7 @@ use crate::reader::{self, Conditionals, Form, Kind, Span};
 use crate::syntax::SyntaxKind;
 use crate::types::Arity;
 
-use super::{FileCache, Session, SourceTarget};
+use super::{FileCache, Session, SourceTarget, cached_type_query};
 
 pub struct CallSignature {
     pub parameters: Vec<String>,
@@ -36,7 +37,7 @@ impl Session {
         {
             let source = self.signatures_at(path, declarations, forms, &site);
             return match self.checked_call(caller, path, &site) {
-                Some(checked) => Some(typed_signatures(&site, checked, source)),
+                Some(checked) => Some(typed_signatures(&site, &checked, source)),
                 None => source,
             };
         }
@@ -48,7 +49,7 @@ impl Session {
             declarations.qualified_call_declaration(globals, site.head.symbol()?, site.wanted())
         });
         match declared {
-            Some(signature) => Some(typed_signatures(&site, signature, source)),
+            Some(signature) => Some(typed_signatures(&site, &signature, source)),
             None => source,
         }
     }
@@ -58,16 +59,21 @@ impl Session {
         caller: &FileCache,
         path: &str,
         site: &CallSite<'_>,
-    ) -> Option<CheckedCall> {
-        let scope = self.typing_at(caller, path, site.span.start.offset)?;
-        scope.declarations.checked_call(
-            scope.forms,
-            scope.model,
-            scope.globals,
-            &caller.source,
-            site.span,
-            site.written,
-        )
+    ) -> Option<Arc<CheckedCall>> {
+        cached_type_query(&caller.checked_calls, site.span.start.offset, || {
+            let scope = self.typing_at(caller, path, site.span.start.offset)?;
+            scope
+                .declarations
+                .checked_call(
+                    scope.forms,
+                    scope.model,
+                    scope.globals,
+                    &caller.source,
+                    site.span,
+                    site.written,
+                )
+                .map(Arc::new)
+        })
     }
 
     fn signatures_at(
@@ -109,7 +115,7 @@ impl Session {
 
 fn typed_signatures(
     site: &CallSite<'_>,
-    checked: CheckedCall,
+    checked: &CheckedCall,
     source: Option<CallSignatures>,
 ) -> CallSignatures {
     let mut info = source.unwrap_or_else(|| CallSignatures {

@@ -33,7 +33,7 @@ use crate::ContractOrigin;
 use crate::checker::{Declarations, ProjectCall, ScopedReference, java_type_tag_at};
 use crate::reader::{Form, Kind, Span};
 
-use super::{FileCache, Session};
+use super::{FileCache, Session, TypeQueries};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Definition {
@@ -481,5 +481,60 @@ fn source_symbol_form_at(forms: &[Form], offset: usize, type_hint: bool) -> Opti
             source_symbol_form_at(&function.body, offset, type_hint)
         }
         _ => None,
+    }
+}
+
+const MAX_CACHED_TYPE_QUERIES: usize = 128;
+
+fn cached_type_query<T: Clone>(
+    cache: &TypeQueries<T>,
+    start: usize,
+    infer: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    let entries = cache.get_or_init(Default::default);
+    if let Some(value) = entries.lock().unwrap().get(&start).cloned() {
+        return value;
+    }
+    let value = infer();
+    let mut entries = entries.lock().unwrap();
+    if let Some(current) = entries.get(&start) {
+        return current.clone();
+    }
+    if entries.len() == MAX_CACHED_TYPE_QUERIES {
+        entries.pop_first();
+    }
+    entries.insert(start, value.clone());
+    value
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::{MAX_CACHED_TYPE_QUERIES, TypeQueries, cached_type_query};
+
+    #[test]
+    fn type_query_cache_reuses_results_and_bounds_distinct_sites() {
+        let mut cache = TypeQueries::default();
+        assert_eq!(
+            cached_type_query(&cache, 0, || Some("found")),
+            Some("found")
+        );
+        assert_eq!(cached_type_query(&cache, 1, || None), None);
+        assert_eq!(
+            cached_type_query(&cache, 0, || panic!("cached result")),
+            Some("found")
+        );
+        assert_eq!(cached_type_query(&cache, 1, || panic!("cached miss")), None);
+        for offset in 2..MAX_CACHED_TYPE_QUERIES + 10 {
+            cached_type_query(&cache, offset, || Some("other result"));
+        }
+        assert_eq!(
+            cache.get().unwrap().lock().unwrap().len(),
+            MAX_CACHED_TYPE_QUERIES
+        );
+        cache.take();
+        assert_eq!(
+            cached_type_query(&cache, 0, || Some("updated")),
+            Some("updated")
+        );
     }
 }
