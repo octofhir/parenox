@@ -24,7 +24,22 @@ pub(crate) struct CheckedCall {
     pub origin: Option<Arc<ContractOrigin>>,
     pub explicit_offset: Option<usize>,
     pub argument_count: Option<usize>,
-    declared: Signature,
+    declaration: CallDeclaration,
+}
+
+#[derive(PartialEq, Eq)]
+enum CallDeclaration {
+    Typed(Signature),
+    Local {
+        definition: Span,
+        labels: Vec<String>,
+    },
+}
+
+pub(super) struct LocalCall {
+    pub definition: Span,
+    pub labels: Vec<String>,
+    pub args: Vec<Type>,
 }
 
 impl CheckedCall {
@@ -34,7 +49,14 @@ impl CheckedCall {
             origin: Some(origin.clone()),
             explicit_offset: None,
             argument_count: None,
-            declared: signature.clone(),
+            declaration: CallDeclaration::Typed(signature.clone()),
+        }
+    }
+
+    pub(crate) fn local_labels(&self) -> Option<&[String]> {
+        match &self.declaration {
+            CallDeclaration::Local { labels, .. } => Some(labels),
+            CallDeclaration::Typed(_) => None,
         }
     }
 }
@@ -90,7 +112,7 @@ impl<'a> TypeQuery<'a> {
     }
 }
 
-impl Checker<'_> {
+impl<'model> Checker<'model> {
     pub(super) fn observe_local(&mut self, name: &str, span: Span, value: &Value) {
         if self.path_reachable
             && let Some(TypeQuery::Local {
@@ -124,49 +146,70 @@ impl Checker<'_> {
         signature: &Signature,
         origin: Option<&Arc<ContractOrigin>>,
     ) {
-        let Some(TypeQuery::Call(query)) = &mut self.type_query else {
+        let Some(query) = self.call_query_at(span) else {
             return;
         };
-        if query.span != span
-            || !self.path_reachable
-            || arguments.forms.len() != arguments.values.len()
-        {
+        if arguments.forms.len() != arguments.values.len() {
             return;
         }
-        let argument_count = Some(arguments.forms.len());
-        let explicit_offset = if query.written.is_empty() {
-            // An implicit-only call does not prove which slot new written
-            // arguments would occupy.
-            arguments.forms.is_empty().then_some(0)
-        } else {
-            let Some(offset) = explicit_offset(query.written, arguments.forms) else {
-                return;
-            };
-            Some(offset)
+        let checked = CheckedCall {
+            signature: signature.clone(),
+            origin: origin.cloned(),
+            explicit_offset: None,
+            argument_count: None,
+            declaration: CallDeclaration::Typed(declared.clone()),
         };
-        if let Some(previous) = &mut query.checked {
-            if previous.declared != *declared
-                || previous.origin.as_ref() != origin
-                || previous.explicit_offset != explicit_offset
-                || previous.argument_count != argument_count
-            {
-                self.type_query = None;
-            } else if previous.signature != *signature {
-                query.use_declaration();
-            }
-        } else {
-            query.checked = Some(CheckedCall {
-                signature: if query.declared_only {
-                    declared
-                } else {
-                    signature
-                }
-                .clone(),
-                origin: origin.cloned(),
-                explicit_offset,
-                argument_count,
-                declared: declared.clone(),
+        if !query.record(Some(checked), arguments.forms) {
+            self.type_query = None;
+        }
+    }
+
+    pub(super) fn observes_local_call_at(&self, span: Span) -> bool {
+        self.path_reachable
+            && matches!(&self.type_query, Some(TypeQuery::Call(query))
+                if query.span == span && !query.declared_only)
+    }
+
+    pub(super) fn observe_local_call(
+        &mut self,
+        span: Span,
+        forms: &[Form],
+        local: Option<LocalCall>,
+        result: &Value,
+    ) {
+        let Some(query) = self.call_query_at(span) else {
+            return;
+        };
+        let checked = local
+            .filter(|_| result.known != Type::Never && !result.known.contains_unknown())
+            .map(|local| CheckedCall {
+                signature: Signature {
+                    args: local.args,
+                    ret: result.known.clone(),
+                    rest: None,
+                    parameters: None,
+                },
+                origin: None,
+                explicit_offset: None,
+                argument_count: None,
+                declaration: CallDeclaration::Local {
+                    definition: local.definition,
+                    labels: local.labels,
+                },
             });
+        if !query.record(checked, forms) {
+            self.type_query = None;
+        }
+    }
+
+    fn call_query_at(&mut self, span: Span) -> Option<&mut CallQuery<'model>> {
+        if self.path_reachable
+            && let Some(TypeQuery::Call(query)) = &mut self.type_query
+            && query.span == span
+        {
+            Some(query)
+        } else {
+            None
         }
     }
 
@@ -189,10 +232,50 @@ impl Checker<'_> {
 }
 
 impl CallQuery<'_> {
+    fn record(&mut self, checked: Option<CheckedCall>, forms: &[Form]) -> bool {
+        let explicit_offset = if self.written.is_empty() {
+            // An implicit-only call does not prove which slot new written
+            // arguments would occupy.
+            forms.is_empty().then_some(0)
+        } else {
+            let Some(offset) = explicit_offset(self.written, forms) else {
+                return true;
+            };
+            Some(offset)
+        };
+        let Some(mut checked) = checked else {
+            self.use_declaration();
+            return true;
+        };
+        checked.argument_count = Some(forms.len());
+        checked.explicit_offset = explicit_offset;
+        if let Some(previous) = &self.checked {
+            if previous.declaration != checked.declaration
+                || previous.origin != checked.origin
+                || previous.explicit_offset != checked.explicit_offset
+                || previous.argument_count != checked.argument_count
+            {
+                return false;
+            }
+            if previous.signature != checked.signature {
+                self.use_declaration();
+            }
+        } else {
+            self.checked = Some(checked);
+            if self.declared_only {
+                self.use_declaration();
+            }
+        }
+        true
+    }
+
     fn use_declaration(&mut self) {
         self.declared_only = true;
         if let Some(checked) = &mut self.checked {
-            checked.signature = checked.declared.clone();
+            match &checked.declaration {
+                CallDeclaration::Typed(declared) => checked.signature = declared.clone(),
+                CallDeclaration::Local { .. } => self.checked = None,
+            }
         }
     }
 }

@@ -118,6 +118,7 @@ fn typed_signatures(
     checked: &CheckedCall,
     source: Option<CallSignatures>,
 ) -> CallSignatures {
+    let source = source.filter(|_| checked.local_labels().is_none());
     let mut info = source.unwrap_or_else(|| CallSignatures {
         name: checked.origin.as_ref().map_or_else(
             || site.head.symbol().unwrap().to_owned(),
@@ -134,7 +135,9 @@ fn typed_signatures(
         .signatures
         .iter()
         .position(|signature| signature.arity == arity);
-    let labels = source_arity.map(|index| &info.signatures[index].parameters);
+    let labels = source_arity
+        .map(|index| info.signatures[index].parameters.as_slice())
+        .or_else(|| checked.local_labels());
     let parameters = checked
         .signature
         .args

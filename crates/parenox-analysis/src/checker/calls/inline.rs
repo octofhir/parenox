@@ -8,10 +8,11 @@ use super::super::{
     env::{CapturedFn, CapturedInline},
     function_forms::{MAX_FIXED_PARAMETERS, function_clauses, letfn_definition, pack_arguments},
     nil_part,
+    queries::LocalCall,
 };
 use super::{Callable, PreparedCallable, call_returns, combinators::Combiner};
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
-use crate::types::{Signature, Type};
+use crate::types::{Arity, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 
 const MAX_CALLBACK_DEPTH: usize = 16;
@@ -134,6 +135,53 @@ pub(super) struct Partial<'form, 'model> {
 }
 
 impl<'model> Checker<'model> {
+    pub(super) fn local_call(
+        &self,
+        captured: &CapturedInline,
+        arguments: &[(Value, Span)],
+    ) -> Option<LocalCall> {
+        if arguments
+            .iter()
+            .any(|(value, _)| value.known.contains_unknown())
+        {
+            return None;
+        }
+        let (definition, function) = captured.syntax();
+        let count = arguments.len();
+        let labels = match function {
+            InlineFunction::Function(parts) => {
+                let clauses = function_clauses(
+                    &parts[usize::from(function.name().is_some())..],
+                    definition.span,
+                )
+                .ok()?;
+                clauses
+                    .get(&Arity::Fixed(count))?
+                    .parameters()
+                    .map(|parameter| {
+                        self.source
+                            .get(parameter.span.start.offset..parameter.span.end.offset)
+                            .map(str::to_owned)
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            }
+            InlineFunction::Literal(function)
+                if !function.variadic && count == function.required =>
+            {
+                (1..=count).map(|index| format!("%{index}")).collect()
+            }
+            InlineFunction::Literal(_) => return None,
+        };
+        Some(LocalCall {
+            definition: definition.span,
+            labels,
+            args: arguments
+                .iter()
+                .map(|(value, _)| value.known.clone())
+                .collect(),
+        })
+    }
+
     pub(super) fn prepare_inline<'form>(
         &mut self,
         form: &'form Form,

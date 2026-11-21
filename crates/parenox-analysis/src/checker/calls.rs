@@ -313,9 +313,22 @@ impl<'model> Checker<'model> {
                 _ => {}
             }
         }
+        let start = self.diagnostics.len();
         if let Some(callable) = self.prepare_inline(&xs[0], env) {
             let args: Vec<_> = self.eval_args(&xs[1..], env, callable.returns()).collect();
             let invoked = call_returns(&args);
+            // Prepared callbacks elsewhere use synthetic arguments. Only
+            // this call has the written forms for signature help.
+            if invoked
+                && self.observes_local_call_at(span)
+                && let Callable::Captured { function, .. } = &callable.kind
+            {
+                let local = self.local_call(function, &args);
+                let result = self.call_prepared(&callable, args, span, env, true);
+                let local = local.filter(|_| start == self.diagnostics.len());
+                self.observe_local_call(span, &xs[1..], local, &result);
+                return result;
+            }
             return self.call_prepared(&callable, args, span, env, invoked);
         }
         let function = self.infer(&xs[0], env);

@@ -73,3 +73,80 @@ fn letfn_compiles_overwritten_and_uncalled_definitions() {
         ]
     );
 }
+
+#[test]
+fn local_signature_help_uses_the_checked_call_and_threaded_argument_positions() {
+    let source = r#"
+(ns local-functions)
+(defn checked {:t/sig '[:-> any?]} []
+  (letfn [(choose [value ignored] value)]
+    (-> "🦊" (choose :explicit))))
+(defn shorthand {:t/sig '[:-> any?]} []
+  (let [pick #(identity %)] (pick :shorthand)))
+(defn render-number {:t/sig '[number? :-> string?]} [_] "known")
+(defn nested {:t/sig '[:-> any?]} []
+  (letfn [(choose [value] value)] (choose (render-number 7))))
+"#;
+    let mut session = Session::default();
+    let report = session.check("local_functions.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let help = session
+        .call_signatures("local_functions.clj", source.find(":explicit").unwrap())
+        .unwrap();
+    assert_eq!(help.name, "choose");
+    assert_eq!(help.active_parameter, Some(1));
+    assert_eq!(
+        help.signatures[0].parameters,
+        [r#"value: "🦊""#, "ignored: :explicit"]
+    );
+    assert_eq!(help.signatures[0].result.as_deref(), Some(r#""🦊""#));
+
+    let offset = source.find(":shorthand").unwrap();
+    let help = session
+        .call_signatures("local_functions.clj", offset)
+        .unwrap();
+    assert_eq!(help.signatures[0].parameters, ["%1: :shorthand"]);
+    assert_eq!(help.signatures[0].result.as_deref(), Some(":shorthand"));
+
+    let offset = source.rfind("(render-number 7)").unwrap();
+    let help = session
+        .call_signatures("local_functions.clj", offset)
+        .unwrap();
+    assert_eq!(help.signatures[0].parameters, ["value: String"]);
+    let broken = source.replace("(render-number 7)", "(render-number :bad)");
+    let report = session.check("local_functions.clj", &broken);
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    assert!(
+        session
+            .call_signatures("local_functions.clj", offset)
+            .is_none()
+    );
+}
+
+#[test]
+fn an_unchecked_later_invocation_withholds_the_earlier_local_signature() {
+    let source = r#"
+(ns local-functions)
+(defn untyped [unknown]
+  (letfn [(choose [value] value)
+          (cross [x] (choose x))]
+    (cross :first)
+    (cross unknown)))
+"#;
+    let mut session = Session::default();
+    session.check("local_functions.clj", source);
+    let offset = source.find("choose x").unwrap() + "choose ".len();
+    assert!(
+        session
+            .call_signatures("local_functions.clj", offset)
+            .is_none()
+    );
+
+    let changed = source.replace("(cross unknown)", "(cross :first)");
+    session.check("local_functions.clj", &changed);
+    let help = session
+        .call_signatures("local_functions.clj", offset)
+        .unwrap();
+    assert_eq!(help.signatures[0].parameters, ["value: :first"]);
+    assert_eq!(help.signatures[0].result.as_deref(), Some(":first"));
+}
