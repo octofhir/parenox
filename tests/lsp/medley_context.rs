@@ -41,6 +41,15 @@ fn infers_medley_callback_parameters_from_dictionary_keys_and_values() {
             "textDocument":{"uri":document},"position":{"line":line,"character":character}
         }})
     };
+    let (line, lib) = location(SOURCE, "(fn [lib usages]", "lib");
+    let (_, usages) = location(SOURCE, "(fn [lib usages]", "usages");
+    let inlay = |id| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/inlayHint","params":{
+            "textDocument":{"uri":document},"range":{
+                "start":{"line":line,"character":0},"end":{"line":line+1,"character":0}
+            }
+        }})
+    };
     let change = |version, text: &str| {
         json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
             "textDocument":{"uri":document,"version":version},"contentChanges":[{"text":text}]
@@ -56,8 +65,11 @@ fn infers_medley_callback_parameters_from_dictionary_keys_and_values() {
         hover(3, " lib usages)", "usages"),
         hover(4, "(subs %1", "%1"),
         hover(5, "(inc %2", "%2"),
+        inlay(7),
         change(2, &broken),
+        inlay(8),
         change(3, SOURCE),
+        inlay(9),
         json!({"jsonrpc":"2.0","id":6,"method":"shutdown"}),
         json!({"jsonrpc":"2.0","method":"exit"}),
     ]);
@@ -76,6 +88,16 @@ fn infers_medley_callback_parameters_from_dictionary_keys_and_values() {
             "{response}"
         );
     }
+    let hints = |id| &responses.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    assert_eq!(
+        hints(7),
+        &json!([
+            {"position":{"line":line,"character":lib+3},"label":": Symbol","kind":1},
+            {"position":{"line":line,"character":usages+6},"label":": Vector<String>","kind":1}
+        ])
+    );
+    assert_eq!(hints(8), &json!([]));
+    assert_eq!(hints(9), hints(7));
     let findings = |version| {
         let message = responses
             .iter()

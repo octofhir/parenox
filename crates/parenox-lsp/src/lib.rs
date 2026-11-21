@@ -4,6 +4,7 @@ pub mod clojuredocs;
 pub mod completion;
 pub mod diagnostics;
 pub mod hover;
+pub mod inlay_hints;
 pub mod lenses;
 pub mod project_tree;
 pub mod protocol;

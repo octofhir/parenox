@@ -112,7 +112,7 @@ impl Checker<'_> {
             for ([pattern, _], value) in bindings.iter().zip(state) {
                 if let Some(name) = pattern.symbol() {
                     if !destructures {
-                        checker.observe_local(name, pattern.without_metadata().span, value);
+                        checker.observe_binding(name, pattern.without_metadata().span, value);
                     }
                     local.insert(name.to_string(), value.clone());
                 }

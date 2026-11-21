@@ -28,6 +28,8 @@ mod get_in_none;
 mod hover_docs;
 #[path = "lsp/if_to_cond.rs"]
 mod if_to_cond;
+#[path = "lsp/inlay_hints.rs"]
+mod inlay_hints;
 #[path = "lsp/inspection.rs"]
 mod inspection;
 #[path = "lsp/jar_definition.rs"]

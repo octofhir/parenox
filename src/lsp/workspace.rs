@@ -20,7 +20,9 @@ use parenox::{
 };
 use parenox_lsp::diagnostics::{self, RelatedInformation};
 use parenox_lsp::structural::{self, FoldingOptions};
-use parenox_lsp::{hover, lenses, project_tree, refactor, rename, semantic, signatures, test_tree};
+use parenox_lsp::{
+    hover, inlay_hints, lenses, project_tree, refactor, rename, semantic, signatures, test_tree,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -119,7 +121,7 @@ pub(super) struct SelectionQuery {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct FormatRangeQuery {
+pub(super) struct RangeQuery {
     text_document: DocumentUri,
     range: Range,
 }
@@ -694,6 +696,15 @@ impl Workspace {
         ))
     }
 
+    pub fn inlay_hints(&self, params: RangeQuery) -> Option<Vec<inlay_hints::InlayHint>> {
+        let path = self.document_key(&params.text_document.uri)?;
+        let document = self.documents.get(&path)?;
+        let lines = Lines::new(&document.source);
+        let range = lines.byte_range(params.range)?;
+        let types = self.session_for(&path)?.binding_types(&path, range);
+        Some(inlay_hints::bindings(types, &lines))
+    }
+
     pub fn semantic_tokens_full(&self, params: DocumentParams) -> Option<Value> {
         self.semantic_tokens(&params.text_document.uri, None)
     }
@@ -715,7 +726,7 @@ impl Workspace {
         lenses::resolve(self.session_for(&path)?, &path, &document.source, query)
     }
 
-    pub fn semantic_tokens_range(&self, params: FormatRangeQuery) -> Option<Value> {
+    pub fn semantic_tokens_range(&self, params: RangeQuery) -> Option<Value> {
         self.semantic_tokens(&params.text_document.uri, Some(params.range))
     }
 
@@ -868,7 +879,7 @@ impl Workspace {
         self.format(&params.text_document.uri, None)
     }
 
-    pub fn format_range(&self, params: FormatRangeQuery) -> Option<Value> {
+    pub fn format_range(&self, params: RangeQuery) -> Option<Value> {
         self.format(&params.text_document.uri, Some(params.range))
     }
 

@@ -21,7 +21,7 @@ pub use call_hierarchy::{CallHierarchyCalls, CallHierarchyItem};
 pub use completion_docs::{SourceExport, namespace_exports};
 use completion_require::LiteralRequireSite;
 pub use hover::{
-    DocumentHover, LocalHover, SourceHover, VarDocumentation, namespace_documentation,
+    BindingType, DocumentHover, LocalHover, SourceHover, VarDocumentation, namespace_documentation,
 };
 pub(super) use recovered_types::CheckedPrefix;
 pub use semantic::{InspectedReference, SemanticSymbol, SemanticSymbolKind};

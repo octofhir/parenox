@@ -692,6 +692,11 @@ project, a buffer has no project context.
   preceding complete functions. These prefix types are scoped to queries
   in that buffer. A named spec defined in the same file needs a complete
   source snapshot for registration.
+- **Inlay hints** show compact inferred types beside local bindings in checked
+  function clauses. They follow the editor's requested range and the current
+  buffer. A type hint requires a reachable binding and enough type evidence.
+  Hints use clauses whose body check found no error or coverage gap.
+  Proven local types can help explain a mismatch with the declared return type.
 - **ClojureDocs** downloads the public compact EDN export over HTTPS in
   the background when the cache is missing, invalid, or at least 24 hours old. The
   server uses the last valid snapshot while a refresh runs or fails. The

@@ -4,9 +4,9 @@ mod spec_proposals;
 mod symbols;
 
 pub use navigation::{
-    ArchiveDeclarations, CallHierarchyCalls, CallHierarchyItem, CallSignature, CallSignatures,
-    Definition, DocumentHover, InspectedReference, LocalHover, PrivacyDeclaration, SemanticSymbol,
-    SemanticSymbolKind, SourceExport, SourceHover, SourceTestKind, SourceTestNode,
+    ArchiveDeclarations, BindingType, CallHierarchyCalls, CallHierarchyItem, CallSignature,
+    CallSignatures, Definition, DocumentHover, InspectedReference, LocalHover, PrivacyDeclaration,
+    SemanticSymbol, SemanticSymbolKind, SourceExport, SourceHover, SourceTestKind, SourceTestNode,
     VarDocumentation, VarInfo, namespace_documentation, namespace_exports,
 };
 pub use spec_proposals::{ContractProposals, SpecContractProposal};

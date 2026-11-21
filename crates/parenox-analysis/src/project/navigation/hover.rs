@@ -1,5 +1,7 @@
 //! Source-backed hover help without evaluating declarations or metadata.
-use crate::checker::Declarations;
+use std::{collections::BTreeMap, ops::Range};
+
+use crate::checker::{Declarations, ProjectCall};
 use crate::reader::{Form, Span};
 use crate::types::Type;
 
@@ -27,6 +29,11 @@ pub struct LocalHover<'a> {
     pub span: Span,
 }
 
+pub struct BindingType {
+    pub span: Span,
+    pub inferred_type: String,
+}
+
 pub enum DocumentHover<'a> {
     Local(LocalHover<'a>),
     Lookup {
@@ -49,6 +56,67 @@ pub fn namespace_documentation(
 }
 
 impl Session {
+    /// Inferred types of binding occurrences with their insertion point in `range`.
+    pub fn binding_types(&self, path: &str, range: Range<usize>) -> Vec<BindingType> {
+        let Some(file) = self.current_file(path) else {
+            return Vec::new();
+        };
+        if file.parse_error.is_some()
+            || range.is_empty()
+            || !file.source.is_char_boundary(range.start)
+            || !file.source.is_char_boundary(range.end)
+        {
+            return Vec::new();
+        }
+        let Some(scope) = self.typing_at(file, path, range.start) else {
+            return Vec::new();
+        };
+        if !scope.model.functions.values().any(|function| {
+            !function.inferred()
+                && function.span.start.offset < range.end
+                && function.span.end.offset > range.start
+        }) {
+            return Vec::new();
+        }
+        let mut providers = BTreeMap::new();
+        let references = scope.declarations.collect_references(
+            scope.forms,
+            self.has_standard_test(),
+            false,
+            |namespace, name, arity| match self.reference_call(
+                path,
+                namespace,
+                name,
+                arity,
+                &mut providers,
+            ) {
+                ProjectCall::Unknown
+                    if scope
+                        .declarations
+                        .has_external_function(scope.globals, namespace, name) =>
+                {
+                    ProjectCall::Function {
+                        expected_arity: None,
+                    }
+                }
+                call => call,
+            },
+        );
+        let bindings = references
+            .bindings
+            .into_iter()
+            .filter(|span| range.contains(&span.end.offset));
+        scope
+            .declarations
+            .binding_types(scope.model, scope.globals, &file.source, bindings)
+            .into_iter()
+            .map(|(span, ty)| BindingType {
+                span,
+                inferred_type: ty.to_string(),
+            })
+            .collect()
+    }
+
     /// Hover a source var, evaluated local binding or read, or a keyword lookup.
     pub fn document_hover_at(&self, path: &str, offset: usize) -> Option<DocumentHover<'_>> {
         let resolved = self.hover_target(path, offset);

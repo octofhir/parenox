@@ -288,7 +288,7 @@ fn request(
             json!({"capabilities": {
             "positionEncoding":"utf-16", "textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},
             "definitionProvider":true, "declarationProvider":true, "implementationProvider":true,
-            "hoverProvider":true, "documentFormattingProvider":true,
+            "hoverProvider":true, "inlayHintProvider":true, "documentFormattingProvider":true,
             "documentRangeFormattingProvider":true,
             "foldingRangeProvider":true, "selectionRangeProvider":true,
             "renameProvider":{"prepareProvider":true},"linkedEditingRangeProvider":true,
@@ -428,6 +428,7 @@ fn request(
             | "textDocument/semanticTokens/range"
             | "textDocument/codeLens"
             | "textDocument/hover"
+            | "textDocument/inlayHint"
             | "textDocument/signatureHelp"
             | "textDocument/codeAction"
             | "codeLens/resolve"
@@ -481,6 +482,10 @@ fn request(
         },
         "textDocument/selectionRange" => match serde_json::from_value(params) {
             Ok(params) => json!(workspace.selection_ranges(params).unwrap_or_default()),
+            Err(error) => return send_error(output, id, -32602, &error.to_string()),
+        },
+        "textDocument/inlayHint" => match serde_json::from_value(params) {
+            Ok(params) => json!(workspace.inlay_hints(params).unwrap_or_default()),
             Err(error) => return send_error(output, id, -32602, &error.to_string()),
         },
         "textDocument/prepareRename" => match serde_json::from_value(params) {

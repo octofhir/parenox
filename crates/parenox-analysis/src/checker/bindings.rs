@@ -211,7 +211,7 @@ impl Checker<'_> {
         env: &mut Env,
     ) {
         if env.reachable() {
-            self.observe_local(name, span, &value);
+            self.observe_binding(name, span, &value);
         }
         if value.known == Type::Never {
             env.mark_impossible();

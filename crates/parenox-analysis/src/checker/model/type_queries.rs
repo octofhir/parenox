@@ -7,9 +7,70 @@ use crate::checker::{CheckedCall, Checker, TypeQuery};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 impl Declarations {
+    pub(crate) fn has_external_function(
+        &self,
+        globals: &Globals,
+        namespace: &str,
+        name: &str,
+    ) -> bool {
+        self.names.required_libraries.contains(namespace)
+            && !globals.project_namespaces.contains(namespace)
+            && matches!(
+                globals.declared_value(&format!("{namespace}/{name}")),
+                Some(DeclaredValue::Function(_))
+            )
+    }
+
+    pub(crate) fn binding_types(
+        &self,
+        model: &Model,
+        globals: &Globals,
+        source: &str,
+        bindings: impl Iterator<Item = Span>,
+    ) -> Vec<(Span, Type)> {
+        if !globals
+            .exports
+            .get(self.namespace())
+            .is_some_and(|published| Arc::ptr_eq(published, &model.exports))
+        {
+            return Vec::new();
+        }
+        let bindings: BTreeMap<_, _> = bindings.map(|span| (span.start.offset, span)).collect();
+        if bindings.is_empty() {
+            return Vec::new();
+        }
+        let mut types = Vec::new();
+        for function in model.functions.values() {
+            let Some(contract) = &function.contract else {
+                continue;
+            };
+            for signature in contract.signatures.iter() {
+                let clause = function.arities[&signature.arity()].span;
+                let candidates = bindings
+                    .range(clause.start.offset..clause.end.offset)
+                    .map(|(_, span)| *span);
+                let Some(query) = TypeQuery::bindings(clause, candidates) else {
+                    continue;
+                };
+                let mut checker = Checker::new(model, globals, source);
+                checker.type_query = Some(query);
+                checker.declared_function_body(function, signature);
+                if !checker.has_unproven_expectation
+                    && checker.diagnostics.is_empty()
+                    && let Some(query) = checker.type_query
+                {
+                    types.extend(query.into_binding_types());
+                }
+            }
+        }
+        types.sort_by_key(|(span, _)| span.start.offset);
+        types
+    }
+
     pub(crate) fn local_type(
         &self,
         forms: &[Form],

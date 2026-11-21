@@ -181,23 +181,27 @@ impl Session {
             forms,
             standard_test,
             collect_calls,
-            |namespace, name, actual| {
-                let provider = providers.get(namespace).copied().unwrap_or_else(|| {
-                    let provider = self.navigation_provider(namespace);
-                    providers.insert(namespace.into(), provider);
-                    provider
-                });
-                provider.map_or(
-                    ProjectCall::Unknown,
-                    |(provider_path, _, declarations, forms)| {
-                        declarations.source_function_call(
-                            forms,
-                            name,
-                            actual,
-                            provider_path != path,
-                        )
-                    },
-                )
+            |namespace, name, actual| self.reference_call(path, namespace, name, actual, providers),
+        )
+    }
+
+    pub(super) fn reference_call<'a>(
+        &'a self,
+        path: &str,
+        namespace: &str,
+        name: &str,
+        actual: usize,
+        providers: &mut BTreeMap<String, Option<Provider<'a>>>,
+    ) -> ProjectCall {
+        let provider = providers.get(namespace).copied().unwrap_or_else(|| {
+            let provider = self.navigation_provider(namespace);
+            providers.insert(namespace.into(), provider);
+            provider
+        });
+        provider.map_or(
+            ProjectCall::Unknown,
+            |(provider_path, _, declarations, forms)| {
+                declarations.source_function_call(forms, name, actual, provider_path != path)
             },
         )
     }

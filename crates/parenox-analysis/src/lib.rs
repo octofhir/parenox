@@ -15,12 +15,12 @@ pub use extern_diff::{
     ExternMismatchReason, ExternPathStep, ExternSnapshot,
 };
 pub use project::{
-    ArchiveDeclarations, CallHierarchyCalls, CallHierarchyItem, CallSignature, CallSignatures,
-    ContractProposals, Definition, DocumentHover, ExternExport, FdefSuggestion, InspectedReference,
-    LocalHover, PrivacyDeclaration, ProjectReport, SemanticSymbol, SemanticSymbolKind, Session,
-    Source, SourceEdit, SourceExport, SourceHover, SourceSymbol, SourceSymbolKind, SourceTestKind,
-    SourceTestNode, SpecContractProposal, VarDocumentation, VarInfo, compare_externs,
-    namespace_documentation, namespace_exports,
+    ArchiveDeclarations, BindingType, CallHierarchyCalls, CallHierarchyItem, CallSignature,
+    CallSignatures, ContractProposals, Definition, DocumentHover, ExternExport, FdefSuggestion,
+    InspectedReference, LocalHover, PrivacyDeclaration, ProjectReport, SemanticSymbol,
+    SemanticSymbolKind, Session, Source, SourceEdit, SourceExport, SourceHover, SourceSymbol,
+    SourceSymbolKind, SourceTestKind, SourceTestNode, SpecContractProposal, VarDocumentation,
+    VarInfo, compare_externs, namespace_documentation, namespace_exports,
 };
 
 #[derive(Clone, Debug, Serialize)]

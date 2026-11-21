@@ -1,5 +1,5 @@
 //! Observations made by the checker at one requested source occurrence.
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use super::{Checker, Value, calls::CallArguments};
 use crate::ContractOrigin;
@@ -10,6 +10,12 @@ pub(super) enum TypeQuery<'a> {
     Local { name: &'a str, span: Span, ty: Type },
     Lookup { span: Span, ty: Type },
     Call(Box<CallQuery<'a>>),
+    Bindings(BindingQueries),
+}
+
+pub(super) struct BindingQueries {
+    enclosing: Span,
+    types: BTreeMap<usize, (Span, Option<Type>)>,
 }
 
 pub(super) struct CallQuery<'a> {
@@ -86,10 +92,18 @@ impl<'a> TypeQuery<'a> {
         }
     }
 
+    pub(super) fn bindings(enclosing: Span, spans: impl Iterator<Item = Span>) -> Option<Self> {
+        let types: BTreeMap<_, _> = spans
+            .map(|span| (span.start.offset, (span, Some(Type::Never))))
+            .collect();
+        (!types.is_empty()).then_some(Self::Bindings(BindingQueries { enclosing, types }))
+    }
+
     pub(super) fn span(&self) -> Span {
         match self {
             Self::Local { span, .. } | Self::Lookup { span, .. } => *span,
             Self::Call(query) => query.span,
+            Self::Bindings(query) => query.enclosing,
         }
     }
 
@@ -110,9 +124,40 @@ impl<'a> TypeQuery<'a> {
             _ => None,
         }
     }
+
+    pub(super) fn into_binding_types(self) -> impl Iterator<Item = (Span, Type)> {
+        let types = match self {
+            Self::Bindings(query) => query.types,
+            _ => BTreeMap::new(),
+        };
+        types.into_values().filter_map(|(span, ty)| {
+            let ty = ty?;
+            (ty != Type::Never).then_some((span, ty))
+        })
+    }
 }
 
 impl<'model> Checker<'model> {
+    pub(super) fn observe_binding(&mut self, name: &str, span: Span, value: &Value) {
+        self.observe_local(name, span, value);
+        if self.path_reachable
+            && let Some(TypeQuery::Bindings(query)) = &mut self.type_query
+            && let Some((binding, ty)) = query.types.get_mut(&span.start.offset)
+            && *binding == span
+            && let Some(previous) = ty
+        {
+            if value.known == Type::Any || value.known.contains_unknown() {
+                *ty = None;
+            } else if *previous != value.known {
+                let combined = Type::union([
+                    std::mem::replace(previous, Type::Never),
+                    value.known.clone(),
+                ]);
+                *ty = (!combined.contains_unknown() && combined != Type::Any).then_some(combined);
+            }
+        }
+    }
+
     pub(super) fn observe_local(&mut self, name: &str, span: Span, value: &Value) {
         if self.path_reachable
             && let Some(TypeQuery::Local {
@@ -222,6 +267,17 @@ impl<'model> Checker<'model> {
             return;
         }
         if let Some(query) = &mut self.type_query {
+            if let TypeQuery::Bindings(batch) = query {
+                for (_, (span, ty)) in batch
+                    .types
+                    .range_mut(enclosing.start.offset..enclosing.end.offset)
+                {
+                    if span.end.offset <= enclosing.end.offset {
+                        *ty = None;
+                    }
+                }
+                return;
+            }
             let site = query.span();
             if enclosing.start.offset <= site.start.offset
                 && site.end.offset <= enclosing.end.offset
@@ -229,6 +285,7 @@ impl<'model> Checker<'model> {
                 match query {
                     TypeQuery::Local { .. } | TypeQuery::Lookup { .. } => self.type_query = None,
                     TypeQuery::Call(query) => query.use_declaration(),
+                    TypeQuery::Bindings(_) => unreachable!(),
                 }
             }
         }
