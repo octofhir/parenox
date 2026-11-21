@@ -269,8 +269,8 @@ fn a_rejected_callback_with_a_checked_result_has_one_type_error() {
 fn an_independent_coverage_gap_survives_a_callback_type_error() {
     let report = check(
         "(defn erased {:t/sig '[number? :-> t/any]} [n] n)
-         (defn mixed {:t/sig '[:-> string?]} []
-           (convert (fn [n] (inc \"not a number\") (subs (erased n) 0)) 1))",
+         (defn mixed {:t/sig '[boolean? :-> string?]} [bad-number?]
+           (convert (fn [n] (if bad-number? (inc \"not a number\") (subs (erased n) 0))) 1))",
     );
     assert!(!report.complete);
     let [gap, error] = report.diagnostics.as_slice() else {

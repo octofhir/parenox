@@ -109,12 +109,13 @@ impl Checker<'_> {
                         )
                         .map(|callback| {
                             if check_body && let Some((parameter, witness)) = output {
-                                output_gap_explained = callback
-                                    .rejected_return
-                                    .as_ref()
-                                    .and_then(|ty| witness.evidence(ty))
-                                    .is_some_and(|ty| {
-                                        parameter.check_bound(&ty) == Compatibility::Proven
+                                output_gap_explained =
+                                    callback.rejected_return.as_ref().is_some_and(|ty| {
+                                        *ty == Type::Never
+                                            || witness.evidence(ty).is_some_and(|evidence| {
+                                                parameter.check_bound(&evidence)
+                                                    == Compatibility::Proven
+                                            })
                                     });
                             }
                             callback.value

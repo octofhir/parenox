@@ -2,9 +2,9 @@ use parenox::{Session, output};
 
 #[test]
 fn suppression_matches_only_its_rule_inside_the_next_form() {
-    let source = r#"(defn f {:t/sig '[:-> number?]} []
+    let source = r#"(defn f {:t/sig '[boolean? :-> number?]} [check-legacy?]
       ;; parenox-ignore PNX2322: the legacy input is intentional
-      (do (inc "hidden") (missing))
+      (if check-legacy? (do (inc "hidden") (missing)) 0)
       (inc "visible"))"#;
     let report = Session::default().check("app.clj", source);
     assert!(!report.ok && !report.complete);

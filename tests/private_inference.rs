@@ -178,10 +178,9 @@ fn local_bindings_and_private_predicate_names_keep_clojure_resolution() {
 fn repeated_specializations_replay_errors_with_the_current_call_site() {
     let report = check(
         "(defn- f [x] (inc x))\n\
-        (defn entry {:t/sig '[:-> number?]} []\n\
-          (f \"wrong\")\n\
-          (f \"wrong\")\n\
-          (f 1))",
+        (defn entry {:t/sig '[boolean? :-> number?]} [choose-first?]\n\
+          (if choose-first? (f \"wrong\")\n\
+              (f \"wrong\")))",
     );
     assert!(!report.ok && report.complete, "{report:#?}");
     assert_eq!(report.diagnostics.len(), 2);

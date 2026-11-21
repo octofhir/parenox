@@ -201,7 +201,7 @@ fn excludes_nan(value: &Value) -> bool {
         || value.known.known_intersection(&Type::NonIntegral) == Some(Type::Never)
 }
 
-fn excludes_number(value: &Value) -> bool {
+pub(super) fn excludes_number(value: &Value) -> bool {
     value.literal_container.is_some()
         || value.known.known_intersection(&Type::Number) == Some(Type::Never)
 }

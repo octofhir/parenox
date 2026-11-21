@@ -100,6 +100,53 @@ fn a_failed_direct_comparison_stops_before_later_forms() {
 }
 
 #[test]
+fn unary_numeric_failures_preserve_only_the_actual_exception_path() {
+    let report = check(
+        r#"
+(defn symbol-input {:t/sig '[:-> #{:cast}]} []
+  (try (inc 'read-config)
+       (catch NullPointerException _ :wrong)
+       (catch ClassCastException _ :cast)))
+(defn nil-input {:t/sig '[:-> #{:nil}]} []
+  (try (apply dec [nil])
+       (catch ClassCastException _ :wrong)
+       (catch NullPointerException _ :nil)))
+(defn maybe-number {:t/sig '[(s/or :count int? :name symbol?) :-> number?]} [input]
+  (let [incremented (inc input)] (inc incremented)))
+"#,
+    );
+    assert!(report.complete, "{report:#?}");
+    let [symbol, nil, mixed] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    for (finding, (name, actual)) in [symbol, nil, mixed].into_iter().zip([
+        ("clojure.core/inc", "SimpleSymbol"),
+        ("clojure.core/dec", "Nil"),
+        ("clojure.core/inc", "JVM fixed-precision integer | Symbol"),
+    ]) {
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(finding.contract.as_ref().unwrap().name, name);
+        assert_eq!(finding.actual.as_deref(), Some(actual));
+    }
+}
+
+#[test]
+fn a_bad_filter_callback_reports_its_operand_without_a_return_mismatch() {
+    let report = check(
+        r#"
+(defn namespace-usages {:t/sig '[:-> (s/tuple {:to symbol?})]} []
+  (into [] (filter #(inc (:to %))) [{:to 'sample.source} {:to 'sample.dest}]))
+"#,
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.contract.as_ref().unwrap().name, "clojure.core/inc");
+    assert_eq!(finding.actual.as_deref(), Some("SimpleSymbol"));
+}
+
+#[test]
 fn open_spreads_keep_the_unary_path_and_lazy_failures() {
     let report = check(
         r#"

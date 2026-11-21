@@ -386,7 +386,8 @@ impl Model {
 
     pub(super) fn can_use_standard_core(&self, name: &str, globals: &Globals) -> bool {
         !globals.project_namespaces.contains("clojure.core")
-            && (name.contains('/') || self.external_refers.is_empty())
+            // Loaded referrals have already been applied in namespace order.
+            && (name.contains('/') || self.external_refers.values().all(Option::is_some))
     }
 
     pub(super) fn resolve(&self, name: &str) -> String {

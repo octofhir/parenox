@@ -707,6 +707,8 @@ impl<'model> Checker<'model> {
                 resolved,
                 "clojure.core/count"
                     | "clojure.core/first"
+                    | "clojure.core/inc"
+                    | "clojure.core/dec"
                     | "clojure.core/min"
                     | "clojure.core/max"
             ) || self.model.can_use_standard_core(spelling, self.globals))
@@ -870,6 +872,20 @@ impl<'model> Checker<'model> {
             return self.extremum(name, args);
         }
         let arithmetic = arithmetic::fixed_result(name, args);
+        if arithmetic.is_none()
+            && matches!(name, "clojure.core/inc" | "clojure.core/dec")
+            && arithmetic::excludes_number(&args[0].0)
+        {
+            let (argument, span) = &args[0];
+            self.expect(argument, &Type::Number, *span, name);
+            if nil_part(&argument.known) != Type::Never {
+                self.null_pointer();
+            }
+            if !argument.known.subtype_of(&Type::Nil) {
+                self.class_cast();
+            }
+            return Value::new(Type::Never);
+        }
         if self.throws.is_some()
             && arithmetic.is_none()
             && !matches!(

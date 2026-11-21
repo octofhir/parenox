@@ -121,7 +121,7 @@ fn dynamic_paths_preserve_nil_and_use_the_guard_for_the_first_segment() {
             "(s/map-of string? (s/map-of keyword? number?))",
             "number?",
             r#"(get-in m [sku (inc "bad")] 0)"#,
-            &["PNX9001", "PNX2322"],
+            &["PNX2322"],
         ),
     ];
     for (argument, ret, expression, expected) in cases {
