@@ -214,6 +214,50 @@ fn vector_assoc_distinguishes_index_failure_and_runtime_key_class() {
 }
 
 #[test]
+fn two_argument_into_preserves_both_halves_of_a_vector_edit() {
+    let report = check(
+        r#"
+(defn cut-middle {:t/sig '[:-> (s/tuple #{:first} #{:last})]} []
+  (let [i 1]
+    (letfn [(cut [v] (into (subvec v 0 i) (subvec v (inc i))))]
+      (mapv first (cut [[:first] [:remove] [:last]])))))
+(defn empty-source {:t/sig '[:-> #{"original"}]} []
+  (peek (into ["original"] nil)))
+(defn target-first {:t/sig '[:-> #{:target}]} []
+  (try (into (throw (ex-info "target" {:part :target}))
+             (throw (ex-info "source" {:part :source})))
+       (catch clojure.lang.ExceptionInfo error (:part (ex-data error)))))
+(defn source-before-append {:t/sig '[:-> #{:source}]} []
+  (try (into [:target] (throw (ex-info "source" {:part :source})))
+       (catch clojure.lang.ExceptionInfo error (:part (ex-data error)))))
+"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn two_argument_into_requires_proof_for_both_vector_operations() {
+    let source = r#"(ns stack (:require [clojure.spec.alpha :as s]))
+(defn target {:t/sig '[(s/tuple #{:kept}) :-> any?]} [previous]
+  (into previous [:new]))
+(defn source {:t/sig '[(s/tuple #{:new}) :-> any?]} [items]
+  (into [:kept] items))"#;
+    let report = Session::default().check("stack.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    let [target, input] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    for (finding, expected) in [target, input].into_iter().zip(["previous", "items"]) {
+        assert_eq!(finding.code, "PNX9001");
+        assert_eq!(finding.severity, "warning");
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            expected
+        );
+    }
+}
+
+#[test]
 fn unchecked_into_visits_withhold_only_callback_hovers() {
     let source = r#"(ns traversal (:require [clojure.spec.alpha :as s]))
 (defn inline {:t/sig '[(s/tuple keyword?) :-> any?]} [custom]

@@ -344,7 +344,7 @@ impl<'model> Checker<'model> {
                         return self.deref_call(&xs[1..], span, env);
                     }
                     if resolved == "clojure.core/into"
-                        && let Some(result) = self.collect_vector_transducer(xs, span, env)
+                        && let Some(result) = self.collect_vector(xs, span, env)
                     {
                         return result;
                     }

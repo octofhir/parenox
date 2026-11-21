@@ -157,24 +157,82 @@ impl Checker<'_> {
         result
     }
 
-    pub(super) fn collect_vector_transducer(
+    pub(super) fn collect_vector(
         &mut self,
         forms: &[Form],
         span: Span,
         env: &Env,
     ) -> Option<Value> {
-        let [into, target, transducer, source] = forms else {
+        let [into, target, operands @ ..] = forms else {
             return None;
         };
-        // An empty vector literal has no evaluation effects and supplies the
-        // ordinary conj! step and completion used by into.
-        if !matches!(&target.kind, Kind::Vector(items) if items.is_empty())
-            || !self
-                .model
-                .can_use_standard_core(into.symbol()?, self.globals)
+        if !self
+            .model
+            .can_use_standard_core(into.symbol()?, self.globals)
         {
             return None;
         }
+        match operands {
+            [_] => {
+                let args = self.typed_args(&forms[1..], env);
+                Some(self.append_vector_inputs(&args))
+            }
+            // The empty vector literal supplies the ordinary conj! step.
+            [transducer, source] if matches!(&target.kind, Kind::Vector(items) if items.is_empty()) => {
+                self.collect_vector_transducer(transducer, source, span, env)
+            }
+            _ => None,
+        }
+    }
+
+    fn append_vector_inputs(&mut self, args: &[(Value, Span)]) -> Value {
+        let [(target, target_span), (source, source_span)] = args else {
+            unreachable!("two-argument into was selected");
+        };
+        if !call_returns(args) {
+            return Value::new(Type::Never);
+        }
+        let (Type::Tuple(target_items), Some(target_vector @ LiteralContainer::Vector(_))) =
+            (&target.known, &target.literal_container)
+        else {
+            return self.unchecked_form(
+                *target_span,
+                "Two-argument into needs a proven ordinary vector target",
+            );
+        };
+        if source.known == Type::Nil {
+            return target.clone();
+        }
+        let (Type::Tuple(source_items), Some(source_vector @ LiteralContainer::Vector(_))) =
+            (&source.known, &source.literal_container)
+        else {
+            return self.unchecked_form(
+                *source_span,
+                "Two-argument into needs a proven ordinary vector or Nil source",
+            );
+        };
+        let contents = [(target_items, target_vector), (source_items, source_vector)]
+            .into_iter()
+            .flat_map(|(items, vector)| {
+                items.iter().enumerate().map(move |(index, item)| {
+                    let mut value = Value::new(item.clone());
+                    value.literal_container = vector.vector_item(index).cloned();
+                    value
+                })
+            });
+        let mut result =
+            literal_vector_value(contents, target_items.len() + source_items.len(), true);
+        result.notes.clone_from(&target.notes);
+        result
+    }
+
+    fn collect_vector_transducer(
+        &mut self,
+        transducer: &Form,
+        source: &Form,
+        span: Span,
+        env: &Env,
+    ) -> Option<Value> {
         let Kind::List(form) = &transducer.kind else {
             return None;
         };
