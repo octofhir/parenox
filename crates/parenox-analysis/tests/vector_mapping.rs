@@ -1,4 +1,4 @@
-use parenox_analysis::{DocumentHover, Session};
+use parenox_analysis::{DocumentHover, ExternPathStep, Session};
 
 #[test]
 fn fixed_doc_rows_retain_their_positions_at_the_use_site() {
@@ -127,4 +127,36 @@ fn filterv_preserves_the_positions_retained_by_malli_instrumentation() {
     let span = finding.span.start.offset..finding.span.end.offset;
     assert_eq!(&broken[span], "1");
     assert!(session.check("malli_instrumented.clj", source).ok);
+}
+
+#[test]
+fn projected_literal_fields_keep_their_callback_argument_position() {
+    let source = r#"
+(ns positions)
+(defn line-delta {:t/sig '[{:line number?} {:line number?} :-> number?]} [left right]
+  (- (:line right) (:line left)))
+(defn check-positions {:t/sig '[:-> any?]} []
+  (let [original [{:line 0}]]
+    (mapv line-delta original [{:line "0"}])))
+"#;
+    let report = Session::default().check("positions.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    let span = finding.span.start.offset..finding.span.end.offset;
+    assert_eq!(&source[span], r#""0""#);
+    assert_eq!(
+        finding.mismatch_path,
+        [
+            ExternPathStep::Argument { index: 2 },
+            ExternPathStep::Field {
+                key: ":line".into()
+            },
+        ]
+    );
+    assert_eq!(
+        finding.contract.as_ref().unwrap().name,
+        "positions/line-delta"
+    );
 }

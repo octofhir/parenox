@@ -149,9 +149,12 @@ impl<'model> Checker<'model> {
         let Some(query) = self.call_query_at(span) else {
             return;
         };
-        if arguments.forms.len() != arguments.values.len() {
+        let Some(forms) = arguments
+            .written_forms()
+            .filter(|forms| forms.len() == arguments.values.len())
+        else {
             return;
-        }
+        };
         let checked = CheckedCall {
             signature: signature.clone(),
             origin: origin.cloned(),
@@ -159,7 +162,7 @@ impl<'model> Checker<'model> {
             argument_count: None,
             declaration: CallDeclaration::Typed(declared.clone()),
         };
-        if !query.record(Some(checked), arguments.forms) {
+        if !query.record(Some(checked), forms) {
             self.type_query = None;
         }
     }

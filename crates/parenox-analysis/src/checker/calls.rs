@@ -91,8 +91,32 @@ pub(super) struct Specialization {
 #[derive(Clone, Copy)]
 pub(super) struct CallArguments<'a> {
     pub(super) values: &'a [(Value, Span)],
-    pub(super) forms: &'a [Form],
+    forms: ArgumentForms<'a>,
     output_gap_explained: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ArgumentForms<'a> {
+    Written(&'a [Form]),
+    Projected(&'a [Option<&'a Form>]),
+    Unavailable,
+}
+
+impl<'a> CallArguments<'a> {
+    pub(super) fn written_forms(self) -> Option<&'a [Form]> {
+        match self.forms {
+            ArgumentForms::Written(forms) => Some(forms),
+            _ => None,
+        }
+    }
+
+    fn form_at(self, index: usize) -> Option<&'a Form> {
+        match self.forms {
+            ArgumentForms::Written(forms) => forms.get(index),
+            ArgumentForms::Projected(forms) => forms.get(index).copied().flatten(),
+            ArgumentForms::Unavailable => None,
+        }
+    }
 }
 
 struct EvaluatedArguments {
@@ -350,7 +374,7 @@ impl<'model> Checker<'model> {
             &function,
             CallArguments {
                 values: &args.values,
-                forms: &xs[1..],
+                forms: ArgumentForms::Written(&xs[1..]),
                 output_gap_explained: args.output_gap_explained,
             },
             xs[0].span,
@@ -604,7 +628,7 @@ impl<'model> Checker<'model> {
                 &format!("Argument {argument}"),
                 function.contract.as_deref(),
             );
-            if let Some(form) = args.forms.get(index).filter(|form| form.span == *span)
+            if let Some(form) = args.form_at(index).filter(|form| form.span == *span)
                 && self
                     .diagnostics
                     .get(start)
@@ -666,6 +690,25 @@ impl<'model> Checker<'model> {
         env: &Env,
         invoked: bool,
     ) -> Value {
+        self.call_prepared_with_forms(
+            callable,
+            args,
+            ArgumentForms::Unavailable,
+            span,
+            env,
+            invoked,
+        )
+    }
+
+    fn call_prepared_with_forms(
+        &mut self,
+        callable: &PreparedCallable<'_, '_>,
+        args: Vec<(Value, Span)>,
+        forms: ArgumentForms<'_>,
+        span: Span,
+        env: &Env,
+        invoked: bool,
+    ) -> Value {
         let invoked = invoked && callable.returns();
         match &callable.kind {
             Callable::Inline(parts) => {
@@ -693,7 +736,7 @@ impl<'model> Checker<'model> {
                     function,
                     CallArguments {
                         values: &args,
-                        forms: &[],
+                        forms,
                         output_gap_explained: false,
                     },
                     callable.span,

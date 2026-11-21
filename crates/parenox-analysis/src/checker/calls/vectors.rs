@@ -3,7 +3,7 @@ use super::super::{
     Checker, Env, LiteralContainer, Value, flow::narrow_by_type, literal_vector_value, nil_part,
 };
 use super::{
-    PreparedCallable, call_returns, narrow_emptiness, predicate_type,
+    ArgumentForms, Callable, PreparedCallable, call_returns, narrow_emptiness, predicate_type,
     sequences::{collection_emptiness, iteration_may_throw},
 };
 use crate::reader::{Form, Span};
@@ -190,6 +190,10 @@ impl Checker<'_> {
         if count == 0 {
             self.call_prepared(callable, Vec::new(), span, env, false);
         }
+        let check_arguments = matches!(&callable.kind, Callable::Value(value)
+            if matches!(value.known, Type::Function(_) | Type::Union(_)))
+            && vectors.iter().any(|vector| vector.literal.is_some());
+        let mut projected = check_arguments.then(|| Vec::with_capacity(vectors.len()));
         let mut output = Vec::with_capacity(count);
         let mut exact_positions = true;
         for index in 0..count {
@@ -207,20 +211,28 @@ impl Checker<'_> {
                 ));
             }
             self.vector_transform_steps += 1;
+            if let Some(projected) = &mut projected {
+                projected.clear();
+            }
             let args: Vec<_> = vectors
                 .iter()
                 .map(|vector| {
                     let mut value =
                         Value::with_notes(vector.items[index].clone(), vector.notes.to_vec());
                     value.literal_container = vector.container.vector_item(index).cloned();
-                    let span = vector
-                        .literal
-                        .map_or(vector.span, |forms| forms[index].span);
+                    let form = vector.literal.map(|forms| &forms[index]);
+                    if let Some(projected) = &mut projected {
+                        projected.push(form);
+                    }
+                    let span = form.map_or(vector.span, |form| form.span);
                     (value, span)
                 })
                 .collect();
             let selection = predicate.map(|form| (form, args[0].0.clone()));
-            let result = self.call_prepared(callable, args, span, env, true);
+            let forms = projected
+                .as_deref()
+                .map_or(ArgumentForms::Unavailable, ArgumentForms::Projected);
+            let result = self.call_prepared_with_forms(callable, args, forms, span, env, true);
             if result.known == Type::Never {
                 return Some(result);
             }
