@@ -227,6 +227,10 @@ impl Checker<'_> {
                     sequence
                 })
             }
+            Callable::Builtin(name) if name == "clojure.core/str" => {
+                self.may_throw();
+                Value::new(Type::String)
+            }
             Callable::Builtin(name)
                 if matches!(name.as_str(), "clojure.core/min" | "clojure.core/max") =>
             {

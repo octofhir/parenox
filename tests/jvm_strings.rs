@@ -1,4 +1,4 @@
-use parenox::{Session, Source};
+use parenox::{DocumentHover, Session, Source};
 
 const SOURCE: &str = include_str!("../examples/jvm_strings.cljc");
 
@@ -259,6 +259,82 @@ fn multiline_alias_text_checks_the_middle_slice_before_the_last_line() {
             );
             assert_eq!(finding.span.start.line, 8);
         }
+    }
+}
+
+#[test]
+fn literal_rendering_checks_version_labels_and_nil_without_a_catch_path() {
+    let source = r#"
+(defn version-label {:t/sig '[:-> #{"2026.11-SNAPSHOT (🦊12345)"}]} []
+  (let [version "2026.11-SNAPSHOT" revision "🦊123456789"]
+    (str version " (" (subs revision 0 (min 7 (count revision))) ")")))
+(defn pure {:t/sig '[:-> #{"a🦊"}]} []
+  (try (str "a" nil "🦊") (catch Throwable _ :render-failed)))
+(defn empty-label {:t/sig '[:-> #{""}]} [] (str))
+(defn fixed-spread {:t/sig '[:-> #{"a🦊"}]} [] (apply str ["a" nil "🦊"]))
+"#;
+    let report = Session::default().check("labels.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn rendering_caps_literals_and_preserves_effects_of_unknown_arguments() {
+    let astral = "🦊".repeat(256);
+    let source = format!(
+        r#"(ns labels (:require [clojure.spec.alpha :as s]))
+(defn boundary {{:t/sig '[:-> string?]}} []
+  (let [boundary (str "{astral}" nil)] boundary))
+(defn over-limit {{:t/sig '[:-> string?]}} []
+  (let [over-limit (str "{astral}" "a")] over-limit))
+(defn uncertain {{:t/sig '[any? :-> any?]}} [object]
+  (let [uncertain (try (str "{astral}" "a" object)
+                       (catch Throwable _ :render-failed))] uncertain))
+(defn open-spread {{:t/sig '[(s/coll-of #{{"a"}} :kind vector?) :-> string?]}} [pieces]
+  (let [joined (apply str pieces)] joined))"#,
+    );
+    let mut session = Session::default();
+    let report = session.check("render.clj", &source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    for (marker, expected) in [
+        ("boundary))", format!("\"{astral}\"")),
+        ("over-limit))", "String".into()),
+        ("uncertain))", "String | :render-failed".into()),
+        ("joined))", "String".into()),
+    ] {
+        let offset = source.find(marker).unwrap();
+        let Some(DocumentHover::Local(hover)) = session.document_hover_at("render.clj", offset)
+        else {
+            panic!("missing hover for {marker}");
+        };
+        assert_eq!(hover.inferred_type, expected);
+    }
+}
+
+#[test]
+fn structural_traversal_does_not_supply_literal_str_arguments() {
+    let source = r#"(ns rendering (:require [clojure.spec.alpha :as s]))
+(defn projected {:t/sig '[(s/tuple #{"x"}) :-> any?]} [parts]
+  (let [joined (apply str parts)
+        seq-joined (apply str (seq parts))
+        prefixed (apply (partial str "prefix:") parts)
+        mapped (mapv str parts)]
+    [joined seq-joined prefixed mapped]))"#;
+    let mut session = Session::default();
+    let report = session.check("render.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let start = source.find("[joined seq-joined").unwrap();
+    for (name, expected) in [
+        ("joined", "String"),
+        ("seq-joined", "String"),
+        ("prefixed", "String"),
+        ("mapped", "Vector<String>"),
+    ] {
+        let offset = start + source[start..].find(name).unwrap();
+        let Some(DocumentHover::Local(hover)) = session.document_hover_at("render.clj", offset)
+        else {
+            panic!("missing hover for {name}");
+        };
+        assert_eq!(hover.inferred_type, expected);
     }
 }
 

@@ -709,6 +709,7 @@ impl<'model> Checker<'model> {
                     | "clojure.core/first"
                     | "clojure.core/nth"
                     | "clojure.core/subvec"
+                    | "clojure.core/str"
                     | "clojure.core/inc"
                     | "clojure.core/dec"
                     | "clojure.core/conj"
@@ -808,6 +809,14 @@ impl<'model> Checker<'model> {
                 args.into_iter().map(|(value, _)| value).collect(),
                 span,
             ),
+            Callable::Builtin(name)
+                if name == "clojure.core/str" && matches!(forms, ArgumentForms::Unavailable) =>
+            {
+                // Structural spreads and aggregate callbacks can supply values
+                // through a custom traversal with different elements.
+                self.may_throw();
+                Value::new(Type::String)
+            }
             Callable::Builtin(name) => self.builtin(name, &args, span),
             Callable::Value(function) => {
                 let result = self.call_value(
@@ -898,6 +907,7 @@ impl<'model> Checker<'model> {
                     | "clojure.lang.MapEntry/create"
                     | "clojure.core/ex-data"
                     | "clojure.core/identity"
+                    | "clojure.core/str"
                     | "clojure.core/name"
                     | "clojure.core/map?"
                     | "clojure.core/vector?"
@@ -1029,7 +1039,7 @@ impl<'model> Checker<'model> {
                 }
                 Type::Vector(Box::new(Type::String))
             }
-            "clojure.core/str" => Type::String,
+            "clojure.core/str" => self.str_result(args),
             "clojure.core/name" if self.globals.project_namespaces.contains("clojure.core") => {
                 self.may_throw();
                 return self.unsupported(span, "name requires the standard clojure.core function");

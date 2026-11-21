@@ -4,7 +4,29 @@ use crate::Diagnostic;
 use crate::reader::{Form, Kind};
 use crate::types::MAX_TUPLE_ITEMS;
 
+const MAX_CONCATENATED_STRING_BYTES: usize = 1024;
+
 impl Checker<'_> {
+    pub(super) fn str_result(&mut self, args: &[(Value, Span)]) -> Type {
+        if !args
+            .iter()
+            .all(|(value, _)| matches!(value.known, Type::Str(_) | Type::Nil))
+        {
+            self.may_throw();
+            return Type::String;
+        }
+        let mut text = String::new();
+        for (value, _) in args {
+            if let Type::Str(part) = &value.known {
+                if part.len() > MAX_CONCATENATED_STRING_BYTES - text.len() {
+                    return Type::String;
+                }
+                text.push_str(part);
+            }
+        }
+        Type::Str(text)
+    }
+
     pub(super) fn substring(&mut self, forms: &[Form], span: Span, env: &Env) -> Value {
         const NAME: &str = "clojure.core/subs";
         let args = self.typed_args(forms, env);
