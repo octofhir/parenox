@@ -142,3 +142,101 @@ fn symbolic_case_labels_are_data_and_narrow_the_tested_value() {
     };
     assert_eq!(finding.code, "PNX2790");
 }
+
+#[test]
+fn equality_condp_narrows_map_selectors_and_only_checks_reached_results() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn render {:t/sig '[(s/or :label {:kind #{:label} :label string?}
+                            :count {:kind #{:count} :count number?})
+                       :-> string?]} [row]
+  (condp = (:kind row)
+    :label (:label row)
+    :count (str (inc (:count row)))
+    (subs false 0)))
+(defn repeated {:t/sig '[keyword? :-> string?]} [status]
+  (condp = status
+    :ready "first"
+    :ready (subs false 0)
+    "other"))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (expression, expected) in [
+        ("(condp = :on :on :first :on (subs false 0))", "#{:first}"),
+        ("(condp clojure.core/= nil false :off nil :nil)", "#{:nil}"),
+        ("(condp = 'get 'other :other 'get :symbol)", "#{:symbol}"),
+        ("(condp = \\x \\x :char :fallback)", "#{:char}"),
+        (
+            "(loop [state :start] (condp = state :start (recur :done) :done 7))",
+            "number?",
+        ),
+    ] {
+        let report = check(expression, expected);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn equality_condp_keeps_compiler_findings_and_reports_unchecked_predicates() {
+    for (expression, code) in [
+        ("(condp = :none :one 1)", "PNX2802"),
+        ("(condp = :one :one 1 :two unresolved)", "PNX2304"),
+        ("(condp = (subs false 0) 1)", "PNX2322"),
+        ("(condp = [] :one 1 2)", "PNX9001"),
+        ("(condp = :one :one :>> (fn [_] 1) 2)", "PNX9001"),
+        (
+            "(let [= (fn [_ _] true)] (condp = :none :one 1 2))",
+            "PNX9001",
+        ),
+    ] {
+        let report = check(expression, "number?");
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{expression}: {report:#?}");
+        };
+        assert_eq!(finding.code, code, "{expression}: {finding:#?}");
+    }
+    let report = check("(condp = (subs false 0) (identity :key) 1 2)", "number?");
+    let codes: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| finding.code.as_str())
+        .collect();
+    assert_eq!(codes, ["PNX2322", "PNX9001"], "{report:#?}");
+}
+
+#[test]
+fn empty_condp_can_throw_while_printing_an_arbitrary_subject() {
+    let source = r#"
+(ns demo)
+(defn explain {:t/sig '[t/any :-> #{:argument}]} [value]
+  (try (condp = value)
+       (catch clojure.lang.ExceptionInfo _ :printing)
+       (catch IllegalArgumentException _ :argument)))
+"#;
+    let mut session = Session::default();
+    let report = session.check("demo.clj", source);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX2802")
+    );
+    assert!(
+        report.diagnostics.iter().any(|finding| {
+            finding.code == "PNX2322"
+                && finding
+                    .actual
+                    .as_deref()
+                    .is_some_and(|actual| actual.contains(":printing"))
+        }),
+        "{report:#?}"
+    );
+
+    let scalar = session.check("demo.clj", &source.replace("t/any", "keyword?"));
+    let [finding] = scalar.diagnostics.as_slice() else {
+        panic!("{scalar:#?}");
+    };
+    assert_eq!(finding.code, "PNX2802");
+}

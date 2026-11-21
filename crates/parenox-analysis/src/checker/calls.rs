@@ -757,7 +757,7 @@ impl<'model> Checker<'model> {
             ) || self.model.can_use_standard_core(spelling, self.globals))
     }
 
-    fn standard_core_name(&self, head: &Form, env: &Env) -> Option<String> {
+    pub(super) fn standard_core_name(&self, head: &Form, env: &Env) -> Option<String> {
         let name = head.symbol()?;
         let resolved = self.model.resolve(name);
         (resolved.starts_with("clojure.core/")

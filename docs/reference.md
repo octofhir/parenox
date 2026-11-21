@@ -56,7 +56,7 @@ Write `;; parenox-ignore PNX2322: reason` before the next form. The reason
 is required. The directive applies only to that rule and form, not siblings,
 quoted data, discards, or inactive reader branches. Supported rules are
 `PNX2322` (type mismatch), `PNX2741` (missing key), `PNX2801`
-(out-of-bounds index), and `PNX2802` (unhandled `case` value). Suppressions
+(out-of-bounds index), and `PNX2802` (unhandled dispatch value). Suppressions
 do not change inferred types; JSON retains the original finding in
 `suppressed` and the report remains incomplete. Invalid directives and
 unmatched ones in fully checked code report `PNX9006` and `PNX9007`.
@@ -536,7 +536,7 @@ nested field.
 
 | Area | What Parenox checks |
 |---|---|
-| Flow | Lexical scopes, conditionals, literal `case`, `loop`/`recur`, `try`/`catch`, core threading, and selected predicates |
+| Flow | Lexical scopes, conditionals, literal `case` and `condp =`, `loop`/`recur`, `try`/`catch`, core threading, and selected predicates |
 | Maps | Presence, required/optional fields, open and closed shapes, dictionaries, stable lookup narrowing, and supported reads, updates, and projections |
 | Collections | Vectors, sets, map entries, sequences, positional destructuring, and selected calls including `mapv`, `filterv`, `some`, `every?`, `reduce`, and `reduce-kv` |
 | JVM | Selected regex and string operations and known exception classes, not general Java interop |
@@ -619,6 +619,12 @@ accepts exact integer indices in the signed `int` range across those classes.
 It keeps exact sizes for tuple shapes and map entries, and counts UTF-16
 code units in literal strings. Counting an open sequence can realize
 values and throw.
+
+Standard `condp =` checks literal nil, boolean, character, string, keyword,
+and quoted symbol tests with a known subject of those types. Matching clauses
+narrow a local or stable map selector in the result expression. Tests run in
+source order and the first match wins. Dynamic predicates, numeric or computed
+tests, unknown subjects, and `:>>` clauses report incomplete analysis.
 
 Verified `:t/guard '[:then value string?]` narrows the argument after a true
 result. Use `:both` only if the checker can also verify the false branch.

@@ -1269,6 +1269,7 @@ fn plain_core_arguments(name: &str) -> bool {
             | "and"
             | "or"
             | "cond"
+            | "condp"
             | "="
             | "not="
             | "<"

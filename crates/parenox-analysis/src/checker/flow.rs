@@ -2,18 +2,42 @@
 mod selectors;
 mod spec_guards;
 
+use std::collections::BTreeSet;
+
 pub(super) use selectors::{narrow_literal, refine_owner};
 
 use super::calls::{is_builtin, narrow_emptiness, narrow_vector_predicate, predicate_type};
 use super::maps::narrow_map_predicate;
 use super::model::DeclaredValue;
 use super::recur::bounded_state;
-use super::{Checker, Env, Value, nil_part};
+use super::{Checker, Env, Value, has_evaluated_metadata, nil_part};
 use crate::expand::{self, Threading};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
 const MAX_THREAD_EXPANSION_DEPTH: usize = 32;
+
+fn condp_scalar(ty: &Type) -> bool {
+    match ty {
+        Type::Union(parts) => parts.iter().all(condp_scalar),
+        Type::Never
+        | Type::Nil
+        | Type::Boolean
+        | Type::Bool(_)
+        | Type::String
+        | Type::Str(_)
+        | Type::Character
+        | Type::Char(_)
+        | Type::Keyword
+        | Type::SpecKeyword
+        | Type::Key(_)
+        | Type::Symbol
+        | Type::SimpleSymbol
+        | Type::QualifiedSymbol
+        | Type::Sym(_) => true,
+        _ => false,
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Conditional {
@@ -483,6 +507,122 @@ impl Checker<'_> {
             branches.push(Value::new(Type::Nil));
         }
         Value::union_branches(branches)
+    }
+
+    pub(super) fn condp_form(
+        &mut self,
+        forms: &[Form],
+        span: Span,
+        env: &Env,
+        tail: bool,
+    ) -> Value {
+        let [head, predicate, subject, clauses @ ..] = forms else {
+            self.error(
+                "PNX2554",
+                span,
+                "condp requires a predicate and an expression",
+            );
+            return Value::new(Type::Unknown);
+        };
+        if !self
+            .model
+            .can_use_standard_core(head.symbol().unwrap(), self.globals)
+        {
+            return self.unchecked_condp(
+                head.span,
+                "Standard clojure.core/condp is unconfirmed",
+                env,
+            );
+        }
+        if !matches!(predicate.kind, Kind::Symbol(_))
+            || self.standard_core_name(predicate, env).as_deref() != Some("clojure.core/=")
+        {
+            return self.unchecked_condp(
+                predicate.span,
+                "condp analysis requires the standard = predicate",
+                env,
+            );
+        }
+        let value = self.infer(subject, env);
+        let (pairs, fallback) = clauses.as_chunks::<2>();
+        let mut tests = Vec::with_capacity(pairs.len());
+        for [test, result] in pairs {
+            let Some(literal) = self
+                .guard_literal(test)
+                .filter(|_| !has_evaluated_metadata(test))
+            else {
+                return self.unchecked_condp(
+                    test.span,
+                    "condp = analysis requires scalar literal tests",
+                    env,
+                );
+            };
+            if result.keyword() == Some(":>>") {
+                return self.unchecked_condp(result.span, "condp :>> clauses are unchecked", env);
+            }
+            tests.push((literal, result));
+        }
+
+        let mut remaining = if value.rejected_call {
+            Type::Never
+        } else {
+            value.known.clone()
+        };
+        // JVM equality can delegate to a collection operand's custom equiv.
+        if !tests.is_empty() && !condp_scalar(&remaining) {
+            return self.unchecked_condp(
+                subject.span,
+                "condp = analysis requires a known scalar expression",
+                env,
+            );
+        }
+        let mut fallthrough = env.clone();
+        let mut outcomes = Vec::with_capacity(tests.len() + fallback.len());
+        let mut compared = BTreeSet::new();
+        let mut matched = false;
+        for (literal, result) in &tests {
+            if !compared.insert(literal) {
+                outcomes.push(self.infer_path(result, &fallthrough, false, tail));
+                continue;
+            }
+            let selected = narrow_literal(&remaining, literal, true);
+            matched |= selected != Type::Never;
+            let mut branch = fallthrough.clone();
+            self.narrow_subject(subject, &mut branch, |ty| narrow_literal(ty, literal, true));
+            outcomes.push(self.infer_path(result, &branch, selected != Type::Never, tail));
+            self.narrow_subject(subject, &mut fallthrough, |ty| {
+                narrow_literal(ty, literal, false)
+            });
+            remaining = narrow_literal(&remaining, literal, false);
+        }
+        if let Some(default) = fallback.first() {
+            outcomes.push(self.infer_path(default, &fallthrough, remaining != Type::Never, tail));
+        } else if remaining != Type::Never {
+            if condp_scalar(&remaining) {
+                self.illegal_argument();
+            } else {
+                // With no tests the macro still prints the subject in its error.
+                self.may_throw();
+            }
+            if !matched {
+                self.error(
+                    "PNX2802",
+                    subject.span,
+                    format!("condp has no matching clause for {remaining}"),
+                );
+            }
+        }
+        if value.rejected_call {
+            value
+        } else {
+            Value::union_branches(outcomes)
+        }
+    }
+
+    fn unchecked_condp(&mut self, span: Span, reason: &str, env: &Env) -> Value {
+        self.withhold_captured_facts(env.inline_functions());
+        self.withhold_literals_after_opaque_form();
+        self.unchecked_form(span, reason)
     }
 
     pub(super) fn binding_conditional(
