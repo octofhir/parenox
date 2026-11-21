@@ -560,7 +560,9 @@ checker stops visiting elements once the result is guaranteed truthy.
 reaches the end. Its callback sees the inferred collection element type.
 An inline `fn` saved in `let` can specialize in direct calls and supported
 collection operations, including a checked callback contract. It retains
-the lexical bindings from its definition.
+the lexical bindings from its definition. A named local `fn` can call itself
+through its lexical name, including across supported arities. Its parameters
+and inner bindings can shadow that name. Recursive analysis is bounded.
 Using that function as data leaves a coverage gap.
 `partial` can supply a callback to modeled calls such as `mapv` and `reduce`.
 Its saved arguments evaluate at construction and are checked against the

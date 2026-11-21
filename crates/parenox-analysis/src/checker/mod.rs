@@ -556,7 +556,7 @@ impl Checker<'_> {
                     if env.inline_function(s).is_some() {
                         self.diagnostics.push(Diagnostic::analysis_gap(
                             "PNX9001", form.span,
-                            "The type of a let-bound fn is unchecked outside supported calls",
+                            "The type of a local fn is unchecked outside supported calls",
                         ));
                     }
                     self.observe_local(s, form.span, value);

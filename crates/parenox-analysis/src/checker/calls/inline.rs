@@ -21,6 +21,22 @@ pub(super) enum InlineFunction<'a> {
     Literal(&'a AnonymousFunction),
 }
 
+impl<'a> InlineFunction<'a> {
+    fn name(self) -> Option<&'a str> {
+        match self {
+            Self::Function(parts) => parts.first()?.symbol(),
+            Self::Literal(_) => None,
+        }
+    }
+
+    fn bind_name(self, function: &Arc<CapturedInline>, env: &mut Env) {
+        if let Some(name) = self.name() {
+            env.insert(name.into(), Value::new(Type::Unknown));
+            env.mark_inline(name, function.clone());
+        }
+    }
+}
+
 enum InlineSyntax<'a> {
     Function(InlineFunction<'a>),
     Fnil(&'a [Form]),
@@ -83,9 +99,21 @@ impl<'model> Checker<'model> {
     ) -> Option<PreparedCallable<'form, 'model>> {
         let kind = if let Some(function) = form.symbol().and_then(|name| env.inline_function(name))
         {
-            Callable::Captured(function.clone())
+            Callable::Captured {
+                function: function.clone(),
+                compile_when_uninvoked: false,
+            }
         } else {
             match self.inline_syntax(form, env)? {
+                InlineSyntax::Function(function) if function.name().is_some() => {
+                    Callable::Captured {
+                        function: Arc::new(CapturedInline {
+                            form: form.clone(),
+                            scope: env.clone(),
+                        }),
+                        compile_when_uninvoked: true,
+                    }
+                }
                 InlineSyntax::Function(function) => Callable::Inline(function),
                 InlineSyntax::Fnil(parts) => self.prepare_fnil(parts, form.span, env),
                 InlineSyntax::Partial(parts) => {
@@ -112,19 +140,32 @@ impl<'model> Checker<'model> {
             if let Some(function) = init.symbol().and_then(|name| env.inline_function(name)) {
                 Some(function.clone())
             } else {
-                let Some(InlineSyntax::Function(function)) = self.inline_syntax(init, env) else {
+                let Some(InlineSyntax::Function(inline)) = self.inline_syntax(init, env) else {
                     return false;
                 };
                 if self.local_inline_step(init.span) {
+                    let function = Arc::new(CapturedInline {
+                        form: init.clone(),
+                        scope: env.clone(),
+                    });
+                    let scope = inline.name().map(|_| {
+                        let mut scope = env.clone();
+                        inline.bind_name(&function, &mut scope);
+                        scope
+                    });
                     // The compiler checks every clause when creating a function.
                     // Its body contributes no runtime effects until it is called.
                     self.inspect_path(false, |checker| {
-                        checker.call_inline(function, Vec::new(), init.span, init.span, env, false);
+                        checker.call_inline(
+                            inline,
+                            Vec::new(),
+                            init.span,
+                            init.span,
+                            scope.as_ref().unwrap_or(env),
+                            false,
+                        );
                     });
-                    Some(Arc::new(CapturedInline {
-                        form: init.clone(),
-                        scope: env.clone(),
-                    }))
+                    Some(function)
                 } else {
                     None
                 }
@@ -138,20 +179,22 @@ impl<'model> Checker<'model> {
 
     pub(super) fn call_captured(
         &mut self,
-        function: &CapturedInline,
+        function: &Arc<CapturedInline>,
         args: Vec<(Value, Span)>,
         call: Span,
         caller: &Env,
         invoked: bool,
+        compile_when_uninvoked: bool,
     ) -> Value {
-        if !invoked || !self.path_reachable {
+        let invoked = invoked && self.path_reachable;
+        if !invoked && !compile_when_uninvoked {
             return Value::new(Type::Never);
         }
-        if !self.local_inline_step(call) {
+        if invoked && !self.local_inline_step(call) {
             self.may_throw();
             return Value::new(Type::Unknown);
         }
-        if self.callback_depth >= MAX_CALLBACK_DEPTH {
+        if invoked && self.callback_depth >= MAX_CALLBACK_DEPTH {
             self.type_query = None;
             return self.unsupported(
                 call,
@@ -165,10 +208,11 @@ impl<'model> Checker<'model> {
         };
         // Binding IDs retain refinement only for locals still in the same
         // lexical scope. A later binding with the same name is a new value.
-        let scope = function.scope.refine_capture(caller);
-        self.callback_depth += 1;
-        let result = self.call_inline(inline, args, function.form.span, call, &scope, true);
-        self.callback_depth -= 1;
+        let mut scope = function.scope.refine_capture(caller);
+        inline.bind_name(function, &mut scope);
+        self.callback_depth += usize::from(invoked);
+        let result = self.call_inline(inline, args, function.form.span, call, &scope, invoked);
+        self.callback_depth -= usize::from(invoked);
         result
     }
 
@@ -312,7 +356,17 @@ impl<'model> Checker<'model> {
         if saved.is_some() && !self.local_inline_step(form.span) {
             return Some(ContextualCallback::unchecked());
         }
-        let scope = saved.map(|closure| closure.scope.refine_capture(env));
+        let named = (saved.is_none() && function.name().is_some()).then(|| {
+            Arc::new(CapturedInline {
+                form: form.clone(),
+                scope: env.clone(),
+            })
+        });
+        let scope = saved.or(named.as_ref()).map(|closure| {
+            let mut scope = closure.scope.refine_capture(env);
+            function.bind_name(closure, &mut scope);
+            scope
+        });
         let start = self.diagnostics.len();
         let arguments = signature
             .args
@@ -431,9 +485,21 @@ impl<'model> Checker<'model> {
         env: &Env,
         site: InlineSite<'_>,
     ) -> Value {
-        if let Some(name) = parts.first().filter(|form| form.symbol().is_some()) {
-            return self.unsupported(name.span, "Named fn forms are not supported yet");
-        }
+        let parts = if let Some((head, parts)) = parts.split_first()
+            && let Some(name) = head.symbol()
+        {
+            if name == "&" || (name.contains('/') && name != "/") {
+                self.error(
+                    "PNX1001",
+                    head.span,
+                    "fn requires an unqualified local name",
+                );
+                return Value::new(Type::Unknown);
+            }
+            parts
+        } else {
+            parts
+        };
         let clauses = match function_clauses(parts, site.constructor) {
             Ok(clauses) => clauses,
             Err(diagnostic) => {

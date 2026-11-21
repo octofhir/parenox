@@ -39,7 +39,10 @@ use inline::{CallbackReturn, Fnil, InlineFunction, Partial};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
-    Captured(Arc<CapturedInline>),
+    Captured {
+        function: Arc<CapturedInline>,
+        compile_when_uninvoked: bool,
+    },
     Fnil(Box<Fnil<'form, 'model>>),
     Partial(Box<Partial<'form, 'model>>),
     Combined(CombinedCallable<'form, 'model>),
@@ -650,7 +653,10 @@ impl<'model> Checker<'model> {
             Callable::Inline(parts) => {
                 self.call_inline(*parts, args, callable.span, span, env, invoked)
             }
-            Callable::Captured(function) => self.call_captured(function, args, span, env, invoked),
+            Callable::Captured {
+                function,
+                compile_when_uninvoked,
+            } => self.call_captured(function, args, span, env, invoked, *compile_when_uninvoked),
             Callable::Fnil(wrapper) => self.call_fnil(wrapper, args, span, env, invoked),
             Callable::Partial(wrapper) => {
                 let args = wrapper.prefix.iter().cloned().chain(args).collect();
