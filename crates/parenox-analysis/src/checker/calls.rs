@@ -306,7 +306,7 @@ impl<'model> Checker<'model> {
                     if let Some(form) = CoreForm::resolve(&resolved) {
                         return self.core_form(form, &resolved, xs, span, env, tail);
                     }
-                    if is_builtin(&resolved) {
+                    if self.is_available_builtin(name, &resolved) {
                         let args = self.typed_args(&xs[1..], env);
                         return self.builtin(&resolved, &args, span);
                     }
@@ -632,12 +632,18 @@ impl<'model> Checker<'model> {
                 .is_none()
             {
                 let resolved = self.model.resolve(name);
-                if is_builtin(&resolved) {
+                if self.is_available_builtin(name, &resolved) {
                     return prepare(Callable::Builtin(resolved));
                 }
             }
         }
         prepare(Callable::Value(self.infer(callee, env)))
+    }
+
+    fn is_available_builtin(&self, spelling: &str, resolved: &str) -> bool {
+        is_builtin(resolved)
+            && (resolved != "clojure.core/count"
+                || self.model.can_use_standard_core(spelling, self.globals))
     }
 
     pub(super) fn call_prepared(
@@ -900,42 +906,7 @@ impl<'model> Checker<'model> {
                 self.diagnostics.push(diagnostic);
                 Type::Unknown
             }
-            "clojure.core/count" => {
-                fn countable(t: &Type) -> bool {
-                    match t {
-                        Type::Nil
-                        | Type::String
-                        | Type::Str(_)
-                        | Type::Map(_)
-                        | Type::MapEntry(_)
-                        | Type::Vector(_)
-                        | Type::Tuple(_)
-                        | Type::Seq(_)
-                        | Type::SeqTuple(_)
-                        | Type::List(_)
-                        | Type::ListTuple(_)
-                        | Type::Set(_)
-                        | Type::Never
-                        | Type::Unknown => true,
-                        Type::Parameter(parameter) => {
-                            parameter.upper.as_ref().is_some_and(countable)
-                        }
-                        Type::Union(xs) => xs.iter().all(countable),
-                        _ => false,
-                    }
-                }
-                if !countable(&args[0].0.ty) {
-                    self.error(
-                        "PNX2322",
-                        args[0].1,
-                        format!(
-                            "count expects a collection, string or Nil, got {}",
-                            args[0].0.ty
-                        ),
-                    );
-                }
-                Type::Number
-            }
+            "clojure.core/count" => return self.count(&args[0]),
             "clojure.core/nil?" => {
                 if args[0].0.ty == Type::Nil {
                     Type::Bool(true)

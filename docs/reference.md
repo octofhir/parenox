@@ -589,6 +589,10 @@ Literal `case` branches compare integer values across fixed and arbitrary
 precision classes within the JVM signed `long` range. A selected branch keeps
 the subject's numeric class and can refine a known field or local. `nth`
 accepts exact integer indices in the signed `int` range across those classes.
+`count` returns a JVM fixed-precision integer in the signed `int` range.
+It keeps exact sizes for tuple shapes and map entries, and counts UTF-16
+code units in literal strings. Counting an open sequence can realize
+values and throw.
 
 Verified `:t/guard '[:then value string?]` narrows the argument after a true
 result. Use `:both` only if the checker can also verify the false branch.

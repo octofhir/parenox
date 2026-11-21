@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use super::super::{Checker, Value};
 use crate::Diagnostic;
 use crate::reader::Span;
-use crate::types::{ExtraFields, MAX_TUPLE_ITEMS, MapType, Type};
+use crate::types::{ExtraFields, IntegerType, MAX_TUPLE_ITEMS, MapType, Type};
 
 #[derive(Clone, Copy)]
 enum ReadSequence {
@@ -435,5 +435,48 @@ pub(in crate::checker) fn narrow_emptiness(ty: &Type, empty: bool) -> Type {
             extra: ExtraFields::Closed,
         }),
         _ => ty.clone(),
+    }
+}
+
+fn counted_type(ty: &Type) -> Option<Type> {
+    const JVM_COUNT: Type = Type::Integral(IntegerType::FIXED_INT32);
+    let size = match ty {
+        Type::Nil => 0,
+        Type::Str(text) => text.encode_utf16().count(),
+        Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => items.len(),
+        Type::MapEntry(_) => 2,
+        Type::Vector(element) | Type::Set(element) if **element == Type::Never => 0,
+        Type::String
+        | Type::Map(_)
+        | Type::Vector(_)
+        | Type::Seq(_)
+        | Type::List(_)
+        | Type::Set(_)
+        | Type::Unknown => return Some(JVM_COUNT),
+        Type::Never => return Some(Type::Never),
+        Type::Parameter(parameter) => return counted_type(parameter.upper.as_ref()?),
+        Type::Union(parts) => {
+            let counts = parts.iter().map(counted_type).collect::<Option<Vec<_>>>()?;
+            return Some(Type::union(counts));
+        }
+        _ => return None,
+    };
+    Some(i32::try_from(size).map_or(JVM_COUNT, Type::Integer))
+}
+
+impl Checker<'_> {
+    pub(super) fn count(&mut self, (value, span): &(Value, Span)) -> Value {
+        if let Some(size) = counted_type(&value.known) {
+            return Value::new(size);
+        }
+        self.error(
+            "PNX2322",
+            *span,
+            format!(
+                "count expects a collection, string or Nil, got {}",
+                value.ty
+            ),
+        );
+        Value::new(Type::Integral(IntegerType::FIXED_INT32))
     }
 }

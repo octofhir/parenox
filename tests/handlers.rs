@@ -171,6 +171,6 @@ fn an_ordinary_function_call_keeps_catch_results_possible() {
     assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
     assert_eq!(
         report.diagnostics[0].actual.as_deref(),
-        Some("Number | String")
+        Some("JVM fixed-precision integer in the JVM int range | String")
     );
 }
