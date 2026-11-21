@@ -62,6 +62,84 @@ fn later_argument_failure_keeps_generic_callback_compiler_checks() {
 }
 
 #[test]
+fn fixed_callbacks_receive_context_after_operands_can_return() {
+    let source = format!(
+        "{EXAMPLE}\n{}",
+        r#"(defn run-fixed
+             {:t/sig '[(s/fspec :args (s/cat :x string?) :ret string?) string? :-> string?]}
+             [f x] (f x))
+           (defn accepts-at-runtime {:t/sig '[string? :-> string?]} [_] "kept")
+           (defn use-fixed {:t/sig '[:-> string?]} []
+             (run-fixed ^:probe (fn [item] (str item)) (subs "kept" 0)))"#
+    );
+    let offset = source.find("str item").unwrap() + "str ".len();
+    let mut session = Session::default();
+    for (operand, inferred) in [
+        ("(subs \"kept\" 0)", Some("String")),
+        ("(subs nil 0)", None),
+        ("(accepts-at-runtime nil)", Some("String")),
+        ("(subs \"kept\" 0)", Some("String")),
+    ] {
+        let edited = source.replace("(subs \"kept\" 0)", operand);
+        let report = session.check("generics.clj", &edited);
+        if operand.contains("nil") {
+            let [finding] = report.diagnostics.as_slice() else {
+                panic!("{report:#?}");
+            };
+            assert_eq!(finding.code, "PNX2322");
+            assert_eq!(
+                &edited[finding.span.start.offset..finding.span.end.offset],
+                "nil"
+            );
+        } else {
+            assert!(report.ok && report.complete, "{report:#?}");
+        }
+        let hover = session.document_hover_at("generics.clj", offset);
+        assert_eq!(
+            hover.map(|hover| {
+                let DocumentHover::Local(local) = hover else {
+                    panic!("expected a local callback argument");
+                };
+                local.inferred_type
+            }),
+            inferred.map(str::to_owned)
+        );
+    }
+}
+
+#[test]
+fn a_dead_contextual_call_checks_closure_syntax_without_invoking_it() {
+    let source = format!(
+        "{EXAMPLE}\n{}",
+        r#"(defn run-fixed
+             {:t/sig '[(s/fspec :args (s/cat :x string?) :ret string?) string? :-> string?]}
+             [f x] (f x))
+           (defn compile-only {:t/sig '[:-> string?]} []
+             (run-fixed (fn self [x y] (self x y) missing-callback-name)
+                        (subs :bad-argument 0)))"#
+    );
+    let report = Session::default().check("generics.clj", &source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2304", "missing-callback-name"),
+            ("PNX2322", ":bad-argument"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn stored_callbacks_get_context_and_specialize_again_at_each_generic_call() {
     let source = format!(
         "{EXAMPLE}\n{}",

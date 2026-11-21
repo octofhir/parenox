@@ -450,6 +450,24 @@ impl<'model> Checker<'model> {
             // The saved closure was already compiled at its binding.
             return Some(ContextualCallback::unchecked());
         }
+        let named = (saved.is_none() && function.name().is_some())
+            .then(|| CapturedInline::single(form, env));
+        let scope = saved.or(named.as_ref()).map(|closure| {
+            let mut scope = closure.refine_scope(env);
+            function.bind_name(closure, &mut scope);
+            scope
+        });
+        if !self.path_reachable {
+            self.call_inline(
+                function,
+                Vec::new(),
+                constructor.span,
+                call,
+                scope.as_ref().unwrap_or(env),
+                false,
+            );
+            return Some(ContextualCallback::unchecked());
+        }
         if signature.rest.is_some() {
             self.error(
                 "PNX9001",
@@ -472,13 +490,6 @@ impl<'model> Checker<'model> {
         if saved.is_some() && !self.local_inline_step(form.span) {
             return Some(ContextualCallback::unchecked());
         }
-        let named = (saved.is_none() && function.name().is_some())
-            .then(|| CapturedInline::single(form, env));
-        let scope = saved.or(named.as_ref()).map(|closure| {
-            let mut scope = closure.refine_scope(env);
-            function.bind_name(closure, &mut scope);
-            scope
-        });
         let start = self.diagnostics.len();
         let arguments = signature
             .args

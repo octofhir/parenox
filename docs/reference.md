@@ -637,6 +637,10 @@ standard `partial` are evaluated in source order. After a proven runtime failure
 later expressions still get compiler checks such as name resolution. Their
 runtime types and diagnostics are withheld, including when a vector literal
 supplies `apply` arguments.
+With a fixed callback contract, contextual inference for plain or inertly
+annotated function literals and saved local functions runs after the eager
+operands can return. The compiler checks the closure even when the call is
+unreachable.
 Sequential bodies apply the same rule to later forms and to function
 postconditions. A proven failure in `finally` also prevents a normal result
 from the enclosing `try`.

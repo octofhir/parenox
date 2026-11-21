@@ -490,37 +490,58 @@ impl<'model> Checker<'model> {
                 .collect::<Vec<_>>()
                 .into();
         };
-        let mut reachable = env.reachable();
-        forms
-            .iter()
-            .enumerate()
-            .map(|(index, form)| {
-                let expected = signature
-                    .args
-                    .get(index)
-                    .or(signature.rest.as_ref())
-                    .unwrap();
-                let mut value = self.check_path(reachable, |checker| {
-                    checker
-                        .contextual_callback(
-                            form,
-                            expected,
-                            call,
-                            function.contract.as_deref(),
-                            env,
-                            CallbackReturn::Check,
-                        )
-                        .map(|callback| callback.value)
-                        .unwrap_or_else(|| checker.infer(form, env))
-                });
-                reachable = !value.stops_evaluation();
-                if !reachable {
-                    value.narrow(Type::Never);
-                }
-                (value, form.span)
+        let infer_argument = |checker: &mut Self, form: &Form, expected: &Type, reachable| {
+            checker.check_path(reachable, |checker| {
+                checker
+                    .contextual_callback(
+                        form,
+                        expected,
+                        call,
+                        function.contract.as_deref(),
+                        env,
+                        CallbackReturn::Check,
+                    )
+                    .map(|callback| callback.value)
+                    .unwrap_or_else(|| checker.infer(form, env))
             })
-            .collect::<Vec<_>>()
-            .into()
+        };
+        let mut values = Vec::with_capacity(forms.len());
+        let mut deferred = Vec::new();
+        let mut reachable = env.reachable();
+        for (index, form) in forms.iter().enumerate() {
+            let expected = signature
+                .args
+                .get(index)
+                .or(signature.rest.as_ref())
+                .unwrap();
+            if matches!(expected, Type::Function(signatures) if signatures.len() == 1)
+                && self.contextual_callback_form(form, env)
+                && (form.symbol().is_some() || self.model.inert_function_metadata(form, [None; 2]))
+            {
+                // Reading or creating an ordinary closure does not run its body.
+                deferred.push((index, expected));
+                let ty = if reachable {
+                    Type::Unknown
+                } else {
+                    Type::Never
+                };
+                values.push((Value::new(ty), form.span));
+                continue;
+            }
+            let mut value = infer_argument(self, form, expected, reachable);
+            reachable = !value.stops_evaluation();
+            if !reachable {
+                value.narrow(Type::Never);
+            }
+            values.push((value, form.span));
+        }
+        for (index, expected) in deferred {
+            let value = infer_argument(self, &forms[index], expected, reachable);
+            if reachable {
+                values[index].0 = value;
+            }
+        }
+        values.into()
     }
 
     fn typed_args(&mut self, args: &[Form], env: &Env) -> Vec<(Value, Span)> {
