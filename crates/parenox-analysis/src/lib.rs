@@ -1,4 +1,5 @@
 mod checker;
+mod core_names;
 pub mod expand;
 mod extern_diff;
 mod project;

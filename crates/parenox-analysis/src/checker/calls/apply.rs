@@ -45,6 +45,10 @@ impl Checker<'_> {
             // The literal's syntax supplies every position even for large vectors.
             args.extend(self.eval_eager_inputs(items, env, reachable));
             let invoked = reachable && call_returns(&args);
+            if let Some(value) = self.vector_metadata_outcome(spread, env, invoked) {
+                self.call_prepared(&callable, args, span, env, false);
+                return value;
+            }
             let written: Vec<_> = prefix.iter().chain(items).map(Some).collect();
             return self.call_prepared_with_forms(
                 &callable,

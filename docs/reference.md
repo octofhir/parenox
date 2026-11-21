@@ -638,6 +638,9 @@ are withheld, including when a vector literal supplies `apply` arguments.
 Conditional expressions combine the types and collection facts of branches
 that can return a value. A proven runtime failure in the condition or dispatch
 expression leaves the results unavailable and still allows compiler checks.
+Vector metadata with up to eight literal keyword keys is checked after the
+elements, including on `apply` spreads. Metadata wrappers merge before their
+values are evaluated, with the outer value taking precedence for a shared key.
 
 Verified `:t/guard '[:then value string?]` narrows the argument after a true
 result. Use `:both` only if the checker can also verify the false branch.

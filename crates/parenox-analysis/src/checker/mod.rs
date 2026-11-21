@@ -7,6 +7,7 @@ mod exceptions;
 mod flow;
 mod function_forms;
 mod maps;
+mod metadata;
 mod model;
 mod queries;
 mod quote;
@@ -778,6 +779,13 @@ impl Checker<'_> {
             Kind::Regex => Value::new(Type::Pattern),
             Kind::Character(c) => Value::new(Type::Char(*c)),
             Kind::Metadata(_, target) => {
+                let bare = target.without_metadata();
+                if matches!(&bare.kind, Kind::Vector(_)) {
+                    let value = self.infer_position(bare, env, tail);
+                    return self
+                        .vector_metadata_outcome(form, env, !value.stops_evaluation())
+                        .unwrap_or(value);
+                }
                 let mut value = self.infer_position(target, env, tail);
                 value.literal_container = None;
                 value

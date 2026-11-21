@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 use crate::SourceSymbolKind;
 use crate::checker::ScopedReference;
+use crate::core_names::known_core_function;
 use crate::reader::{Kind, Span};
 
 use super::{Session, SourceTarget, symbol_at};
@@ -301,15 +302,7 @@ fn core_kind(name: &str) -> Option<SemanticSymbolKind> {
         | "fn" | "for" | "if-let" | "if-not" | "if-some" | "let" | "letfn" | "loop" | "or"
         | "some->" | "some->>" | "when" | "when-first" | "when-let" | "when-not" | "when-some"
         | "with-open" => Macro,
-        "*" | "+" | "-" | "/" | "<" | "<=" | "=" | "==" | ">" | ">=" | "apply" | "assoc"
-        | "assoc-in" | "boolean?" | "char?" | "conj" | "cons" | "contains?" | "count" | "dec"
-        | "deref" | "dissoc" | "empty?" | "every?" | "ex-data" | "ex-info" | "filter"
-        | "filterv" | "first" | "get" | "get-in" | "hash-map" | "identity" | "inc" | "int?"
-        | "integer?" | "into" | "key" | "keys" | "keyword?" | "last" | "list" | "long" | "map"
-        | "map?" | "mapcat" | "mapv" | "merge" | "next" | "nil?" | "not" | "nth" | "number?"
-        | "partial" | "pos?" | "prn" | "println" | "reduce" | "reduce-kv" | "rest" | "seq"
-        | "set" | "set?" | "some" | "some?" | "str" | "string?" | "subs" | "symbol?" | "update"
-        | "update-in" | "val" | "vals" | "vec" | "vector" | "vector?" | "zero?" => Function,
+        _ if known_core_function(name) => Function,
         _ => return None,
     })
 }

@@ -113,6 +113,99 @@ fn branch_joins_preserve_normal_results_and_proven_stops() {
 }
 
 #[test]
+fn vector_metadata_effects_follow_elements_and_merge_before_checking() {
+    let source = r#"(ns demo (:require [clojure.string :as string]) (:import java.util.UUID))
+(defn inert-class {:t/sig '[:-> #{"ab"}]} []
+  (apply str ^String ^:checked ["a" "b"]))
+(defn imported-class {:t/sig '[:-> #{"ab"}]} []
+  (apply str ^UUID ["a" "b"]))
+(defn qualified-class {:t/sig '[:-> #{"ab"}]} []
+  (apply str ^java.util.Date ["a" "b"]))
+(defn default-classes {:t/sig '[:-> #{"ab"}]} []
+  (apply str ^{:first Exception :second Runnable} ["a" "b"]))
+(defn core-function {:t/sig '[:-> #{"ab"}]} []
+  (apply str ^long ["a" "b"]))
+(defn specialized-core-functions {:t/sig '[:-> #{"ab"}]} []
+  (apply str ^{:substring subs :transform mapv :spread apply :divide /} ["a" "b"]))
+(defn locally-shadowed {:t/sig '[:-> #{"ab"}]} []
+  (let [String :local] (apply str ^String ["a" "b"])))
+(defn overridden {:t/sig '[:-> #{"ab"}]} []
+  (apply str ^{::string/stamp :override} ^{:clojure.string/stamp missing-before-merge} ["a" "b"]))
+(defn effect-after-elements {:t/sig '[:-> #{:metadata}]} []
+  (try (apply str ^{:stamp (throw (ex-info "stamp" {:stage :metadata}))} ["a" "b"])
+       (catch clojure.lang.ExceptionInfo error (:stage (ex-data error)))))
+(defn first-element-fails {:t/sig '[:-> #{:element}]} []
+  (try ^{:stamp (throw (ex-info "stamp" {:stage :metadata}))}
+       [(throw (ex-info "element" {:stage :element}))]
+       (catch clojure.lang.ExceptionInfo error (:stage (ex-data error)))))
+(defn metadata-order {:t/sig '[:-> #{:inner}]} []
+  (try ^{:outer (throw (ex-info "outer" {:stage :outer}))}
+       ^{:inner (throw (ex-info "inner" {:stage :inner}))} []
+       (catch clojure.lang.ExceptionInfo error (:stage (ex-data error)))))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn vector_metadata_still_resolves_names_after_element_failure() {
+    let source = r#"(ns demo (:require [clojure.string :as string]))
+(defn broken {:t/sig '[:-> t/any]} []
+  (apply str ^{:stamp missing-metadata} [(subs false 0)]))
+(defn duplicate {:t/sig '[:-> t/any]} []
+  ^{::string/stamp :first :clojure.string/stamp :second} [])
+(defn unchecked {:t/sig '[:-> t/any]} []
+  ^SomeRuntimeClass [])
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2304", "missing-metadata"),
+            ("PNX2322", "false"),
+            ("PNX2790", ":clojure.string/stamp"),
+            ("PNX9001", "SomeRuntimeClass"),
+        ]
+    );
+}
+
+#[test]
+fn opaque_vector_metadata_withholds_captured_function_hover() {
+    let source = r#"(ns demo)
+(defn captured {:t/sig '[:-> t/any]} []
+  (let [saved (fn [item] item)
+        before (saved "first")]
+    ^{(identity :stamp) (saved 7)} []))
+"#;
+    let mut session = Session::default();
+    let report = session.check("demo.clj", source);
+    let [gap] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!((gap.code.as_str(), gap.severity), ("PNX9001", "warning"));
+    let offset = source.find("] item").unwrap() + "] ".len();
+    assert!(session.document_hover_at("demo.clj", offset).is_none());
+
+    let source = source.replace("(identity :stamp)", ":stamp");
+    let report = session.check("demo.clj", &source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let Some(DocumentHover::Local(hover)) = session.document_hover_at("demo.clj", offset) else {
+        panic!("missing hover for the evaluated metadata call");
+    };
+    assert_eq!(hover.inferred_type, "7 | \"first\"");
+}
+
+#[test]
 fn join_accepts_seqable_values_and_reports_the_invalid_collection_input() {
     let source = r#"(ns labels (:require [clojure.string :as str] [clojure.spec.alpha :as s]))
         (defn entries {:t/sig '[map? :-> string?]} [m] (str/join :entry m))

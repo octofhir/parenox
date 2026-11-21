@@ -1,5 +1,5 @@
 //! Static JVM class names introduced by an ns import clause.
-use super::Declarations;
+use super::{Declarations, Model};
 use crate::reader::{Form, Kind};
 
 /// The source token of the effective symbolic type hint.
@@ -131,12 +131,14 @@ fn implicit_java_class(name: &str) -> Option<&'static str> {
         "Character" => "java.lang.Character",
         "Class" => "java.lang.Class",
         "Double" => "java.lang.Double",
+        "Exception" => "java.lang.Exception",
         "Float" => "java.lang.Float",
         "Integer" => "java.lang.Integer",
         "Long" => "java.lang.Long",
         "Math" => "java.lang.Math",
         "Number" => "java.lang.Number",
         "Object" => "java.lang.Object",
+        "Runnable" => "java.lang.Runnable",
         "Short" => "java.lang.Short",
         "StrictMath" => "java.lang.StrictMath",
         "String" => "java.lang.String",
@@ -148,4 +150,24 @@ fn implicit_java_class(name: &str) -> Option<&'static str> {
         "Void" => "java.lang.Void",
         _ => return None,
     })
+}
+
+impl Model {
+    pub(in crate::checker) fn known_java_class(&self, name: &str) -> bool {
+        let short = name.rsplit('.').next().unwrap();
+        name == "java.util.Date"
+            || implicit_java_class(short)
+                .is_some_and(|qualified| name == short || name == qualified)
+            || self.names.imports.contains_key(name)
+            || self
+                .names
+                .imports
+                .values()
+                .any(|qualified| qualified == name)
+    }
+
+    pub(in crate::checker) fn possible_java_class(name: &str) -> bool {
+        qualified_java_name(name)
+            || (!name.contains('/') && name.chars().next().is_some_and(char::is_uppercase))
+    }
 }
