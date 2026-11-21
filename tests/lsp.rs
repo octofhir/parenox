@@ -4417,6 +4417,77 @@ fn rename_preserves_jvm_local_binding_name_rules() {
 }
 
 #[test]
+fn dotted_var_rename_requires_qualified_value_uses() {
+    let fixture = Fixture::new("rename dotted JVM vars");
+    let provider = fixture.0.join("src/provider.clj");
+    let consumer = fixture.0.join("src/consumer.clj");
+    let provider_uri = uri(&provider);
+    let consumer_uri = uri(&consumer);
+    let source = concat!(
+        "(ns provider (:require [clojure.spec.alpha :as s]))\n",
+        "(defn called [x] x)\n",
+        "(defn passed [x] x)\n",
+        "(declare safe)\n",
+        "(s/fdef safe :args (s/cat :x int?) :ret int?)\n",
+        "(defn safe [x] x)\n",
+        "(defn explicit [] [#'safe (var safe)])\n",
+    );
+    let caller = concat!(
+        "(ns consumer (:require [provider :as p :refer [called passed safe]]))\n",
+        "(defn example [] [(called 2) (map passed [1]) (p/safe 3) (var safe)])\n",
+    );
+    fs::write(&provider, source).unwrap();
+    fs::write(&consumer, caller).unwrap();
+    let query = |id, line, target| {
+        let character = source.lines().nth(line).unwrap().find(target).unwrap();
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/rename","params":{
+            "textDocument":{"uri":provider_uri},"position":{"line":line,"character":character},
+            "newName":"entry.next"
+        }})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),"capabilities":{"workspace":{"workspaceEdit":{"documentChanges":true}}}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":consumer_uri,"version":2,"languageId":"clojure","text":caller}
+        }}),
+        query(2, 1, "called"),
+        query(3, 2, "passed"),
+        query(4, 5, "safe"),
+        json!({"jsonrpc":"2.0","id":5,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| messages.iter().find(|reply| reply["id"] == id).unwrap();
+    for id in [2, 3] {
+        assert_eq!(response(id)["error"]["code"], -32602);
+        assert_eq!(
+            response(id)["error"]["message"],
+            "Clojure/JVM resolves an unqualified use of entry.next as a class. Qualify its reads and calls before renaming."
+        );
+    }
+    let edits = response(4)["result"]["documentChanges"].as_array().unwrap();
+    let edit = |text: &str, line, marker, skip| {
+        let column = text.lines().nth(line).unwrap().find(marker).unwrap() + skip;
+        json!({"newText":"entry.next","range":{
+            "start":{"line":line,"character":column},"end":{"line":line,"character":column+4}
+        }})
+    };
+    assert_eq!(
+        edits,
+        &[
+            json!({"textDocument":{"uri":consumer_uri,"version":2},"edits":[
+                edit(caller,0,"safe",0),edit(caller,1,"p/safe",2),edit(caller,1,"var safe",4)
+            ]}),
+            json!({"textDocument":{"uri":provider_uri,"version":null},"edits":[
+                edit(source,3,"safe",0),edit(source,4,"safe",0),edit(source,5,"safe",0),
+                edit(source,6,"#'safe",2),edit(source,6,"var safe",4)
+            ]}),
+        ]
+    );
+}
+
+#[test]
 fn rename_and_definition_follow_the_binding_in_map_defaults() {
     let fixture = Fixture::new("references in map destructuring defaults");
     let path = fixture.0.join("src/app.clj");

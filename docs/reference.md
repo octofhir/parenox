@@ -856,6 +856,8 @@ project, a buffer has no project context.
   rename follow reads in `:or` values of a direct map destructuring in `let`
   or a function parameter. Dots are permitted when renaming the self-binding
   of a named `fn` or `fn*`. Ordinary JVM locals require a name without dots.
+  For a dotted JVM var name, qualify its ordinary reads and calls first.
+  `var` and `#'` can still refer to it by its unqualified name.
 - **Call Hierarchy** groups source calls by resolved caller or callee.
   **Code Lens** resolves reference counts on source var declarations.
 - Semantic tokens work for the whole file or a specified range. Folding

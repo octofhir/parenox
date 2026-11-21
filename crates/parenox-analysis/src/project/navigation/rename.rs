@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
-use crate::checker::{Declarations, ScopedReference};
+use crate::checker::{Declarations, DocumentReferences, ScopedReference};
 use crate::reader::{self, Form, Kind, Span};
 use crate::syntax::{SyntaxElement, SyntaxKind, SyntaxToken};
 
@@ -148,6 +148,7 @@ impl Session {
             })
             .collect();
         let qualified = namespace.map(|namespace| format!("{namespace}/{name}"));
+        let dotted_var = new_name.filter(|name| namespace.is_some() && name.contains('.'));
         for (candidate_path, file) in &self.files {
             if file.snapshot != self.snapshot || (local_scope.is_some() && candidate_path != path) {
                 continue;
@@ -188,6 +189,13 @@ impl Session {
                 ))
             };
             let occurrences = references.as_ref().unwrap_or(&origin);
+            if let Some(replacement) = dotted_var
+                && edits_bare_var_use(&file.source, occurrences, edited_here, name)
+            {
+                return Err(format!(
+                    "Clojure/JVM resolves an unqualified use of {replacement} as a class. Qualify its reads and calls before renaming."
+                ));
+            }
             let shadows: BTreeSet<_> = occurrences
                 .bindings
                 .iter()
@@ -255,6 +263,22 @@ impl Session {
             local: local_scope.is_some(),
         })
     }
+}
+
+fn edits_bare_var_use(
+    source: &str,
+    occurrences: &DocumentReferences<'_>,
+    edits: &[Range<usize>],
+    name: &str,
+) -> bool {
+    occurrences.uses.iter().any(|(span, _)| {
+        let range = bounds(*span);
+        edits
+            .binary_search_by_key(&range.start, |edit| edit.start)
+            .is_ok_and(|index| edits[index] == range)
+            && source.get(range) == Some(name)
+            && !occurrences.var_operands.contains(span)
+    })
 }
 
 fn plain_name(name: &str) -> bool {

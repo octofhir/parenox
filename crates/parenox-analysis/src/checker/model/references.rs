@@ -36,6 +36,7 @@ pub(crate) struct DocumentReferences<'a> {
     pub uses: Vec<(Span, ScopedReference<'a>)>,
     pub bindings: Vec<Span>,
     pub named_fn_bindings: Vec<Span>,
+    pub var_operands: Vec<Span>,
     pub calls: Option<Vec<(Span, ScopedReference<'a>)>>,
     literal_bindings: Option<BTreeSet<usize>>,
 }
@@ -982,7 +983,12 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                     }
                 }
             }
-            Purpose::Collect(found) => found.uses.push((span, hit)),
+            Purpose::Collect(found) => {
+                if !allow_local && found.literal_bindings.is_none() {
+                    found.var_operands.push(span);
+                }
+                found.uses.push((span, hit));
+            }
             Purpose::Check(_) | Purpose::ProtocolMethods { .. } => unreachable!(),
         }
     }
