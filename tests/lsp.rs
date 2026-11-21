@@ -913,6 +913,7 @@ fn completes_only_visible_lexical_names_in_written_expressions() {
         ("(defn f [if] (i|f true :yes :no))", "if", &[]),
         ("(defn f [if] (do i|f))", "if", &["if"]),
         ("(defn f [catch] (cat|ch))", "catch", &["catch"]),
+        ("(defn f [/] (/| 1))", "/", &["/"]),
     ];
     let initial = format!("{prefix}(defn f [] nil)\n");
     fs::write(&path, &initial).unwrap();
@@ -986,6 +987,77 @@ fn completes_only_visible_lexical_names_in_written_expressions() {
     assert_eq!(eof[0]["code"], "PNX9000");
     assert_eq!(eof.as_array().unwrap().len(), 1);
     assert_eq!(fs::read_to_string(&path).unwrap(), initial);
+}
+
+#[test]
+fn local_completion_shows_types_at_reachable_use_sites() {
+    let fixture = Fixture::new("flow types in completion");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    let namespace = "(ns app (:require [clojure.spec.alpha :as s]))\n";
+    let cases: &[(&str, Option<&str>, Option<&str>)] = &[
+        ("(do lab| label))", Some("Nil | String"), None),
+        (
+            "(let [label-other :fallback] (if (some? label) (do \"🦊\" lab|) nil)))",
+            Some("String"),
+            Some(":fallback"),
+        ),
+        ("(if (some? label) label lab|))", Some("Nil"), None),
+        (
+            "(if (nil? label) (if (string? label) lab| nil) label))",
+            None,
+            None,
+        ),
+        (
+            "(let [visit (fn [label] lab|)] [(visit \"first\") (visit \"second\")]))",
+            Some("\"first\" | \"second\""),
+            None,
+        ),
+        (
+            "(let [visit (fn [label] lab|)] [(visit \"first\") (visit unknown.ns/value)]))",
+            None,
+            None,
+        ),
+        ("(when (some? label) (lab|", None, None),
+        ("(if (some? label) (lab|) label))", Some("String"), None),
+    ];
+    let initial = format!("{namespace}(defn f [] nil)\n");
+    fs::write(&path, &initial).unwrap();
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":file,"version":1,"languageId":"clojure","text":initial
+        }}}),
+    ];
+    for (index, &(body, _, _)) in cases.iter().enumerate() {
+        let defn = format!("(defn f {{:t/sig '[(s/nilable string?) :-> t/any]}} [label] {body}");
+        let cursor = defn.find('|').unwrap();
+        let row = defn.replace('|', "");
+        let id = index + 2;
+        requests.push(json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":id},"contentChanges":[{"text":format!("{namespace}{row}")}]
+        }}));
+        requests.push(json!({"jsonrpc":"2.0","id":id,"method":"textDocument/completion","params":{
+            "textDocument":{"uri":file},"position":{"line":1,"character":row[..cursor].encode_utf16().count()}
+        }}));
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    for (index, &(body, label, other)) in cases.iter().enumerate() {
+        let result = &replies
+            .iter()
+            .find(|reply| reply["id"] == index + 2)
+            .unwrap()["result"];
+        let items = result["items"].as_array().unwrap();
+        let item = |name: &str| items.iter().find(|item| item["label"] == name);
+        assert_eq!(item("label").unwrap()["detail"].as_str(), label, "{body}");
+        if let Some(detail) = other {
+            assert_eq!(item("label-other").unwrap()["detail"], detail, "{body}");
+        } else {
+            assert!(item("label-other").is_none(), "{body}");
+        }
+    }
 }
 
 #[test]

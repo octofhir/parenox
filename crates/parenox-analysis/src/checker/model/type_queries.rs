@@ -147,6 +147,25 @@ impl Declarations {
             .into_value_type()
     }
 
+    pub(crate) fn completion_types<'a>(
+        &'a self,
+        forms: &'a [Form],
+        model: &'a Model,
+        globals: &'a Globals,
+        source: &'a str,
+        site: Span,
+        names: &[&'a str],
+    ) -> Option<BTreeMap<String, String>> {
+        self.observe_at(
+            forms,
+            model,
+            globals,
+            source,
+            TypeQuery::completion(site, names),
+        )?
+        .into_completion_types()
+    }
+
     pub(crate) fn checked_call(
         &self,
         forms: &[Form],

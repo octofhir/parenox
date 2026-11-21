@@ -249,6 +249,7 @@ pub fn complete(
         }
     } else if let Some((qualifier, member)) = prefix.split_once('/')
         && qualifier != "clojure.core"
+        && prefix != "/"
     {
         let require_alias = session.completion_require_alias(path, qualifier, offset);
         let java = if require_alias.is_none() {
@@ -314,7 +315,7 @@ pub fn complete(
         let core = CORE.iter().filter_map(|entry| {
             if !entry.name.starts_with(qualified.unwrap_or(prefix))
                 || (qualified.is_none()
-                    && (locals.contains(&entry.name)
+                    && (locals.iter().any(|local| local.name == entry.name)
                         || !session.core_completion_visible(path, entry.name, offset)))
             {
                 return None;
@@ -340,7 +341,15 @@ pub fn complete(
         });
         locals
             .iter()
-            .map(|name| json!({"label":name,"kind":6,"textEdit":{"range":range,"newText":name}}))
+            .map(|local| {
+                let name = local.name;
+                let mut item =
+                    json!({"label":name,"kind":6,"textEdit":{"range":range,"newText":name}});
+                if let Some(detail) = &local.inferred_type {
+                    item["detail"] = json!(detail);
+                }
+                item
+            })
             .chain(core)
             .take(LIMIT + 1)
             .collect()

@@ -791,6 +791,7 @@ impl Checker<'_> {
                 tag.symbol().unwrap())),
             Kind::Keyword(k) => Value::new(Type::Key(self.model.key(k))),
             Kind::Symbol(s) | Kind::AnonymousArgument(s) => {
+                self.observe_completion(form.span, env);
                 if let Some(value) = env.get(s) {
                     if let Some(function) = env.inline_function(s) {
                         self.withhold_captured_facts(Some(function));

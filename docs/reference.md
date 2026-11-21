@@ -779,6 +779,10 @@ project, a buffer has no project context.
   `let` bindings and the scope of conditional bindings. A local that shadows a
   core var appears once as a plain name. Missing closing delimiters at EOF can
   be supplied for the query. Completion replaces the whole written symbol.
+  In complete forms, a candidate can show its inferred type at the cursor,
+  including narrowing inside a branch. Details combine types when the checker
+  visits the same occurrence more than once. Names remain available when a
+  type cannot be determined.
 - **Keyword value completion** suggests literal values from the declared
   argument type of a checked call. Type `:` or a prefix such as
   `:fr` to complete the keyword in place. Threaded calls use the parameter

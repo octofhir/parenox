@@ -5,8 +5,8 @@ mod symbols;
 
 pub use navigation::{
     ArchiveDeclarations, ArgumentKeyword, BindingType, CallHierarchyCalls, CallHierarchyItem,
-    CallSignature, CallSignatures, Definition, DocumentHover, InspectedReference, LocalHover,
-    PrivacyDeclaration, SemanticSymbol, SemanticSymbolKind, SourceExport, SourceHover,
+    CallSignature, CallSignatures, Definition, DocumentHover, InspectedReference, LocalCompletion,
+    LocalHover, PrivacyDeclaration, SemanticSymbol, SemanticSymbolKind, SourceExport, SourceHover,
     SourceTestKind, SourceTestNode, VarDocumentation, VarInfo, namespace_documentation,
     namespace_exports,
 };
@@ -126,6 +126,7 @@ struct FileCache {
     recovered_delimited_forms: OnceLock<Option<(Declarations, Vec<Form>)>>,
     hover_types: TypeQueries<String>,
     checked_calls: TypeQueries<Arc<CheckedCall>>,
+    completion_types: TypeQueries<Arc<BTreeMap<String, String>>, (usize, usize, usize)>,
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
     interface: Option<InterfaceKey>,
@@ -134,7 +135,7 @@ struct FileCache {
     partial_diagnostics: Option<Vec<Diagnostic>>,
 }
 
-type TypeQueries<T> = OnceLock<Mutex<BTreeMap<usize, Option<T>>>>;
+type TypeQueries<T, K = usize> = OnceLock<Mutex<BTreeMap<K, Option<T>>>>;
 
 struct CheckedFunction {
     ranges: Vec<Span>,
@@ -510,6 +511,7 @@ impl Session {
             // Type queries can depend on externs or other edited files.
             cache.hover_types.take();
             cache.checked_calls.take();
+            cache.completion_types.take();
             cache.recovered_delimited_forms.take();
             if let Some(fallback) = &mut cache.navigation_fallback {
                 fallback.checked_prefix.take();

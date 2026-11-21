@@ -1,7 +1,7 @@
 //! Observations made by the checker at one requested source occurrence.
 use std::{collections::BTreeMap, sync::Arc};
 
-use super::{Checker, Value, calls::CallArguments};
+use super::{Checker, Env, Value, calls::CallArguments};
 use crate::ContractOrigin;
 use crate::reader::{Form, Span};
 use crate::types::{Signature, Type};
@@ -11,6 +11,12 @@ pub(super) enum TypeQuery<'a> {
     Lookup { span: Span, ty: Type },
     Call(Box<CallQuery<'a>>),
     Bindings(BindingQueries),
+    Completion(CompletionQuery<'a>),
+}
+
+pub(super) struct CompletionQuery<'a> {
+    span: Span,
+    types: BTreeMap<&'a str, Option<Type>>,
 }
 
 pub(super) struct BindingQueries {
@@ -110,6 +116,16 @@ impl<'a> TypeQuery<'a> {
         }
     }
 
+    pub(super) fn completion(span: Span, names: &[&'a str]) -> Self {
+        Self::Completion(CompletionQuery {
+            span,
+            types: names
+                .iter()
+                .map(|&name| (name, Some(Type::Never)))
+                .collect(),
+        })
+    }
+
     pub(super) fn bindings(
         enclosing: Span,
         sites: impl Iterator<Item = (Span, bool)>,
@@ -134,6 +150,7 @@ impl<'a> TypeQuery<'a> {
             Self::Local { span, .. } | Self::Lookup { span, .. } => *span,
             Self::Call(query) => query.span,
             Self::Bindings(query) => query.enclosing,
+            Self::Completion(query) => query.span,
         }
     }
 
@@ -153,6 +170,22 @@ impl<'a> TypeQuery<'a> {
             Self::Call(query) => query.checked,
             _ => None,
         }
+    }
+
+    pub(super) fn into_completion_types(self) -> Option<BTreeMap<String, String>> {
+        let Self::Completion(query) = self else {
+            return None;
+        };
+        Some(
+            query
+                .types
+                .into_iter()
+                .filter_map(|(name, ty)| {
+                    let ty = ty.filter(completion_detail_type)?;
+                    Some((name.to_owned(), ty.to_string()))
+                })
+                .collect(),
+        )
     }
 
     pub(super) fn includes_literal_bindings(&self) -> bool {
@@ -176,7 +209,37 @@ impl<'a> TypeQuery<'a> {
     }
 }
 
+fn completion_detail_type(ty: &Type) -> bool {
+    !matches!(ty, Type::Never | Type::Any) && !ty.contains_unknown()
+}
+
 impl<'model> Checker<'model> {
+    pub(super) fn observe_completion(&mut self, span: Span, env: &Env) {
+        if self.path_reachable
+            && let Some(TypeQuery::Completion(query)) = &mut self.type_query
+            && query.span == span
+        {
+            for (&name, observed) in &mut query.types {
+                let Some(previous) = observed else {
+                    continue;
+                };
+                let Some(actual) = env
+                    .get(name)
+                    .map(|value| &value.known)
+                    .filter(|ty| completion_detail_type(ty))
+                else {
+                    // Every reachable visit must support the detail.
+                    *observed = None;
+                    continue;
+                };
+                if previous != actual {
+                    *previous =
+                        Type::union([std::mem::replace(previous, Type::Never), actual.clone()]);
+                }
+            }
+        }
+    }
+
     pub(super) fn observe_binding(&mut self, name: &str, span: Span, value: &Value) {
         self.observe_local(name, span, value);
         if self.path_reachable
@@ -338,7 +401,11 @@ impl<'model> Checker<'model> {
                 && site.end.offset <= enclosing.end.offset
             {
                 match query {
-                    TypeQuery::Local { .. } | TypeQuery::Lookup { .. } => self.type_query = None,
+                    TypeQuery::Local { .. }
+                    | TypeQuery::Lookup { .. }
+                    | TypeQuery::Completion(_) => {
+                        self.type_query = None;
+                    }
                     TypeQuery::Call(query) => query.use_declaration(),
                     TypeQuery::Bindings(_) => unreachable!(),
                 }

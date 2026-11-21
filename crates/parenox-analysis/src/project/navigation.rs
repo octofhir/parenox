@@ -2,6 +2,7 @@
 mod archive;
 mod call_hierarchy;
 mod completion_docs;
+mod completion_locals;
 mod completion_require;
 mod declaration;
 mod hover;
@@ -19,6 +20,7 @@ mod usages;
 pub use archive::ArchiveDeclarations;
 pub use call_hierarchy::{CallHierarchyCalls, CallHierarchyItem};
 pub use completion_docs::{SourceExport, namespace_exports};
+pub use completion_locals::LocalCompletion;
 use completion_require::LiteralRequireSite;
 pub use hover::{
     BindingType, DocumentHover, LocalHover, SourceHover, VarDocumentation, namespace_documentation,
@@ -537,24 +539,24 @@ fn source_symbol_form_at(forms: &[Form], offset: usize, site: SymbolSite) -> Opt
 
 const MAX_CACHED_TYPE_QUERIES: usize = 128;
 
-fn cached_type_query<T: Clone>(
-    cache: &TypeQueries<T>,
-    start: usize,
+fn cached_type_query<T: Clone, K: Copy + Ord>(
+    cache: &TypeQueries<T, K>,
+    key: K,
     infer: impl FnOnce() -> Option<T>,
 ) -> Option<T> {
     let entries = cache.get_or_init(Default::default);
-    if let Some(value) = entries.lock().unwrap().get(&start).cloned() {
+    if let Some(value) = entries.lock().unwrap().get(&key).cloned() {
         return value;
     }
     let value = infer();
     let mut entries = entries.lock().unwrap();
-    if let Some(current) = entries.get(&start) {
+    if let Some(current) = entries.get(&key) {
         return current.clone();
     }
     if entries.len() == MAX_CACHED_TYPE_QUERIES {
         entries.pop_first();
     }
-    entries.insert(start, value.clone());
+    entries.insert(key, value.clone());
     value
 }
 

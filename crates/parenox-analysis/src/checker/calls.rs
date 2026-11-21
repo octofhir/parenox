@@ -232,6 +232,7 @@ impl<'model> Checker<'model> {
     }
 
     pub(super) fn list(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
+        self.observe_completion(xs[0].without_metadata().span, env);
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
             && let Some(value) =
