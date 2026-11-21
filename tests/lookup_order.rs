@@ -1,4 +1,4 @@
-use parenox::{Report, Session};
+use parenox::{DocumentHover, Report, Session};
 
 fn check(expression: &str, expected: &str) -> Report {
     Session::default().check(
@@ -67,6 +67,75 @@ fn successful_lookups_do_not_add_impossible_exception_paths() {
         panic!("{report:#?}");
     };
     assert_eq!(diagnostic.code, "PNX2741");
+}
+
+#[test]
+fn a_literal_get_in_lookup_can_throw_before_the_next_key_expression() {
+    let source = r#"(ns demo)
+        (defn inlined {:t/sig '[t/any :-> #{:later}]} [target]
+          (try
+            (get-in target [:key (throw (ex-info "late key" {}))])
+            (catch IllegalArgumentException _ :earlier)
+            (catch ExceptionInfo _ :later)))
+        (defn with-default {:t/sig '[t/any :-> #{:later}]} [target]
+          (try
+            (get-in target [:key (throw (ex-info "late key" {}))] :fallback)
+            (catch IllegalArgumentException _ :earlier)
+            (catch ExceptionInfo _ :later)))
+        (defn computed-path {:t/sig '[t/any :-> #{:later}]} [target]
+          (try
+            (let [path [:key (throw (ex-info "late key" {}))]] (get-in target path))
+            (catch IllegalArgumentException _ :earlier)
+            (catch ExceptionInfo _ :later)))"#;
+    let report = Session::default().check("lookup.clj", source);
+    let [diagnostic] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(diagnostic.code, "PNX2322");
+    assert_eq!(diagnostic.expected.as_deref(), Some(":later"));
+    assert_eq!(diagnostic.actual.as_deref(), Some(":earlier | :later"));
+    assert!(diagnostic.message.contains("demo/inlined"));
+}
+
+#[test]
+fn an_opaque_macro_shadowing_get_in_has_no_standard_lookup_proof() {
+    let source = r#"(ns demo)
+        (defmacro get-in [& _] :real)
+        (defn opaque {:t/sig '[:-> #{:real}]} [] (get-in {} [:missing] :fallback))
+        (defn explicit {:t/sig '[:-> #{:fallback}]} [] (clojure.core/get-in {} [:missing] :fallback))"#;
+    let report = Session::default().check("lookup.clj", source);
+    let [declaration, use_site] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(declaration.code, "PNX9001");
+    assert_eq!(use_site.code, "PNX9001");
+    assert_eq!(
+        &source[use_site.span.start.offset..use_site.span.end.offset],
+        "(get-in {} [:missing] :fallback)"
+    );
+}
+
+#[test]
+fn a_shadowed_get_in_cannot_narrow_the_map_in_a_branch() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defmacro get-in [& _] true)
+        (defn read-path {:t/sig '[{:outer {:leaf (s/nilable string?)}} :-> string?]} [m]
+          (if (get-in m [:outer :leaf])
+            (let [leaf (:leaf (:outer m))] (subs leaf 0))
+            "fallback"))"#;
+    let mut session = Session::default();
+    let report = session.check("lookup.clj", source);
+    let mismatch = report
+        .diagnostics
+        .iter()
+        .find(|finding| finding.code == "PNX2322")
+        .unwrap();
+    assert_eq!(mismatch.actual.as_deref(), Some("Nil | String"));
+    let offset = source.rfind("leaf 0").unwrap();
+    let Some(DocumentHover::Local(local)) = session.document_hover_at("lookup.clj", offset) else {
+        panic!("expected a type for the leaf read");
+    };
+    assert_eq!(local.inferred_type, "Nil | String");
 }
 
 #[test]

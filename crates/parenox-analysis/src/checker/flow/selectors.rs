@@ -31,7 +31,11 @@ impl Checker<'_> {
                 let mut selector = self.selector(target, env)?;
                 match op.as_str() {
                     "clojure.core/get" => selector.keys.push(self.literal_map_key(key)?),
-                    "clojure.core/get-in" => {
+                    "clojure.core/get-in"
+                        if self
+                            .model
+                            .can_use_standard_core(head.symbol()?, self.globals) =>
+                    {
                         let keys = key.vector()?;
                         if keys.is_empty() || selector.keys.len() + keys.len() > MAX_SELECTOR_KEYS {
                             return None;

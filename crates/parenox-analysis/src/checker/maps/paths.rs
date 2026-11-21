@@ -142,6 +142,20 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         }
+        if !xs[0]
+            .symbol()
+            .is_some_and(|name| self.model.can_use_standard_core(name, self.globals))
+        {
+            return self.unchecked_form(
+                span,
+                "Checking get-in requires the standard core definition",
+            );
+        }
+        if let [_, target, path] = xs
+            && let Some(keys) = path.vector()
+        {
+            return self.inline_get_in(target, keys, env);
+        }
         let value = self.infer(&xs[1], env);
         let target_returns = value.known != Type::Never;
         let path = self.inspect_path(target_returns, |checker| {
@@ -168,6 +182,14 @@ impl Checker<'_> {
                 if result.known.contains_unknown() {
                     self.may_throw();
                 }
+                if self.type_query.is_some()
+                    && default.is_some()
+                    && let Some(last) = xs[2].vector().and_then(|keys| keys.last())
+                {
+                    // With a default, the path may stop at an earlier miss.
+                    // Show the result of the call at the final path token.
+                    self.observe_lookup(last.without_metadata().span, &result);
+                }
                 result
             }
             Err(ty) => {
@@ -175,6 +197,37 @@ impl Checker<'_> {
                 Value::new(ty)
             }
         }
+    }
+
+    fn inline_get_in(&mut self, target: &Form, keys: &[Form], env: &Env) -> Value {
+        // The JVM inlines a two-argument literal vector as nested get calls.
+        // Each lookup runs before the next key expression is evaluated.
+        let mut value = self.infer(target, env);
+        for (index, key) in keys.iter().enumerate() {
+            let reachable = value.known != Type::Never;
+            let ty = self.inspect_path(reachable, |checker| {
+                checker.read_map_key(key, env, "get-in", true)
+            });
+            if !reachable {
+                continue;
+            }
+            let Some(ty) = ty else {
+                self.may_throw();
+                value = Value::new(Type::Unknown);
+                continue;
+            };
+            if ty == Type::Never {
+                value = Value::new(Type::Never);
+                continue;
+            }
+            if value.known.contains_unknown() || ty.contains_unknown() {
+                self.may_throw();
+            }
+            let presence = (index == 0).then(|| env.presence(target, key)).flatten();
+            value = self.lookup_with_presence(&value, &ty, None, key.span, presence);
+            self.observe_lookup(key.without_metadata().span, &value);
+        }
+        value
     }
 
     fn lookup_paths(

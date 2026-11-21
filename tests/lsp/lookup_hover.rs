@@ -13,10 +13,11 @@ fn hover_shows_the_lookup_type_at_each_evaluated_keyword_occurrence() {
     (do "🦊" (subs (:path ref) 0))))
 (defn fallback {:t/sig '[:-> string?]} [] (get {} :path "fallback"))
 (defn nested {:t/sig '[{:ref {:path string?}} :-> string?]} [base]
-  (get (:ref base) :path))
+  (get-in base [:ref :path]))
 (defn data {:t/sig '[:-> t/any]} [] {:path '(:path {})})
 (defn shadow {:t/sig '[(s/fspec :args (s/cat :m map? :k keyword?) :ret string?) :-> string?]} [get]
   (get {} :path))
+(defn with-default {:t/sig '[:-> string?]} [] (get-in {} [:missing :path] "fallback"))
 "#;
     fs::write(&path, source).unwrap();
     let broken = source.replace("(nil? (:path ref))", "(some? (:path ref))");
@@ -51,7 +52,8 @@ fn hover_shows_the_lookup_type_at_each_evaluated_keyword_occurrence() {
         hover(10, &broken, 5, ":path"),
         change(3, source),
         hover(11, source, 5, ":path"),
-        json!({"jsonrpc":"2.0","id":12,"method":"shutdown"}),
+        hover(12, source, 12, ":path"),
+        json!({"jsonrpc":"2.0","id":13,"method":"shutdown"}),
         json!({"jsonrpc":"2.0","method":"exit"}),
     ]);
     let result = |id| &replies.iter().find(|reply| reply["id"] == id).unwrap()["result"];
@@ -68,6 +70,7 @@ fn hover_shows_the_lookup_type_at_each_evaluated_keyword_occurrence() {
         (7, 8, ":path", "String"),
         (10, 5, ":path", "Nil"),
         (11, 5, ":path", "String"),
+        (12, 12, ":path", "\"fallback\""),
     ] {
         let start = at(source, line, key);
         let hover = result(id);
