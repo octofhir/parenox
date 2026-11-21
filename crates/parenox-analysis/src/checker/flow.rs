@@ -468,9 +468,10 @@ impl Checker<'_> {
             };
             let mut scope = env.clone();
             self.narrow(test, truth, &mut scope);
-            self.check_path(possible != Type::Never && scope.reachable(), |checker| {
-                branch(checker, &scope, truth)
-            })
+            self.check_path(
+                !condition.stops_evaluation() && possible != Type::Never && scope.reachable(),
+                |checker| branch(checker, &scope, truth),
+            )
         })
     }
 
@@ -491,17 +492,19 @@ impl Checker<'_> {
         let mut branches = Vec::new();
         for [test, result] in pairs {
             let condition = self.infer_path(test, &fallthrough, reachable, false);
+            let returns = !condition.stops_evaluation();
             let mut selected = fallthrough.clone();
             self.narrow(test, true, &mut selected);
             let branch = self.infer_path(
                 result,
                 &selected,
-                condition.known.truthy() != Type::Never,
+                returns && condition.known.truthy() != Type::Never,
                 tail,
             );
             branches.push(branch);
             self.narrow(test, false, &mut fallthrough);
-            reachable = condition.known.falsey() != Type::Never && fallthrough.reachable();
+            reachable =
+                returns && condition.known.falsey() != Type::Never && fallthrough.reachable();
         }
         if reachable {
             branches.push(Value::new(Type::Nil));
@@ -664,7 +667,9 @@ impl Checker<'_> {
 
         let mut input = self.infer(init, env);
         let first = name == "clojure.core/when-first";
-        if first {
+        if input.stops_evaluation() {
+            input.narrow(Type::Never);
+        } else if first {
             input = self.sequence_call("clojure.core/seq", &input, init.span);
         }
         let non_nil = first || name.ends_with("-some");
@@ -736,6 +741,11 @@ impl Checker<'_> {
             let last = index + 2 == xs.len();
             let mut value = self.infer_path(x, &local, reachable, tail && last);
             if !reachable {
+                continue;
+            }
+            if value.stops_evaluation() {
+                reachable = false;
+                branches.push(value);
                 continue;
             }
             if last {

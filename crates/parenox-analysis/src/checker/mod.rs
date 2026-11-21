@@ -340,7 +340,11 @@ impl Value {
         let mut origin: Option<LiteralContainer> = None;
         let mut have_value = false;
         for branch in branches {
-            if !matches!(branch.known, Type::Never | Type::Nil) {
+            if branch.stops_evaluation() {
+                notes.extend(branch.notes);
+                continue;
+            }
+            if branch.known != Type::Nil {
                 origin = if have_value {
                     origin
                         .zip(branch.literal_container)

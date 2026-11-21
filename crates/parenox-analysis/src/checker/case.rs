@@ -63,7 +63,11 @@ impl Checker<'_> {
 
         let local = input.symbol();
         let selector = self.selector(input, env);
-        let mut remaining = subject.known;
+        let mut remaining = if subject.stops_evaluation() {
+            Type::Never
+        } else {
+            subject.known
+        };
         let mut outcomes = Vec::new();
         let mut matched = false;
         for (keys, result) in branches {

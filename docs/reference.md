@@ -635,6 +635,9 @@ Vector literals and bound arguments to standard `partial` are evaluated in
 source order. After a proven runtime failure, later expressions still get
 compiler checks such as name resolution. Their runtime types and diagnostics
 are withheld, including when a vector literal supplies `apply` arguments.
+Conditional expressions combine the types and collection facts of branches
+that can return a value. A proven runtime failure in the condition or dispatch
+expression leaves the results unavailable and still allows compiler checks.
 
 Verified `:t/guard '[:then value string?]` narrows the argument after a true
 result. Use `:both` only if the checker can also verify the false branch.

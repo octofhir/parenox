@@ -55,6 +55,64 @@ fn eager_vector_inputs_stop_only_after_a_proven_runtime_failure() {
 }
 
 #[test]
+fn branch_joins_preserve_normal_results_and_proven_stops() {
+    let source = r#"(ns demo)
+(defn joined {:t/sig '[boolean? :-> #{"label"}]} [choice]
+  (if choice (subs nil 0) "label"))
+(defn wrapped {:t/sig '[:-> t/any]} []
+  [(if true (subs false 0) "unused") (subs "text" -1)])
+(defn wrapped-dispatch {:t/sig '[:-> t/any]} []
+  [(condp = :ready :ready (subs :bad-arm 0) "unused") (subs "text" -2)])
+(defn if-test {:t/sig '[:-> t/any]} []
+  (if (subs :bad-if 0) (subs :unused 0) missing-name))
+(defn cond-test {:t/sig '[:-> t/any]} []
+  (cond (subs :bad-cond 0) (subs :unused 0) :else (subs :unused 0)))
+(defn case-test {:t/sig '[:-> t/any]} []
+  (case (subs :bad-case 0) "x" (subs :unused 0) (subs :unused 0)))
+(defn or-test {:t/sig '[:-> t/any]} []
+  (or (subs :bad-or 0) (subs :unused 0) missing-or))
+(defn and-test {:t/sig '[:-> t/any]} []
+  (and (subs :bad-and 0) (subs :unused 0)))
+(defn if-let-test {:t/sig '[:-> t/any]} []
+  (if-let [text (subs :bad-init 0)] (subs :unused 0) missing-init))
+(defn accepts-at-runtime {:t/sig '[string? :-> string?]} [_] "prefix")
+(defn contract-only {:t/sig '[:-> t/any]} []
+  [(if true (accepts-at-runtime nil) "unused") (subs "text" -9)])
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", "nil"),
+            ("PNX2322", "false"),
+            ("PNX2322", ":bad-arm"),
+            ("PNX2322", ":bad-if"),
+            ("PNX2304", "missing-name"),
+            ("PNX2322", ":bad-cond"),
+            ("PNX2322", ":bad-case"),
+            ("PNX2322", ":bad-or"),
+            ("PNX2304", "missing-or"),
+            ("PNX2322", ":bad-and"),
+            ("PNX2322", ":bad-init"),
+            ("PNX2304", "missing-init"),
+            ("PNX2322", "nil"),
+            ("PNX2801", "-9"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn join_accepts_seqable_values_and_reports_the_invalid_collection_input() {
     let source = r#"(ns labels (:require [clojure.string :as str] [clojure.spec.alpha :as s]))
         (defn entries {:t/sig '[map? :-> string?]} [m] (str/join :entry m))
