@@ -150,6 +150,70 @@ fn a_structural_tuple_does_not_prove_peek_or_conj_behavior() {
 }
 
 #[test]
+fn assoc_updates_ordinary_vector_positions_without_losing_nested_facts() {
+    let report = check(
+        r#"
+(defn replace-child {:t/sig '[:-> (s/tuple #{:current} #{:next})]} []
+  (let [keyset {:child {:order 1}}
+        i (:order (keyset :child))
+        children [[:current] [:old]]
+        c [:next]]
+    (mapv first (assoc children i c))))
+(defn append-after-wrap {:t/sig '[:-> (s/tuple #{:first} #{:second})]} []
+  (assoc [:old] 4294967296 :first 4294967297N :second))
+(defn growing {:t/sig '[:-> (s/tuple #{:first} #{:second})]} []
+  (assoc [] 0 :old 1 :second 0 :first))
+(defn checks-all-operands-first {:t/sig '[:-> #{:operand}]} []
+  (try (assoc [] -1 :bad 0 (throw (ex-info "operand" {:which :operand})))
+       (catch clojure.lang.ExceptionInfo error (:which (ex-data error)))))
+"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn vector_assoc_distinguishes_index_failure_and_runtime_key_class() {
+    let source = r#"(ns stack (:require [clojure.spec.alpha :as s]))
+(defn bounds {:t/sig '[:-> #{:bounds}]} []
+  (try (assoc [:old] 2 :new)
+       (catch IllegalArgumentException _ :wrong)
+       (catch IndexOutOfBoundsException _ :bounds)))
+(defn invalid-key {:t/sig '[:-> #{:invalid}]} []
+  (try (assoc [:old] "0" :new)
+       (catch IndexOutOfBoundsException _ :wrong)
+       (catch IllegalArgumentException _ :invalid)))
+(defn fixed-value {:t/sig '[(s/and int? #{0}) :-> #{:ok :invalid}]} [index]
+  (let [outcome (try (do (assoc [:old] index :new) :ok)
+                     (catch IllegalArgumentException _ :invalid))]
+    outcome))"#;
+    let mut session = Session::default();
+    let report = session.check("stack.clj", source);
+    assert!(report.complete, "{report:#?}");
+    let [bounds, key] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    for (finding, (code, fragment)) in [bounds, key]
+        .into_iter()
+        .zip([("PNX2801", "2"), ("PNX2322", "\"0\"")])
+    {
+        assert_eq!(finding.code, code);
+        assert_eq!(
+            finding.contract.as_ref().unwrap().name,
+            "clojure.core/assoc"
+        );
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            fragment
+        );
+    }
+    let offset = source.rfind("outcome").unwrap();
+    let Some(DocumentHover::Local(hover)) = session.document_hover_at("stack.clj", offset) else {
+        panic!("missing assoc outcome hover");
+    };
+    assert_eq!(hover.inferred_type, ":invalid | :ok");
+}
+
+#[test]
 fn unchecked_into_visits_withhold_only_callback_hovers() {
     let source = r#"(ns traversal (:require [clojure.spec.alpha :as s]))
 (defn inline {:t/sig '[(s/tuple keyword?) :-> any?]} [custom]

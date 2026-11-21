@@ -446,15 +446,27 @@ impl Checker<'_> {
 
     pub(super) fn assoc(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
         if xs.len() < 4 || !xs.len().is_multiple_of(2) {
-            self.error("PNX2554", span, "assoc requires a map and key/value pairs");
+            self.error(
+                "PNX2554",
+                span,
+                "assoc requires a target and key/value pairs",
+            );
             return Value::new(Type::Unknown);
         }
         let args: Vec<_> = self.eval_args(&xs[1..], env, true).collect();
         if !call_returns(&args) {
             return Value::new(Type::Never);
         }
+        let pairs = args[1..].as_chunks::<2>().0;
+        if matches!(args[0].0.known, Type::Tuple(_) | Type::Vector(_))
+            && xs[0]
+                .symbol()
+                .is_some_and(|name| self.model.can_use_standard_core(name, self.globals))
+        {
+            return self.assoc_vector(&args[0], pairs, xs[2..].as_chunks::<2>().0);
+        }
         let mut updates = Vec::new();
-        for [(key, key_span), (value, _)] in args[1..].as_chunks::<2>().0 {
+        for [(key, key_span), (value, _)] in pairs {
             let key = self.validate_map_key(key.clone(), *key_span, "assoc", false);
             let Some(key) = key.filter(|key| !key.contains_unknown()) else {
                 self.may_throw();

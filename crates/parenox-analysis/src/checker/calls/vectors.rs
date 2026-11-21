@@ -6,9 +6,9 @@ use super::{
     ArgumentForms, Callable, PreparedCallable, call_returns, narrow_emptiness, predicate_type,
     sequences::{collection_emptiness, iteration_may_throw},
 };
-use crate::ContractKind;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{IntegerClass, IntegerType, Type};
+use crate::{ContractKind, Diagnostic};
 
 const MAX_VECTOR_TRANSFORM_STEPS: usize = 128;
 
@@ -82,6 +82,81 @@ pub(in crate::checker) fn narrow_vector_predicate(input: &Type, truth: bool) -> 
 }
 
 impl Checker<'_> {
+    pub(in crate::checker) fn assoc_vector(
+        &mut self,
+        (collection, span): &(Value, Span),
+        pairs: &[[(Value, Span); 2]],
+        forms: &[[Form; 2]],
+    ) -> Value {
+        let (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) =
+            (&collection.known, &collection.literal_container)
+        else {
+            return self.unchecked_form(*span, "Vector assoc needs a proven ordinary vector");
+        };
+        let mut items: Vec<_> = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let mut value = Value::new(item.clone());
+                value.literal_container = vector.vector_item(index).cloned();
+                value
+            })
+            .collect();
+        const NAME: &str = "clojure.core/assoc";
+        let start = self.diagnostics.len();
+        for ([(key, span), (value, _)], [form, _]) in pairs.iter().zip(forms) {
+            let Some(index) = key.known.exact_long_value() else {
+                let integer = Type::Integral(IntegerType::ANY);
+                if key.literal_container.is_some()
+                    || key.known.known_intersection(&integer) == Some(Type::Never)
+                {
+                    self.expect(key, &integer, *span, "Vector assoc index");
+                    self.note_builtin_contract(start, NAME);
+                    self.illegal_argument();
+                    return Value::new(Type::Never);
+                }
+                return self.unchecked_form(*span, "Vector assoc needs a known integer index");
+            };
+            // APersistentVector checks integer keys, then uses Number.intValue.
+            // A boxed Byte or Short can share the type of an exact fixed index.
+            if i16::try_from(index).is_ok()
+                && !matches!(form.kind, Kind::Number)
+                && !key.known.is_arbitrary_integer()
+            {
+                self.illegal_argument();
+            }
+            let index = index as i32;
+            let Some(position) = usize::try_from(index)
+                .ok()
+                .filter(|&index| index <= items.len())
+            else {
+                let mut diagnostic = Diagnostic::new(
+                    "PNX2801",
+                    *span,
+                    format!(
+                        "Index {index} is out of bounds for a vector of length {}",
+                        items.len()
+                    ),
+                );
+                diagnostic.help =
+                    Some("Use an existing index or the vector's length to append.".into());
+                self.diagnostics.push(diagnostic);
+                self.note_builtin_contract(start, NAME);
+                self.index_out_of_bounds();
+                return Value::new(Type::Never);
+            };
+            if position == items.len() {
+                items.push(value.clone());
+            } else {
+                items[position] = value.clone();
+            }
+        }
+        let count = items.len();
+        let mut result = literal_vector_value(items.into_iter(), count, true);
+        result.notes.clone_from(&collection.notes);
+        result
+    }
+
     pub(super) fn collect_vector_transducer(
         &mut self,
         forms: &[Form],
