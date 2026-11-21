@@ -4,6 +4,131 @@ use std::collections::{BTreeMap, BTreeSet};
 const EXTERNS: &str = include_str!("../examples/clinic/externs.edn");
 
 #[test]
+fn transitive_requires_recheck_unchanged_alias_only_spec_declarations() {
+    let app = Source {
+        path: "app.clj",
+        source: "(ns app (:require [loader] [clojure.spec.alpha :as-alias s]))
+          (s/def ::message string?)
+          (s/fdef echo :args (s/cat) :ret ::message)
+          (defn echo [] 42)",
+    };
+    let loader = Source {
+        path: "loader.clj",
+        source: "(ns loader (:require [registry]))",
+    };
+    let loaded = "(ns registry (:require [clojure.spec.alpha :as spec]))";
+    let comment = format!("{loaded}\n;; Registry documentation");
+    let alias_only = "(ns registry (:require [clojure.spec.alpha :as-alias spec]))
+                       (defn register [] (spec/def ::marker string?))";
+    let unfinished = "(ns registry (:require [clojure.spec.alpha :as spec]))\n(";
+    let open = BTreeSet::from([app.path, loader.path]);
+    let mut session = Session::default();
+    for (registry, available, changed) in [
+        (loaded, true, false),
+        (&comment, true, false),
+        (alias_only, false, true),
+        (unfinished, false, false),
+        (loaded, true, true),
+    ] {
+        let (report, availability_changed) = session.check_project_documents_with_contract_changes(
+            &[
+                app,
+                loader,
+                Source {
+                    path: "registry.clj",
+                    source: registry,
+                },
+            ],
+            &[],
+            &open,
+        );
+        let findings: Vec<_> = report.files[0]
+            .diagnostics
+            .iter()
+            .filter(|finding| matches!(finding.code.as_str(), "PNX2322" | "PNX9003"))
+            .map(|finding| {
+                (
+                    finding.code.as_str(),
+                    &app.source[finding.span.start.offset..finding.span.end.offset],
+                )
+            })
+            .collect();
+        if available {
+            assert_eq!(findings, [("PNX2322", "42")], "{report:#?}");
+        } else {
+            assert_eq!(
+                findings,
+                [("PNX9003", "s/def"), ("PNX9003", "s/fdef")],
+                "{report:#?}"
+            );
+        }
+        assert_eq!(availability_changed, changed, "{registry}");
+    }
+}
+
+#[test]
+fn transitive_requires_withhold_unavailable_provider_contracts() {
+    let app = Source {
+        path: "app.clj",
+        source: "(ns app (:require [loader] [target :as-alias t]))
+                 (defn run {:t/sig '[:-> t/any]} [] (t/render 42))",
+    };
+    let loader = Source {
+        path: "loader.clj",
+        source: "(ns loader (:require [target]))",
+    };
+    let target = Source {
+        path: "target.clj",
+        source: "(ns target) (defn render {:t/sig '[number? :-> number?]} [n] n)",
+    };
+    let duplicate = Source {
+        path: "target.cljc",
+        source: "(ns target) (defn render {:t/sig '[string? :-> string?]} [s] s)",
+    };
+    let unfinished = Source {
+        source: "(ns target) (",
+        ..target
+    };
+    let unreadable = Source {
+        source: "(",
+        ..target
+    };
+    let wrong_namespace = Source {
+        source: "(ns another)",
+        ..target
+    };
+    let externs = Source {
+        path: "api.edn",
+        source: "{target/render [[string? :-> string?]]}",
+    };
+    let mut session = Session::default();
+    for (providers, known) in [
+        (vec![target], true),
+        (vec![target, duplicate], false),
+        (vec![unfinished], false),
+        (vec![unreadable], false),
+        (vec![wrong_namespace], false),
+        (vec![target], true),
+    ] {
+        let sources = [app, loader]
+            .into_iter()
+            .chain(providers)
+            .collect::<Vec<_>>();
+        let report = session.check_project(&sources, Some(externs));
+        let findings: Vec<_> = report.files[0]
+            .diagnostics
+            .iter()
+            .map(|item| item.code.as_str())
+            .collect();
+        if known {
+            assert!(findings.is_empty(), "{report:#?}");
+        } else {
+            assert_eq!(findings, ["PNX9003"], "{report:#?}");
+        }
+    }
+}
+
+#[test]
 fn deftype_factories_navigate_and_check_only_positional_arity() {
     let provider = Source {
         path: "cell.clj",

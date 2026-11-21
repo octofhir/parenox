@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::Globals;
 use super::contracts::function_parts;
 use super::references::ProjectCall;
-use super::require::ExplicitReferral;
+use super::require::{ExplicitReferral, RuntimeLoads};
 use crate::Diagnostic;
 use crate::checker::bindings::binding_names;
 use crate::checker::function_forms::{Clause, function_clauses, lexical_function_clauses};
@@ -64,6 +64,7 @@ pub(super) struct Names {
     pub(super) imports: BTreeMap<String, String>,
     pub(super) required_libraries: BTreeSet<String>,
     pub(super) aliased_libraries: BTreeSet<String>,
+    pub(super) proven_alias_libraries: BTreeSet<String>,
     pub(super) core_only: Option<BTreeSet<String>>,
     pub(super) core_hidden: BTreeSet<String>,
     pub(super) source_macros: BTreeMap<String, Vec<SourceMacro>>,
@@ -130,13 +131,19 @@ impl Names {
 
     fn runtime_alias_gap_in(&self, namespace: &str) -> Option<&str> {
         let namespace = self.aliased_libraries.get(namespace)?.as_str();
-        if namespace == self.namespace
+        (!self.directly_loads(namespace) && !self.proven_alias_libraries.contains(namespace))
+            .then_some(namespace)
+    }
+
+    pub(super) fn directly_loads(&self, namespace: &str) -> bool {
+        namespace == self.namespace
             || namespace == "clojure.core"
             || self.required_libraries.contains(namespace)
-        {
-            return None;
-        }
-        Some(namespace)
+    }
+
+    pub(super) fn loads_library(&self, namespace: &str) -> bool {
+        self.required_libraries.contains(namespace)
+            || self.proven_alias_libraries.contains(namespace)
     }
 
     pub(super) fn core_visible(&self, name: &str) -> bool {
@@ -229,6 +236,49 @@ impl Declarations {
 
     pub(super) fn runtime_alias_gap(&self, symbol: &str) -> Option<&str> {
         self.names.runtime_alias_gap(symbol)
+    }
+
+    pub(crate) fn has_runtime_aliases(&self) -> bool {
+        !self.names.aliased_libraries.is_empty()
+    }
+
+    pub(crate) fn proven_alias_libraries(&self) -> &BTreeSet<String> {
+        &self.names.proven_alias_libraries
+    }
+
+    pub(super) fn has_static_requirements(&self, forms: &[Form]) -> bool {
+        self.namespace_end.is_some_and(|end| {
+            forms.first().is_some_and(|first| {
+                first.span.end.offset == end
+                    && static_namespace_prelude(first)
+                    && self
+                        .diagnostics
+                        .iter()
+                        .all(|finding| finding.span.start.offset >= end)
+            })
+        })
+    }
+
+    pub(crate) fn runtime_alias_evidence(
+        &self,
+        forms: &[Form],
+        loads: &RuntimeLoads,
+    ) -> BTreeSet<String> {
+        if self.has_runtime_aliases() && self.has_static_requirements(forms) {
+            loads.proven_aliases(&self.names)
+        } else {
+            BTreeSet::new()
+        }
+    }
+
+    pub(crate) fn with_runtime_loads(&self, forms: &[Form], loads: &RuntimeLoads) -> Option<Self> {
+        let proven = self.runtime_alias_evidence(forms, loads);
+        if proven == self.names.proven_alias_libraries {
+            return None;
+        }
+        let mut declarations = Self::read_with_imports(forms, None, proven);
+        declarations.refers_to_assert_expr = self.refers_to_assert_expr;
+        Some(declarations)
     }
 
     pub(crate) fn has_namespace_declaration(&self) -> bool {
@@ -757,7 +807,7 @@ impl Declarations {
     }
 
     pub fn read(forms: &[Form]) -> Self {
-        Self::read_with_imports(forms, None)
+        Self::read_with_imports(forms, None, BTreeSet::new())
     }
 
     fn references_assert_expr(&self, forms: &[Form]) -> bool {
@@ -770,10 +820,15 @@ impl Declarations {
         })
     }
 
-    pub(super) fn read_with_imports(forms: &[Form], globals: Option<&Globals>) -> Self {
+    pub(super) fn read_with_imports(
+        forms: &[Form],
+        globals: Option<&Globals>,
+        proven_alias_libraries: BTreeSet<String>,
+    ) -> Self {
         let mut model = Self {
             names: Names {
                 namespace: "user".into(),
+                proven_alias_libraries,
                 ..Names::default()
             },
             ..Self::default()

@@ -1,11 +1,122 @@
 //! Namespace imports from Clojure ns declarations.
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::sync::Arc;
 
-use super::{Declarations, Globals};
+use super::{Declarations, Globals, Names};
 use crate::Diagnostic;
 use crate::checker::calls::is_builtin;
 use crate::reader::{Form, Kind, Span};
+
+/// Ordinary namespace load edges from the current, fully read project sources.
+#[derive(Clone, Default)]
+pub(crate) struct RuntimeLoads(Option<Arc<RuntimeLoadGraph>>);
+
+struct RuntimeLoadGraph {
+    requires: BTreeMap<String, BTreeSet<String>>,
+    unavailable: BTreeSet<String>,
+    unverified_resources: Vec<String>,
+}
+
+impl RuntimeLoadGraph {
+    fn resource_unavailable(&self, namespace: &str) -> bool {
+        self.unavailable.contains(namespace)
+            || self
+                .unverified_resources
+                .iter()
+                .any(|path| RuntimeLoads::matches_source_resource(path, namespace))
+    }
+}
+
+impl RuntimeLoads {
+    pub fn from_sources<'a>(
+        sources: impl Iterator<Item = (&'a str, Option<(&'a Declarations, &'a [Form])>, bool)>,
+    ) -> Self {
+        let mut requires = BTreeMap::new();
+        let mut unavailable = BTreeSet::new();
+        let mut unverified_resources = Vec::new();
+        for (path, source, checked) in sources {
+            let Some((declarations, forms)) =
+                source.filter(|(declarations, _)| declarations.has_namespace_declaration())
+            else {
+                unverified_resources.push(path.to_owned());
+                continue;
+            };
+            let namespace = declarations.namespace();
+            if !checked || !Self::matches_source_resource(path, namespace) {
+                unavailable.insert(namespace.to_owned());
+                unverified_resources.push(path.to_owned());
+                continue;
+            }
+            if !declarations.names.required_libraries.is_empty()
+                && declarations.has_static_requirements(forms)
+            {
+                requires.insert(
+                    namespace.to_owned(),
+                    declarations.names.required_libraries.clone(),
+                );
+            }
+        }
+        Self(Some(Arc::new(RuntimeLoadGraph {
+            requires,
+            unavailable,
+            unverified_resources,
+        })))
+    }
+
+    fn matches_source_resource(path: &str, namespace: &str) -> bool {
+        let path = Path::new(path);
+        let Some(extension @ ("clj" | "cljc")) = path.extension().and_then(|ext| ext.to_str())
+        else {
+            return false;
+        };
+        !namespace
+            .split('.')
+            .any(|part| part.is_empty() || part.contains(['/', '\\']))
+            && path.ends_with(format!(
+                "{}.{extension}",
+                namespace.replace('-', "_").replace('.', "/")
+            ))
+    }
+
+    pub(super) fn proven_aliases(&self, names: &Names) -> BTreeSet<String> {
+        let mut proven = BTreeSet::new();
+        let Some(loads) = &self.0 else {
+            return proven;
+        };
+        let mut unresolved: BTreeSet<_> = names
+            .aliased_libraries
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !names.directly_loads(name) && !loads.resource_unavailable(name))
+            .collect();
+        if unresolved.is_empty() {
+            return proven;
+        }
+        let mut pending: Vec<_> = names
+            .required_libraries
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let mut visited = BTreeSet::from([names.namespace.as_str()]);
+        while !unresolved.is_empty() {
+            let Some(namespace) = pending.pop() else {
+                break;
+            };
+            if !visited.insert(namespace) || loads.resource_unavailable(namespace) {
+                continue;
+            }
+            if unresolved.remove(namespace) {
+                proven.insert(namespace.to_owned());
+            }
+            if let Some(required) = loads.requires.get(namespace) {
+                pending.extend(required.iter().map(String::as_str));
+            }
+        }
+        proven
+    }
+}
 
 // Public var names from the pinned Clojure/JVM reference. These are name
 // declarations for referrals, without signatures or macro expansion.
@@ -336,6 +447,13 @@ impl Declarations {
                 .map(|(name, form)| (name, form.without_metadata().span))
                 .collect()
         };
+        if alias_only && !names.is_empty() && !self.names.directly_loads(namespace) {
+            self.diagnostics.push(Diagnostic::analysis_gap(
+                "PNX9003",
+                refer_span,
+                format!("Referring vars through :as-alias requires {namespace} to be loaded first"),
+            ));
+        }
         for (name, source) in names {
             if excluded.iter().any(|(excluded, _)| *excluded == name) {
                 continue;

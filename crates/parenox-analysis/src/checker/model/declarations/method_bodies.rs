@@ -11,7 +11,7 @@ use crate::reader::{Form, Kind};
 impl Declarations {
     pub(super) fn has_static_method_scope(&self, forms: &[Form]) -> bool {
         if self.method_forms.is_empty()
-            || !self.names.required_libraries.contains("clojure.string")
+            || !self.names.loads_library("clojure.string")
             || !self.all_refers.is_empty()
             || self.diagnostics.iter().any(|item| item.severity == "error")
             || !forms.first().is_some_and(static_namespace_prelude)

@@ -19,7 +19,7 @@ impl Declarations {
         namespace: &str,
         name: &str,
     ) -> bool {
-        self.names.required_libraries.contains(namespace)
+        self.names.loads_library(namespace)
             && !globals.project_namespaces.contains(namespace)
             && matches!(
                 globals.declared_value(&format!("{namespace}/{name}")),

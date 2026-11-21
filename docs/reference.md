@@ -180,9 +180,12 @@ set members leave an analysis gap.
   referenced directly is an error. Named specs resolve across source files
   and via declared aliases, including `:as-alias`.
 - `:as-alias` also resolves auto-qualified keywords and supports navigation.
-  Runtime calls through an alias-only namespace report `PNX9003` until a
-  loading require is visible in the same namespace. The implicit `clojure.core`
-  namespace and references to the current namespace are already available.
+  Runtime calls through an alias-only namespace report `PNX9003` when loading
+  is unconfirmed. Ordinary `ns` requires establish loading directly or through
+  fully read project namespaces with unambiguous source resources. The implicit
+  `clojure.core` namespace and references to the current namespace are already
+  available. A `:refer` on an alias-only libspec requires proof of an earlier
+  direct load in that `ns`.
 - Repeating a field with the same spec in `s/keys` preserves its type and
   required presence. Different unqualified specs that resolve to the same
   field still report a collision.
@@ -716,8 +719,8 @@ project, a buffer has no project context.
   Complete functions before a reader error can still show hints in their
   checked prefix. The server requests a refresh from clients that support it
   after a saved extern changes, or when an editor change affects a public
-  function signature or verified guard while another buffer in the same
-  project is open.
+  function signature, a verified guard, or the availability of an alias in
+  another open buffer in the same project.
 - **ClojureDocs** downloads the public compact EDN export over HTTPS in
   the background when the cache is missing, invalid, or at least 24 hours old. The
   server uses the last valid snapshot while a refresh runs or fails. The

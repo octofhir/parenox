@@ -21,7 +21,7 @@ use serde::Serialize;
 
 use crate::checker::{
     CheckedCall, Declarations, ExternCache, FunctionCheck, Globals, InterfaceKey, Model,
-    ProjectCall, SpecCache, SpecFingerprint, SpecSource,
+    ProjectCall, RuntimeLoads, SpecCache, SpecFingerprint, SpecSource,
 };
 use crate::reader::{self, Form, Position, Span};
 use crate::suppressions::{MARKER, Suppressions};
@@ -183,6 +183,23 @@ impl SnapshotMode<'_> {
 }
 
 impl FileCache {
+    fn update_runtime_loads(&mut self, loads: &RuntimeLoads) {
+        let Some(declarations) = self
+            .declarations
+            .as_ref()
+            .and_then(|declarations| declarations.with_runtime_loads(&self.forms, loads))
+        else {
+            return;
+        };
+        let fingerprint = declarations.spec_fingerprint(&self.source, &self.forms);
+        if self.spec_fingerprint.as_deref() != fingerprint.as_ref() {
+            self.spec_fingerprint = fingerprint.map(Arc::new);
+        }
+        self.declarations = Some(declarations);
+        self.model = None;
+        self.known_var_surface.take();
+    }
+
     fn update(&mut self, source: &str, path: &str, kind: FileKind) -> bool {
         if self.parsed && self.source.as_ref() == source && self.kind == kind {
             return false;
@@ -372,20 +389,57 @@ impl Session {
         self.check_snapshot(sources, externs, &[], SnapshotMode::Check(Some(paths)))
     }
 
-    /// Check open documents and report a change to the published source calling types.
+    /// Check open documents and report changes to source calling types or their availability.
     pub fn check_project_documents_with_contract_changes(
         &mut self,
         sources: &[Source<'_>],
         externs: &[Source<'_>],
         paths: &BTreeSet<&str>,
     ) -> (ProjectReport, bool) {
+        let previous_aliases: BTreeMap<_, _> = paths
+            .iter()
+            .filter_map(|&path| {
+                let aliases = self.document_runtime_aliases(path);
+                (!aliases.is_empty()).then_some((path, aliases))
+            })
+            .collect();
         let previous = self.query_globals.take();
         let report = self.check_project_documents(sources, externs, paths);
         let changed = previous
             .as_ref()
             .zip(self.query_globals.as_ref())
-            .is_some_and(|(previous, current)| !current.same_source_function_contracts(previous));
+            .is_some_and(|(previous, current)| {
+                !current.same_source_function_contracts(previous)
+                    || paths.iter().any(|&path| {
+                        let aliases = self.document_runtime_aliases(path);
+                        previous_aliases
+                            .get(path)
+                            .map_or_else(|| !aliases.is_empty(), |old| old != &aliases)
+                    })
+            });
         (report, changed)
+    }
+
+    fn document_runtime_aliases(&self, path: &str) -> BTreeSet<String> {
+        let Some(cache) = self
+            .files
+            .get(path)
+            .filter(|cache| cache.snapshot == self.snapshot)
+        else {
+            return BTreeSet::new();
+        };
+        if let Some(declarations) = &cache.declarations {
+            return declarations.proven_alias_libraries().clone();
+        }
+        cache
+            .navigation_fallback
+            .as_ref()
+            .zip(self.query_globals.as_ref())
+            .map_or_else(BTreeSet::new, |(fallback, globals)| {
+                fallback
+                    .declarations
+                    .runtime_alias_evidence(&fallback.forms, &globals.runtime_loads)
+            })
     }
 
     /// The declaration key for an active extern function in the latest snapshot.
@@ -535,6 +589,29 @@ impl Session {
                 ));
             }
         }
+        let uses_runtime_aliases = entries[..count]
+            .iter()
+            .filter_map(|(_, cache)| cache.navigation_source())
+            .any(|(declarations, _)| declarations.has_runtime_aliases());
+        let runtime_loads = if uses_runtime_aliases {
+            RuntimeLoads::from_sources(entries[..count].iter().enumerate().map(
+                |(index, (source, cache))| {
+                    let checked = built[index]
+                        && cache.snapshot == self.snapshot
+                        && cache.declarations.as_ref().is_some_and(|declarations| {
+                            !ambiguous.contains(declarations.namespace())
+                        });
+                    (source.path, cache.navigation_source(), checked)
+                },
+            ))
+        } else {
+            RuntimeLoads::default()
+        };
+        if uses_runtime_aliases {
+            for (_, cache) in &mut entries[..count] {
+                cache.update_runtime_loads(&runtime_loads);
+            }
+        }
         self.specs.update(
             order
                 .iter()
@@ -551,7 +628,7 @@ impl Session {
             namespaces.contains_key("clojure.set"),
             namespaces.contains_key("clojure.core"),
         );
-        let mut globals = Globals::with_specs(&self.specs);
+        let mut globals = Globals::with_specs(&self.specs, runtime_loads);
         for namespace in namespaces.keys() {
             globals.register_namespace(namespace);
         }

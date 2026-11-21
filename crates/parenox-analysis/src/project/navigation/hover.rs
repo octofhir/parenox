@@ -184,14 +184,17 @@ impl Session {
 
     fn source_hover(&self, path: &str, target: ResolvedVar<'_>) -> SourceHover {
         let mut hover = target.hover();
-        let runtime_gap = self
-            .current_file(path)
-            .and_then(FileCache::navigation_source)
-            .is_some_and(|(declarations, _)| {
+        let runtime_gap = self.current_file(path).is_some_and(|file| {
+            file.navigation_source().is_some_and(|(declarations, _)| {
                 declarations
                     .runtime_alias_gap_in(target.namespace)
                     .is_some()
-            });
+                    && (file.declarations.is_some()
+                        || !self
+                            .document_runtime_aliases(path)
+                            .contains(target.namespace))
+            })
+        });
         if runtime_gap {
             hover.info.signatures.clear();
             hover.info.contract = None;

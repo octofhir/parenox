@@ -30,6 +30,7 @@ pub(crate) use imports::java_type_tag_at;
 pub(crate) use interfaces::InterfaceKey;
 use interfaces::{Exports, LocalInterface, source_macro_value, visible_value};
 pub(crate) use references::{DocumentReferences, ProjectCall, ScopedReference};
+pub(crate) use require::RuntimeLoads;
 pub(crate) use specs::{
     GuardedMapProjection, MapFieldConversion, SpecCache, SpecConversion, SpecFingerprint,
     SpecProvider, SpecSource, StructuredConversion,
@@ -133,17 +134,19 @@ pub(crate) struct Globals {
     spec_unchecked_inputs: Arc<BTreeSet<String>>,
     spec_providers: Arc<BTreeMap<String, Arc<SpecProvider>>>,
     pub(super) project_namespaces: BTreeSet<String>,
+    pub(crate) runtime_loads: RuntimeLoads,
     exports: BTreeMap<String, Arc<Exports>>,
     externs: Option<Arc<Externs>>,
 }
 
 impl Globals {
-    pub fn with_specs(cache: &SpecCache) -> Self {
+    pub fn with_specs(cache: &SpecCache, runtime_loads: RuntimeLoads) -> Self {
         Self {
             specs: cache.types.clone(),
             spec_conversions: cache.conversions.clone(),
             spec_unchecked_inputs: cache.unchecked_inputs.clone(),
             spec_providers: cache.providers.clone(),
+            runtime_loads,
             ..Self::default()
         }
     }
@@ -209,7 +212,7 @@ pub(crate) struct Model {
 impl Model {
     pub(super) fn loads_spec(&self, provider: &SpecProvider) -> bool {
         let loaded = |source: &specs::RegistrationSource| {
-            self.path == source.path || self.names.required_libraries.contains(&source.namespace)
+            self.path == source.path || self.names.loads_library(&source.namespace)
         };
         match provider {
             SpecProvider::Direct(source) | SpecProvider::Imported { source, .. } => loaded(source),
@@ -234,7 +237,11 @@ impl Model {
         let declarations = if declarations.all_refers.is_empty() {
             declarations
         } else {
-            let mut imports = Declarations::read_with_imports(forms, Some(globals));
+            let mut imports = Declarations::read_with_imports(
+                forms,
+                Some(globals),
+                declarations.proven_alias_libraries().clone(),
+            );
             if imports.specs.keys().ne(declarations.specs.keys()) {
                 let span = forms.first().map_or(Span::default(), |form| form.span);
                 imports.error(

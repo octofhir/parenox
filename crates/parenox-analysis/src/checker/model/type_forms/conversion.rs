@@ -829,7 +829,7 @@ fn inverted_entries<'a>(
         return None;
     };
     if !names.spec_core_scope_known
-        || !names.required_libraries.contains("clojure.set")
+        || !names.loads_library("clojure.set")
         || !resolves(names, invert, "clojure.set", "map-invert")
     {
         return None;

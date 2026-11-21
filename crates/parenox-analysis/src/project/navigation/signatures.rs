@@ -43,6 +43,11 @@ impl Session {
         }
         caller.parse_error.as_ref()?;
         let (declarations, forms) = recover_call(path, &caller.source)?;
+        let declarations = self
+            .query_globals
+            .as_ref()
+            .and_then(|globals| declarations.with_runtime_loads(&forms, &globals.runtime_loads))
+            .unwrap_or(declarations);
         let site = call_at(&forms, offset)?;
         let source = self.signatures_at(path, &declarations, &forms, &site);
         let declared = self.query_globals.as_ref().and_then(|globals| {

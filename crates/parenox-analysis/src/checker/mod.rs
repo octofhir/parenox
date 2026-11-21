@@ -17,8 +17,8 @@ use exceptions::Throws;
 use model::{Contract, DeclaredValue, Function, VerifiedGuard};
 pub(crate) use model::{
     Declarations, DocumentReferences, EncodeError, ExternCache, Globals, InterfaceKey, Model,
-    ProjectCall, ScopedReference, SnapshotWriter, SpecCache, SpecConversion, SpecFingerprint,
-    SpecSource, java_type_tag_at,
+    ProjectCall, RuntimeLoads, ScopedReference, SnapshotWriter, SpecCache, SpecConversion,
+    SpecFingerprint, SpecSource, java_type_tag_at,
 };
 pub(crate) use queries::CheckedCall;
 use queries::TypeQuery;

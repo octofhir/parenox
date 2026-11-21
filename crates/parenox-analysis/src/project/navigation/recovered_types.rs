@@ -100,6 +100,9 @@ impl CheckedPrefix {
             span.end.offset <= end
         });
         let declarations = Declarations::read_source(source, &mut read).ok()?;
+        let declarations = declarations
+            .with_runtime_loads(&read.forms, &globals.runtime_loads)
+            .unwrap_or(declarations);
         // The strict snapshot omits this file. A copied registry can contain
         // entries that its source declarations would hide or conflict with.
         if declarations.namespace() != fallback.declarations.namespace()

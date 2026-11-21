@@ -41,6 +41,13 @@ impl Declarations {
         let extern_calls = globals.externs.as_ref().is_some_and(|externs| {
             std::iter::once(model.namespace())
                 .chain(model.names.required_libraries.iter().map(String::as_str))
+                .chain(
+                    model
+                        .names
+                        .proven_alias_libraries
+                        .iter()
+                        .map(String::as_str),
+                )
                 .any(|namespace| {
                     externs.namespaces.get(namespace).is_some_and(|table| {
                         table
@@ -169,7 +176,7 @@ impl Model {
         let Some((namespace, _)) = origin.name.split_once('/') else {
             return false;
         };
-        if namespace != self.namespace() && !self.names.required_libraries.contains(namespace) {
+        if namespace != self.namespace() && !self.names.loads_library(namespace) {
             return false;
         }
         if !globals.project_namespaces.contains(namespace) {
