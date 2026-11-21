@@ -37,6 +37,19 @@ impl<'a> InlineFunction<'a> {
     }
 }
 
+impl CapturedInline {
+    fn function(&self) -> InlineFunction<'_> {
+        // Capture construction has already resolved the head in the
+        // definition's lexical scope. Only ordinary and #() functions
+        // can be stored as captured inline functions.
+        match &self.form.without_metadata().kind {
+            Kind::List(parts) => InlineFunction::Function(&parts[1..]),
+            Kind::AnonymousFunction(function) => InlineFunction::Literal(function),
+            _ => unreachable!("captured fn has no function syntax"),
+        }
+    }
+}
+
 enum InlineSyntax<'a> {
     Function(InlineFunction<'a>),
     Fnil(&'a [Form]),
@@ -201,11 +214,7 @@ impl<'model> Checker<'model> {
                 format!("Local fn nesting limit ({MAX_CALLBACK_DEPTH}) exceeded"),
             );
         }
-        let Some(InlineSyntax::Function(inline)) =
-            self.inline_syntax(&function.form, &function.scope)
-        else {
-            unreachable!("saved inline function was already resolved")
-        };
+        let inline = function.function();
         // Binding IDs retain refinement only for locals still in the same
         // lexical scope. A later binding with the same name is a new value.
         let mut scope = function.scope.refine_capture(caller);
@@ -324,11 +333,13 @@ impl<'model> Checker<'model> {
             return None;
         };
         let saved = form.symbol().and_then(|name| env.inline_function(name));
-        let (constructor, definition_scope) =
-            saved.map_or((form, env), |closure| (&closure.form, &closure.scope));
-        let InlineSyntax::Function(function) = self.inline_syntax(constructor, definition_scope)?
-        else {
-            return None;
+        let (constructor, function) = if let Some(closure) = saved {
+            (&closure.form, closure.function())
+        } else {
+            let InlineSyntax::Function(function) = self.inline_syntax(form, env)? else {
+                return None;
+            };
+            (form, function)
         };
         if saved.is_some() && !self.path_reachable {
             // The saved closure was already compiled at its binding.
