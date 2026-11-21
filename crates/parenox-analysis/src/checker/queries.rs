@@ -8,6 +8,7 @@ use crate::types::{Signature, Type};
 
 pub(super) enum TypeQuery<'a> {
     Local { name: &'a str, span: Span, ty: Type },
+    Lookup { span: Span, ty: Type },
     Call(Box<CallQuery<'a>>),
 }
 
@@ -56,16 +57,27 @@ impl<'a> TypeQuery<'a> {
         }))
     }
 
+    pub(super) fn lookup(site: &Form) -> Self {
+        Self::Lookup {
+            span: site.span,
+            ty: Type::Never,
+        }
+    }
+
     pub(super) fn span(&self) -> Span {
         match self {
-            Self::Local { span, .. } => *span,
+            Self::Local { span, .. } | Self::Lookup { span, .. } => *span,
             Self::Call(query) => query.span,
         }
     }
 
-    pub(super) fn into_local_type(self) -> Option<Type> {
+    pub(super) fn into_value_type(self) -> Option<Type> {
         match self {
-            Self::Local { ty, .. } if !matches!(ty, Type::Never | Type::Unknown) => Some(ty),
+            Self::Local { ty, .. } | Self::Lookup { ty, .. }
+                if !matches!(ty, Type::Never | Type::Unknown) =>
+            {
+                Some(ty)
+            }
             _ => None,
         }
     }
@@ -87,6 +99,16 @@ impl Checker<'_> {
                 ty,
             }) = &mut self.type_query
             && *target == name
+            && *at == span
+            && *ty != value.known
+        {
+            *ty = Type::union([std::mem::replace(ty, Type::Never), value.known.clone()]);
+        }
+    }
+
+    pub(super) fn observe_lookup(&mut self, span: Span, value: &Value) {
+        if self.path_reachable
+            && let Some(TypeQuery::Lookup { span: at, ty }) = &mut self.type_query
             && *at == span
             && *ty != value.known
         {
@@ -158,7 +180,7 @@ impl Checker<'_> {
                 && site.end.offset <= enclosing.end.offset
             {
                 match query {
-                    TypeQuery::Local { .. } => self.type_query = None,
+                    TypeQuery::Local { .. } | TypeQuery::Lookup { .. } => self.type_query = None,
                     TypeQuery::Call(query) => query.use_declaration(),
                 }
             }

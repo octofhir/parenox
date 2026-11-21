@@ -17,7 +17,19 @@ impl Declarations {
         site: &Form,
     ) -> Option<Type> {
         self.observe_at(forms, model, globals, source, TypeQuery::local(site)?)?
-            .into_local_type()
+            .into_value_type()
+    }
+
+    pub(crate) fn lookup_type(
+        &self,
+        forms: &[Form],
+        model: &Model,
+        globals: &Globals,
+        source: &str,
+        site: &Form,
+    ) -> Option<Type> {
+        self.observe_at(forms, model, globals, source, TypeQuery::lookup(site))?
+            .into_value_type()
     }
 
     pub(crate) fn checked_call(

@@ -84,7 +84,7 @@ impl Session {
     }
 }
 
-fn keyword_at(forms: &[Form], offset: usize) -> Option<&Form> {
+pub(super) fn keyword_at(forms: &[Form], offset: usize) -> Option<&Form> {
     let index = forms.partition_point(|form| form.span.end.offset <= offset);
     let form = forms.get(index)?;
     if !(form.span.start.offset..form.span.end.offset).contains(&offset) {

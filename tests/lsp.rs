@@ -42,6 +42,8 @@ mod keyword_refactor;
 mod literal_require_definition;
 #[path = "lsp/local_hover.rs"]
 mod local_hover;
+#[path = "lsp/lookup_hover.rs"]
+mod lookup_hover;
 #[path = "lsp/medley_context.rs"]
 mod medley_context;
 #[path = "lsp/namespace_definition.rs"]

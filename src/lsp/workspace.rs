@@ -743,6 +743,13 @@ impl Workspace {
                 let range = range(local.span);
                 return Some(hover::local(local, markdown, range));
             }
+            Some(DocumentHover::Lookup {
+                key,
+                inferred_type,
+                span,
+            }) => {
+                return Some(hover::inferred(key, inferred_type, markdown, range(span)));
+            }
             Some(DocumentHover::Var(source)) => source,
             None => {
                 return hover::dependency(

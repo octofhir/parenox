@@ -90,7 +90,7 @@ impl Checker<'_> {
             self.may_throw();
         }
         let presence = env.presence(&xs[1], &xs[2]);
-        if required {
+        let result = if required {
             if presence.or_else(|| key_presence(&target.known, &key)) != Some(true) {
                 self.illegal_argument();
             }
@@ -102,7 +102,9 @@ impl Checker<'_> {
             self.checked_lookup(&target, &key, Lookup::Required, key_span)
         } else {
             self.lookup_with_presence(&target, &key, default.as_ref(), key_span, presence)
-        }
+        };
+        self.observe_lookup(xs[2].without_metadata().span, &result);
+        result
     }
 
     pub(super) fn lookup_with_presence(

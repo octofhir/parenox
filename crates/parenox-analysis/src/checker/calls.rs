@@ -299,7 +299,7 @@ impl<'model> Checker<'model> {
         if opaque_arguments {
             self.type_query = observation;
         }
-        self.call_value(
+        let value = self.call_value(
             &function,
             CallArguments {
                 values: &args.values,
@@ -308,7 +308,11 @@ impl<'model> Checker<'model> {
             },
             xs[0].span,
             span,
-        )
+        );
+        if self.type_query.is_some() && xs[0].keyword().is_some() {
+            self.observe_lookup(xs[0].without_metadata().span, &value);
+        }
+        value
     }
 
     pub(super) fn unchecked_function(&mut self, name: &str, span: Span) -> Value {

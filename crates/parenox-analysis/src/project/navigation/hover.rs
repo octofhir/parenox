@@ -4,7 +4,8 @@ use crate::reader::{Form, Span};
 
 use super::{
     InspectedReference, ResolvedVar, ScopedReference, Session, SourceTarget, VarInfo,
-    archive::namespace_declarations, declaration::top_level_reference, symbol_at, symbol_form_at,
+    archive::namespace_declarations, declaration::top_level_reference, specs::keyword_at,
+    symbol_at, symbol_form_at,
 };
 
 #[derive(Default)]
@@ -27,6 +28,11 @@ pub struct LocalHover<'a> {
 
 pub enum DocumentHover<'a> {
     Local(LocalHover<'a>),
+    Lookup {
+        key: &'a str,
+        inferred_type: String,
+        span: Span,
+    },
     Var(SourceHover),
 }
 
@@ -42,7 +48,7 @@ pub fn namespace_documentation(
 }
 
 impl Session {
-    /// Hover a source var or an evaluated local occurrence in the current snapshot.
+    /// Hover a source var, evaluated local read or evaluated keyword lookup.
     pub fn document_hover_at(&self, path: &str, offset: usize) -> Option<DocumentHover<'_>> {
         let resolved = self.hover_target(path, offset);
         if let Some(SourceTarget::Var(target)) = resolved {
@@ -53,7 +59,22 @@ impl Session {
             return None;
         }
         let (_, forms) = file.navigation_source()?;
-        let site = symbol_form_at(forms, offset)?;
+        let Some(site) = symbol_form_at(forms, offset) else {
+            let key = keyword_at(forms, offset)?;
+            let scope = self.typing_at(file, path, offset)?;
+            let ty = scope.declarations.lookup_type(
+                scope.forms,
+                scope.model,
+                scope.globals,
+                &file.source,
+                key,
+            )?;
+            return Some(DocumentHover::Lookup {
+                key: &file.source[key.span.start.offset..key.span.end.offset],
+                inferred_type: ty.to_string(),
+                span: key.span,
+            });
+        };
         // A qualified symbol cannot be a local. For other names, the checker
         // can evaluate arguments through contracts that navigation cannot see.
         let symbol = site.symbol()?;

@@ -627,6 +627,8 @@ project, a buffer has no project context.
   or a local dependency JAR. Checked signatures and their origin appear when
   available. Local reads show the type proved at that occurrence, including
   narrowing in a branch. Markdown is used when the client prefers it.
+  A keyword used for a lookup shows the result type at that occurrence,
+  including keyword calls, `get`, and `req!`.
   A reader error later in the buffer can leave local types available in
   preceding complete functions. These prefix types are scoped to queries
   in that buffer. A named spec defined in the same file needs a complete

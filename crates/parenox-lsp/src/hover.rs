@@ -5,15 +5,11 @@ use serde_json::{Value, json};
 use crate::{clojuredocs::ClojureDocs, completion::DependencyCompletions, text::Range};
 
 pub fn local(local: LocalHover<'_>, markdown: bool, range: Option<Range>) -> Value {
-    render(
-        local.name,
-        &[],
-        &[local.inferred_type],
-        None,
-        markdown,
-        range,
-        None,
-    )
+    inferred(local.name, local.inferred_type, markdown, range)
+}
+
+pub fn inferred(name: &str, inferred_type: String, markdown: bool, range: Option<Range>) -> Value {
+    render(name, &[], &[inferred_type], None, markdown, range, None)
 }
 
 pub fn spec(proposal: &SpecContractProposal, markdown: bool, range: Option<Range>) -> Value {
