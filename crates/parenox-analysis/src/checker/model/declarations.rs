@@ -14,7 +14,7 @@ use super::references::ProjectCall;
 use super::require::ExplicitReferral;
 use crate::Diagnostic;
 use crate::checker::bindings::binding_names;
-use crate::checker::function_forms::{function_clauses, lexical_function_clauses};
+use crate::checker::function_forms::{Clause, function_clauses, lexical_function_clauses};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Arity;
 
@@ -280,13 +280,39 @@ impl Declarations {
         };
         declarations.next().is_none()
             && declared.without_metadata().span == span
-            && head.symbol().is_some_and(|op| {
-                self.names.resolve_parts(op) == ("clojure.core", "defmulti")
-                    && (op.contains('/')
-                        || (self.all_refers.is_empty()
-                            && !self.forward_vars.contains_key(op)
-                            && self.source_declarations(forms, op).next().is_none()))
-            })
+            && self.is_unshadowed_core_operator(forms, head, "defmulti")
+    }
+
+    fn is_unshadowed_core_operator(&self, forms: &[Form], head: &Form, name: &str) -> bool {
+        head.symbol().is_some_and(|operator| {
+            self.names.resolve_parts(operator) == ("clojure.core", name)
+                && (operator.contains('/')
+                    || (self.all_refers.is_empty()
+                        && !self.forward_vars.contains_key(operator)
+                        && self.source_declarations(forms, operator).next().is_none()))
+        })
+    }
+
+    fn multimethod_clauses<'a>(
+        &self,
+        forms: &[Form],
+        tail: &'a [Form],
+    ) -> Option<BTreeMap<Arity, Clause<'a>>> {
+        let dispatcher = multimethod_parts(tail).1.first()?;
+        let Kind::List(items) = &dispatcher.without_metadata().kind else {
+            return None;
+        };
+        let [operator, body @ ..] = items.as_slice() else {
+            return None;
+        };
+        if !self.is_unshadowed_core_operator(forms, operator, "fn") {
+            return None;
+        }
+        let parameters = match body {
+            [head, remainder @ ..] if head.symbol().is_some() => remainder,
+            _ => body,
+        };
+        lexical_function_clauses(parameters, dispatcher.span).ok()
     }
 
     pub(crate) fn method_targets<'a>(
@@ -342,44 +368,21 @@ impl Declarations {
         if declarations.next().is_some() {
             return None;
         }
-        let (documentation, parameters, span) = match declaration {
+        let (documentation, clauses) = match declaration {
             SourceDeclaration::Function([head, declared, tail @ ..]) => (
                 var_documentation::function_docstring(declared, tail),
-                function_parts(tail).0,
-                head.span,
+                lexical_function_clauses(function_parts(tail).0, head.span).ok()?,
             ),
-            SourceDeclaration::Value([_, declared, tail @ ..])
-                if self.is_source_multimethod(forms, name, declared.without_metadata().span) =>
+            SourceDeclaration::Value([head, declared, tail @ ..])
+                if self.is_unshadowed_core_operator(forms, head, "defmulti") =>
             {
-                let dispatcher = multimethod_parts(tail).1.first()?;
-                let Kind::List(items) = &dispatcher.without_metadata().kind else {
-                    return None;
-                };
-                let [operator, body @ ..] = items.as_slice() else {
-                    return None;
-                };
-                let symbol = operator.symbol()?;
-                if self.names.resolve_parts(symbol) != ("clojure.core", "fn")
-                    || (!symbol.contains('/')
-                        && (!self.all_refers.is_empty()
-                            || self.forward_vars.contains_key(symbol)
-                            || self.source_declarations(forms, symbol).next().is_some()))
-                {
-                    return None;
-                }
-                let parameters = match body {
-                    [head, remainder @ ..] if head.symbol().is_some() => remainder,
-                    _ => body,
-                };
                 (
                     var_documentation::multimethod_docstring(declared, tail),
-                    parameters,
-                    dispatcher.span,
+                    self.multimethod_clauses(forms, tail)?,
                 )
             }
             _ => return None,
         };
-        let clauses = lexical_function_clauses(parameters, span).ok()?;
         Some(FunctionParameters {
             documentation,
             clauses: clauses

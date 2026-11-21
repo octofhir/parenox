@@ -2,6 +2,7 @@
 use super::{
     Declarations, SourceDeclaration, function_parts, lexical_function_clauses, multimethod_parts,
 };
+use crate::checker::function_forms::Clause;
 use crate::reader::{Form, Kind, Span};
 
 pub(crate) struct SourceDocumentation<'a> {
@@ -28,6 +29,23 @@ impl Declarations {
                 let (namespace, operator) = self.names.resolve_parts(head.symbol()?);
                 if (namespace, operator) == ("clojure.core", "defmacro") {
                     return Some(function_documentation(head, name, tail));
+                }
+                if operator == "defmulti" && self.is_unshadowed_core_operator(forms, head, operator)
+                {
+                    let (attrs, _) = multimethod_parts(tail);
+                    let explicit = attribute(attrs.as_chunks::<2>().0.iter(), ":arglists")
+                        .or_else(|| name.metadata(":arglists"));
+                    let arglists = match explicit {
+                        Some(form) => declared_arglists(form),
+                        None => self
+                            .multimethod_clauses(forms, tail)
+                            .map(|clauses| clause_arglists(clauses.into_values()))
+                            .unwrap_or_default(),
+                    };
+                    return Some(SourceDocumentation {
+                        documentation: multimethod_docstring(name, tail),
+                        arglists,
+                    });
                 }
                 let positional_doc = (namespace == "clojure.core"
                     && matches!((operator, tail), ("def" | "defmulti", [_, _, ..])))
@@ -89,23 +107,25 @@ fn function_documentation<'a>(
     tail: &'a [Form],
 ) -> SourceDocumentation<'a> {
     let (arms, attrs) = function_parts(tail);
-    let mut arglists = if let Some(value) = attribute(attrs, ":arglists") {
+    let arglists = if let Some(value) = attribute(attrs, ":arglists") {
         declared_arglists(value)
     } else {
         lexical_function_clauses(arms, head.span)
-            .map(|clauses| {
-                clauses
-                    .into_values()
-                    .map(|clause| clause.parameter_vector.without_metadata().span)
-                    .collect()
-            })
+            .map(|clauses| clause_arglists(clauses.into_values()))
             .unwrap_or_default()
     };
-    arglists.sort_by_key(|span| span.start.offset);
     SourceDocumentation {
         documentation: function_docstring(name, tail),
         arglists,
     }
+}
+
+fn clause_arglists<'a>(clauses: impl Iterator<Item = Clause<'a>>) -> Vec<Span> {
+    let mut arglists: Vec<_> = clauses
+        .map(|clause| clause.parameter_vector.without_metadata().span)
+        .collect();
+    arglists.sort_by_key(|span| span.start.offset);
+    arglists
 }
 
 pub(super) fn function_docstring<'a>(name: &'a Form, tail: &'a [Form]) -> Option<&'a str> {

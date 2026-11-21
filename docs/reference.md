@@ -665,8 +665,10 @@ project, a buffer has no project context.
   highlights, document outline, and workspace symbols. Closed files contribute
   declarations and usages. Opaque macro expansions are not indexed.
 - **Hover** shows the var's docstring and argument lists from project source
-  or a local dependency JAR. Checked signatures and their origin appear when
-  available. Function parameters and local bindings show the type inferred
+  or a local dependency JAR. For `defmulti`, a literal `fn` dispatcher
+  supplies argument lists unless the author specifies `:arglists`. Checked
+  signatures and their origin appear when available. Function parameters and
+  local bindings show the type inferred
   when they receive a value. Reads show the type proved at that occurrence,
   including narrowing in a branch. Markdown is used when the client prefers it.
   A keyword used for a lookup shows the result type at that occurrence,
@@ -718,8 +720,8 @@ project, a buffer has no project context.
 - **Signature Help** shows parameters, docstrings, overloads and the active
   argument for calls to source functions. For a resolved `defmulti` with a
   literal `fn` dispatcher, it uses the dispatcher's parameter lists.
-  Checked calls can specialize
-  generic parameters from the actual arguments, including in threading
+  Checked calls can specialize generic parameters from the actual arguments,
+  including in threading
   forms. The tooltip includes the result type and the contract's origin.
   Complete functions before a reader error can still show specialized calls.
   Calls with conflicting specializations show the declaration. Source
