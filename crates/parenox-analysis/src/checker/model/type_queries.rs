@@ -10,6 +10,8 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+const MAX_UNTYPED_BINDING_STEPS: usize = 2_048;
+
 impl Declarations {
     pub(crate) fn has_external_function(
         &self,
@@ -27,6 +29,8 @@ impl Declarations {
 
     pub(crate) fn binding_types(
         &self,
+        forms: &[Form],
+        functions: &[usize],
         model: &Model,
         globals: &Globals,
         source: &str,
@@ -44,26 +48,68 @@ impl Declarations {
             return Vec::new();
         }
         let mut types = Vec::new();
-        for function in model.functions.values() {
-            let Some(contract) = &function.contract else {
+        let query_for = |clause: Span| {
+            TypeQuery::bindings(
+                clause,
+                bindings
+                    .range(clause.start.offset..clause.end.offset)
+                    .map(|(_, span)| *span),
+            )
+        };
+        let untyped_allowed = uses_standard_partial_calls(globals);
+        let mut unchecked = None;
+        for &index in functions {
+            let form = &forms[index];
+            let Kind::List(items) = &form.without_metadata().kind else {
                 continue;
             };
-            for signature in contract.signatures.iter() {
-                let clause = function.arities[&signature.arity()].span;
-                let candidates = bindings
-                    .range(clause.start.offset..clause.end.offset)
-                    .map(|(_, span)| *span);
-                let Some(query) = TypeQuery::bindings(clause, candidates) else {
+            let Some(name) = items.get(1).and_then(Form::symbol) else {
+                continue;
+            };
+            let function = model
+                .local_function(name)
+                .filter(|function| function.span == form.span);
+            if let Some(function) = function
+                && let Some(contract) = &function.contract
+            {
+                for signature in contract.signatures.iter() {
+                    let clause = function.arities[&signature.arity()].span;
+                    let Some(query) = query_for(clause) else {
+                        continue;
+                    };
+                    let mut checker = Checker::new(model, globals, source);
+                    checker.type_query = Some(query);
+                    checker.declared_function_body(function, signature);
+                    types.extend(checker.binding_query_results());
+                }
+            } else if untyped_allowed {
+                let eligible = match function {
+                    Some(function) => function.data_body_eligible,
+                    None => {
+                        model
+                            .unchecked_functions
+                            .get(&model.function_name(name))
+                            .is_some_and(|function| function.arities.is_some())
+                            && unchecked
+                                .get_or_insert_with(|| model.unchecked_definition_offsets())
+                                .contains(&form.span.start.offset)
+                    }
+                };
+                if !eligible {
+                    continue;
+                }
+                let Some(clauses) = untyped_clauses(form, false) else {
                     continue;
                 };
-                let mut checker = Checker::new(model, globals, source);
-                checker.type_query = Some(query);
-                checker.declared_function_body(function, signature);
-                if !checker.has_unproven_expectation
-                    && checker.diagnostics.is_empty()
-                    && let Some(query) = checker.type_query
-                {
-                    types.extend(query.into_binding_types());
+                for clause in clauses.values() {
+                    let Some(query) = query_for(clause.span) else {
+                        continue;
+                    };
+                    let mut checker = Checker::new(model, globals, source);
+                    checker.untyped_binding_budget = Some(MAX_UNTYPED_BINDING_STEPS);
+                    checker.type_query = Some(query);
+                    checker.untyped_clause(clause);
+                    types.extend(checker.binding_query_results());
                 }
             }
         }
@@ -195,5 +241,14 @@ impl Declarations {
             checker.untyped_clause(clause);
         }
         checker.type_query
+    }
+}
+
+impl Checker<'_> {
+    fn binding_query_results(self) -> impl Iterator<Item = (Span, Type)> {
+        self.type_query
+            .filter(|_| self.diagnostics.is_empty() && !self.has_unproven_expectation)
+            .into_iter()
+            .flat_map(TypeQuery::into_binding_types)
     }
 }

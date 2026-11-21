@@ -1,5 +1,6 @@
 //! Definite project-namespace call errors in bodies that lack a type check.
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 use crate::Diagnostic;
 use crate::checker::bindings::binding_names;
@@ -160,13 +161,7 @@ impl Declarations {
         forms: &'a [Form],
         model: &Model,
     ) -> impl Iterator<Item = &'a Form> {
-        // A PNX9002 at the definition means no typed root checks this body.
-        let unchecked: BTreeSet<_> = model
-            .diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.code == "PNX9002")
-            .map(|diagnostic| diagnostic.span.start.offset)
-            .collect();
+        let unchecked = model.unchecked_definition_offsets();
         self.functions
             .iter()
             .map(|&index| &forms[index])
@@ -307,8 +302,36 @@ impl Declarations {
             standard_test,
             resolve,
             Purpose::Collect(&mut occurrences),
+            None,
         );
         occurrences
+    }
+
+    pub(crate) fn functions_in(&self, forms: &[Form], range: Range<usize>) -> &[usize] {
+        let first = self
+            .functions
+            .partition_point(|index| forms[*index].span.end.offset <= range.start);
+        let last = self
+            .functions
+            .partition_point(|index| forms[*index].span.start.offset < range.end);
+        &self.functions[first..last]
+    }
+
+    pub(crate) fn collect_function_bindings<'a>(
+        &'a self,
+        forms: &'a [Form],
+        functions: &[usize],
+        resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
+    ) -> Vec<Span> {
+        let mut occurrences = DocumentReferences::default();
+        self.collect_source_forms(
+            forms,
+            false,
+            resolve,
+            Purpose::Collect(&mut occurrences),
+            Some(functions),
+        );
+        occurrences.bindings
     }
 
     pub(crate) fn reify_method_targets<'a>(
@@ -327,6 +350,7 @@ impl Declarations {
                 method,
                 targets: &mut targets,
             },
+            None,
         );
         targets
     }
@@ -337,6 +361,7 @@ impl Declarations {
         standard_test: bool,
         mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
         purpose: Purpose<'a, '_>,
+        selected_functions: Option<&[usize]>,
     ) {
         let names = self.top_level_names(forms);
         let mut visit = References {
@@ -350,8 +375,11 @@ impl Declarations {
             resolve: &mut resolve,
             purpose,
         };
-        for &index in &self.functions {
+        for &index in selected_functions.unwrap_or(&self.functions) {
             visit.definition(&forms[index]);
+        }
+        if selected_functions.is_some() {
+            return;
         }
         for (bindings, form) in self.scoped_function_forms(forms) {
             for [pattern, _] in bindings.as_chunks::<2>().0 {
@@ -405,6 +433,17 @@ impl Declarations {
                 self.protocol_vars(forms)
                     .filter_map(|var| var.name.symbol()),
             )
+            .collect()
+    }
+}
+
+impl Model {
+    pub(super) fn unchecked_definition_offsets(&self) -> BTreeSet<usize> {
+        // A PNX9002 at the definition means no typed root checks this body.
+        self.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "PNX9002")
+            .map(|diagnostic| diagnostic.span.start.offset)
             .collect()
     }
 }

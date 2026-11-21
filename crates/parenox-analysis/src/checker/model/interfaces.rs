@@ -9,7 +9,7 @@ use super::{
     externs::{ExternalDeclaration, ExternalDeclarations},
 };
 use crate::checker::FunctionCheck;
-use crate::types::Type;
+use crate::types::{Arity, Type};
 
 pub(super) type Contracts = BTreeMap<String, Contract>;
 
@@ -23,10 +23,8 @@ pub(super) struct Exports {
 }
 
 impl Exports {
-    pub(super) fn has_unchecked_function(&self, qualified: &str) -> bool {
-        self.unchecked_functions
-            .get(qualified)
-            .is_some_and(|function| function.arities.is_some())
+    pub(super) fn unchecked_arities(&self, qualified: &str) -> Option<&[Arity]> {
+        self.unchecked_functions.get(qualified)?.arities.as_deref()
     }
 
     pub(super) fn public_var_names(&self) -> impl Iterator<Item = &str> {

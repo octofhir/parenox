@@ -96,7 +96,7 @@ impl Declarations {
                     !matches!(model.declared_value(name, globals, form.span.start.offset),
                         Some(DeclaredValue::Function(contract))
                             if contract.origin.kind == ContractKind::Extern
-                                && model.partial_extern_available(globals, &contract.origin))
+                                && model.partial_extern_available(globals, &contract.origin, false))
                 });
             if !has_string_call && !has_extern_call {
                 continue;
@@ -127,7 +127,7 @@ impl Declarations {
                             ))
                         || (diagnostic.code == "PNX2322"
                             && origin.kind == ContractKind::Extern
-                            && model.partial_extern_available(globals, origin))
+                            && model.partial_extern_available(globals, origin, false))
                 })
             }));
         }
@@ -160,21 +160,45 @@ pub(super) fn untyped_clauses(form: &Form, method: bool) -> Option<BTreeMap<Arit
 }
 
 impl Model {
-    fn partial_extern_available(&self, globals: &Globals, origin: &ContractOrigin) -> bool {
+    fn partial_extern_available(
+        &self,
+        globals: &Globals,
+        origin: &ContractOrigin,
+        check_source_arities: bool,
+    ) -> bool {
         let Some((namespace, _)) = origin.name.split_once('/') else {
             return false;
         };
-        let loaded =
-            namespace == self.namespace() || self.names.required_libraries.contains(namespace);
+        if namespace != self.namespace() && !self.names.required_libraries.contains(namespace) {
+            return false;
+        }
+        if !globals.project_namespaces.contains(namespace) {
+            return true;
+        }
         // Source must establish an ordinary call when it is in the project.
         // An extern alone cannot make a known macro's arguments eager.
-        loaded
-            && (!globals.project_namespaces.contains(namespace)
-                || (origin.kind == ContractKind::Extern
-                    && globals
-                        .exports
-                        .get(namespace)
-                        .is_some_and(|exports| exports.has_unchecked_function(&origin.name))))
+        let Some(arities) = globals
+            .exports
+            .get(namespace)
+            .filter(|_| origin.kind == ContractKind::Extern)
+            .and_then(|exports| exports.unchecked_arities(&origin.name))
+        else {
+            return false;
+        };
+        if !check_source_arities {
+            return true;
+        }
+        let Some(ExternalDeclaration::Function(contract)) =
+            globals.extern_declaration(&origin.name)
+        else {
+            return false;
+        };
+        contract.signatures.iter().all(|signature| {
+            arities.iter().any(|arity| match signature.arity() {
+                Arity::Fixed(count) => arity.accepts(count),
+                Arity::Variadic(count) => matches!(arity, Arity::Variadic(min) if *min <= count),
+            })
+        })
     }
 }
 
@@ -200,12 +224,15 @@ impl Checker<'_> {
     }
 
     pub(in crate::checker) fn partial_contract_visible(&self, origin: &ContractOrigin) -> bool {
-        self.partial_scope.is_none()
+        let verify_arity = self.untyped_binding_budget.is_some();
+        (self.partial_scope.is_none() && !verify_arity)
             || !matches!(
                 origin.kind,
                 ContractKind::Extern | ContractKind::ExternLiteral
             )
-            || self.model.partial_extern_available(self.globals, origin)
+            || self
+                .model
+                .partial_extern_available(self.globals, origin, verify_arity)
     }
 
     pub(in crate::checker) fn allows_partial_call(&self, head: &Form, env: &Env) -> bool {

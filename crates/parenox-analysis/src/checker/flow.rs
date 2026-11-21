@@ -7,6 +7,7 @@ pub(super) use selectors::{narrow_literal, refine_owner};
 use super::calls::{is_builtin, narrow_emptiness, narrow_vector_predicate, predicate_type};
 use super::maps::narrow_map_predicate;
 use super::model::DeclaredValue;
+use super::recur::bounded_state;
 use super::{Checker, Env, Value, nil_part};
 use crate::expand::{self, Threading};
 use crate::reader::{Form, Kind, Span};
@@ -301,6 +302,14 @@ impl Checker<'_> {
                 tail && 2 * index + 4 == xs.len(),
             );
             self.expansion_origin(start, name, span, true);
+            if self.untyped_binding_budget.is_some()
+                && (self.type_query.is_none()
+                    || !bounded_state(std::slice::from_ref(&applied))
+                    || !bounded_state(std::slice::from_ref(&skipped)))
+            {
+                self.type_query = None;
+                return Value::new(Type::Unknown);
+            }
             current = applied.join(skipped);
             if yes_reachable {
                 aliases_seed = false;

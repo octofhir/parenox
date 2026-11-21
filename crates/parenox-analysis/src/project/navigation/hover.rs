@@ -75,18 +75,14 @@ impl Session {
         let Some(scope) = self.typing_at(file, path, range.start) else {
             return Vec::new();
         };
-        if !scope.model.functions.values().any(|function| {
-            !function.inferred()
-                && function.span.start.offset < range.end
-                && function.span.end.offset > range.start
-        }) {
+        let functions = scope.declarations.functions_in(scope.forms, range.clone());
+        if functions.is_empty() {
             return Vec::new();
         }
         let mut providers = BTreeMap::new();
-        let references = scope.declarations.collect_references(
+        let bindings = scope.declarations.collect_function_bindings(
             scope.forms,
-            self.has_standard_test(),
-            false,
+            functions,
             |namespace, name, arity| match self.reference_call(
                 path,
                 namespace,
@@ -106,13 +102,19 @@ impl Session {
                 call => call,
             },
         );
-        let bindings = references
-            .bindings
+        let bindings = bindings
             .into_iter()
             .filter(|span| range.contains(&span.end.offset));
         scope
             .declarations
-            .binding_types(scope.model, scope.globals, &file.source, bindings)
+            .binding_types(
+                scope.forms,
+                functions,
+                scope.model,
+                scope.globals,
+                &file.source,
+                bindings,
+            )
             .into_iter()
             .map(|(span, ty)| BindingType {
                 span,

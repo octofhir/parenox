@@ -1,6 +1,133 @@
 use super::*;
 
 #[test]
+fn unannotated_functions_show_proven_bindings_in_the_requested_arity() {
+    let fixture = Fixture::new("unannotated inlay");
+    let file = fixture.0.join("src/types.clj");
+    let document = uri(&file);
+    let provider = fixture.0.join("src/fixture/api.clj");
+    fs::create_dir(provider.parent().unwrap()).unwrap();
+    fs::write(&provider, "(ns fixture.api)\n(defn copy [text] text)\n").unwrap();
+    let provider = uri(&provider);
+    let source = r#"(ns types (:require [fixture.api :as api]))
+(defn render
+  ([input]
+   (if (string? input)
+     (let [#_"😀" rendered (api/copy input)] rendered)
+     nil))
+  ([input suffix]
+   (let [constant "suffix"] constant)))
+"#;
+    fs::write(&file, source).unwrap();
+    fs::write(fixture.0.join("parenox.edn"), r#"{:externs ["api.edn"]}"#).unwrap();
+    fs::write(
+        fixture.0.join("api.edn"),
+        "{fixture.api/copy [[string? :-> string?]]}",
+    )
+    .unwrap();
+    let broken = source.replace("(api/copy input)", "(api/copy 42)");
+    let alias_only = source.replace(":as api", ":as-alias api");
+    let duplicate = format!(
+        "{source}(defn render {{:t/sig :invalid}} [] (let [failed \"duplicate\"] failed))\n"
+    );
+    let update = |version, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let range = |id, start, end| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/inlayHint","params":{
+            "textDocument":{"uri":document},"range":{
+                "start":{"line":start,"character":0},"end":{"line":end,"character":0}
+            }
+        }})
+    };
+    let replies = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"languageId":"clojure","version":1,"text":source
+        }}}),
+        range(2, 2, 6),
+        range(3, 6, 8),
+        update(2, &broken),
+        range(4, 2, 8),
+        update(3, &alias_only),
+        range(5, 2, 6),
+        update(4, source),
+        range(6, 2, 8),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":provider,"version":1,"languageId":"clojure",
+            "text":"(ns fixture.api)\n(defn copy [] \"changed\")\n"
+        }}}),
+        range(7, 2, 8),
+        json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{
+            "textDocument":{"uri":provider}
+        }}),
+        range(8, 2, 8),
+        update(5, &duplicate),
+        range(9, 8, 9),
+        json!({"jsonrpc":"2.0","id":10,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let at = |line: usize, name: &str| {
+        let row = source.lines().nth(line).unwrap();
+        let end = row.find(name).unwrap() + name.len();
+        json!({"line":line,"character":row[..end].encode_utf16().count()})
+    };
+    let rendered = json!({"position":at(4, "rendered"),"kind":1,"label":": String"});
+    let constant = json!({"position":at(7, "constant"),"kind":1,"label":": \"suffix\""});
+    let result = |id| &replies.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    assert_eq!(result(2), &json!([rendered]));
+    assert_eq!(result(3), &json!([constant]));
+    assert_eq!(result(4), &json!([constant]));
+    assert_eq!(result(5), &json!([]));
+    assert_eq!(result(6), &json!([rendered, constant]));
+    assert_eq!(result(7), &json!([constant]));
+    assert_eq!(result(8), result(6));
+    assert_eq!(result(9), &json!([]));
+}
+
+#[test]
+fn unannotated_inlay_queries_leave_out_overgrown_conditional_types() {
+    let fixture = Fixture::new("inlay conditional growth");
+    let file = fixture.0.join("src/actions.clj");
+    let document = uri(&file);
+    let source = |choices| {
+        let steps: String = (0..choices)
+            .map(|index| format!(" enabled (conj :action-{index})"))
+            .collect();
+        format!(
+            "(ns actions)\n(defn pick-actions [enabled]\n  (let [title \"Actions\"\n        actions (cond-> []{steps})]\n    [title actions]))\n",
+        )
+    };
+    let large = source(12);
+    let small = source(2);
+    fs::write(&file, &small).unwrap();
+    let request = |id| {
+        json!({"jsonrpc":"2.0","id":id,"method":"textDocument/inlayHint","params":{
+            "textDocument":{"uri":document},
+            "range":{"start":{"line":2,"character":0},"end":{"line":3,"character":0}}
+        }})
+    };
+    let replies = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"version":1,"languageId":"clojure","text":small
+        }}}),
+        request(2),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":2},"contentChanges":[{"text":large}]
+        }}),
+        request(3),
+        json!({"jsonrpc":"2.0","id":4,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let result = |id| &replies.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    assert_eq!(result(2)[0]["label"], ": \"Actions\"");
+    assert_eq!(result(3), &json!([]));
+}
+
+#[test]
 fn inlay_hints_show_reached_bindings_once_and_follow_unsaved_types() {
     let fixture = Fixture::new("inlay hints");
     let file = fixture.0.join("src/types.clj");

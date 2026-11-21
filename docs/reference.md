@@ -701,6 +701,10 @@ project, a buffer has no project context.
 - **Inlay hints** show compact inferred types beside local bindings in checked
   function clauses. They follow the editor's requested range and the current
   buffer. A type hint requires a reachable binding and enough type evidence.
+  Functions without signatures can show proven local types with unknown input
+  types. Their extern references require a loaded provider, and any available
+  source arities must support the extern contract. The query leaves out
+  unannotated clauses that exceed its analysis budget.
   Hints use clauses whose body check found no error or coverage gap.
   Proven local types can help explain a mismatch with the declared return type.
   Complete functions before a reader error can still show hints in their

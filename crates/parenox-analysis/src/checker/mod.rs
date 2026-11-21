@@ -406,6 +406,7 @@ struct Checker<'a> {
     partial_method_body: bool,
     partial_method_opaque: bool,
     type_query: Option<TypeQuery<'a>>,
+    untyped_binding_budget: Option<usize>,
     diagnostics: Vec<Diagnostic>,
     has_declaration_findings: bool,
     has_unproven_expectation: bool,
@@ -436,6 +437,7 @@ impl<'a> Checker<'a> {
             partial_method_body: false,
             partial_method_opaque: false,
             type_query: None,
+            untyped_binding_budget: None,
             diagnostics: Vec::new(),
             has_declaration_findings: !model.diagnostics.is_empty(),
             has_unproven_expectation: false,
@@ -682,6 +684,17 @@ impl Checker<'_> {
     }
 
     fn infer_position(&mut self, form: &Form, env: &Env, tail: bool) -> Value {
+        if let Some(remaining) = &mut self.untyped_binding_budget {
+            if self.type_query.is_none()
+                || *remaining == 0
+                || (self.path_reachable
+                    && (!self.diagnostics.is_empty() || self.has_unproven_expectation))
+            {
+                self.type_query = None;
+                return Value::new(Type::Unknown);
+            }
+            *remaining -= 1;
+        }
         if self.partial_method_body
             && matches!(
                 &form.kind,
