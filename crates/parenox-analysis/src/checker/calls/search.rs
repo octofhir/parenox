@@ -3,13 +3,76 @@ use super::{Checker, Env, PreparedCallable, Value, sequences::iteration_may_thro
 use crate::reader::{Form, Span};
 use crate::types::Type;
 
-const SOME: &str = "clojure.core/some";
 const MAX_SEARCH_STEPS: usize = 128;
 
+#[derive(Clone, Copy)]
+pub(super) enum Search {
+    Some,
+    Every,
+}
+
+impl Search {
+    fn qualified(self) -> &'static str {
+        match self {
+            Self::Some => "clojure.core/some",
+            Self::Every => "clojure.core/every?",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        &self.qualified()["clojure.core/".len()..]
+    }
+
+    fn exhausted(self) -> Value {
+        Value::new(match self {
+            Self::Some => Type::Nil,
+            Self::Every => Type::Bool(true),
+        })
+    }
+
+    fn unchecked_result(self) -> Value {
+        Value::new(match self {
+            Self::Some => Type::Unknown,
+            Self::Every => Type::Boolean,
+        })
+    }
+
+    fn step(self, mut value: Value) -> (Value, bool) {
+        let truthy = value.known.truthy();
+        let can_fail = value.known.falsey() != Type::Never;
+        match self {
+            Self::Some => {
+                value.narrow(truthy);
+                (value, can_fail)
+            }
+            Self::Every => {
+                // Rejection terminates the walk with false. Only an
+                // uninterrupted sequence of truthy results can return true.
+                let rejected = if can_fail {
+                    Type::Bool(false)
+                } else {
+                    Type::Never
+                };
+                (Value::new(rejected), truthy != Type::Never)
+            }
+        }
+    }
+}
+
 impl Checker<'_> {
-    pub(super) fn some_form(&mut self, forms: &[Form], span: Span, env: &Env) -> Value {
+    pub(super) fn search_form(
+        &mut self,
+        search: Search,
+        forms: &[Form],
+        span: Span,
+        env: &Env,
+    ) -> Value {
         if forms.len() != 2 {
-            self.error("PNX2554", span, "some expects a predicate and a collection");
+            self.error(
+                "PNX2554",
+                span,
+                format!("{} expects a predicate and a collection", search.name()),
+            );
         }
         let Some((predicate, inputs)) = forms.split_first() else {
             self.arity_error();
@@ -18,7 +81,7 @@ impl Checker<'_> {
         self.with_callback_choice(predicate, env, |checker, selected, scope| {
             let callback = checker.prepare_callable(selected, scope);
             if let [source] = inputs {
-                return checker.some_using(&callback, source, span, scope);
+                return checker.search_using(search, &callback, source, span, scope);
             }
             let returns = checker
                 .eval_args(inputs, scope, callback.returns())
@@ -35,8 +98,9 @@ impl Checker<'_> {
         })
     }
 
-    fn some_using(
+    fn search_using(
         &mut self,
+        search: Search,
         callback: &PreparedCallable<'_, '_>,
         source: &Form,
         span: Span,
@@ -48,20 +112,24 @@ impl Checker<'_> {
             return Value::new(Type::Never);
         }
         if collection.known == Type::Any {
-            return self.unchecked_search(
+            self.unchecked_search(
                 callback,
                 source.span,
                 span,
                 env,
-                "some cannot infer elements of a collection typed Any",
+                &format!(
+                    "{} cannot infer elements of a collection typed Any",
+                    search.name()
+                ),
             );
+            return search.unchecked_result();
         }
         let start = self.diagnostics.len();
         if iteration_may_throw(&collection.known) {
             self.may_throw();
         }
-        let sequence = self.seq_type(&collection.known, SOME, source.span);
-        self.note_builtin_contract(start, SOME);
+        let sequence = self.seq_type(&collection.known, search.qualified(), source.span);
+        self.note_builtin_contract(start, search.qualified());
 
         let shapes = match &sequence {
             Type::Union(shapes) => shapes.as_ref(),
@@ -78,13 +146,14 @@ impl Checker<'_> {
                         let arg = literal.map_or(source.span, |forms| forms[index].span);
                         (item, arg)
                     });
-                    self.search_items(callback, items, &collection.notes, span, env)
+                    self.search_items(search, callback, items, &collection.notes, span, env)
                 }
                 Type::Seq(item) | Type::List(item) => {
                     invoked = true;
-                    // One abstract element represents every position. A falsey
-                    // result can continue to the end without finding a match.
+                    // One abstract element represents every position. If its
+                    // callback can continue, the walk can reach the end.
                     self.search_items(
+                        search,
                         callback,
                         [(item.as_ref(), source.span)],
                         &collection.notes,
@@ -96,9 +165,10 @@ impl Checker<'_> {
                     // This shape could invoke a saved callback outside the
                     // call's source range with inputs we have not checked.
                     self.type_query = None;
-                    Value::new(Type::Unknown)
+                    search.unchecked_result()
                 }
-                Type::Nil | Type::Never => Value::new(shape.clone()),
+                Type::Nil => search.exhausted(),
+                Type::Never => Value::new(Type::Never),
                 _ => unreachable!("sequence start produced {shape:?}"),
             };
             result = result.join(found);
@@ -112,6 +182,7 @@ impl Checker<'_> {
 
     fn search_items<'item>(
         &mut self,
+        search: Search,
         callback: &PreparedCallable<'_, '_>,
         items: impl IntoIterator<Item = (&'item Type, Span)>,
         notes: &[String],
@@ -121,25 +192,28 @@ impl Checker<'_> {
         let mut found = Value::new(Type::Never);
         for (item, argument) in items {
             if self.search_steps >= MAX_SEARCH_STEPS {
-                return found.join(self.unchecked_search(
+                self.unchecked_search(
                     callback,
                     span,
                     span,
                     env,
-                    &format!("some step analysis limit ({MAX_SEARCH_STEPS}) exceeded"),
-                ));
+                    &format!(
+                        "{} step analysis limit ({MAX_SEARCH_STEPS}) exceeded",
+                        search.name()
+                    ),
+                );
+                return found.join(search.unchecked_result());
             }
             self.search_steps += 1;
             let item = Value::with_notes(item.clone(), notes.to_vec());
-            let mut matched = self.call_prepared(callback, vec![(item, argument)], span, env, true);
-            let continues = matched.known.falsey() != Type::Never;
-            matched.narrow(matched.known.truthy());
+            let value = self.call_prepared(callback, vec![(item, argument)], span, env, true);
+            let (matched, continues) = search.step(value);
             found = found.join(matched);
             if !continues {
                 return found;
             }
         }
-        found.join(Value::new(Type::Nil))
+        found.join(search.exhausted())
     }
 
     fn unchecked_search(
@@ -149,9 +223,9 @@ impl Checker<'_> {
         call: Span,
         env: &Env,
         reason: &str,
-    ) -> Value {
+    ) {
         self.type_query = None;
         self.call_prepared(callback, Vec::new(), call, env, false);
-        self.unchecked_form(source, reason)
+        self.unchecked_form(source, reason);
     }
 }

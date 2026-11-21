@@ -516,7 +516,7 @@ nested field.
 |---|---|
 | Flow | Lexical scopes, conditionals, literal `case`, `loop`/`recur`, `try`/`catch`, core threading, and selected predicates |
 | Maps | Presence, required/optional fields, open and closed shapes, dictionaries, stable lookup narrowing, and supported reads, updates, and projections |
-| Collections | Vectors, sets, map entries, sequences, positional destructuring, and selected calls including `mapv`, `filterv`, `some`, `reduce`, and `reduce-kv` |
+| Collections | Vectors, sets, map entries, sequences, positional destructuring, and selected calls including `mapv`, `filterv`, `some`, `every?`, `reduce`, and `reduce-kv` |
 | JVM | Selected regex and string operations and known exception classes, not general Java interop |
 | Unannotated code | Source name resolution, known arities, selected string checks, and argument mismatches against explicit externs |
 
@@ -546,13 +546,15 @@ and binds the first element, which can itself be nil or false.
 `recur` must target a supported tail position and analysis is
 bounded when argument types keep growing.
 
-When `if` chooses between two inline functions passed to `reduce` or
-`some`, the collection operation keeps its chosen callback throughout.
+When `if` chooses between two inline functions passed to `reduce`,
+`some` or `every?`, the collection operation keeps its chosen callback throughout.
 The callback sees the branch's types for captured locals and receives the
 inferred element type. A reducer also sees the evolving accumulator type.
 `some` returns the first truthy callback result, or nil if every result is
 falsey or the collection is empty. On sequences with known positions, the
 checker stops visiting elements once the result is guaranteed truthy.
+`every?` returns false on the first falsey result and true when it
+reaches the end. Its callback sees the inferred collection element type.
 An inline `fn` saved in `let` can specialize in direct calls and supported
 collection operations, including a checked callback contract. It retains
 the lexical bindings from its definition.

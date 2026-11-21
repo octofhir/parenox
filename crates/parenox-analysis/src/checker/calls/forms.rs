@@ -1,5 +1,5 @@
 //! Names of core forms with their own evaluation rules.
-use super::Conditional;
+use super::{Conditional, search::Search};
 use crate::checker::{Checker, Env, Value};
 use crate::expand::Threading;
 use crate::reader::{Form, Span};
@@ -29,7 +29,7 @@ pub(super) enum CoreForm {
     Apply,
     Reduce,
     ReduceKv,
-    Some,
+    PredicateSearch(Search),
     VectorTransform,
     RegexMatch,
     Substring,
@@ -67,7 +67,8 @@ impl CoreForm {
             "apply" => Self::Apply,
             "reduce" => Self::Reduce,
             "reduce-kv" => Self::ReduceKv,
-            "some" => Self::Some,
+            "some" => Self::PredicateSearch(Search::Some),
+            "every?" => Self::PredicateSearch(Search::Every),
             "mapv" | "filterv" => Self::VectorTransform,
             "re-find" | "re-matches" => Self::RegexMatch,
             "subs" => Self::Substring,
@@ -116,14 +117,14 @@ impl Checker<'_> {
             CoreForm::Apply => self.apply_form(&xs[1..], span, env),
             CoreForm::Reduce => self.reduce_form(&xs[1..], span, env),
             CoreForm::ReduceKv => self.reduce_kv_form(&xs[1..], span, env),
-            CoreForm::Some => {
+            CoreForm::PredicateSearch(search) => {
                 if self
                     .model
                     .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
                 {
-                    self.some_form(&xs[1..], span, env)
+                    self.search_form(search, &xs[1..], span, env)
                 } else {
-                    self.unchecked_form(xs[0].span, "Standard clojure.core/some is unconfirmed")
+                    self.unchecked_form(xs[0].span, &format!("Standard {name} is unconfirmed"))
                 }
             }
             CoreForm::VectorTransform => self.vector_transform(xs, span, env, name),
