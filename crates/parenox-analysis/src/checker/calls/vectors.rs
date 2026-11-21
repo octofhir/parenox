@@ -9,7 +9,7 @@ use super::{
 use crate::reader::{Form, Span};
 use crate::types::{IntegerClass, IntegerType, Type};
 
-const MAX_VECTOR_MAP_STEPS: usize = 128;
+const MAX_VECTOR_TRANSFORM_STEPS: usize = 128;
 
 struct FixedVector<'a> {
     items: &'a [Type],
@@ -105,14 +105,19 @@ impl Checker<'_> {
             self.call_prepared(&callable, Vec::new(), span, env, false);
             return Value::new(Type::Never);
         }
-        if !filter
-            && self
-                .model
-                .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
+        if self
+            .model
+            .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
         {
             let start = self.diagnostics.len();
-            if let Some(result) = self.map_fixed_vectors(&callable, &inputs, collections, span, env)
-            {
+            if let Some(result) = self.transform_fixed_vectors(
+                &callable,
+                &inputs,
+                collections,
+                filter.then_some(callback),
+                span,
+                env,
+            ) {
                 self.explain_projected_arguments(start, collections);
                 self.dedup_diagnostics(start);
                 return result;
@@ -142,11 +147,12 @@ impl Checker<'_> {
         Value::new(Type::Vector(Box::new(element)))
     }
 
-    fn map_fixed_vectors(
+    fn transform_fixed_vectors(
         &mut self,
         callable: &PreparedCallable<'_, '_>,
         inputs: &[(Value, Span)],
         collections: &[Form],
+        predicate: Option<&Form>,
         span: Span,
         env: &Env,
     ) -> Option<Value> {
@@ -184,17 +190,23 @@ impl Checker<'_> {
             self.call_prepared(callable, Vec::new(), span, env, false);
         }
         let mut output = Vec::with_capacity(count);
+        let mut exact_positions = true;
         for index in 0..count {
-            if self.vector_map_steps >= MAX_VECTOR_MAP_STEPS {
+            if self.vector_transform_steps >= MAX_VECTOR_TRANSFORM_STEPS {
                 self.type_query = None;
                 self.call_prepared(callable, Vec::new(), span, env, false);
+                let name = if predicate.is_some() {
+                    "filterv"
+                } else {
+                    "mapv"
+                };
                 return Some(self.unchecked_form(
                     span,
-                    &format!("mapv step analysis limit ({MAX_VECTOR_MAP_STEPS}) exceeded"),
+                    &format!("{name} step analysis limit ({MAX_VECTOR_TRANSFORM_STEPS}) exceeded"),
                 ));
             }
-            self.vector_map_steps += 1;
-            let args = vectors
+            self.vector_transform_steps += 1;
+            let args: Vec<_> = vectors
                 .iter()
                 .map(|vector| {
                     let mut value =
@@ -206,13 +218,30 @@ impl Checker<'_> {
                     (value, span)
                 })
                 .collect();
-            let item = self.call_prepared(callable, args, span, env, true);
-            if item.known == Type::Never {
-                return Some(item);
+            let selection = predicate.map(|form| (form, args[0].0.clone()));
+            let result = self.call_prepared(callable, args, span, env, true);
+            if result.known == Type::Never {
+                return Some(result);
             }
-            output.push(item);
+            if let Some((form, mut item)) = selection {
+                if result.known.truthy() == Type::Never {
+                    continue;
+                }
+                exact_positions &= result.known.falsey() == Type::Never;
+                let kept = self.filtered_element(item.known.clone(), form, env);
+                item.narrow(kept);
+                output.push(item);
+            } else {
+                output.push(result);
+            }
         }
-        Some(literal_vector_value(output.into_iter(), count, true))
+        let count = output.len();
+        Some(if exact_positions {
+            literal_vector_value(output.into_iter(), count, true)
+        } else {
+            let element = Type::union(output.into_iter().map(|item| item.known));
+            Value::new(Type::Vector(Box::new(element)))
+        })
     }
 
     fn explain_projected_arguments(&mut self, start: usize, collections: &[Form]) {

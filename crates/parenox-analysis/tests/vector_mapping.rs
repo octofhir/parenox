@@ -95,3 +95,36 @@ fn fixed_mapv_visits_only_runtime_positions_and_blames_the_literal_element() {
         "0x7"
     );
 }
+
+#[test]
+fn filterv_preserves_the_positions_retained_by_malli_instrumentation() {
+    let source = r#"
+(ns malli-instrumented)
+(defn installed {:t/sig '[:-> qualified-symbol?]} []
+  (let [actions (filterv some? ['sample.instrument/run nil 'sample.instrument/stop])]
+    (nth actions 1)))
+"#;
+    let mut session = Session::default();
+    let report = session.check("malli_instrumented.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let binding = source.find("actions (filterv").unwrap();
+    let Some(DocumentHover::Local(actions)) =
+        session.document_hover_at("malli_instrumented.clj", binding)
+    else {
+        panic!("expected hover on the retained actions");
+    };
+    assert_eq!(
+        actions.inferred_type,
+        "Tuple<QualifiedSymbol, QualifiedSymbol>"
+    );
+
+    let broken = source.replace("'sample.instrument/stop", "nil");
+    let report = session.check("malli_instrumented.clj", &broken);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2801");
+    let span = finding.span.start.offset..finding.span.end.offset;
+    assert_eq!(&broken[span], "1");
+    assert!(session.check("malli_instrumented.clj", source).ok);
+}
