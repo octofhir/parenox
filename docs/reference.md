@@ -37,6 +37,8 @@ operation inside the callback.
 For a nested argument mismatch, `mismatch_path` describes the failing field
 or element. Literal maps and vectors can locate the exact value in source.
 Computed arguments retain their range and report the failing path in a note.
+A call with a definite argument mismatch has an unknown result type.
+Signature help shows the expected arguments and declared result for that call.
 
 A function body without a checked signature can still report a proved
 argument mismatch at a call to a required library with an EDN extern.

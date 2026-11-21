@@ -216,7 +216,10 @@ impl Checker<'_> {
                 function.contract.as_ref(),
             );
         }
-        self.check_call_arguments(&instantiated, function, arguments);
+        let mismatch = self.check_call_arguments(&instantiated, function, arguments);
+        if mismatch {
+            return Value::rejected_call();
+        }
         Value::new(if valid {
             instantiated.ret
         } else {

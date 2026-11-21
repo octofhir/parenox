@@ -202,6 +202,8 @@ struct Value {
     guard: Option<Arc<VerifiedGuard>>,
     // Structural types do not prove ordinary JVM collection behavior.
     literal_container: Option<LiteralContainer>,
+    // The evaluator checked this call and reported a definite argument mismatch.
+    rejected_call: bool,
 }
 
 impl Value {
@@ -213,6 +215,14 @@ impl Value {
             contract: None,
             guard: None,
             literal_container: None,
+            rejected_call: false,
+        }
+    }
+
+    fn rejected_call() -> Self {
+        Self {
+            rejected_call: true,
+            ..Self::new(Type::Unknown)
         }
     }
 

@@ -275,3 +275,85 @@ fn hover_uses_the_type_at_a_local_read_after_an_unsaved_edit() {
     let start = cli["span"]["start"]["offset"].as_u64().unwrap() as usize;
     assert_eq!(start, broken.rfind("path").unwrap());
 }
+
+#[test]
+fn hover_requires_a_valid_call_result_and_signature_help_keeps_the_declaration() {
+    let fixture = Fixture::new("rejected call hover");
+    let file = fixture.0.join("src/fragment.clj");
+    let document = uri(&file);
+    let source = r#"(ns fragment (:require [clojure.spec.alpha :as s] [library.codec :as codec]))
+(defn normalize {:t/sig '[(s/nilable string?) :-> string?]} [fragment]
+  (if (nil? fragment) ""
+    (let [decoded (codec/decode fragment)
+          encoded (codec/encode decoded :fragment)]
+      encoded)))
+"#;
+    let rejected = source.replace("(nil? fragment)", "(some? fragment)");
+    fs::write(&file, source).unwrap();
+    fs::write(
+        fixture.0.join("parenox.edn"),
+        r#"{:externs ["codecs.edn"]}"#,
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("codecs.edn"),
+        r#"{library.codec/decode (t/nil-preserving [string? :-> string?])
+             library.codec/encode [string? keyword? :-> string?]}"#,
+    )
+    .unwrap();
+    let request = |id, method, line: usize, token| {
+        let row = source.lines().nth(line).unwrap();
+        let start = row.rfind(token).unwrap();
+        let character = row[..start].encode_utf16().count();
+        json!({"jsonrpc":"2.0","id":id,"method":method,"params":{
+            "textDocument":{"uri":document},"position":{"line":line,"character":character}
+        }})
+    };
+    let hover = |id, line, token| request(id, "textDocument/hover", line, token);
+    let signature = |id| request(id, "textDocument/signatureHelp", 4, "decoded");
+    let change = |version, text: &str| {
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":document,"version":version},"contentChanges":[{"text":text}]
+        }})
+    };
+    let responses = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":document,"languageId":"clojure","version":1,"text":source}
+        }}),
+        hover(2, 4, "encoded"),
+        hover(3, 5, "encoded"),
+        signature(4),
+        change(2, &rejected),
+        hover(5, 4, "decoded"),
+        hover(6, 4, "encoded"),
+        hover(7, 5, "encoded"),
+        signature(8),
+        change(3, source),
+        hover(9, 5, "encoded"),
+        signature(10),
+        json!({"jsonrpc":"2.0","id":11,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let result = |id| &responses.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    for id in [2, 3, 9] {
+        assert_eq!(result(id)["contents"]["value"], "encoded\nString");
+    }
+    assert_eq!(result(5)["contents"]["value"], "decoded\nNil");
+    assert!(result(6).is_null());
+    assert!(result(7).is_null());
+    assert_eq!(result(4)["activeParameter"], 0);
+    assert_eq!(result(4), result(8));
+    assert_eq!(result(4), result(10));
+    let diagnostics = &responses
+        .iter()
+        .find(|reply| {
+            reply["method"] == "textDocument/publishDiagnostics" && reply["params"]["version"] == 2
+        })
+        .unwrap()["params"]["diagnostics"];
+    let [diagnostic] = diagnostics.as_array().unwrap().as_slice() else {
+        panic!("{diagnostics}");
+    };
+    assert_eq!(diagnostic["code"], "PNX2322");
+    assert_eq!(diagnostic["range"], result(5)["range"]);
+}

@@ -8,6 +8,42 @@ const RECORD: &str = "
 ";
 
 #[test]
+fn rejected_arguments_do_not_supply_result_types_to_other_calls() {
+    let source = r#"(ns rejected)
+(defn encode {:t/sig '[string? :-> string?]} [text] text)
+(defn tagged {:t/sig '(t/all [T] [T string? :-> T])} [value tag] value)
+(defn direct {:t/sig '[:-> number?]} [] (inc (encode nil)))
+(defn spread {:t/sig '[:-> number?]} [] (inc (apply encode [nil])))
+(defn generic {:t/sig '[:-> number?]} [] (inc (tagged "text" 0)))
+"#;
+    let report = Session::default().check("rejected.clj", source);
+    assert_eq!(report.diagnostics.len(), 3, "{report:#?}");
+    for (diagnostic, owner, label, argument) in [
+        (
+            &report.diagnostics[0],
+            "rejected/encode",
+            "Argument 1",
+            "nil",
+        ),
+        (
+            &report.diagnostics[1],
+            "rejected/encode",
+            "Argument 1",
+            "nil",
+        ),
+        (&report.diagnostics[2], "rejected/tagged", "Argument 2", "0"),
+    ] {
+        assert_eq!(diagnostic.code, "PNX2322");
+        assert_eq!(diagnostic.contract.as_ref().unwrap().name, owner);
+        assert!(diagnostic.message.starts_with(label));
+        assert_eq!(
+            &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+            argument
+        );
+    }
+}
+
+#[test]
 fn unknown_map_field_does_not_hide_a_wrong_field_at_a_call() {
     let source = format!(
         "{RECORD}

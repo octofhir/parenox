@@ -581,7 +581,10 @@ impl<'model> Checker<'model> {
                     active,
                     function.contract.as_ref(),
                 );
-                self.check_call_arguments(signature, function, arguments);
+                let mismatch = self.check_call_arguments(signature, function, arguments);
+                if mismatch {
+                    return Value::rejected_call();
+                }
                 if signature.nil_preserving
                     && args[0].0.known.compatibility(&signature.args[0]) != Compatibility::Proven
                 {
@@ -647,7 +650,8 @@ impl<'model> Checker<'model> {
         signature: &Signature,
         function: &Value,
         args: CallArguments<'_>,
-    ) {
+    ) -> bool {
+        let mut mismatch = false;
         for (index, (actual, span)) in args.values.iter().enumerate() {
             let expected = signature
                 .args
@@ -663,15 +667,18 @@ impl<'model> Checker<'model> {
                 &format!("Argument {argument}"),
                 function.contract.as_deref(),
             );
-            if let Some(form) = args.form_at(index).filter(|form| form.span == *span)
-                && self
-                    .diagnostics
-                    .get(start)
-                    .is_some_and(|d| d.code == "PNX2322")
+            if self
+                .diagnostics
+                .get(start)
+                .is_some_and(|d| d.code == "PNX2322")
             {
-                self.refine_argument_mismatch(start, argument, form, &actual.known, expected);
+                mismatch = true;
+                if let Some(form) = args.form_at(index).filter(|form| form.span == *span) {
+                    self.refine_argument_mismatch(start, argument, form, &actual.known, expected);
+                }
             }
         }
+        mismatch
     }
 
     pub(super) fn prepare_callable<'form>(
