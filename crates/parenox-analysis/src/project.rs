@@ -136,6 +136,7 @@ struct CheckedFunction {
 struct NavigationFallback {
     forms: Vec<Form>,
     declarations: Declarations,
+    checked_prefix: OnceLock<Option<navigation::CheckedPrefix>>,
 }
 
 impl CheckedFunction {
@@ -248,6 +249,7 @@ impl FileCache {
                         self.navigation_fallback = Some(Box::new(NavigationFallback {
                             declarations: Declarations::read(&read.forms),
                             forms: read.forms,
+                            checked_prefix: OnceLock::new(),
                         }));
                     }
                 }
@@ -420,6 +422,10 @@ impl Session {
             };
             let mut cache = self.files.remove(source.path).unwrap_or_default();
             let parsed = cache.update(source.source, source.path, kind);
+            // An unchanged prefix can depend on externs or other edited files.
+            if let Some(fallback) = &mut cache.navigation_fallback {
+                fallback.checked_prefix.take();
+            }
             let mut diagnostics: Vec<_> = cache.parse_error.iter().cloned().collect();
             let unique = paths.insert(source.path);
             cache.snapshot = if unique && index < count {

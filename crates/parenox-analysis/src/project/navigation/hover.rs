@@ -48,22 +48,23 @@ impl Session {
         if let Some(SourceTarget::Var(target)) = resolved {
             return Some(DocumentHover::Var(target.hover()));
         }
-        let globals = self.query_globals.as_ref()?;
         let file = self.current_file(path)?;
         if !file.source.is_char_boundary(offset) {
             return None;
         }
-        let site = symbol_form_at(&file.forms, offset)?;
+        let (_, forms) = file.navigation_source()?;
+        let site = symbol_form_at(forms, offset)?;
         // A qualified symbol cannot be a local. For other names, the checker
         // can evaluate arguments through contracts that navigation cannot see.
         let symbol = site.symbol()?;
         if symbol != "/" && symbol.contains('/') {
             return None;
         }
-        let ty = file.declarations.as_ref()?.local_read_type(
-            &file.forms,
-            file.model.as_ref()?,
-            globals,
+        let scope = self.typing_at(file, path, offset)?;
+        let ty = scope.declarations.local_read_type(
+            scope.forms,
+            scope.model,
+            scope.globals,
             &file.source,
             site,
         )?;

@@ -46,6 +46,8 @@ mod local_hover;
 mod medley_context;
 #[path = "lsp/namespace_definition.rs"]
 mod namespace_definition;
+#[path = "lsp/prefix_types.rs"]
+mod prefix_types;
 #[path = "lsp/protocol_implementations.rs"]
 mod protocol_implementations;
 #[path = "lsp/thread_first.rs"]

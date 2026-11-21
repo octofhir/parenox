@@ -616,6 +616,10 @@ project, a buffer has no project context.
   or a local dependency JAR. Checked signatures and their origin appear when
   available. Local reads show the type proved at that occurrence, including
   narrowing in a branch. Markdown is used when the client prefers it.
+  A reader error later in the buffer can leave local types available in
+  preceding complete functions. These prefix types are scoped to queries
+  in that buffer. A named spec defined in the same file needs a complete
+  source snapshot for registration.
 - **ClojureDocs** downloads the public compact EDN export over HTTPS in
   the background when the cache is missing, invalid, or at least 24 hours old. The
   server uses the last valid snapshot while a refresh runs or fails. The
@@ -655,6 +659,7 @@ project, a buffer has no project context.
   argument for calls to source functions. Checked calls can specialize
   generic parameters from the actual arguments, including in threading
   forms. The tooltip includes the result type and the contract's origin.
+  Complete functions before a reader error can still show specialized calls.
   Calls with conflicting specializations show the declaration. Source
   arglists and qualified checked declarations are also available when
   missing closing delimiters can be recovered at the end of the file.

@@ -9,6 +9,7 @@ pub(crate) use projection::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use super::Globals;
 use super::contracts::function_parts;
 use super::declarations::{Declarations, Names, SpecDeclaration, symbols_match};
 use super::type_forms::{
@@ -30,6 +31,15 @@ pub(crate) struct SpecFingerprint {
 }
 
 impl Declarations {
+    pub(crate) fn has_prefix_spec_conflict(&self, globals: &Globals) -> bool {
+        let namespace = self.namespace();
+        self.specs.keys().any(|key| globals.specs.contains_key(key))
+            || globals.spec_providers.values().any(|provider| {
+                matches!(provider.as_ref(), SpecProvider::Imported { source, .. }
+                    if source.namespace == namespace)
+            })
+    }
+
     pub(super) fn has_preserving_spec(&self, forms: &[Form]) -> bool {
         let uses_preserving_predicate = |form: &Form| {
             !symbols_match(form, &mut |name| {

@@ -8,6 +8,7 @@ mod hover;
 mod implementations;
 mod java_completion;
 mod namespace_move;
+mod recovered_types;
 mod rename;
 mod semantic;
 mod signatures;
@@ -22,6 +23,7 @@ use completion_require::LiteralRequireSite;
 pub use hover::{
     DocumentHover, LocalHover, SourceHover, VarDocumentation, namespace_documentation,
 };
+pub(super) use recovered_types::CheckedPrefix;
 pub use semantic::{InspectedReference, SemanticSymbol, SemanticSymbolKind};
 use serde::Serialize;
 pub use signatures::{CallSignature, CallSignatures};

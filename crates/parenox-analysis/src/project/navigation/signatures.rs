@@ -35,7 +35,7 @@ impl Session {
             && let Some(site) = call_at(forms, offset)
         {
             let source = self.signatures_at(path, declarations, forms, &site);
-            return match self.checked_call(caller, &site) {
+            return match self.checked_call(caller, path, &site) {
                 Some(checked) => Some(typed_signatures(&site, checked, source)),
                 None => source,
             };
@@ -53,11 +53,17 @@ impl Session {
         }
     }
 
-    fn checked_call(&self, caller: &FileCache, site: &CallSite<'_>) -> Option<CheckedCall> {
-        caller.declarations.as_ref()?.checked_call(
-            &caller.forms,
-            caller.model.as_ref()?,
-            self.query_globals.as_ref()?,
+    fn checked_call(
+        &self,
+        caller: &FileCache,
+        path: &str,
+        site: &CallSite<'_>,
+    ) -> Option<CheckedCall> {
+        let scope = self.typing_at(caller, path, site.span.start.offset)?;
+        scope.declarations.checked_call(
+            scope.forms,
+            scope.model,
+            scope.globals,
             &caller.source,
             site.span,
             site.written,

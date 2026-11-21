@@ -123,7 +123,7 @@ pub(super) enum DeclaredValue<'a> {
     Macro(&'a MacroScope),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Globals {
     specs: Arc<BTreeMap<String, Type>>,
     spec_conversions: Arc<BTreeMap<String, SpecConversion>>,
