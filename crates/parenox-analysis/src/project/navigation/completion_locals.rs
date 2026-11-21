@@ -1,11 +1,12 @@
 //! Local names and their checked types at expression positions.
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::checker::{Declarations, ProjectCall};
 use crate::core_names::known_core_function;
-use crate::reader::Form;
+use crate::reader::{Form, Kind};
 
 use super::{
     Session, cached_type_query,
@@ -19,6 +20,31 @@ pub struct LocalCompletion<'a> {
 }
 
 impl Session {
+    /// Find one nearby lexical spelling for an exact written symbol.
+    pub fn local_spelling_fix(&self, path: &str, range: Range<usize>) -> Option<&str> {
+        let file = self.current_file(path)?;
+        let (declarations, forms) = file.navigation_source()?;
+        let site = symbol_form_at(forms, range.start)?;
+        let Kind::Symbol(written) = &site.kind else {
+            return None;
+        };
+        if site.span.start.offset != range.start
+            || site.span.end.offset != range.end
+            || written.contains('/')
+            || written.starts_with('.')
+            || written.ends_with('.')
+        {
+            return None;
+        }
+        let written: Vec<_> = written.chars().collect();
+        let mut candidates = self
+            .visible_local_names(declarations, forms, range.start, "", usize::MAX)
+            .into_iter()
+            .filter(|candidate| one_edit_apart(&written, candidate));
+        let candidate = candidates.next()?;
+        candidates.next().is_none().then_some(candidate)
+    }
+
     /// Complete lexical names in a written expression, including forms with open delimiters at EOF.
     pub fn complete_local(
         &self,
@@ -152,6 +178,28 @@ impl Session {
             },
         )
     }
+}
+
+fn one_edit_apart(written: &[char], candidate: &str) -> bool {
+    let candidate: Vec<_> = candidate.chars().collect();
+    let common = written
+        .iter()
+        .zip(&candidate)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let written = &written[common..];
+    let candidate = &candidate[common..];
+    if written.len() == candidate.len() && !written.is_empty() {
+        return written[1..] == candidate[1..]
+            || (written.len() >= 2
+                && written[0] == candidate[1]
+                && written[1] == candidate[0]
+                && written[2..] == candidate[2..]);
+    }
+    if written.len() == candidate.len() + 1 {
+        return written[1..] == *candidate;
+    }
+    candidate.len() == written.len() + 1 && *written == candidate[1..]
 }
 
 fn gap_delimiter(c: char) -> bool {

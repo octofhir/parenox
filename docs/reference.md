@@ -794,6 +794,9 @@ project, a buffer has no project context.
   determined. With only closing delimiters missing at EOF, local and lookup
   hover can also use the recovered form. Reader diagnostics still describe
   the current buffer.
+- **Local spelling quick fix** replaces an unresolved symbol reported as
+  `PNX2304` when exactly one visible local name is one edit away. It uses the
+  range of the current diagnostic.
 - **Keyword value completion** suggests literal values from the declared
   argument type of a checked call. Type `:` or a prefix such as
   `:fr` to complete the keyword in place. Threaded calls use the parameter

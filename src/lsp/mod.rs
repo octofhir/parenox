@@ -361,7 +361,7 @@ fn request(
             "documentSymbolProvider":true,"workspaceSymbolProvider":true,
             "completionProvider":{"resolveProvider":true,"triggerCharacters":[":","/","."]},
             "signatureHelpProvider":{"triggerCharacters":[" "],"retriggerCharacters":[")"]},
-            "codeActionProvider":{"codeActionKinds":[refactor::REFACTOR_KIND,refactor::REWRITE_KIND,refactor::EXTRACT_KIND]},
+            "codeActionProvider":{"codeActionKinds":[parenox_lsp::diagnostics::QUICK_FIX_KIND,refactor::REFACTOR_KIND,refactor::REWRITE_KIND,refactor::EXTRACT_KIND]},
             "executeCommandProvider":{"commands":commands},
             "workspace":{"fileOperations":{"willRename":rename_files,"didRename":rename_files}},
             "experimental":{"testTree":true,"projectTree":true,"serverInfo":true,"cursorInfo":true,"clojuredocs":true}

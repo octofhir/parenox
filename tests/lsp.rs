@@ -1808,6 +1808,117 @@ fn completes_public_jvm_vars_from_dependency_jars() {
 }
 
 #[test]
+fn repairs_a_unique_local_spelling_from_the_current_diagnostic() {
+    let fixture = Fixture::new("local spelling quick fix");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    let text =
+        "(ns app)\n(defn f {:t/sig '[string? :-> string?]} [fragment] (str #_\"🦊\" fragmnet))\n";
+    let line = text.lines().nth(1).unwrap();
+    let start = line[..line.find("fragmnet").unwrap()]
+        .encode_utf16()
+        .count();
+    let range = json!({
+        "start":{"line":1,"character":start},
+        "end":{"line":1,"character":start+8}
+    });
+    let diagnostic = json!({
+        "source":"parenox","code":"PNX2304","range":range,
+        "message":"Unresolved or private value fragmnet","severity":1
+    });
+    let mut forged = diagnostic.clone();
+    forged["message"] = json!("Unresolved or private value other");
+    let repeated = r#"(ns app)
+(defn f {:t/sig '[:-> string?]} []
+  ((fn walk [fragment count]
+     (let [part (str fragmeent)]
+       (if (= count 0) part (str part (walk fragment (dec count))))))
+   "text" 2))
+"#;
+    let (line, row) = repeated
+        .lines()
+        .enumerate()
+        .find(|(_, row)| row.contains("fragmeent"))
+        .unwrap();
+    let start = row.find("fragmeent").unwrap();
+    let repeated_range = json!({
+        "start":{"line":line,"character":start},
+        "end":{"line":line,"character":start+9}
+    });
+    fs::write(&path, text).unwrap();
+    let query = |id, finding: Value, selection: Value| {
+        json!({
+            "jsonrpc":"2.0","id":id,"method":"textDocument/codeAction","params":{
+                "textDocument":{"uri":file},"range":selection,
+                "context":{"only":["quickfix"],"diagnostics":[finding]}
+            }
+        })
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),
+            "capabilities":{"workspace":{"workspaceEdit":{"documentChanges":true}}}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"version":1,"languageId":"clojure","text":text}
+        }}),
+        query(2, diagnostic.clone(), range.clone()),
+        query(3, forged, range.clone()),
+        query(
+            4,
+            diagnostic.clone(),
+            json!({"start":{"line":1,"character":0},"end":{"line":1,"character":0}}),
+        ),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":2},
+            "contentChanges":[{"text":text.replace("fragmnet","fragment")}]
+        }}),
+        query(5, diagnostic.clone(), range.clone()),
+        json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":3},"contentChanges":[{"text":repeated}]
+        }}),
+        json!({"jsonrpc":"2.0","id":6,"method":"textDocument/codeAction","params":{
+            "textDocument":{"uri":file},"range":repeated_range,"context":{"only":["quickfix"],"diagnostics":[]}
+        }}),
+        json!({"jsonrpc":"2.0","id":7,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    assert!(
+        response(1)["capabilities"]["codeActionProvider"]["codeActionKinds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("quickfix"))
+    );
+    assert_eq!(
+        response(2),
+        &json!([{
+            "title":"Replace with fragment","kind":"quickfix","diagnostics":[diagnostic],
+            "edit":{"documentChanges":[{"textDocument":{"uri":file,"version":1},
+                    "edits":[{"range":range,"newText":"fragment"}]}]}
+        }])
+    );
+    for id in 3..=5 {
+        assert_eq!(response(id), &json!([]));
+    }
+    let published = &messages
+        .iter()
+        .find(|reply| {
+            reply["method"] == "textDocument/publishDiagnostics" && reply["params"]["version"] == 3
+        })
+        .unwrap()["params"]["diagnostics"];
+    assert!(published.as_array().unwrap().len() > 1, "{published:#?}");
+    let [action] = response(6).as_array().unwrap().as_slice() else {
+        panic!("{:#?}", response(6));
+    };
+    assert_eq!(
+        action["edit"]["documentChanges"][0]["edits"],
+        json!([{"range":repeated_range,"newText":"fragment"}])
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), text);
+}
+
+#[test]
 fn generates_a_versioned_fdef_from_the_unsaved_function() {
     let fixture = Fixture::new("generate fdef");
     let path = fixture.0.join("src/demo.clj");

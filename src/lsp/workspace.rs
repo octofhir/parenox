@@ -177,6 +177,8 @@ pub(super) struct CodeActionQuery {
 #[derive(Deserialize)]
 struct CodeActionContext {
     only: Option<Vec<String>>,
+    #[serde(default)]
+    diagnostics: Vec<Value>,
 }
 
 impl Workspace {
@@ -941,11 +943,12 @@ impl Workspace {
 
     pub fn code_actions(&self, params: CodeActionQuery) -> Vec<Value> {
         let only = params.context.only.as_deref();
+        let quick_fix = refactor::action_allowed(diagnostics::QUICK_FIX_KIND, only);
         let rewrite = refactor::action_allowed(refactor::REWRITE_KIND, only);
-        if !rewrite
-            && !refactor::action_allowed(refactor::REFACTOR_KIND, only)
-            && !refactor::action_allowed(refactor::EXTRACT_KIND, only)
-        {
+        let allow_refactor = rewrite
+            || refactor::action_allowed(refactor::REFACTOR_KIND, only)
+            || refactor::action_allowed(refactor::EXTRACT_KIND, only);
+        if !quick_fix && !allow_refactor {
             return Vec::new();
         }
         let Some(path) = self.document_key(&params.text_document.uri) else {
@@ -955,9 +958,10 @@ impl Workspace {
             return Vec::new();
         };
         let lines = Lines::new(&document.source);
-        let Some(offset) = lines.byte_range(params.range).map(|range| range.start) else {
+        let Some(selection) = lines.byte_range(params.range) else {
             return Vec::new();
         };
+        let offset = selection.start;
         let mut actions = Vec::new();
         if rewrite {
             actions.extend(self.fdef_action(&path, &lines, offset));
@@ -968,17 +972,35 @@ impl Workspace {
             }
         }
         if is_clojure_source(Path::new(&path))
-            && self.rename_document(&path).is_some()
+            && let Some(editable) = self.rename_document(&path)
             && let Some(session) = self.session_for(&path)
         {
-            actions.extend(refactor::command_actions(
-                session,
-                &path,
-                &lines,
-                offset,
-                &params.text_document.uri,
-                only,
-            ));
+            if quick_fix
+                && let Some(published) = document
+                    .editor
+                    .as_ref()
+                    .and_then(|editor| editor.published.as_deref())
+            {
+                actions.extend(diagnostics::local_spelling_actions(
+                    session,
+                    &path,
+                    &editable,
+                    selection,
+                    published,
+                    &params.context.diagnostics,
+                    self.versioned_edits,
+                ));
+            }
+            if allow_refactor {
+                actions.extend(refactor::command_actions(
+                    session,
+                    &path,
+                    &lines,
+                    offset,
+                    &params.text_document.uri,
+                    only,
+                ));
+            }
         }
         actions
     }
