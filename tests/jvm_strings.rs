@@ -226,6 +226,43 @@ fn unannotated_line_slice_checks_the_first_invalid_bound() {
 }
 
 #[test]
+fn multiline_alias_text_checks_the_middle_slice_before_the_last_line() {
+    let source = r#"(ns aliases (:require [clojure.string :as string]))
+(defn between []
+  (let [lines ["name" "  :as-alias" "  ; 🦊" "alias"]
+        name-end-row 1 name-end-col 5 alias-row 4 alias-col 3]
+    (str
+      (subs (nth lines (dec name-end-row)) (dec name-end-col))
+      "\n"
+      (string/join "\n" (subvec lines name-end-row (dec alias-row)))
+      "\n"
+      (subs (nth lines (dec alias-row)) 0 (dec alias-col)))))"#;
+    let broken = source.replace("alias-row 4", "alias-row 6");
+    let mut session = Session::default();
+    for (text, expected) in [(source, 0), (broken.as_str(), 1), (source, 0)] {
+        let report = session.check("aliases.clj", text);
+        let errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|finding| finding.severity == "error")
+            .collect();
+        assert_eq!(errors.len(), expected, "{report:#?}");
+        if let [finding] = errors.as_slice() {
+            assert_eq!(finding.code, "PNX2801");
+            assert_eq!(
+                finding.contract.as_ref().unwrap().name,
+                "clojure.core/subvec"
+            );
+            assert_eq!(
+                &text[finding.span.start.offset..finding.span.end.offset],
+                "(dec alias-row)"
+            );
+            assert_eq!(finding.span.start.line, 8);
+        }
+    }
+}
+
+#[test]
 fn checks_jvm_utf16_length_and_characters_after_nil_guards() {
     let mut session = Session::default();
     let report = session.check("jvm_strings.cljc", SOURCE);

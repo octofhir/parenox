@@ -1,5 +1,5 @@
 //! Strict indexing through clojure.core/nth and vector invocation.
-use super::super::{Checker, LiteralContainer, Value};
+use super::super::{Checker, LiteralContainer, Value, literal_vector_value};
 use crate::Diagnostic;
 use crate::reader::Span;
 use crate::types::{IndexedItem, IntegerRange, IntegerType, Type};
@@ -24,14 +24,7 @@ impl Checker<'_> {
         let (collection, collection_span) = &args[0];
         let (key, key_span) = &args[1];
         let fallback = args.get(2).map(|(value, _)| value);
-        let index = match &key.known {
-            Type::Integer(index)
-            | Type::Integral(IntegerType {
-                range: IntegerRange::Exact(index),
-                ..
-            }) => Some(*index),
-            _ => None,
-        };
+        let index = exact_integer_index(&key.known);
         let proof = match (&collection.known, &collection.literal_container) {
             (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) => {
                 Some((items, vector))
@@ -63,6 +56,62 @@ impl Checker<'_> {
             };
             result.literal_container = selected.cloned();
         }
+        result
+    }
+
+    pub(super) fn subvec(&mut self, args: &[(Value, Span)]) -> Value {
+        let (source, source_span) = &args[0];
+        let (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) =
+            (&source.known, &source.literal_container)
+        else {
+            return self.unchecked_form(*source_span, "subvec needs a proven ordinary vector");
+        };
+        let (start, start_span) = &args[1];
+        let Some(start) = exact_integer_index(&start.known) else {
+            return self.unchecked_form(*start_span, "subvec needs a known i32 start index");
+        };
+        let length = items.len() as i32;
+        let mut end = length;
+        let mut end_span = *start_span;
+        if let Some((bound, span)) = args.get(2) {
+            let Some(index) = exact_integer_index(&bound.known) else {
+                return self.unchecked_form(*span, "subvec needs a known i32 end index");
+            };
+            end = index;
+            end_span = *span;
+        }
+
+        let invalid = if !(0..=length).contains(&start) {
+            Some(*start_span)
+        } else if end < start || end > length {
+            Some(end_span)
+        } else {
+            None
+        };
+        if let Some(span) = invalid {
+            let mut diagnostic = Diagnostic::new(
+                "PNX2801",
+                span,
+                format!("Slice {start}..{end} is out of bounds for a vector of length {length}"),
+            );
+            diagnostic.help = Some(
+                "Keep both indices within the vector and put the start before or at the end."
+                    .into(),
+            );
+            self.diagnostics.push(diagnostic);
+            self.index_out_of_bounds();
+            return Value::new(Type::Never);
+        }
+
+        let start = start as usize;
+        let selected = &items[start..end as usize];
+        let contents = selected.iter().enumerate().map(|(offset, item)| {
+            let mut value = Value::new(item.clone());
+            value.literal_container = vector.vector_item(start + offset).cloned();
+            value
+        });
+        let mut result = literal_vector_value(contents, selected.len(), true);
+        result.notes.clone_from(&source.notes);
         result
     }
 
@@ -243,6 +292,17 @@ impl Checker<'_> {
                 Type::Never
             }
         }
+    }
+}
+
+fn exact_integer_index(ty: &Type) -> Option<i32> {
+    match ty {
+        Type::Integer(index)
+        | Type::Integral(IntegerType {
+            range: IntegerRange::Exact(index),
+            ..
+        }) => Some(*index),
+        _ => None,
     }
 }
 

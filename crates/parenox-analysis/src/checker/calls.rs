@@ -708,6 +708,7 @@ impl<'model> Checker<'model> {
                 "clojure.core/count"
                     | "clojure.core/first"
                     | "clojure.core/nth"
+                    | "clojure.core/subvec"
                     | "clojure.core/inc"
                     | "clojure.core/dec"
                     | "clojure.core/conj"
@@ -908,6 +909,7 @@ impl<'model> Checker<'model> {
                     | "clojure.core/conj"
                     | "clojure.core/peek"
                     | "clojure.core/seq"
+                    | "clojure.core/subvec"
                     | "clojure.core/first"
                     | "clojure.core/next"
                     | "clojure.core/rest"
@@ -940,6 +942,7 @@ impl<'model> Checker<'model> {
                 return self.emptiness_call(name, &args[0]);
             }
             "clojure.core/nth" => return self.nth(args),
+            "clojure.core/subvec" => return self.subvec(args),
             "clojure.core/list" => return sequences::list_value(args),
             "clojure.core/cons" => return self.cons(args),
             "clojure.core/conj" => return self.conj(args),
@@ -1105,9 +1108,10 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         | "clojure.core/dissoc"
         | "clojure.core/min"
         | "clojure.core/max" => &[Arity::Variadic(1)],
-        "clojure.core/nth" | "clojure.core/ex-info" | "clojure.string/split" => {
-            &[Arity::Fixed(2), Arity::Fixed(3)]
-        }
+        "clojure.core/nth"
+        | "clojure.core/subvec"
+        | "clojure.core/ex-info"
+        | "clojure.string/split" => &[Arity::Fixed(2), Arity::Fixed(3)],
         "clojure.string/replace" => &[Arity::Fixed(3)],
         "clojure.string/join" => &[Arity::Fixed(1), Arity::Fixed(2)],
         "clojure.core/cons"
@@ -1243,6 +1247,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/empty?"
             | "clojure.core/not-empty"
             | "clojure.core/nth"
+            | "clojure.core/subvec"
             | "clojure.core/seq"
             | "clojure.core/first"
             | "clojure.core/next"

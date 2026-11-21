@@ -108,7 +108,10 @@ impl Declarations {
                         && partial_string_operator(&origin.name))
                         || (diagnostic.code == "PNX2801"
                             && origin.kind == ContractKind::Builtin
-                            && origin.name == "clojure.core/nth")
+                            && matches!(
+                                origin.name.as_str(),
+                                "clojure.core/nth" | "clojure.core/subvec"
+                            ))
                         || (diagnostic.code == "PNX2322"
                             && origin.kind == ContractKind::Extern
                             && model.partial_extern_available(globals, origin))
@@ -171,6 +174,7 @@ impl Checker<'_> {
                     | "clojure.core/count"
                     | "clojure.core/first"
                     | "clojure.core/nth"
+                    | "clojure.core/subvec"
                     | "clojure.core/inc"
                     | "clojure.core/dec"
                     | "clojure.core/min"

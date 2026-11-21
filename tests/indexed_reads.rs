@@ -65,6 +65,51 @@ fn nth_preserves_proved_vector_elements_and_fallbacks() {
 }
 
 #[test]
+fn subvec_keeps_nested_positions_and_distinguishes_an_empty_slice() {
+    for (expression, expected) in [
+        (
+            r#"(mapv first (subvec [["drop"] ["x"] ["y"]] 1 3))"#,
+            r#"(clojure.spec.alpha/tuple #{"x"} #{"y"})"#,
+        ),
+        ("(peek (subvec [:first :last] 1))", "#{:last}"),
+        ("(empty? (subvec [:first] 1 1))", "#{true}"),
+    ] {
+        let report = check(expression, expected);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn subvec_marks_the_rejected_bound_and_only_its_exception() {
+    for (expression, bound) in [
+        ("(subvec [:one] -1 0)", "-1"),
+        ("(subvec [:one] 0 (inc 1))", "(inc 1)"),
+        ("(subvec [:one] 1 0)", "0"),
+    ] {
+        let source = format!(
+            "(defn f {{:t/sig '[:-> #{{:bounds}}]}} []
+          (try {expression}
+            (catch IllegalArgumentException _ :wrong)
+            (catch IndexOutOfBoundsException _ :bounds)))"
+        );
+        let report = Session::default().check("slice.clj", &source);
+        assert!(report.complete, "{report:#?}");
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(finding.code, "PNX2801");
+        assert_eq!(
+            finding.contract.as_ref().unwrap().name,
+            "clojure.core/subvec"
+        );
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            bound
+        );
+    }
+}
+
+#[test]
 fn keeps_unmodeled_numeric_indices_and_writes_explicit() {
     for (expression, code) in [
         ("(nth [:sku] 0.5)", "PNX9001"),
