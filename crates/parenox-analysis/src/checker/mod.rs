@@ -773,7 +773,12 @@ impl Checker<'_> {
                 if matches!(&bare.kind, Kind::Vector(_)) {
                     let value = self.infer_position(bare, env, tail);
                     return self
-                        .vector_metadata_outcome(form, env, !value.stops_evaluation())
+                        .literal_metadata_outcome(
+                            form,
+                            env,
+                            !value.stops_evaluation(),
+                            metadata::MetadataTarget::Vector,
+                        )
                         .unwrap_or(value);
                 }
                 let mut value = self.infer_position(target, env, tail);

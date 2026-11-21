@@ -7,6 +7,7 @@ use super::super::{
     Checker, Env, Value,
     env::{CapturedFn, CapturedInline},
     function_forms::{MAX_FIXED_PARAMETERS, function_clauses, letfn_definition, pack_arguments},
+    metadata::MetadataTarget,
     nil_part,
     queries::InferredCall,
 };
@@ -420,6 +421,25 @@ impl<'model> Checker<'model> {
             .and_then(|name| env.inline_function(name))
             .is_some()
             || self.inline_callback_literal(form, env)
+    }
+
+    pub(super) fn contextual_callback_argument(
+        &mut self,
+        form: &Form,
+        env: &Env,
+        reachable: bool,
+    ) -> Value {
+        if form.symbol().is_none()
+            && let Some(value) =
+                self.literal_metadata_outcome(form, env, reachable, MetadataTarget::Function)
+        {
+            return value;
+        }
+        Value::new(if reachable {
+            Type::Unknown
+        } else {
+            Type::Never
+        })
     }
 
     pub(super) fn contextual_callback(

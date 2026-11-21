@@ -1,7 +1,7 @@
 //! Calls whose final input supplies zero or more positional arguments.
 use std::collections::BTreeSet;
 
-use super::super::LiteralContainer;
+use super::super::{LiteralContainer, metadata::MetadataTarget};
 use super::{
     ArgumentForms, Callable, Checker, Env, PreparedCallable, Value, arity_counts, builtin_arities,
     call_returns, vectors::CollectionError, vectors::element_type,
@@ -43,7 +43,9 @@ impl Checker<'_> {
             // The literal's syntax supplies every position even for large vectors.
             args.extend(self.eval_args(items, env, reachable));
             let invoked = reachable && call_returns(&args);
-            if let Some(value) = self.vector_metadata_outcome(spread, env, invoked) {
+            if let Some(value) =
+                self.literal_metadata_outcome(spread, env, invoked, MetadataTarget::Vector)
+            {
                 self.call_prepared(&callable, args, span, env, false);
                 return value;
             }

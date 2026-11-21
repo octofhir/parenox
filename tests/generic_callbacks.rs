@@ -140,6 +140,85 @@ fn a_dead_contextual_call_checks_closure_syntax_without_invoking_it() {
 }
 
 #[test]
+fn callback_constructor_metadata_runs_before_later_arguments() {
+    let report = check(
+        r#"(defn run-fixed
+             {:t/sig '[(s/fspec :args (s/cat :x string?) :ret string?) string? :-> string?]}
+             [f x] (f x))
+           (defn fixed-stop {:t/sig '[:-> string?]} []
+             (run-fixed ^{:label (subs :fixed-metadata 0)}
+                        (fn [item] missing-fixed)
+                        (subs :dead-fixed-argument 0)))
+           (defn generic-stop {:t/sig '[:-> string?]} []
+             (convert ^{:label (subs :generic-metadata 0)}
+                      #(str % missing-generic)
+                      (subs :dead-generic-argument 0)))"#,
+    );
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| (finding.code.as_str(), finding.actual.as_deref()))
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", Some(":fixed-metadata")),
+            ("PNX2304", None),
+            ("PNX2322", Some(":generic-metadata")),
+            ("PNX2304", None),
+        ],
+        "{report:#?}"
+    );
+    assert!(report.diagnostics[1].message.contains("missing-fixed"));
+    assert!(report.diagnostics[3].message.contains("missing-generic"));
+}
+
+#[test]
+fn hover_follows_narrowing_in_callback_metadata_and_its_later_operands() {
+    let source = format!(
+        "{EXAMPLE}\n{}",
+        r#"(defn render
+             {:t/sig '[(s/nilable string?) :-> (s/nilable string?)]} [label]
+             (let [later "ready"]
+               (when (some? label)
+                 (convert ^{:label (subs label 0)} #(str % "-used") later))))"#
+    );
+    let metadata = source.find("subs label").unwrap() + "subs ".len();
+    let operand = source.rfind("later").unwrap();
+    let callback = source.find("% \"-used\"").unwrap();
+    let mut session = Session::default();
+    for (test, expected) in [
+        ("some?", [Some("String"), Some("\"ready\""), Some("String")]),
+        ("nil?", [Some("Nil"), None, None]),
+    ] {
+        let edited = source.replace("some? label", &format!("{test} label"));
+        let report = session.check("generics.clj", &edited);
+        if test == "nil?" {
+            let [finding] = report.diagnostics.as_slice() else {
+                panic!("{report:#?}");
+            };
+            assert_eq!(finding.code, "PNX2322");
+            assert_eq!(finding.actual.as_deref(), Some("Nil"));
+        } else {
+            assert!(report.ok && report.complete, "{report:#?}");
+        }
+        let shift = "some?".len() - test.len();
+        for (offset, ty) in [metadata, operand, callback].into_iter().zip(expected) {
+            let hover = session.document_hover_at("generics.clj", offset - shift);
+            assert_eq!(
+                hover.map(|hover| {
+                    let DocumentHover::Local(local) = hover else {
+                        panic!("expected a local hover");
+                    };
+                    local.inferred_type
+                }),
+                ty.map(str::to_owned)
+            );
+        }
+    }
+}
+
+#[test]
 fn stored_callbacks_get_context_and_specialize_again_at_each_generic_call() {
     let source = format!(
         "{EXAMPLE}\n{}",

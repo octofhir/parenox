@@ -7,7 +7,7 @@ use crate::reader::{Form, Kind};
 use crate::types::{Arity, MAX_TUPLE_ITEMS, Parameter, Type};
 
 impl Model {
-    pub(in crate::checker) fn inert_function_metadata(
+    pub(super) fn inert_function_metadata(
         &self,
         mut name: &Form,
         attrs: [Option<&Form>; 2],

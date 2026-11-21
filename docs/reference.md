@@ -639,9 +639,9 @@ runtime types and diagnostics are withheld, including when a vector literal
 supplies `apply` arguments.
 Standard `subs` and `deref` report wrong arity once their operands can return.
 A reached arity failure participates in `catch clojure.lang.ArityException`.
-With a fixed callback contract, contextual inference for plain or inertly
-annotated function literals and saved local functions runs after the eager
-operands can return. The compiler checks the closure even when the call is
+With a fixed or generic callback contract, a function literal evaluates its
+metadata at the argument position. Contextual inference runs after the eager
+operands can return. Compiler checks still cover the closure when the call is
 unreachable.
 Sequential bodies apply the same rule to later forms and to function
 postconditions. A proven failure in `finally` also prevents a normal result
@@ -649,10 +649,11 @@ from the enclosing `try`.
 Conditional expressions combine the types and collection facts of branches
 that can return a value. A proven runtime failure in the condition or dispatch
 expression leaves the results unavailable and still allows compiler checks.
-Vector metadata with up to eight literal keyword keys is checked after the
-elements, including on `apply` spreads. Metadata wrappers merge before their
-values are evaluated, with the outer value taking precedence for a shared key.
-Hover shows flow-narrowed local types at evaluated metadata values.
+Vector metadata is checked after the elements, including on `apply` spreads.
+The checker supports up to eight literal keyword keys in both vector and
+callback metadata. Wrappers merge before their values are evaluated, with the
+outer value taking precedence for a shared key. Hover shows flow-narrowed
+local types at evaluated metadata values.
 
 Verified `:t/guard '[:then value string?]` narrows the argument after a true
 result. Use `:both` only if the checker can also verify the false branch.

@@ -524,16 +524,12 @@ impl<'model> Checker<'model> {
                 .unwrap();
             if matches!(expected, Type::Function(signatures) if signatures.len() == 1)
                 && self.contextual_callback_form(form, env)
-                && (form.symbol().is_some() || self.model.inert_function_metadata(form, [None; 2]))
             {
                 // Reading or creating an ordinary closure does not run its body.
+                let argument = self.contextual_callback_argument(form, env, reachable);
+                reachable = !argument.stops_evaluation();
                 deferred.push((index, expected));
-                let ty = if reachable {
-                    Type::Unknown
-                } else {
-                    Type::Never
-                };
-                values.push((Value::new(ty), form.span));
+                values.push((argument, form.span));
                 continue;
             }
             let mut value = infer_argument(self, form, expected, reachable);

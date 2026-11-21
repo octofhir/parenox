@@ -488,7 +488,10 @@ fn source_symbol_form_at(forms: &[Form], offset: usize, site: SymbolSite) -> Opt
     let bare = form.without_metadata();
     if site == SymbolSite::Hover
         && offset < bare.span.start.offset
-        && matches!(&bare.kind, Kind::Vector(_))
+        && matches!(
+            &bare.kind,
+            Kind::Vector(_) | Kind::List(_) | Kind::AnonymousFunction(_)
+        )
     {
         // Find the written occurrence. The type query decides which metadata
         // was evaluated after wrapper merging and reachability checks.

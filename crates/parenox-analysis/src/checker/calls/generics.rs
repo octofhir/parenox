@@ -58,14 +58,9 @@ impl Checker<'_> {
                 // A literal fn creates a closure; a saved local only reads one.
                 // The contextual body can wait for the other arguments' types.
                 callbacks.push((index, reachable));
-                values.push((
-                    Value::new(if reachable {
-                        Type::Unknown
-                    } else {
-                        Type::Never
-                    }),
-                    form.span,
-                ));
+                let argument = self.contextual_callback_argument(form, env, reachable);
+                reachable = !argument.stops_evaluation();
+                values.push((argument, form.span));
             } else {
                 let mut value = self.infer_path(form, env, reachable, false);
                 reachable = !value.stops_evaluation();

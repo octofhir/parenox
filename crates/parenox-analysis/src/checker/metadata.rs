@@ -1,4 +1,4 @@
-//! Metadata attached to runtime vector literals.
+//! Metadata attached to runtime literals.
 use super::{Checker, Env, Value, calls::is_builtin, model::Model};
 use crate::Diagnostic;
 use crate::core_names::known_core_function;
@@ -8,47 +8,62 @@ use std::collections::BTreeSet;
 
 const MAX_ORDERED_METADATA_KEYS: usize = 8;
 
+#[derive(Clone, Copy)]
+pub(super) enum MetadataTarget {
+    Vector,
+    Function,
+}
+
 enum MetadataError {
     Unsupported(Span),
     DuplicateKey { key: String, span: Span },
 }
 
 impl Checker<'_> {
-    /// Evaluate metadata after the elements. `None` preserves the vector's result.
-    pub(super) fn vector_metadata_outcome(
+    /// Evaluate metadata after the literal itself. `None` preserves its result.
+    pub(super) fn literal_metadata_outcome(
         &mut self,
         form: &Form,
         env: &Env,
         mut reachable: bool,
+        target: MetadataTarget,
     ) -> Option<Value> {
         if !matches!(&form.kind, Kind::Metadata(..)) {
             return None;
         }
-        let values = match self.vector_metadata_values(form) {
+        let (literal, unsupported) = match target {
+            MetadataTarget::Vector => (
+                "vector",
+                "Vector metadata analysis requires up to eight literal keyword keys",
+            ),
+            MetadataTarget::Function => (
+                "function literal",
+                "Function literal metadata analysis requires up to eight literal keyword keys",
+            ),
+        };
+        let values = match self.literal_metadata_values(form) {
             Ok(values) => values,
             Err(error) => {
-                return Some(self.check_path(reachable && env.reachable(), |checker| {
-                    match error {
+                return Some(self.check_path(
+                    reachable && env.reachable(),
+                    |checker| match error {
                         MetadataError::Unsupported(span) => {
                             checker.withhold_captured_facts(env.inline_functions());
                             checker.withhold_literals_after_opaque_form();
-                            checker.unchecked_form(
-                                span,
-                                "Vector metadata analysis requires up to eight literal keyword keys",
-                            )
+                            checker.unchecked_form(span, unsupported)
                         }
                         MetadataError::DuplicateKey { key, span } => {
                             checker.error("PNX2790", span, format!("Duplicate map key {key}"));
                             Value::new(Type::Unknown)
                         }
-                    }
-                }));
+                    },
+                ));
             }
         };
 
         let mut unavailable = None;
         for form in values {
-            let Some(mut value) = self.vector_metadata_value(form, env, reachable) else {
+            let Some(mut value) = self.literal_metadata_value(form, env, reachable, literal) else {
                 continue;
             };
             if value.stops_evaluation() {
@@ -63,7 +78,13 @@ impl Checker<'_> {
         unavailable
     }
 
-    fn vector_metadata_value(&mut self, form: &Form, env: &Env, reachable: bool) -> Option<Value> {
+    fn literal_metadata_value(
+        &mut self,
+        form: &Form,
+        env: &Env,
+        reachable: bool,
+        literal: &str,
+    ) -> Option<Value> {
         if let Kind::Symbol(name) = &form.kind
             && !env.contains_key(name)
             && self
@@ -90,7 +111,9 @@ impl Checker<'_> {
                     checker.diagnostics.push(Diagnostic::analysis_gap(
                         "PNX9001",
                         form.span,
-                        format!("JVM class resolution for {name} in vector metadata is unchecked"),
+                        format!(
+                            "JVM class resolution for {name} in {literal} metadata is unchecked"
+                        ),
                     ));
                     Value::new(Type::Unknown)
                 }));
@@ -99,7 +122,7 @@ impl Checker<'_> {
         Some(self.infer_path(form, env, reachable, false))
     }
 
-    fn vector_metadata_values<'form>(
+    fn literal_metadata_values<'form>(
         &self,
         mut form: &'form Form,
     ) -> Result<Vec<&'form Form>, MetadataError> {
