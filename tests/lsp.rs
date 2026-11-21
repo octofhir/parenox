@@ -4354,6 +4354,82 @@ fn rename_tracks_cross_file_vars_and_lexical_bindings_without_capture() {
 }
 
 #[test]
+fn rename_and_definition_follow_the_binding_in_map_defaults() {
+    let fixture = Fixture::new("references in map destructuring defaults");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    let source = concat!(
+        "(ns app)\n",
+        "(defn document [printer]\n",
+        "  (let [{:keys [title] :or {title (:title #_\"🦊\" printer)} :as printer} {:title \"given\"}]\n",
+        "    [title printer 'printer]))\n",
+        "(defn choose [{:keys [chosen] :or {chosen db}} db] chosen)\n",
+    );
+    fs::write(&path, source).unwrap();
+    let range = |line, token: &str, length| {
+        let row = source.lines().nth(line).unwrap();
+        let start = row[..row.find(token).unwrap()].encode_utf16().count();
+        json!({"start":{"line":line,"character":start},"end":{"line":line,"character":start+length}})
+    };
+    let outer = range(1, "printer]", 7);
+    let default = range(2, "printer)", 7);
+    let alias = range(2, "printer}", 7);
+    let body = range(3, "printer '", 7);
+    let default_key = range(2, "title (", 5);
+    let later = range(4, "db]", 2);
+    let fn_default = range(4, "db}", 2);
+    let location = |range: &Value| json!({"uri":file,"range":range});
+    let query = |id, method, site: &Value| {
+        let mut params = json!({"textDocument":{"uri":file},"position":site["start"]});
+        match method {
+            "textDocument/references" => params["context"] = json!({"includeDeclaration":true}),
+            "textDocument/rename" => params["newName"] = json!("fallback-printer"),
+            _ => {}
+        }
+        json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+    };
+    let messages = transcript(&[
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "rootUri":uri(&fixture.0),"capabilities":{"workspace":{"workspaceEdit":{"documentChanges":true}}}
+        }}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+            "textDocument":{"uri":file,"version":7,"languageId":"clojure","text":source}
+        }}),
+        query(2, "textDocument/definition", &default),
+        query(3, "textDocument/definition", &body),
+        query(4, "textDocument/definition", &fn_default),
+        query(5, "textDocument/definition", &default_key),
+        query(6, "textDocument/references", &outer),
+        query(7, "textDocument/prepareRename", &default),
+        query(8, "textDocument/rename", &default),
+        query(9, "textDocument/linkedEditingRange", &default),
+        json!({"jsonrpc":"2.0","id":10,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
+    ]);
+    let response = |id| &messages.iter().find(|reply| reply["id"] == id).unwrap()["result"];
+    for (id, target) in [(2, &outer), (3, &alias), (4, &later)] {
+        assert_eq!(response(id), &location(target));
+    }
+    assert!(response(5).is_null());
+    assert_eq!(response(6), &json!([location(&outer), location(&default)]));
+    assert_eq!(
+        response(7),
+        &json!({"placeholder":"printer","range":default})
+    );
+    assert_eq!(
+        response(8),
+        &json!({"documentChanges":[{
+            "textDocument":{"uri":file,"version":7},"edits":[
+                {"range":outer,"newText":"fallback-printer"},
+                {"range":default,"newText":"fallback-printer"}
+            ]
+        }]})
+    );
+    assert_eq!(response(9), &json!({"ranges":[outer,default]}));
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
 fn test_tree_notifications_follow_the_opted_in_buffer_and_resolved_test_scopes() {
     let fixture = Fixture::new("test tree");
     let path = fixture.0.join("src/example.clj");

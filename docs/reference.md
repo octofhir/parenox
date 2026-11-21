@@ -852,7 +852,9 @@ project, a buffer has no project context.
   takes precedence for an unqualified name.
 - **Rename** returns versioned workspace edits when the client supports
   them. It covers ordinary source vars and lexical bindings. Linked editing
-  covers proven lexical bindings within one file.
+  covers proven lexical bindings within one file. Definition, references and
+  rename follow reads in `:or` values of a direct map destructuring in `let`
+  or a function parameter.
 - **Call Hierarchy** groups source calls by resolved caller or callee.
   **Code Lens** resolves reference counts on source var declarations.
 - Semantic tokens work for the whole file or a specified range. Folding

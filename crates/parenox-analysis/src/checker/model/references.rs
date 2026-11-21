@@ -561,7 +561,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
     fn clause(&mut self, clause: &Clause<'a>) {
         let scope = self.locals.len();
         self.select_type_hint(clause.parameter_vector);
-        if self.completing_locals() {
+        if self.tracks_binding_references() {
             // The compiler installs the ordinary formals before destructuring.
             for parameter in clause.parameters().filter(|param| param.symbol().is_some()) {
                 self.bind_pattern(parameter);
@@ -996,6 +996,16 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         )
     }
 
+    fn tracks_binding_references(&self) -> bool {
+        match &self.purpose {
+            Purpose::Navigate { .. } => true,
+            Purpose::Collect(occurrences) => {
+                occurrences.calls.is_none() && occurrences.literal_bindings.is_none()
+            }
+            _ => false,
+        }
+    }
+
     fn plain_core_arguments(&self, name: &str) -> bool {
         plain_core_arguments(name)
             || (self.completing_locals()
@@ -1229,7 +1239,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         {
             let scope = self.locals.len();
             for [pattern, value] in pairs {
-                if operator == "let" && self.completing_locals() {
+                if operator == "let" && self.tracks_binding_references() {
                     self.direct_map_defaults(pattern);
                 }
                 self.forms(std::slice::from_ref(value));
