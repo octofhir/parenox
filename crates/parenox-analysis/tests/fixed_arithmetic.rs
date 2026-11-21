@@ -55,6 +55,76 @@ fn exact_arithmetic_is_shared_by_apply_and_known_callbacks() {
 }
 
 #[test]
+fn extrema_keep_fixed_values_for_version_bounds_and_editor_positions() {
+    let report = check(
+        r#"
+(defn revision-prefix {:t/sig '[:-> #{"abc"}]} []
+  (let [revision "abc"] (subs revision 0 (min 7 (count revision)))))
+(defn row-col->position
+  {:t/sig '[nil? nil? :-> {:line (s/and int? #{0}) :character (s/and int? #{0})}]}
+  [row col]
+  {:line (max 0 (dec (or row 1)))
+   :character (max 0 (dec (or col 1)))})
+(defn bounded-end
+  {:t/sig '[string? :-> (s/and int? (s/and integer? (s/conformer int)))]}
+  [revision]
+  (min 7 (count revision)))
+(defn fixed-no-throw {:t/sig '[int? int? :-> int?]} [left right]
+  (try (max left right) (catch Throwable _ :impossible)))
+(defn applied {:t/sig '[:-> (s/and int? #{42})]} []
+  (apply max [-1 0 42 7]))
+(defn unary {:t/sig '[:-> #{:data}]} [] (max :data))
+(defn mixed {:t/sig '[:-> number?]} [] (max 1 ##NaN "unused"))
+"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn a_failed_direct_comparison_stops_before_later_forms() {
+    let body = r#"
+(defn direct {:t/sig '[:-> any?]} []
+  (min 1 "not numeric" (subs "x" 9)))
+(defn applied {:t/sig '[:-> any?]} []
+  (apply min [1 "not numeric" (subs "x" 9)]))
+"#;
+    let report = check(body);
+    let [direct, applied] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(direct.code, "PNX2322");
+    assert_eq!(direct.actual.as_deref(), Some("String"));
+    assert_eq!(direct.contract.as_ref().unwrap().name, "clojure.core/min");
+    assert_eq!(applied.code, "PNX2801");
+    assert_eq!(applied.contract.as_ref().unwrap().name, "clojure.core/subs");
+}
+
+#[test]
+fn open_spreads_keep_the_unary_path_and_lazy_failures() {
+    let report = check(
+        r#"
+(defn empty-tail {:t/sig '[(s/coll-of int? :kind vector?) :-> #{:first}]} [tail]
+  (apply min :first tail))
+(defn empty-after-two {:t/sig '[(s/coll-of string? :kind vector?) :-> (s/and int? #{2})]} [tail]
+  (apply max 1 2 tail))
+(defn maybe-nan {:t/sig '[(s/coll-of number? :kind vector?) :-> (s/or :one #{:first} :more number?)]} [tail]
+  (apply max :first tail))
+(defn lazy-tail {:t/sig '[(s/coll-of int? :kind seq?) :-> (s/or :ok int? :error #{:thrown})]} [tail]
+  (let [result (try (apply min 3 tail) (catch clojure.lang.ExceptionInfo _ :thrown))]
+    (if (number? result) result (name result))))
+"#,
+    );
+    // The last body deliberately violates its return contract only on the
+    // lazy exception path. Omitting spread realization would miss it.
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert!(finding.message.contains("demo.fixed-arithmetic/lazy-tail"));
+    assert!(finding.actual.as_deref().unwrap().contains("\"thrown\""));
+}
+
+#[test]
 fn loop_counters_keep_short_exact_runs_and_widen_unbounded_growth() {
     let report = check(
         r#"
@@ -187,7 +257,14 @@ fn failing_inputs_and_malformed_calls_do_not_use_a_folded_result() {
     );
     assert!(report.ok && report.complete, "{report:#?}");
 
-    for expression in ["(-)", "(inc 1 2)", "(dec)", "(apply inc [])"] {
+    for expression in [
+        "(-)",
+        "(inc 1 2)",
+        "(dec)",
+        "(apply inc [])",
+        "(max)",
+        "(apply min [])",
+    ] {
         let report = check(&format!(
             r#"(defn bad {{:t/sig '[:-> any?]}} [] {expression})"#
         ));

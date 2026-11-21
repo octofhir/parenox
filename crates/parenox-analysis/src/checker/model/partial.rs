@@ -168,6 +168,8 @@ impl Checker<'_> {
                     | "clojure.core/count"
                     | "clojure.core/inc"
                     | "clojure.core/dec"
+                    | "clojure.core/min"
+                    | "clojure.core/max"
             ) && self.model.can_use_standard_core(name, self.globals))
             || matches!(
                 resolved.strip_prefix("clojure.core/"),

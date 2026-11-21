@@ -175,6 +175,14 @@ impl Checker<'_> {
                 })
             }
             Callable::Builtin(name)
+                if matches!(name.as_str(), "clojure.core/min" | "clojure.core/max") =>
+            {
+                self.check_spread_arities(builtin_arities(name), minimum, spread.span);
+                let result = self.open_extremum(name, prefix, &element, minimum);
+                self.note_builtin_contract(start, name);
+                result
+            }
+            Callable::Builtin(name)
                 if !matches!(
                     name.as_str(),
                     "clojure.core/conj" | "clojure.core/merge" | "clojure.core/dissoc"

@@ -347,6 +347,9 @@ impl<'model> Checker<'model> {
                         return self.core_form(form, &resolved, xs, span, env, tail);
                     }
                     if self.is_available_builtin(name, &resolved) {
+                        if matches!(resolved.as_str(), "clojure.core/min" | "clojure.core/max") {
+                            return self.direct_extremum(&resolved, &xs[1..], span, env);
+                        }
                         let args = self.typed_args(&xs[1..], env);
                         return self.builtin(&resolved, &args, span);
                     }
@@ -695,8 +698,10 @@ impl<'model> Checker<'model> {
 
     fn is_available_builtin(&self, spelling: &str, resolved: &str) -> bool {
         is_builtin(resolved)
-            && (resolved != "clojure.core/count"
-                || self.model.can_use_standard_core(spelling, self.globals))
+            && (!matches!(
+                resolved,
+                "clojure.core/count" | "clojure.core/min" | "clojure.core/max"
+            ) || self.model.can_use_standard_core(spelling, self.globals))
     }
 
     pub(super) fn call_prepared(
@@ -810,6 +815,9 @@ impl<'model> Checker<'model> {
         }
         if !returns {
             return Value::new(Type::Never);
+        }
+        if matches!(name, "clojure.core/min" | "clojure.core/max") {
+            return self.extremum(name, args);
         }
         let arithmetic = arithmetic::fixed_result(name, args);
         if self.throws.is_some()
@@ -1020,7 +1028,11 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
     match name {
         "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj"
         | "clojure.core/list" | "clojure.core/merge" => &[Arity::Variadic(0)],
-        "clojure.core/-" | "clojure.core/=" | "clojure.core/dissoc" => &[Arity::Variadic(1)],
+        "clojure.core/-"
+        | "clojure.core/="
+        | "clojure.core/dissoc"
+        | "clojure.core/min"
+        | "clojure.core/max" => &[Arity::Variadic(1)],
         "clojure.core/nth" | "clojure.core/ex-info" | "clojure.string/split" => {
             &[Arity::Fixed(2), Arity::Fixed(3)]
         }
@@ -1138,6 +1150,8 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/*"
             | "clojure.core/inc"
             | "clojure.core/dec"
+            | "clojure.core/min"
+            | "clojure.core/max"
             | "clojure.core/long"
             | "clojure.core/str"
             | "clojure.core/name"
