@@ -398,20 +398,24 @@ impl<'model> Checker<'model> {
         let function = self.infer(&xs[0], env);
         // An unresolved var might be a macro. Its arguments are inspected for
         // findings, but may not be evaluated in this lexical scope at runtime.
-        let opaque_arguments = self.type_query.is_some()
-            && function.known == Type::Unknown
-            && xs[0].symbol().is_some_and(|name| !env.contains_key(name));
-        let observation = if opaque_arguments {
+        if function.known == Type::Unknown
+            && xs[0].symbol().is_some_and(|name| !env.contains_key(name))
+        {
             self.withhold_captured_facts(env.inline_functions());
             self.withhold_literals_after_opaque_form();
-            self.type_query.take()
-        } else {
-            None
-        };
-        let args = self.call_args(&function, &xs[1..], span, env);
-        if opaque_arguments {
+            let observation = self.type_query.take();
+            let enclosing_throws = self.throws.take();
+            // An unconfirmed macro may reorder or discard operands. Check
+            // each provisionally without taking its effects as call evidence.
+            for operand in &xs[1..] {
+                self.infer_path(operand, env, true, false);
+            }
             self.type_query = observation;
+            self.throws = enclosing_throws;
+            self.may_throw();
+            return Value::new(Type::Unknown);
         }
+        let args = self.call_args(&function, &xs[1..], span, env);
         let value = self.call_value(
             &function,
             CallArguments {
@@ -482,7 +486,7 @@ impl<'model> Checker<'model> {
                 .any(|ty| matches!(ty, Type::Function(_)))
         }) else {
             return self
-                .eval_args(forms, env, function.known != Type::Never)
+                .eval_args(forms, env, !function.stops_evaluation())
                 .collect::<Vec<_>>()
                 .into();
         };
@@ -496,7 +500,7 @@ impl<'model> Checker<'model> {
                     .get(index)
                     .or(signature.rest.as_ref())
                     .unwrap();
-                let value = self.check_path(reachable, |checker| {
+                let mut value = self.check_path(reachable, |checker| {
                     checker
                         .contextual_callback(
                             form,
@@ -509,7 +513,10 @@ impl<'model> Checker<'model> {
                         .map(|callback| callback.value)
                         .unwrap_or_else(|| checker.infer(form, env))
                 });
-                reachable = value.known != Type::Never;
+                reachable = !value.stops_evaluation();
+                if !reachable {
+                    value.narrow(Type::Never);
+                }
                 (value, form.span)
             })
             .collect::<Vec<_>>()
@@ -528,7 +535,7 @@ impl<'model> Checker<'model> {
         span: Span,
     ) -> Value {
         let args = arguments.values;
-        if !call_returns(args) {
+        if function.stops_evaluation() || !call_returns(args) {
             return Value::new(Type::Never);
         }
         if matches!(

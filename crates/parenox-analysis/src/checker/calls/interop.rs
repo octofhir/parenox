@@ -79,10 +79,9 @@ impl Checker<'_> {
         };
 
         let receiver_type = self.infer(receiver, env);
-        let typed: Vec<_> = self
-            .eval_args(args, env, receiver_type.known != Type::Never)
-            .collect();
-        if receiver_type.known == Type::Never || !call_returns(&typed) {
+        let receiver_returns = !receiver_type.stops_evaluation();
+        let typed: Vec<_> = self.eval_args(args, env, receiver_returns).collect();
+        if !receiver_returns || !call_returns(&typed) {
             return Some(Value::new(Type::Never));
         }
         let tag = receiver

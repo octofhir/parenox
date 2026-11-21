@@ -743,9 +743,7 @@ impl<'model> Checker<'model> {
         if bound.is_empty() {
             return target;
         }
-        let prefix: Vec<_> = self
-            .eval_eager_inputs(bound, env, target.returns())
-            .collect();
+        let prefix: Vec<_> = self.eval_args(bound, env, target.returns()).collect();
         let returns = target.returns() && call_returns(&prefix);
         PreparedCallable::new(
             Callable::Partial(Box::new(Partial {

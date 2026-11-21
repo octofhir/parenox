@@ -33,6 +33,35 @@ fn infers_callback_results_independently_for_each_call() {
 }
 
 #[test]
+fn later_argument_failure_keeps_generic_callback_compiler_checks() {
+    let source = format!(
+        "{EXAMPLE}\n{}",
+        r#"(defn stopped {:t/sig '[:-> t/any]} []
+             (convert (fn [arg] (subs :dead-callback 0) missing-callback-name)
+                      (subs :bad-argument 0)))"#
+    );
+    let report = Session::default().check("generics.clj", &source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2304", "missing-callback-name"),
+            ("PNX2322", ":bad-argument"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn stored_callbacks_get_context_and_specialize_again_at_each_generic_call() {
     let source = format!(
         "{EXAMPLE}\n{}",

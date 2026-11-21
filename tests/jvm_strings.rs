@@ -207,6 +207,77 @@ fn let_stops_after_failed_initializers_and_eager_defaults() {
 }
 
 #[test]
+fn eager_calls_stop_after_a_failed_argument_or_target() {
+    let source = r#"(ns demo)
+(defn accepts-two {:t/sig '[t/any t/any :-> t/any]} [a b] [a b])
+(defn builtin {:t/sig '[:-> t/any]} []
+  (str (subs :bad-first 0) (subs :dead-next 0) missing-argument))
+(defn typed {:t/sig '[:-> t/any]} []
+  (accepts-two (subs :bad-typed 0) (subs :dead-typed 0)))
+(defn wrong-arity {:t/sig '[:-> t/any]} []
+  (accepts-two (subs :bad-arity 0)))
+(defn computed {:t/sig '[:-> t/any]} []
+  ((subs :bad-target 0) (subs :dead-target 0)))
+(defn host {:t/sig '[:-> t/any]} []
+  (.startsWith ^String (subs :bad-receiver 0) (subs :dead-member 0)))
+(defn nil-receiver {:t/sig '[:-> t/any]} []
+  (let [^String text nil]
+    (.startsWith text (subs :bad-member-arg 0))))
+(defn accepts-at-runtime {:t/sig '[string? :-> t/any]} [_] "ok")
+(defn contract-only {:t/sig '[:-> t/any]} []
+  (str (accepts-at-runtime false) (subs "abc" -4)))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", ":bad-first"),
+            ("PNX2304", "missing-argument"),
+            ("PNX2322", ":bad-typed"),
+            ("PNX2322", ":bad-arity"),
+            ("PNX2322", ":bad-target"),
+            ("PNX2322", ":bad-receiver"),
+            ("PNX2322", ":bad-member-arg"),
+            ("PNX2322", "false"),
+            ("PNX2801", "-4"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn an_unresolved_operator_does_not_prove_an_argument_is_evaluated() {
+    let source = r#"(ns demo)
+(defn from-opaque-macro {:t/sig '[:-> string?]} []
+  (let [continuation "after"]
+    (opaque.macros/maybe-discard (str (subs nil 0)) (subs "unused" -6))
+    (opaque.macros/maybe-discard (throw (ex-info "unused" {})) :unused)
+    continuation))
+"#;
+    let mut session = Session::default();
+    let report = session.check("demo.clj", source);
+    assert!(report.diagnostics.iter().any(|finding| {
+        finding.code == "PNX2801"
+            && &source[finding.span.start.offset..finding.span.end.offset] == "-6"
+    }));
+    let offset = source.rfind("continuation").unwrap();
+    let Some(DocumentHover::Local(hover)) = session.document_hover_at("demo.clj", offset) else {
+        panic!("an unresolved operator can discard the failing form");
+    };
+    assert_eq!(hover.inferred_type, "\"after\"");
+}
+
+#[test]
 fn vector_metadata_effects_follow_elements_and_merge_before_checking() {
     let source = r#"(ns demo (:require [clojure.string :as string]) (:import java.util.UUID))
 (defn inert-class {:t/sig '[:-> #{"ab"}]} []
@@ -416,7 +487,6 @@ fn rejected_substring_operands_do_not_supply_a_result_or_a_bounds_error() {
             ("PNX2322", "nil"),
             ("PNX2322", "\\a"),
             ("PNX2322", "nil"),
-            ("PNX2322", ":bad-index"),
             ("PNX2322", "(subs (if flag \"abc\" nil) 0)"),
             ("PNX2322", "(if flag \"abc\" nil)"),
         ],

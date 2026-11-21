@@ -632,10 +632,11 @@ finite vector or nil when the mapper is `str` or `partial` applied to `str`.
 Captured arguments are evaluated before the collection. The consumer can keep
 the exact joined text when the mapped strings are known.
 
-Vector literals and bound arguments to standard `partial` are evaluated in
-source order. After a proven runtime failure, later expressions still get
-compiler checks such as name resolution. Their runtime types and diagnostics
-are withheld, including when a vector literal supplies `apply` arguments.
+Ordinary call arguments, vector literal elements and bound arguments to
+standard `partial` are evaluated in source order. After a proven runtime failure,
+later expressions still get compiler checks such as name resolution. Their
+runtime types and diagnostics are withheld, including when a vector literal
+supplies `apply` arguments.
 Sequential bodies apply the same rule to later forms and to function
 postconditions. A proven failure in `finally` also prevents a normal result
 from the enclosing `try`.

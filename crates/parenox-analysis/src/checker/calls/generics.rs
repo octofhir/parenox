@@ -67,8 +67,11 @@ impl Checker<'_> {
                     form.span,
                 ));
             } else {
-                let value = self.infer_path(form, env, reachable, false);
-                reachable = value.known != Type::Never;
+                let mut value = self.infer_path(form, env, reachable, false);
+                reachable = !value.stops_evaluation();
+                if !reachable {
+                    value.narrow(Type::Never);
+                }
                 values.push((value, form.span));
             }
         }
