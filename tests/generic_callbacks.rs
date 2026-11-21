@@ -1,4 +1,4 @@
-use parenox::{Report, Session, Source};
+use parenox::{DocumentHover, Report, Session, Source};
 
 const EXAMPLE: &str = include_str!("../examples/generic_callbacks.clj");
 
@@ -30,6 +30,68 @@ fn infers_callback_results_independently_for_each_call() {
            (forward-convert #(count %) text))",
     );
     assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn stored_callbacks_get_context_and_specialize_again_at_each_generic_call() {
+    let source = format!(
+        "{EXAMPLE}\n{}",
+        r#"(defn both {:t/sig '[string? number? :-> (s/tuple string? number?)]} [word n]
+             (let [choose (fn [value] value) callback choose]
+               [(convert callback word) (convert callback n)]))
+           (defn fixed {:t/sig '[(s/fspec :args (s/cat :x string?) :ret string?) :-> string?]} [f]
+             (f "arg"))
+           (defn use-fixed {:t/sig '[:-> string?]} []
+             (let [trimmed (fn [word] (str/trim word))]
+               (fixed trimmed)))"#
+    );
+    let mut session = Session::default();
+    let report = session.check("generics.clj", &source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let offset = source.rfind("value] value").unwrap() + "value] ".len();
+    let Some(DocumentHover::Local(value)) = session.document_hover_at("generics.clj", offset)
+    else {
+        panic!("expected a type at the shared callback body");
+    };
+    assert_eq!(value.inferred_type, "Number | String");
+}
+
+#[test]
+fn a_stored_callback_reports_the_failed_operand_and_the_consuming_contract() {
+    let source = format!(
+        "{EXAMPLE}\n{}",
+        r#"(defn bad {:t/sig '[string? :-> number?]} [word]
+             (let [bump (fn [value] (inc value))]
+               (convert bump word)))"#
+    );
+    let report = Session::default().check("generics.clj", &source);
+    let [diagnostic] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert!(report.complete);
+    assert_eq!(diagnostic.code, "PNX2322");
+    assert_eq!(
+        &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+        "value"
+    );
+    assert_eq!(diagnostic.actual.as_deref(), Some("String"));
+    assert_eq!(
+        diagnostic.callback_contract.as_ref().unwrap().name,
+        "demo.generic-callbacks/convert"
+    );
+
+    let wrong_arity = "(defn bad {:t/sig '[:-> number?]} []
+                        (let [too-many (fn [a b] a)] (convert too-many 0)))";
+    let report = check(wrong_arity);
+    let arity = report
+        .diagnostics
+        .iter()
+        .find(|finding| finding.code == "PNX2554")
+        .unwrap();
+    assert!(arity.message.contains("expects 2 arguments, got 1"));
+    let start = EXAMPLE.len() + 1 + wrong_arity.rfind("too-many").unwrap();
+    assert_eq!(arity.span.start.offset, start);
+    assert_eq!(arity.span.end.offset, start + "too-many".len());
 }
 
 #[test]

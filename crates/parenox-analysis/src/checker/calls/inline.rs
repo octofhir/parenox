@@ -36,6 +36,7 @@ struct InlineSite<'a> {
 
 #[derive(Clone, Copy)]
 struct CallbackCheck<'a> {
+    argument: Span,
     expected_return: Option<&'a Type>,
     origin: Option<&'a ContractOrigin>,
 }
@@ -202,6 +203,13 @@ impl<'model> Checker<'model> {
         )
     }
 
+    pub(super) fn contextual_callback_form(&self, form: &Form, env: &Env) -> bool {
+        form.symbol()
+            .and_then(|name| env.inline_function(name))
+            .is_some()
+            || self.inline_callback_literal(form, env)
+    }
+
     pub(super) fn contextual_callback(
         &mut self,
         form: &Form,
@@ -217,9 +225,17 @@ impl<'model> Checker<'model> {
         let [signature] = signatures.as_ref() else {
             return None;
         };
-        let InlineSyntax::Function(function) = self.inline_syntax(form, env)? else {
+        let saved = form.symbol().and_then(|name| env.inline_function(name));
+        let (constructor, definition_scope) =
+            saved.map_or((form, env), |closure| (&closure.form, &closure.scope));
+        let InlineSyntax::Function(function) = self.inline_syntax(constructor, definition_scope)?
+        else {
             return None;
         };
+        if saved.is_some() && !self.path_reachable {
+            // The saved closure was already compiled at its binding.
+            return Some(ContextualCallback::unchecked());
+        }
         if signature.rest.is_some() {
             self.error(
                 "PNX9001",
@@ -229,6 +245,9 @@ impl<'model> Checker<'model> {
             return Some(ContextualCallback::unchecked());
         }
         if self.callback_depth >= MAX_CALLBACK_DEPTH {
+            if saved.is_some() {
+                self.type_query = None;
+            }
             self.error(
                 "PNX9001",
                 form.span,
@@ -236,6 +255,10 @@ impl<'model> Checker<'model> {
             );
             return Some(ContextualCallback::unchecked());
         }
+        if saved.is_some() && !self.local_inline_step(form.span) {
+            return Some(ContextualCallback::unchecked());
+        }
+        let scope = saved.map(|closure| closure.scope.refine_capture(env));
         let start = self.diagnostics.len();
         let arguments = signature
             .args
@@ -251,12 +274,13 @@ impl<'model> Checker<'model> {
         let result = self.check_inline(
             function,
             arguments,
-            env,
+            scope.as_ref().unwrap_or(env),
             InlineSite {
-                constructor: form.span,
+                constructor: constructor.span,
                 call,
                 invoked: true,
                 callback: Some(CallbackCheck {
+                    argument: form.span,
                     expected_return: matches!(mode, CallbackReturn::Check)
                         .then_some(&signature.ret),
                     origin,
@@ -371,11 +395,8 @@ impl<'model> Checker<'model> {
         if missing_arity {
             let mut diagnostic = Diagnostic::new(
                 "PNX2554",
-                if site.callback.is_some() {
-                    site.constructor
-                } else {
-                    site.call
-                },
+                site.callback
+                    .map_or(site.call, |callback| callback.argument),
                 format!(
                     "fn expects {} arguments, got {}",
                     super::arity_counts(clauses.keys().copied()),
@@ -412,6 +433,7 @@ impl<'model> Checker<'model> {
                 if let Some(CallbackCheck {
                     expected_return: Some(expected),
                     origin,
+                    ..
                 }) = site.callback
                 {
                     self.expect_contract(

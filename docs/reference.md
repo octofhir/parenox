@@ -544,7 +544,8 @@ When `if` chooses between two inline functions passed to `reduce`, each
 possible fold uses the chosen function throughout. The callback body sees
 the branch's types for captured locals, the accumulator and each element.
 An inline `fn` saved in `let` can specialize in direct calls and supported
-collection operations. It retains the lexical bindings from its definition.
+collection operations, including a checked callback contract. It retains
+the lexical bindings from its definition.
 Using that function as data leaves a coverage gap.
 
 Vector `:pre` conditions are checked after parameter binding and on each

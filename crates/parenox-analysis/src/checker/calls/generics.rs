@@ -47,9 +47,9 @@ impl Checker<'_> {
         let mut callbacks = Vec::new();
         let mut reachable = env.reachable();
         for (index, (form, expected)) in forms.iter().zip(&signature.args).enumerate() {
-            if matches!(expected, Type::Function(_)) && self.inline_callback_literal(form, env) {
-                // Delay the static analysis of the body, not the evaluation of
-                // an argument expression. A literal fn or #() only creates a closure.
+            if matches!(expected, Type::Function(_)) && self.contextual_callback_form(form, env) {
+                // A literal fn creates a closure; a saved local only reads one.
+                // The contextual body can wait for the other arguments' types.
                 callbacks.push((index, reachable));
                 values.push((
                     Value::new(if reachable {
