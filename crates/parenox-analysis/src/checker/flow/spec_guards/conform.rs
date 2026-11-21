@@ -1,6 +1,7 @@
 //! Conform known map fields and collection elements using resolved child specs.
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::{MapWrap, SpecOperation, map_wrap};
 use crate::checker::{
@@ -32,6 +33,81 @@ const STRING_KEYED_MAP_GAP: &str =
     "s/conform requires a closed map with known keys for this map spec";
 const LITERAL_STRING_KEYED_MAP_GAP: &str =
     "This s/coll-of map extern requires a literal map with known keys";
+
+pub(super) fn conformed_value(input: &Value, output: Type, conversion: &SpecConversion) -> Value {
+    let literal_container = conformed_origin(
+        &input.known,
+        input.literal_container.as_ref(),
+        &output,
+        conversion,
+    );
+    Value {
+        literal_container,
+        ..Value::new(output)
+    }
+}
+
+fn conformed_origin(
+    input: &Type,
+    origin: Option<&LiteralContainer>,
+    output: &Type,
+    conversion: &SpecConversion,
+) -> Option<LiteralContainer> {
+    if let (Type::MapEntry(items), SpecConversion::TaggedOr(branches)) = (output, conversion)
+        && let Type::Key(tag) = &items[0]
+    {
+        let (_, selected) = branches.iter().find(|(branch, _)| branch == tag)?;
+        let result = conformed_origin(input, origin, &items[1], selected)?;
+        return Some(LiteralContainer::Positions(Arc::from([None, Some(result)])));
+    }
+    if matches!(output, Type::Tuple(_))
+        && (matches!(input, Type::MapEntry(_))
+            || matches!(origin, Some(LiteralContainer::Vector(_))))
+    {
+        // A modeled collection conversion preserves an ordinary vector or
+        // rebuilds a changed map entry as an ordinary vector.
+        return Some(LiteralContainer::Vector(None));
+    }
+    let origin = origin?;
+    match conversion {
+        SpecConversion::Any
+        | SpecConversion::AnyCollection
+        | SpecConversion::Identity
+        | SpecConversion::IdentityDomain(_) => origin.matches_type(output).then(|| origin.clone()),
+        SpecConversion::Structured(shape) => match (shape.as_ref(), input, output, origin) {
+            (StructuredConversion::Collection { .. }, Type::MapEntry(_), Type::MapEntry(_), _) => {
+                Some(origin.clone())
+            }
+            (
+                StructuredConversion::Map(fields),
+                Type::Map(before),
+                Type::Map(after),
+                LiteralContainer::Map(Some(origins)),
+            ) => {
+                let children: BTreeMap<_, _> = origins
+                    .iter()
+                    .filter_map(|(key, proof)| {
+                        let output = &after.fields.get(key)?.ty;
+                        let child = if let Some(conversion) = &fields.get(key)?.conversion {
+                            conformed_origin(
+                                &before.fields.get(key)?.ty,
+                                Some(proof),
+                                output,
+                                conversion,
+                            )?
+                        } else {
+                            proof.matches_type(output).then(|| proof.clone())?
+                        };
+                        Some((key.clone(), child))
+                    })
+                    .collect();
+                (!children.is_empty()).then(|| LiteralContainer::Map(Some(Arc::new(children))))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
 const ENTRY_GAP: &str =
     "s/conform cannot prove whether this map entry preserves the identity of both elements";
 
@@ -270,7 +346,7 @@ impl Checker<'_> {
         if let (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) = (input, proof) {
             let outcome =
                 self.conform_ordered_values(items, Type::Tuple, |checker, index, item| {
-                    checker.conform_proven_child(item, element, vector.vector_item(index))
+                    checker.conform_proven_child(item, element, vector.position_child(index))
                 })?;
             Ok(outcome.result_for(operation))
         } else if definitely_not_collection(input) {

@@ -56,8 +56,6 @@ fn fixed_mapv_visits_only_runtime_positions_and_blames_the_literal_element() {
        (catch clojure.lang.ExceptionInfo _ :caught)))
 (defn empty-result {:t/sig '[:-> (s/coll-of any? :kind vector?)]} []
   (mapv (fn [uncalled _] uncalled) [:first] []))
-(defn structural {:t/sig '[(s/tuple #{:shape}) :-> any?]} [input]
-  (let [unchecked-order (mapv identity input)] unchecked-order))
 (defn render {:t/sig '[string? :-> string?]} [x] x)
 "#;
     let mut session = Session::default();
@@ -75,14 +73,6 @@ fn fixed_mapv_visits_only_runtime_positions_and_blames_the_literal_element() {
             .document_hover_at("mapv_positions.clj", uncalled)
             .is_none()
     );
-    let structural = source.find("unchecked-order (mapv").unwrap();
-    let Some(DocumentHover::Local(rows)) =
-        session.document_hover_at("mapv_positions.clj", structural)
-    else {
-        panic!("expected hover on structurally typed input's result");
-    };
-    assert_eq!(rows.inferred_type, "Vector<:shape>");
-
     let changed =
         format!("{source}\n(defn wrong {{:t/sig '[:-> any?]}} [] (mapv render [\"ok\" 0x7]))");
     let report = session.check("mapv_positions.clj", &changed);

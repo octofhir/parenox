@@ -18,11 +18,11 @@ mod strings;
 mod vectors;
 pub(super) use vectors::{narrow_vector_predicate, vector_predicate};
 
-pub(super) use sequences::{iteration_may_throw, narrow_emptiness};
+pub(super) use sequences::{iteration_may_throw, narrow_emptiness, narrow_seq_emptiness};
 
 use super::flow::Conditional;
 use super::{
-    Checker, Env, Value,
+    Checker, Env, LiteralContainer, Value,
     env::CapturedInline,
     exceptions::Throws,
     function_forms::pack_arguments,
@@ -754,7 +754,7 @@ impl<'model> Checker<'model> {
         )
     }
 
-    fn withhold_callback_facts(&mut self, callback: &PreparedCallable<'_, '_>) {
+    pub(super) fn withhold_callback_facts(&mut self, callback: &PreparedCallable<'_, '_>) {
         if self.type_query.is_none() || !self.path_reachable {
             return;
         }
@@ -963,7 +963,21 @@ impl<'model> Checker<'model> {
             "clojure.core/select-keys" => return self.select_keys(&args[0], &args[1]),
             "clojure.core/zipmap" => return self.zipmap(&args[0], &args[1], span),
             "clojure.lang.MapEntry/create" => {
-                Type::MapEntry(Box::new([args[0].0.known.clone(), args[1].0.known.clone()]))
+                let mut value = Value::new(Type::MapEntry(Box::new([
+                    args[0].0.known.clone(),
+                    args[1].0.known.clone(),
+                ])));
+                if args
+                    .iter()
+                    .any(|(value, _)| value.literal_container.is_some())
+                {
+                    value.literal_container = Some(LiteralContainer::Positions(
+                        args.iter()
+                            .map(|(value, _)| value.literal_container.clone())
+                            .collect(),
+                    ));
+                }
+                return value;
             }
             "clojure.core/ex-info" => return self.ex_info(args),
             "clojure.core/ex-data" => return self.ex_data(&args[0].0),
@@ -1063,7 +1077,7 @@ impl<'model> Checker<'model> {
                 let (entry, span) = &args[0];
                 let index = usize::from(name == "clojure.core/val");
                 if let Some(item) = entry.known.entry_item(index) {
-                    return Value::with_notes(item, entry.notes.clone());
+                    return entry.position_value(item, index);
                 }
                 let mut diagnostic =
                     Diagnostic::type_mismatch(*span, name, "MapEntry".into(), entry.ty.to_string());

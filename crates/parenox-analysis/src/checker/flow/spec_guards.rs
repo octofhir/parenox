@@ -8,7 +8,7 @@ use crate::checker::{
     Checker, Env, Value,
     calls::{call_returns, iteration_may_throw, vector_predicate},
     maps::{map_predicate, narrow_map_predicate},
-    model::{SpecConversion, SpecProvider},
+    model::{SpecConversion, SpecProvider, StructuredConversion},
 };
 use crate::reader::{Form, Span};
 use crate::types::{
@@ -147,6 +147,9 @@ impl Checker<'_> {
                     op,
                     input.literal_container.as_ref(),
                 ) {
+                    Ok(ty) if matches!(op, SpecOperation::Conform) => {
+                        conform::conformed_value(input, ty, conversion)
+                    }
                     Ok(ty) => Value::new(ty),
                     Err(reason) => self.unchecked_spec_call(op, spec.span, reason),
                 },
@@ -193,8 +196,20 @@ impl Checker<'_> {
                     _ => {}
                 }
             }
+            let collection = matches!(&conversion, SpecConversion::Structured(shape)
+                if matches!(shape.as_ref(), StructuredConversion::Collection { .. }));
+            if collection && input.unproven_tuple_traversal() {
+                return Some(self.unchecked_spec_call(
+                    op,
+                    spec.span,
+                    "Collection conformance needs a proven ordinary vector to traverse a tuple",
+                ));
+            }
             let result = self.convert_spec(&input.known, &conversion, op);
             return Some(match result {
+                Ok(ty) if matches!(op, SpecOperation::Conform) => {
+                    conform::conformed_value(input, ty, &conversion)
+                }
                 Ok(ty) => Value::new(ty),
                 Err(reason) => self.unchecked_form(spec.span, reason),
             });

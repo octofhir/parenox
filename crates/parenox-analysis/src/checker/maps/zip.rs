@@ -47,14 +47,14 @@ impl Checker<'_> {
         if iteration_may_throw(&keys.known) {
             self.may_throw();
         }
-        let keys = self.seq_type(&keys.known, "zipmap keys", *keys_span);
+        let keys = self.seq_value_type(keys, "zipmap keys", *keys_span);
         if keys == Type::Never {
             return Value::new(Type::Never);
         }
         if iteration_may_throw(&values.known) {
             self.may_throw();
         }
-        let values = self.seq_type(&values.known, "zipmap values", *values_span);
+        let values = self.seq_value_type(values, "zipmap values", *values_span);
         if values == Type::Never {
             return Value::new(Type::Never);
         }

@@ -111,6 +111,12 @@ impl Checker<'_> {
             self.call_prepared(callback, Vec::new(), span, env, false);
             return Value::new(Type::Never);
         }
+        if collection.unproven_tuple_traversal() {
+            self.withhold_callback_facts(callback);
+            self.call_prepared(callback, Vec::new(), span, env, false);
+            self.unchecked_tuple_traversal(search.qualified(), source.span);
+            return search.unchecked_result();
+        }
         if collection.known == Type::Any {
             self.unchecked_search(
                 callback,
@@ -144,9 +150,9 @@ impl Checker<'_> {
                     let literal = source.vector().filter(|forms| forms.len() == items.len());
                     let items = items.iter().enumerate().map(|(index, item)| {
                         let arg = literal.map_or(source.span, |forms| forms[index].span);
-                        (item, arg)
+                        (collection.position_value(item.clone(), index), arg)
                     });
-                    self.search_items(search, callback, items, &collection.notes, span, env)
+                    self.search_items(search, callback, items, span, env)
                 }
                 Type::Seq(item) | Type::List(item) => {
                     invoked = true;
@@ -155,8 +161,10 @@ impl Checker<'_> {
                     self.search_items(
                         search,
                         callback,
-                        [(item.as_ref(), source.span)],
-                        &collection.notes,
+                        [(
+                            Value::with_notes(item.as_ref().clone(), collection.notes.clone()),
+                            source.span,
+                        )],
                         span,
                         env,
                     )
@@ -180,12 +188,11 @@ impl Checker<'_> {
         result
     }
 
-    fn search_items<'item>(
+    fn search_items(
         &mut self,
         search: Search,
         callback: &PreparedCallable<'_, '_>,
-        items: impl IntoIterator<Item = (&'item Type, Span)>,
-        notes: &[String],
+        items: impl IntoIterator<Item = (Value, Span)>,
         span: Span,
         env: &Env,
     ) -> Value {
@@ -205,7 +212,6 @@ impl Checker<'_> {
                 return found.join(search.unchecked_result());
             }
             self.search_steps += 1;
-            let item = Value::with_notes(item.clone(), notes.to_vec());
             let value = self.call_prepared(callback, vec![(item, argument)], span, env, true);
             let (matched, continues) = search.step(value);
             found = found.join(matched);

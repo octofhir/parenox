@@ -18,7 +18,7 @@ const MAX_REDUCE_STEPS: usize = 128;
 struct ReductionInput<'a> {
     items: &'a [Type],
     form: &'a Form,
-    notes: &'a [String],
+    collection: &'a Value,
 }
 
 impl Checker<'_> {
@@ -49,6 +49,11 @@ impl Checker<'_> {
         if collection.known == Type::Never {
             self.call_prepared(&callable, Vec::new(), span, env, false);
             return Value::new(Type::Never);
+        }
+        if collection.unproven_tuple_traversal() {
+            self.withhold_callback_facts(&callable);
+            self.call_prepared(&callable, Vec::new(), span, env, false);
+            return self.unchecked_tuple_traversal("clojure.core/reduce", source.span);
         }
         let shapes = match &collection.known {
             Type::Union(shapes) => shapes.as_slice(),
@@ -119,7 +124,7 @@ impl Checker<'_> {
             let input = ReductionInput {
                 items,
                 form: source,
-                notes: &collection.notes,
+                collection: &collection,
             };
             result = result.join(self.reduce_exact(&callable, initial, input, span, env));
         }
@@ -168,7 +173,7 @@ impl Checker<'_> {
         let mut elements = input.items.iter().enumerate().map(|(index, ty)| {
             let element_span = literal.map_or(input.form.span, |forms| forms[index].span);
             (
-                Value::with_notes(ty.clone(), input.notes.to_vec()),
+                input.collection.position_value(ty.clone(), index),
                 element_span,
             )
         });

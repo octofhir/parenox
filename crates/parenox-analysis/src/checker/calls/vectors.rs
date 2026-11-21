@@ -3,7 +3,8 @@ use super::super::{
     Checker, Env, LiteralContainer, Value, flow::narrow_by_type, literal_vector_value, nil_part,
 };
 use super::{
-    ArgumentForms, Callable, PreparedCallable, call_returns, narrow_emptiness, predicate_type,
+    ArgumentForms, Callable, PreparedCallable, call_returns, narrow_emptiness,
+    narrow_seq_emptiness, predicate_type,
     sequences::{collection_emptiness, iteration_may_throw},
 };
 use crate::reader::{Form, Kind, Span};
@@ -98,7 +99,7 @@ impl Checker<'_> {
             .enumerate()
             .map(|(index, item)| {
                 let mut value = Value::new(item.clone());
-                value.literal_container = vector.vector_item(index).cloned();
+                value.literal_container = vector.position_child(index).cloned();
                 value
             })
             .collect();
@@ -216,7 +217,7 @@ impl Checker<'_> {
             .flat_map(|(items, vector)| {
                 items.iter().enumerate().map(move |(index, item)| {
                     let mut value = Value::new(item.clone());
-                    value.literal_container = vector.vector_item(index).cloned();
+                    value.literal_container = vector.position_child(index).cloned();
                     value
                 })
             });
@@ -341,6 +342,15 @@ impl Checker<'_> {
             // above proves that mapv actually calls the extern on these items.
             return Value::new(Type::Unknown);
         }
+        if let Some((_, source)) = inputs
+            .iter()
+            .find(|(input, _)| input.unproven_tuple_traversal())
+        {
+            self.withhold_callback_facts(&callable);
+            self.call_prepared(&callable, Vec::new(), span, env, false);
+            self.unchecked_tuple_traversal(name, *source);
+            return Value::new(Type::Vector(Box::new(Type::Unknown)));
+        }
         let nonempty = inputs
             .iter()
             .all(|(value, _)| collection_emptiness(&value.known) == Some(Type::Bool(false)));
@@ -431,7 +441,7 @@ impl Checker<'_> {
                 .map(|vector| {
                     let mut value =
                         Value::with_notes(vector.items[index].clone(), vector.notes.to_vec());
-                    value.literal_container = vector.container.vector_item(index).cloned();
+                    value.literal_container = vector.container.position_child(index).cloned();
                     let form = vector.literal.map(|forms| &forms[index]);
                     if let Some(projected) = &mut projected {
                         projected.push(form);
@@ -536,7 +546,7 @@ impl Checker<'_> {
             "clojure.core/some?" => element.without_nil(),
             "clojure.core/nil?" => nil_part(&element),
             "clojure.core/empty?" => narrow_emptiness(&element, true),
-            "clojure.core/not-empty" => narrow_emptiness(&element, false),
+            "clojure.core/not-empty" => narrow_seq_emptiness(&element, false),
             "clojure.core/identity" => element.truthy(),
             "clojure.core/vector?" if !self.globals.project_namespaces.contains("clojure.core") => {
                 narrow_vector_predicate(&element, true)

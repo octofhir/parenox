@@ -231,7 +231,7 @@ fn a_shadowed_seq_does_not_prove_emptiness() {
 #[test]
 fn when_first_preserves_presence_of_the_saved_selector_and_the_falsey_head() {
     let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
-      (s/def ::items (s/tuple (s/nilable (s/or :false #{false} :text string?))))
+      (s/def ::items (s/coll-of (s/nilable (s/or :false #{false} :text string?)) :kind vector?))
       (defn assert-present {:t/sig '[::items :-> ::items]} [value] value)
       (defn read-items
         {:t/sig '[{:items (s/nilable ::items)} :-> any?]}

@@ -48,7 +48,7 @@ impl Checker<'_> {
                 fallback_proof()
             } else if let Some((items, vector)) = proof {
                 match usize::try_from(index) {
-                    Ok(index) if index < items.len() => vector.vector_item(index),
+                    Ok(index) if index < items.len() => vector.position_child(index),
                     _ => fallback_proof(),
                 }
             } else {
@@ -107,7 +107,7 @@ impl Checker<'_> {
         let selected = &items[start..end as usize];
         let contents = selected.iter().enumerate().map(|(offset, item)| {
             let mut value = Value::new(item.clone());
-            value.literal_container = vector.vector_item(start + offset).cloned();
+            value.literal_container = vector.position_child(start + offset).cloned();
             value
         });
         let mut result = literal_vector_value(contents, selected.len(), true);

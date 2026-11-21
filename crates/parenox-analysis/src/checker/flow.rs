@@ -406,7 +406,7 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         }
         let runs_on_truth = matches!(mode, Conditional::If | Conditional::When);
-        let [yes, no] = self.check_if_paths(&xs[1], env, runs_on_truth, |checker, scope, truth| {
+        let branches = self.check_if_paths(&xs[1], env, runs_on_truth, |checker, scope, truth| {
             let body = if truth == runs_on_truth {
                 &xs[2..if when { xs.len() } else { 3 }]
             } else if when {
@@ -416,10 +416,7 @@ impl Checker<'_> {
             };
             checker.body(body, scope, tail)
         });
-        Value::with_notes(
-            Type::union([yes.known, no.known]),
-            [yes.notes, no.notes].concat(),
-        )
+        Value::union_branches(branches)
     }
 
     pub(super) fn check_if_paths(
@@ -458,8 +455,7 @@ impl Checker<'_> {
         }
         let mut fallthrough = env.clone();
         let mut reachable = true;
-        let mut types = Vec::new();
-        let mut notes = Vec::new();
+        let mut branches = Vec::new();
         for [test, result] in pairs {
             let condition = self.infer_path(test, &fallthrough, reachable, false);
             let mut selected = fallthrough.clone();
@@ -470,15 +466,14 @@ impl Checker<'_> {
                 condition.known.truthy() != Type::Never,
                 tail,
             );
-            types.push(branch.known);
-            notes.extend(branch.notes);
+            branches.push(branch);
             self.narrow(test, false, &mut fallthrough);
             reachable = condition.known.falsey() != Type::Never && fallthrough.reachable();
         }
         if reachable {
-            types.push(Type::Nil);
+            branches.push(Value::new(Type::Nil));
         }
-        Value::with_notes(Type::union(types), notes)
+        Value::union_branches(branches)
     }
 
     pub(super) fn binding_conditional(
@@ -537,7 +532,7 @@ impl Checker<'_> {
                     .model
                     .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
                 {
-                    self.narrow_subject(init, scope, |ty| narrow_emptiness(ty, !truth));
+                    self.narrow_sequence_subject(init, scope, !truth);
                 }
             } else if non_nil {
                 self.narrow_subject(init, scope, |ty| {
@@ -578,10 +573,7 @@ impl Checker<'_> {
         } else {
             Value::new(Type::Never)
         };
-        Value::with_notes(
-            Type::union([yes.known, no.known]),
-            [yes.notes, no.notes].concat(),
-        )
+        Value::union_branches([yes, no])
     }
 
     pub(super) fn short_circuit(&mut self, xs: &[Form], env: &Env, or: bool, tail: bool) -> Value {
@@ -589,25 +581,23 @@ impl Checker<'_> {
             return Value::new(if or { Type::Nil } else { Type::Bool(true) });
         }
         let mut local = env.clone();
-        let mut types = Vec::new();
-        let mut notes = Vec::new();
+        let mut branches = Vec::new();
         let mut reachable = true;
         for (index, x) in xs[1..].iter().enumerate() {
             let last = index + 2 == xs.len();
-            let value = self.infer_path(x, &local, reachable, tail && last);
+            let mut value = self.infer_path(x, &local, reachable, tail && last);
             if !reachable {
                 continue;
             }
-            notes.extend(value.notes);
             if last {
-                types.push(value.known);
+                branches.push(value);
                 break;
             }
-            types.push(if or {
+            let selected = if or {
                 value.known.truthy()
             } else {
                 value.known.falsey()
-            });
+            };
             if (if or {
                 value.ty.falsey()
             } else {
@@ -616,10 +606,12 @@ impl Checker<'_> {
             {
                 reachable = false;
             }
+            value.narrow(selected);
+            branches.push(value);
             self.narrow(x, !or, &mut local);
             reachable &= local.reachable();
         }
-        Value::with_notes(Type::union(types), notes)
+        Value::union_branches(branches)
     }
 
     fn unshadowed_operation(&self, head: &Form, env: &Env) -> Option<String> {
@@ -711,16 +703,15 @@ impl Checker<'_> {
                 }
             }
             ("clojure.core/not", [operand]) => self.narrow(operand, !truth, env),
-            ("clojure.core/empty?" | "clojure.core/not-empty", [operand]) => {
-                let empty = truth == (op == "clojure.core/empty?");
-                self.narrow_subject(operand, env, |ty| narrow_emptiness(ty, empty));
+            ("clojure.core/empty?", [operand]) => {
+                self.narrow_subject(operand, env, |ty| narrow_emptiness(ty, truth));
             }
-            ("clojure.core/seq", [operand])
+            ("clojure.core/seq" | "clojure.core/not-empty", [operand])
                 if self
                     .model
                     .can_use_standard_core(head.symbol().unwrap(), self.globals) =>
             {
-                self.narrow_subject(operand, env, |ty| narrow_emptiness(ty, !truth));
+                self.narrow_sequence_subject(operand, env, !truth);
             }
             ("clojure.core/nil?", [operand]) => {
                 self.narrow_subject(operand, env, |ty| narrow_by_type(ty, &Type::Nil, truth));

@@ -45,6 +45,11 @@ impl Checker<'_> {
             self.call_prepared(&callable, Vec::new(), span, env, false);
             return Value::new(Type::Never);
         }
+        if collection.unproven_tuple_traversal() {
+            self.withhold_callback_facts(&callable);
+            self.call_prepared(&callable, Vec::new(), span, env, false);
+            return self.unchecked_tuple_traversal("clojure.core/reduce-kv", source.span);
+        }
         let call = KvCall {
             callable: &callable,
             initial,

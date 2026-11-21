@@ -235,9 +235,9 @@ impl Checker<'_> {
             {
                 match item {
                     IndexedItem::Present(item) => {
-                        literal_container = usize::try_from(*index)
-                            .ok()
-                            .and_then(|index| value.literal_container.as_ref()?.vector_item(index));
+                        literal_container = usize::try_from(*index).ok().and_then(|index| {
+                            value.literal_container.as_ref()?.position_child(index)
+                        });
                         item.clone()
                     }
                     IndexedItem::Optional(item)

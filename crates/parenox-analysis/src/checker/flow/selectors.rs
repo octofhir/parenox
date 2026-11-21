@@ -1,7 +1,8 @@
 //! Narrow immutable map reads back to their lexical owner.
 use super::narrow_by_type;
 use crate::checker::{
-    Checker, Env,
+    Checker, Env, LiteralContainer,
+    calls::{narrow_emptiness, narrow_seq_emptiness},
     env::{MAX_SELECTOR_KEYS, Selector},
     quote::quoted_symbol,
 };
@@ -85,6 +86,28 @@ impl Checker<'_> {
             Kind::Keyword(_) | Kind::String(_) => self.literal_map_key(form),
             _ => quoted_symbol(form).map(|symbol| Type::Sym(symbol.to_owned())),
         }
+    }
+
+    pub(super) fn narrow_sequence_subject(&self, form: &Form, env: &mut Env, empty: bool) {
+        let local = form.symbol().and_then(|name| env.get(name));
+        let proof = local
+            .and_then(|value| value.literal_container.as_ref())
+            .or_else(|| {
+                let selector = self.selector(form, env)?;
+                let root = env.owner(&selector.root)?.literal_container.as_ref()?;
+                selector
+                    .keys
+                    .iter()
+                    .try_fold(root, |proof, key| proof.map_field(key))
+            });
+        let proved_vector = matches!(proof, Some(LiteralContainer::Vector(_)));
+        self.narrow_subject(form, env, |ty| {
+            if proved_vector {
+                narrow_emptiness(ty, empty)
+            } else {
+                narrow_seq_emptiness(ty, empty)
+            }
+        });
     }
 }
 

@@ -65,7 +65,7 @@ impl Checker<'_> {
                 }
                 Type::Unknown
             });
-            self.bind(pattern, Value::with_notes(ty, value.notes.clone()), env);
+            self.bind(pattern, value.position_value(ty, index), env);
         }
         if let Some((pattern, remaining)) = rest {
             self.bind(pattern, remaining, env);

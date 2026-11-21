@@ -163,7 +163,14 @@ impl Checker<'_> {
                     let invoked = reachable && input.known != Type::Never;
                     let start = self.diagnostics.len();
                     let sequence = self.inspect_path(invoked, |checker| {
-                        checker.comprehension_seq(&input.known, init.span, name)
+                        if input.unproven_tuple_traversal() {
+                            checker
+                                .unchecked_tuple_traversal(name, init.span)
+                                .known
+                                .nilable()
+                        } else {
+                            checker.comprehension_seq(&input.known, init.span, name)
+                        }
                     });
                     self.dedup_diagnostics(start);
                     may_skip |= invoked && sequence.without_nil() != sequence;
@@ -172,7 +179,7 @@ impl Checker<'_> {
                     });
                     reachable = invoked && item != Type::Never;
                     self.inspect_path(reachable, |checker| {
-                        checker.bind(pattern, Value::with_notes(item, input.notes), &mut local);
+                        checker.bind(pattern, input.traversal_element(item), &mut local);
                     });
                 }
                 Binding::Let(pairs) => {

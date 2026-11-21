@@ -64,8 +64,7 @@ impl Checker<'_> {
         let local = input.symbol();
         let selector = self.selector(input, env);
         let mut remaining = subject.known;
-        let mut types = Vec::new();
-        let mut notes = Vec::new();
+        let mut outcomes = Vec::new();
         let mut matched = false;
         for (keys, result) in branches {
             let select =
@@ -82,8 +81,7 @@ impl Checker<'_> {
                 refine_owner(selector, &mut branch_env, select);
             }
             let branch = self.case_branch(result, local, selected, branch_env, tail);
-            types.push(branch.known);
-            notes.extend(branch.notes);
+            outcomes.push(branch);
         }
         if let Some(fallback) = fallback.first() {
             let mut branch_env = env.clone();
@@ -99,8 +97,7 @@ impl Checker<'_> {
                 });
             }
             let branch = self.case_branch(fallback, local, remaining, branch_env, tail);
-            types.push(branch.known);
-            notes.extend(branch.notes);
+            outcomes.push(branch);
         } else if remaining != Type::Never {
             self.illegal_argument();
             if (!matched && remaining != Type::Unknown)
@@ -116,7 +113,7 @@ impl Checker<'_> {
                 );
             }
         }
-        Value::with_notes(Type::union(types), notes)
+        Value::union_branches(outcomes)
     }
 
     fn case_constant(&mut self, form: &Form, env: &Env) -> Option<Type> {

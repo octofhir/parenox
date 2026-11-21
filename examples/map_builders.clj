@@ -2,8 +2,8 @@
 
 (defn public-reading
   {:t/sig '[(s/tuple number? string?) :-> {"amount" number? "unit" string?}]}
-  [reading]
-  (-> (zipmap [:amount :unit] reading)
+  [[amount unit]]
+  (-> (zipmap [:amount :unit] [amount unit])
       (update-keys (fn [key]
                      (case key :amount "amount" :unit "unit")))))
 

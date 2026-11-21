@@ -5,11 +5,10 @@ fn a_named_local_fn_checks_each_reached_part_of_a_recursive_lookup() {
     let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
         (defn update-existing-in
           {:t/sig '[{:outer {:label string?}}
-                    (s/tuple #{:outer} #{:label})
                     (s/fspec :args (s/cat :value string?) :ret string?)
                     nil?
                     :-> {:outer {:label string?}}]}
-          [m ks f args]
+          [m f args]
           (let [up (fn up [m ks f args]
                      (let [[k & ks] ks]
                        (if-let [kv (find m k)]
@@ -17,7 +16,7 @@ fn a_named_local_fn_checks_each_reached_part_of_a_recursive_lookup() {
                            (assoc m k (up (val kv) ks f args))
                            (assoc m k (apply f (val kv) args)))
                          m)))]
-            (up m ks f args)))"#;
+            (up m [:outer :label] f args)))"#;
     let mut session = Session::default();
     let report = session.check("named.clj", source);
     assert!(report.ok && report.complete, "{report:#?}");

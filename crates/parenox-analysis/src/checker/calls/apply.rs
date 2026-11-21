@@ -85,6 +85,11 @@ impl Checker<'_> {
         if collection.known == Type::Never {
             return self.call_prepared(&callable, args, span, env, false);
         }
+        if collection.unproven_tuple_traversal() {
+            self.withhold_callback_facts(&callable);
+            self.call_prepared(&callable, Vec::new(), span, env, false);
+            return self.unchecked_tuple_traversal("clojure.core/apply", spread.span);
+        }
         let types = match &collection.known {
             Type::Union(types) => types.as_slice(),
             ty => std::slice::from_ref(ty),
@@ -133,12 +138,12 @@ impl Checker<'_> {
             };
             let mut actual = Vec::with_capacity(args.len() + elements.len());
             actual.extend(args.iter().cloned());
-            actual.extend(elements.iter().map(|ty| {
-                (
-                    Value::with_notes(ty.clone(), collection.notes.clone()),
-                    spread.span,
-                )
-            }));
+            actual.extend(
+                elements
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| (collection.position_value(ty.clone(), index), spread.span)),
+            );
             let start = self.diagnostics.len();
             let value = self.call_prepared(&callable, actual, span, env, true);
             self.explain_spread_elements(start, spread.span);
@@ -361,7 +366,7 @@ fn append_concat_arguments<'form>(
         for (index, ty) in items.into_vec().into_iter().enumerate() {
             let site = literal.map_or(form, |forms| &forms[index]);
             let mut value = Value::with_notes(ty, input.notes.clone());
-            value.literal_container = container.vector_item(index).cloned();
+            value.literal_container = container.position_child(index).cloned();
             args.push((value, site.span));
             projected.push(Some(site));
         }

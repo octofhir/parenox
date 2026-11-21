@@ -126,10 +126,10 @@ fn emptiness_guards_refine_sequence_state_and_open_empty_shapes() {
                (if-not (empty? items)
                  (recur (next items) (+ total (first items)))
                  total)))
-           (defn empty-first
+           (defn empty-indexed
              {:t/sig '[(s/coll-of number? :kind vector?) :-> nil?]}
              [values]
-             (when (empty? values) (first values)))
+             (when (empty? values) (nth values 0 nil)))
            (defn fallback
              {:t/sig '[(s/keys) :-> string?]} [configuration]
              (if (empty? configuration)
@@ -137,6 +137,58 @@ fn emptiness_guards_refine_sequence_state_and_open_empty_shapes() {
                "configured"))"#,
     );
     assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn tuple_spec_positions_do_not_describe_a_vector_sequence() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+(defn indexed {:t/sig '[(s/tuple #{"x"}) :-> #{"x"}]} [[head]] head)
+(defn read-head {:t/sig '[(s/tuple #{"x"}) :-> any?]} [input]
+  (subs (first input) 2))
+(defn choose {:t/sig '[(s/tuple #{"x"}) :-> any?]} [input]
+  (let [choice (if (seq input) :present :empty)] choice))
+(defn counted-empty {:t/sig '[(s/coll-of string? :kind vector?) :-> any?]} [input]
+  (when (empty? input) (first input)))
+(defn ordinary {:t/sig '[boolean? :-> (s/nilable #{"x"})]} [condition]
+  (let [optional (if condition ["x"] nil)
+        items (if condition ["x"] [])]
+    (when (seq items) (first items))
+    (first optional)))"#;
+    let mut session = Session::default();
+    let report = session.check("vector_sources.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 3, "{report:#?}");
+    for finding in &report.diagnostics {
+        assert_eq!(finding.code, "PNX9001");
+        assert_eq!(finding.severity, "warning");
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            "input"
+        );
+    }
+    let offset = source.find("choice))").unwrap();
+    let Some(parenox::DocumentHover::Local(hover)) =
+        session.document_hover_at("vector_sources.clj", offset)
+    else {
+        panic!("missing hover on the branches of a structural sequence");
+    };
+    assert_eq!(hover.inferred_type, ":empty | :present");
+}
+
+#[test]
+fn ordinary_vector_origins_survive_sequence_reads_and_callbacks() {
+    for expression in [
+        r#"(first (first (seq [["x"]])))"#,
+        r#"(first (first (rest [nil ["x"]])))"#,
+        r#"(let [outer [["x"]]] (apply first outer))"#,
+        r#"(reduce (fn [_ item] (first item)) nil [["x"]])"#,
+        r#"(some first [["x"]])"#,
+        r#"(first (or nil (if-let [value "x"] [value] [])))"#,
+        r#"(first (case :hit :hit ["x"] ["wrong"]))"#,
+    ] {
+        let report = check(expression, r#"#{"x"}"#);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
 }
 
 #[test]

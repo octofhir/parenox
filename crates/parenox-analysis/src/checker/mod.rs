@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use crate::reader::{Form, Kind, Span};
 use crate::types::{
-    Arity, Compatibility, IntegerRange, IntegerType, MAX_TUPLE_ITEMS, Signature, Type,
+    Arity, Compatibility, ExtraFields, IntegerRange, IntegerType, MAX_TUPLE_ITEMS, Signature, Type,
 };
 use crate::{ContractOrigin, Diagnostic, Suggestion};
 
@@ -98,9 +98,34 @@ impl Model {
 enum LiteralContainer {
     Map(Option<Arc<BTreeMap<Type, LiteralContainer>>>),
     Vector(Option<Arc<[Option<LiteralContainer>]>>),
+    Positions(Arc<[Option<LiteralContainer>]>),
 }
 
 impl LiteralContainer {
+    fn from_inert_type(ty: &Type) -> Option<Self> {
+        match ty {
+            Type::Tuple(items) => {
+                let children: Vec<_> = items.iter().map(Self::from_inert_type).collect();
+                let children = children
+                    .iter()
+                    .any(Option::is_some)
+                    .then(|| Arc::from(children));
+                Some(Self::Vector(children))
+            }
+            Type::Map(map) => {
+                let fields: BTreeMap<_, _> = map
+                    .fields
+                    .iter()
+                    .filter_map(|(key, field)| {
+                        Self::from_inert_type(&field.ty).map(|proof| (key.clone(), proof))
+                    })
+                    .collect();
+                (!fields.is_empty()).then(|| Self::Map(Some(Arc::new(fields))))
+            }
+            _ => None,
+        }
+    }
+
     fn map_field(&self, key: &Type) -> Option<&Self> {
         let Self::Map(Some(fields)) = self else {
             return None;
@@ -108,11 +133,16 @@ impl LiteralContainer {
         fields.get(key)
     }
 
-    fn vector_item(&self, index: usize) -> Option<&Self> {
-        let Self::Vector(Some(items)) = self else {
-            return None;
-        };
+    fn position_child(&self, index: usize) -> Option<&Self> {
+        let items = self.child_positions()?;
         items.get(index).and_then(Option::as_ref)
+    }
+
+    fn child_positions(&self) -> Option<&Arc<[Option<Self>]>> {
+        match self {
+            Self::Vector(Some(items)) | Self::Positions(items) => Some(items),
+            _ => None,
+        }
     }
 
     fn matches_type(&self, ty: &Type) -> bool {
@@ -121,11 +151,18 @@ impl LiteralContainer {
             (Self::Vector(items), Type::Tuple(types)) => items
                 .as_ref()
                 .is_none_or(|items| items.len() == types.len()),
+            (Self::Positions(items), Type::SeqTuple(types) | Type::ListTuple(types)) => {
+                items.len() == types.len()
+            }
+            (Self::Positions(items), Type::MapEntry(_)) => items.len() == 2,
+            (Self::Vector(_) | Self::Positions(_), Type::Union(parts)) => parts
+                .iter()
+                .all(|part| matches!(part, Type::Nil) || self.matches_type(part)),
             _ => false,
         }
     }
 
-    fn join(self, other: Self, known: &Type) -> Option<Self> {
+    fn join(self, other: Self) -> Option<Self> {
         match (self, other) {
             (Self::Map(left), Self::Map(right)) => {
                 let fields = match (left, right) {
@@ -142,9 +179,12 @@ impl LiteralContainer {
                 };
                 Some(Self::Map(fields))
             }
-            (left @ Self::Vector(_), right) if left == right && left.matches_type(known) => {
-                Some(left)
-            }
+            (left @ Self::Vector(_), right @ Self::Vector(_)) => Some(if left == right {
+                left
+            } else {
+                Self::Vector(None)
+            }),
+            (left @ Self::Positions(_), right) if left == right => Some(left),
             _ => None,
         }
     }
@@ -186,13 +226,113 @@ impl Value {
         matches!(self.literal_container, Some(LiteralContainer::Map(_)))
     }
 
-    fn join(mut self, other: Value) -> Value {
+    fn with_ordinary_tuple(mut self) -> Self {
+        let proof = LiteralContainer::Vector(None);
+        if proof.matches_type(&self.known) {
+            self.literal_container = Some(proof);
+        }
+        self
+    }
+
+    fn position_value(&self, known: Type, index: usize) -> Self {
+        let mut value = Self::with_notes(known, self.notes.clone());
+        value.literal_container = self
+            .literal_container
+            .as_ref()
+            .and_then(|container| container.position_child(index))
+            .filter(|proof| proof.matches_type(&value.known))
+            .cloned();
+        value
+    }
+
+    fn traversal_element(self, known: Type) -> Self {
+        fn shared<'a>(
+            mut origins: impl Iterator<Item = Option<&'a LiteralContainer>>,
+        ) -> Option<LiteralContainer> {
+            let first = origins.next()??.clone();
+            origins.try_fold(first, |shared, proof| shared.join(proof?.clone()))
+        }
+
+        let origin = match (&self.known, &self.literal_container) {
+            (Type::Map(map), Some(LiteralContainer::Map(Some(origins))))
+                if matches!(map.extra, ExtraFields::Closed) =>
+            {
+                let payload = shared(
+                    map.fields
+                        .iter()
+                        .filter(|(_, field)| field.ty != Type::Never)
+                        .map(|(key, _)| origins.get(key)),
+                );
+                payload.map(|proof| LiteralContainer::Positions(Arc::from([None, Some(proof)])))
+            }
+            (_, proof) => proof
+                .as_ref()
+                .and_then(LiteralContainer::child_positions)
+                .and_then(|children| shared(children.iter().map(Option::as_ref))),
+        };
+        Self {
+            literal_container: origin.filter(|proof| proof.matches_type(&known)),
+            ..Self::with_notes(known, self.notes)
+        }
+    }
+
+    fn unproven_tuple_traversal(&self) -> bool {
+        fn contains_tuple(ty: &Type) -> bool {
+            match ty {
+                Type::Tuple(_) => true,
+                Type::Union(parts) => parts.iter().any(contains_tuple),
+                Type::Parameter(parameter) => parameter.upper.as_ref().is_some_and(contains_tuple),
+                _ => false,
+            }
+        }
+        !matches!(self.literal_container, Some(LiteralContainer::Vector(_)))
+            && contains_tuple(&self.known)
+    }
+
+    fn merge_container_origins(&mut self, other: &mut Self) -> Option<LiteralContainer> {
+        match (
+            self.literal_container.take(),
+            other.literal_container.take(),
+        ) {
+            (Some(left), Some(right)) => left.join(right),
+            (proof, None) if matches!(other.known, Type::Nil | Type::Never) => proof,
+            (None, proof) if matches!(self.known, Type::Nil | Type::Never) => proof,
+            _ => None,
+        }
+    }
+
+    fn union_branches(branches: impl IntoIterator<Item = Self>) -> Self {
+        let mut types = Vec::new();
+        let mut notes = Vec::new();
+        let mut origin: Option<LiteralContainer> = None;
+        let mut have_value = false;
+        for branch in branches {
+            if !matches!(branch.known, Type::Never | Type::Nil) {
+                origin = if have_value {
+                    origin
+                        .zip(branch.literal_container)
+                        .and_then(|(left, right)| left.join(right))
+                } else {
+                    branch.literal_container
+                };
+                have_value = true;
+            }
+            types.push(branch.known);
+            notes.extend(branch.notes);
+        }
+        let mut result = Self::with_notes(Type::union(types), notes);
+        result.literal_container = origin.filter(|proof| proof.matches_type(&result.known));
+        result
+    }
+
+    fn join(mut self, mut other: Value) -> Value {
         if self.known == Type::Never {
             return other;
         }
         if other.known == Type::Never {
             return self;
         }
+        let literal_container = self.merge_container_origins(&mut other);
         for note in other.notes {
             if !self.notes.contains(&note) {
                 self.notes.push(note);
@@ -209,14 +349,10 @@ impl Value {
             None
         };
         let known = self.known.join_values(other.known);
-        let literal_container = self
-            .literal_container
-            .zip(other.literal_container)
-            .and_then(|(left, right)| left.join(right, &known));
         Self {
             contract,
             guard,
-            literal_container,
+            literal_container: literal_container.filter(|proof| proof.matches_type(&known)),
             ..Self::with_notes(known, self.notes)
         }
     }
@@ -224,8 +360,8 @@ impl Value {
     fn narrow(&mut self, known: Type) {
         let keep = match &self.literal_container {
             Some(LiteralContainer::Map(_)) => matches!(known, Type::Map(_)),
-            Some(LiteralContainer::Vector(_)) => {
-                matches!((&self.known, &known), (Type::Tuple(before), Type::Tuple(after)) if before.len() == after.len())
+            Some(proof @ (LiteralContainer::Vector(_) | LiteralContainer::Positions(_))) => {
+                proof.matches_type(&known)
             }
             None => false,
         };
@@ -574,7 +710,10 @@ impl Checker<'_> {
                     Value::new(Type::Unknown)
                 } else if let Some(value) = self.model.declared_value(s, self.globals, form.span.start.offset) {
                     match value {
-                        DeclaredValue::Literal(ty) => Value::new(ty.clone()),
+                        DeclaredValue::Literal(ty) => Value {
+                            literal_container: LiteralContainer::from_inert_type(ty),
+                            ..Value::new(ty.clone())
+                        },
                         DeclaredValue::ExternLiteral(ty, origin) if self.partial_contract_visible(origin) => Value::with_notes(
                             ty.clone(),
                             origin.path.iter().map(|path| {

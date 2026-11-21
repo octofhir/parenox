@@ -94,8 +94,8 @@ fn nil_case_inputs_have_an_honest_contract_and_safe_string_fallback() {
     assert!(report.diagnostics[2].suggestions.is_empty(), "{report:#?}");
 
     let spread = check(
-        r#"(defn projected {:t/sig '[(s/tuple (s/nilable string?)) :-> string?]} [args]
-             (apply str/upper-case args))"#,
+        r#"(defn projected {:t/sig '[(s/nilable string?) :-> string?]} [text]
+             (let [args [text]] (apply str/upper-case args)))"#,
     );
     let [finding] = spread.diagnostics.as_slice() else {
         panic!("{spread:#?}");

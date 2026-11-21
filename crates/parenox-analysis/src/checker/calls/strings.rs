@@ -153,7 +153,7 @@ impl Checker<'_> {
             Some(_) => groups(),
             None => Type::union([Type::String, groups()]),
         };
-        Value::new(result.nilable())
+        Value::new(result.nilable()).with_ordinary_tuple()
     }
 
     pub(super) fn case_string(&mut self, name: &str, (value, span): &(Value, Span)) -> Type {

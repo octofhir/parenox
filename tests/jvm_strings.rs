@@ -317,25 +317,36 @@ fn structural_traversal_does_not_supply_literal_str_arguments() {
   (let [joined (apply str parts)
         seq-joined (apply str (seq parts))
         prefixed (apply (partial str "prefix:") parts)
-        mapped (mapv str parts)]
+        mapped (mapv (fn [part] (str part "!")) parts)]
     [joined seq-joined prefixed mapped]))"#;
     let mut session = Session::default();
     let report = session.check("render.clj", source);
-    assert!(report.ok && report.complete, "{report:#?}");
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 4, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|finding| finding.code == "PNX9001" && finding.severity == "warning")
+    );
     let start = source.find("[joined seq-joined").unwrap();
-    for (name, expected) in [
-        ("joined", "String"),
-        ("seq-joined", "String"),
-        ("prefixed", "String"),
-        ("mapped", "Vector<String>"),
-    ] {
+    for name in ["joined", "seq-joined", "prefixed", "mapped"] {
         let offset = start + source[start..].find(name).unwrap();
-        let Some(DocumentHover::Local(hover)) = session.document_hover_at("render.clj", offset)
-        else {
-            panic!("missing hover for {name}");
-        };
-        assert_eq!(hover.inferred_type, expected);
+        let hover = session.document_hover_at("render.clj", offset);
+        if name == "mapped" {
+            let Some(DocumentHover::Local(hover)) = hover else {
+                panic!("missing vector result");
+            };
+            assert_eq!(hover.inferred_type, "Vector<Unknown>");
+        } else {
+            assert!(hover.is_none(), "unexpected hover for {name}");
+        }
     }
+    assert!(
+        session
+            .document_hover_at("render.clj", source.find("part \"!\"").unwrap())
+            .is_none()
+    );
 }
 
 #[test]

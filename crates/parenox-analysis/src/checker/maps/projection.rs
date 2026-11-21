@@ -11,7 +11,7 @@ impl Checker<'_> {
         (target, target_span): &(Value, Span),
         (keys, keys_span): &(Value, Span),
     ) -> Value {
-        let sequence = self.seq_type(&keys.known, "clojure.core/select-keys", *keys_span);
+        let sequence = self.seq_value_type(keys, "clojure.core/select-keys", *keys_span);
         if matches!(sequence, Type::Never | Type::Unknown) {
             return Value::new(sequence);
         }

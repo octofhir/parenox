@@ -1,5 +1,6 @@
 //! Vector and sequence traversal and accumulation.
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::super::{Checker, LiteralContainer, Value, literal_vector_value};
 use crate::Diagnostic;
@@ -56,17 +57,30 @@ fn nonempty_seq(items: &[Type]) -> Type {
 
 pub(super) fn list_value(args: &[(Value, Span)]) -> Value {
     let items = args.iter().map(|(value, _)| value.known.clone());
-    Value::new(if args.len() <= MAX_TUPLE_ITEMS {
-        Type::ListTuple(items.collect())
-    } else {
-        Type::List(Box::new(Type::union(items)))
-    })
+    if args.len() > MAX_TUPLE_ITEMS {
+        return Value::new(Type::List(Box::new(Type::union(items))));
+    }
+    let mut result = Value::new(Type::ListTuple(items.collect()));
+    if args
+        .iter()
+        .any(|(value, _)| value.literal_container.is_some())
+    {
+        result.literal_container = Some(LiteralContainer::Positions(
+            args.iter()
+                .map(|(value, _)| value.literal_container.clone())
+                .collect(),
+        ));
+    }
+    result
 }
 
 impl Checker<'_> {
     pub(super) fn cons(&mut self, args: &[(Value, Span)]) -> Value {
         let (item, _) = &args[0];
         let (tail, span) = &args[1];
+        if tail.unproven_tuple_traversal() {
+            return self.unchecked_tuple_traversal("clojure.core/cons", *span);
+        }
         let result = self.cons_type(&item.known, &tail.known, *span);
         Value::with_notes(result, tail.notes.clone())
     }
@@ -110,7 +124,7 @@ impl Checker<'_> {
                         .any(|(item, _)| item.literal_container.is_some());
                 let proofs = nested.then(|| {
                     (0..previous.len())
-                        .map(|index| vector.vector_item(index).cloned())
+                        .map(|index| vector.position_child(index).cloned())
                         .chain(items.iter().map(|(item, _)| item.literal_container.clone()))
                         .collect()
                 });
@@ -134,7 +148,7 @@ impl Checker<'_> {
             item.literal_container = items
                 .len()
                 .checked_sub(1)
-                .and_then(|index| vector.vector_item(index))
+                .and_then(|index| vector.position_child(index))
                 .cloned();
             return item;
         }
@@ -200,6 +214,12 @@ impl Checker<'_> {
     }
 
     pub(super) fn emptiness_call(&mut self, name: &str, (value, span): &(Value, Span)) -> Value {
+        if name == "clojure.core/not-empty" && value.unproven_tuple_traversal() {
+            self.may_throw();
+            let mut result = value.clone();
+            result.narrow(result.known.clone().nilable());
+            return result;
+        }
         let Some(empty) = collection_emptiness(&value.known) else {
             self.diagnostics.push(Diagnostic::type_mismatch(
                 *span,
@@ -213,12 +233,13 @@ impl Checker<'_> {
             return Value::with_notes(empty, value.notes.clone());
         }
         let nonempty = narrow_emptiness(&value.known, false);
-        let result = if empty == Type::Bool(false) {
+        let mut result = value.clone();
+        result.narrow(if empty == Type::Bool(false) {
             nonempty
         } else {
             nonempty.nilable()
-        };
-        Value::with_notes(result, value.notes.clone())
+        });
+        result
     }
 
     pub(in crate::checker) fn sequence_call(
@@ -235,12 +256,10 @@ impl Checker<'_> {
             _ => unreachable!(),
         };
         if matches!(operation, ReadSequence::Head) {
-            if let (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) =
+            if let (Type::Tuple(items), Some(LiteralContainer::Vector(_))) =
                 (&value.known, &value.literal_container)
             {
-                let mut head = Value::with_notes(operation.fixed(items), value.notes.clone());
-                head.literal_container = vector.vector_item(0).cloned();
-                return head;
+                return value.position_value(operation.fixed(items), 0);
             }
             if self.partial_scope.is_some() && !matches!(value.known, Type::Nil | Type::Never) {
                 // A structural vector contract can constrain count and nth
@@ -249,15 +268,60 @@ impl Checker<'_> {
                 return Value::new(Type::Unknown);
             }
         }
+        if value.unproven_tuple_traversal() {
+            return self.unchecked_tuple_traversal(name, span);
+        }
         if iteration_may_throw(&value.known) {
             self.may_throw();
         }
         let result = self.read_sequence(operation, &value.known, name, span);
-        Value::with_notes(result, value.notes.clone())
+        if matches!(operation, ReadSequence::Head) {
+            return value.position_value(result, 0);
+        }
+        let mut result = Value::with_notes(result, value.notes.clone());
+        if let Some(items) = value
+            .literal_container
+            .as_ref()
+            .and_then(LiteralContainer::child_positions)
+        {
+            let children = if matches!(operation, ReadSequence::Start) {
+                items.clone()
+            } else {
+                Arc::from(items.get(1..).unwrap_or_default())
+            };
+            let proof = LiteralContainer::Positions(children);
+            if proof.matches_type(&result.known) {
+                result.literal_container = Some(proof);
+            }
+        }
+        result
     }
 
     pub(in crate::checker) fn seq_type(&mut self, ty: &Type, name: &str, span: Span) -> Type {
         self.read_sequence(ReadSequence::Start, ty, name, span)
+    }
+
+    pub(in crate::checker) fn seq_value_type(
+        &mut self,
+        value: &Value,
+        name: &str,
+        span: Span,
+    ) -> Type {
+        if value.unproven_tuple_traversal() {
+            return self.unchecked_tuple_traversal(name, span).known;
+        }
+        self.seq_type(&value.known, name, span)
+    }
+
+    pub(in crate::checker) fn unchecked_tuple_traversal(
+        &mut self,
+        name: &str,
+        span: Span,
+    ) -> Value {
+        self.unchecked_form(
+            span,
+            &format!("{name} needs a proven ordinary vector to use tuple elements for traversal"),
+        )
     }
 
     pub(super) fn map_sequence_call(&mut self, name: &str, (value, span): &(Value, Span)) -> Value {
@@ -492,6 +556,16 @@ pub(in crate::checker) fn narrow_emptiness(ty: &Type, empty: bool) -> Type {
             extra: ExtraFields::Closed,
         }),
         _ => ty.clone(),
+    }
+}
+
+pub(in crate::checker) fn narrow_seq_emptiness(ty: &Type, empty: bool) -> Type {
+    match ty {
+        Type::Tuple(_) | Type::Parameter(_) => ty.clone(),
+        Type::Union(parts) => {
+            Type::union(parts.iter().map(|part| narrow_seq_emptiness(part, empty)))
+        }
+        _ => narrow_emptiness(ty, empty),
     }
 }
 
