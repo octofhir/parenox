@@ -42,18 +42,27 @@ fn points_at_elements_and_callback_bodies_without_suggesting_collection_replacem
         panic!("{report:#?}");
     };
     let fragment = |d: &parenox::Diagnostic| &source[d.span.start.offset..d.span.end.offset];
-    assert_eq!(fragment(direct), r#"["2"]"#);
+    assert_eq!(fragment(direct), r#""2""#);
     assert_eq!(direct.actual.as_deref(), Some("String"));
-    assert!(direct.suggestions.is_empty());
-    assert!(
-        direct
-            .help
-            .as_deref()
-            .is_some_and(|help| help.contains("elements"))
-    );
+    let [suggestion] = direct.suggestions.as_slice() else {
+        panic!("{direct:#?}");
+    };
+    assert_eq!(suggestion.span, direct.span);
+    assert_eq!(suggestion.replacement, "2");
+    assert_eq!(suggestion.applicability, "requires-review");
     assert_eq!(fragment(inline), "name");
     assert_eq!(inline.expected.as_deref(), Some("Non-nil value"));
     assert_eq!(inline.suggestions[0].replacement, r#"(or name "")"#);
+
+    let report = check(
+        r#"(defn indirect {:t/sig '[:-> any?]} []
+             (let [values ["2"]] (mapv inc values)))"#,
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(finding.suggestions.is_empty());
+    assert!(finding.help.as_deref().unwrap().contains("elements"));
 }
 
 #[test]

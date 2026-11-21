@@ -1,11 +1,23 @@
 //! Contextual calls over collections that produce eager Clojure vectors.
-use super::super::{Checker, Env, Value, flow::narrow_by_type, nil_part};
+use super::super::{
+    Checker, Env, LiteralContainer, Value, flow::narrow_by_type, literal_vector_value, nil_part,
+};
 use super::{
-    call_returns, narrow_emptiness, predicate_type,
+    PreparedCallable, call_returns, narrow_emptiness, predicate_type,
     sequences::{collection_emptiness, iteration_may_throw},
 };
 use crate::reader::{Form, Span};
 use crate::types::{IntegerClass, IntegerType, Type};
+
+const MAX_VECTOR_MAP_STEPS: usize = 128;
+
+struct FixedVector<'a> {
+    items: &'a [Type],
+    notes: &'a [String],
+    container: &'a LiteralContainer,
+    span: Span,
+    literal: Option<&'a [Form]>,
+}
 
 pub(in crate::checker) fn vector_predicate(input: &Type) -> Type {
     match input {
@@ -93,6 +105,19 @@ impl Checker<'_> {
             self.call_prepared(&callable, Vec::new(), span, env, false);
             return Value::new(Type::Never);
         }
+        if !filter
+            && self
+                .model
+                .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
+        {
+            let start = self.diagnostics.len();
+            if let Some(result) = self.map_fixed_vectors(&callable, &inputs, collections, span, env)
+            {
+                self.explain_projected_arguments(start, collections);
+                self.dedup_diagnostics(start);
+                return result;
+            }
+        }
         let nonempty = inputs
             .iter()
             .all(|(value, _)| collection_emptiness(&value.known) == Some(Type::Bool(false)));
@@ -104,6 +129,93 @@ impl Checker<'_> {
         let filtered = filter.then(|| args[0].0.known.clone());
         let start = self.diagnostics.len();
         let result = self.call_prepared(&callable, args, span, env, invoked);
+        self.explain_projected_arguments(start, collections);
+        if invoked && nonempty && result.known == Type::Never {
+            return result;
+        }
+        let element = match filtered {
+            _ if !invoked => Type::Never,
+            Some(_) if result.known.truthy() == Type::Never => Type::Never,
+            Some(element) => self.filtered_element(element, callback, env),
+            None => result.known,
+        };
+        Value::new(Type::Vector(Box::new(element)))
+    }
+
+    fn map_fixed_vectors(
+        &mut self,
+        callable: &PreparedCallable<'_, '_>,
+        inputs: &[(Value, Span)],
+        collections: &[Form],
+        span: Span,
+        env: &Env,
+    ) -> Option<Value> {
+        let vectors = inputs
+            .iter()
+            .zip(collections)
+            .map(|((input, _), form)| {
+                // s/tuple observes count and nth. A custom vector can expose
+                // different elements via seq or IReduceInit.
+                let (Type::Tuple(items), Some(container @ LiteralContainer::Vector(_))) =
+                    (&input.known, &input.literal_container)
+                else {
+                    return None;
+                };
+                Some(FixedVector {
+                    items,
+                    notes: &input.notes,
+                    container,
+                    span: form.span,
+                    literal: form.vector().filter(|forms| forms.len() == items.len()),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        // All operands are already evaluated. A zip of these finite vectors
+        // visits one position at a time and ends at the shortest input.
+        let count = vectors
+            .iter()
+            .map(|vector| vector.items.len())
+            .min()
+            .unwrap();
+        if !self.path_reachable {
+            return Some(self.call_prepared(callable, Vec::new(), span, env, false));
+        }
+        if count == 0 {
+            self.call_prepared(callable, Vec::new(), span, env, false);
+        }
+        let mut output = Vec::with_capacity(count);
+        for index in 0..count {
+            if self.vector_map_steps >= MAX_VECTOR_MAP_STEPS {
+                self.type_query = None;
+                self.call_prepared(callable, Vec::new(), span, env, false);
+                return Some(self.unchecked_form(
+                    span,
+                    &format!("mapv step analysis limit ({MAX_VECTOR_MAP_STEPS}) exceeded"),
+                ));
+            }
+            self.vector_map_steps += 1;
+            let args = vectors
+                .iter()
+                .map(|vector| {
+                    let mut value =
+                        Value::with_notes(vector.items[index].clone(), vector.notes.to_vec());
+                    value.literal_container = vector.container.vector_item(index).cloned();
+                    let span = vector
+                        .literal
+                        .map_or(vector.span, |forms| forms[index].span);
+                    (value, span)
+                })
+                .collect();
+            let item = self.call_prepared(callable, args, span, env, true);
+            if item.known == Type::Never {
+                return Some(item);
+            }
+            output.push(item);
+        }
+        Some(literal_vector_value(output.into_iter(), count, true))
+    }
+
+    fn explain_projected_arguments(&mut self, start: usize, collections: &[Form]) {
         for diagnostic in &mut self.diagnostics[start..] {
             if diagnostic.code == "PNX2322"
                 && collections.iter().any(|form| diagnostic.span == form.span)
@@ -115,16 +227,6 @@ impl Checker<'_> {
                 );
             }
         }
-        if invoked && nonempty && result.known == Type::Never {
-            return result;
-        }
-        let element = match filtered {
-            _ if !invoked => Type::Never,
-            Some(_) if result.known.truthy() == Type::Never => Type::Never,
-            Some(element) => self.filtered_element(element, callback, env),
-            None => result.known,
-        };
-        Value::new(Type::Vector(Box::new(element)))
     }
 
     fn collection_element(&mut self, collection: Value, span: Span, name: &str) -> Value {
