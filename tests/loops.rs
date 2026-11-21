@@ -8,6 +8,46 @@ fn check(expression: &str, contract: &str) -> Report {
 }
 
 #[test]
+fn raw_let_checks_sequential_bindings_and_preserves_the_recur_target() {
+    for expression in [
+        "(let* [value 1 / (inc value) value /] value)",
+        "((fn [let*] (let* [value let*] value)) 1)",
+        "(loop* [/ 0] (let* [next (inc /)] (if (= / 0) (recur next) /)))",
+    ] {
+        let report = check(expression, "number?");
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check("(let* [])", "nil?");
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn raw_let_reports_compiler_binding_errors_without_treating_patterns_as_values() {
+    for (expression, binding) in [
+        ("(let* nil unresolved)", "nil"),
+        ("(let* [value 1 other] unresolved)", "[value 1 other]"),
+        ("(let* [[value] [1]] unresolved)", "[value]"),
+        ("(let* [{:keys [value]} {}] unresolved)", "{:keys [value]}"),
+        ("(let* [other/value 1] unresolved)", "other/value"),
+        ("(let* [& 1] unresolved)", "&"),
+        ("(let* [value.bad 1] value.bad)", "value.bad"),
+    ] {
+        let source = format!("(ns demo)\n(defn f {{:t/sig '[:-> t/any]}} [] {expression})");
+        let report = Session::default().check("loops.clj", &source);
+        assert!(report.complete && !report.ok, "{expression}: {report:#?}");
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{expression}: {report:#?}");
+        };
+        assert_eq!(finding.code, "PNX1001", "{expression}");
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            binding,
+            "{expression}",
+        );
+    }
+}
+
+#[test]
 fn checks_loop_accumulators_and_types_of_later_iterations() {
     let source = include_str!("../examples/loops.clj");
     let report = Session::default().check("loops.clj", source);
@@ -69,6 +109,7 @@ fn checks_tail_position_after_core_macro_expansion() {
         "(loop [i 0] (if (recur i) i 0))",
         "(loop [i 0] (do (recur i) i))",
         "(loop [i 0] (let [n (recur i)] n))",
+        "(loop [i 0] (let* [n (recur i)] n))",
         "(loop [i 0] (or (recur i) true))",
         "(loop [i 0] (when false (do (recur i) i)))",
         "(loop [i 0] (if-some [n (recur i)] n i))",

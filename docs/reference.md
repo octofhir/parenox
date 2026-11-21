@@ -576,6 +576,8 @@ leaves later bindings and the body subject to compiler checks.
 On the JVM, a dot in a local parameter or binding name produces `PNX1001`
 on the written binding. Dots in destructuring keys are allowed when the local
 name is valid. A named `fn` can use dots in its own name.
+`let*` checks its local bindings in order and inherits the enclosing tail
+position. The compiler form accepts symbol/value pairs in its binding vector.
 `recur` must target a supported tail position and analysis is
 bounded when argument types keep growing.
 

@@ -96,7 +96,7 @@ impl Checker<'_> {
         match form {
             CoreForm::Thread(threading) => self.thread_form(xs, span, env, threading, name, tail),
             CoreForm::NamedThread => self.named_thread(xs, span, env, tail),
-            CoreForm::Let => self.let_form(xs, span, env, tail),
+            CoreForm::Let => self.let_form(xs, span, env, tail, false),
             CoreForm::LetFn => {
                 if self
                     .model

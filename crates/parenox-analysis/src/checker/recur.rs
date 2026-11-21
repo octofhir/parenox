@@ -1,6 +1,7 @@
 //! Tail transfers and bounded type inference for loop and function bodies.
 use std::collections::{BTreeSet, VecDeque};
 
+use super::bindings::raw_local_symbol;
 use super::function_forms::FunctionConditions;
 use super::{Checker, Env, Value, has_evaluated_metadata};
 use crate::reader::{Form, Kind, Span};
@@ -74,9 +75,10 @@ impl Checker<'_> {
         }
         let mut destructures = false;
         for [pattern, _] in bindings {
+            if raw_local_symbol(pattern).is_some() {
+                continue;
+            }
             match &pattern.without_metadata().kind {
-                Kind::Symbol(name) | Kind::AnonymousArgument(name)
-                    if name != "&" && !name.contains('/') => {}
                 Kind::Map(_) | Kind::Vector(_) if !raw => destructures = true,
                 _ => {
                     self.error("PNX1001", pattern.span, "Invalid loop binding");

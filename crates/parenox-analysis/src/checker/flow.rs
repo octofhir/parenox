@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 pub(super) use selectors::{narrow_literal, refine_owner};
 
-use super::bindings::dotted_binding_error;
+use super::bindings::{dotted_binding_error, raw_local_symbol};
 use super::calls::{is_builtin, narrow_emptiness, narrow_vector_predicate, predicate_type};
 use super::maps::narrow_map_predicate;
 use super::model::DeclaredValue;
@@ -399,18 +399,50 @@ impl Checker<'_> {
         })
     }
 
-    pub(super) fn let_form(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
+    pub(super) fn let_form(
+        &mut self,
+        xs: &[Form],
+        span: Span,
+        env: &Env,
+        tail: bool,
+        raw: bool,
+    ) -> Value {
         let Some(bindings) = xs.get(1).and_then(Form::vector) else {
+            if raw {
+                self.error(
+                    "PNX1001",
+                    xs.get(1).map_or(span, |form| form.span),
+                    "let* requires a binding vector",
+                );
+                return Value::new(Type::Unknown);
+            }
             return self.unsupported(span, "let requires a binding vector");
         };
-        if bindings.len() % 2 != 0 {
+        let (pairs, remaining) = bindings.as_chunks::<2>();
+        if !remaining.is_empty() {
+            if raw {
+                self.error("PNX1001", xs[1].span, "let* requires binding/value pairs");
+                return Value::new(Type::Unknown);
+            }
             return self.unsupported(xs[1].span, "let requires binding/value pairs");
+        }
+        if raw
+            && let Some([pattern, _]) = pairs
+                .iter()
+                .find(|[pattern, _]| raw_local_symbol(pattern).is_none())
+        {
+            self.error(
+                "PNX1001",
+                pattern.without_metadata().span,
+                "let* requires an unqualified local symbol other than &",
+            );
+            return Value::new(Type::Unknown);
         }
         let mut local = env.clone();
         let mut reachable = true;
         let start = self.diagnostics.len();
         let mut checked_inline = false;
-        for pair in bindings.as_chunks::<2>().0 {
+        for pair in pairs {
             if self.inspect_path(reachable && local.reachable(), |checker| {
                 checker.bind_inline(&pair[0], &pair[1], &mut local)
             }) {

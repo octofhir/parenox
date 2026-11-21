@@ -9,6 +9,11 @@ use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
+pub(super) fn raw_local_symbol(form: &Form) -> Option<&str> {
+    form.symbol()
+        .filter(|name| *name != "&" && (*name == "/" || !name.contains('/')))
+}
+
 pub(super) fn dotted_binding_error(name: &str, span: Span) -> Option<Diagnostic> {
     (!name.contains('/') && name.contains('.')).then(|| {
         Diagnostic::new(

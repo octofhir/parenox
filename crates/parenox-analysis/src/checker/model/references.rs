@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use crate::Diagnostic;
-use crate::checker::bindings::{binding_names, dotted_binding_error};
+use crate::checker::bindings::{binding_names, dotted_binding_error, raw_local_symbol};
 use crate::checker::calls::arity_counts;
 use crate::checker::function_forms::{
     Clause, function_clauses, letfn_bindings, letfn_definition, lexical_fn_star_clauses,
@@ -730,7 +730,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             }
             "if" | "do" | "recur" | "throw" => return self.forms(args),
             "try" => return self.try_body(args),
-            "let*" | "loop*" => return self.bindings(args, false),
+            "let*" | "loop*" => return self.bindings(args, symbol),
             "fn*" => return self.function(args, head.span, true),
             _ if self.completing_locals() && special_callee(symbol) => return,
             _ => {}
@@ -780,8 +780,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 return self.thread(args, thread);
             }
             match local {
-                "let" => return self.bindings(args, true),
-                "loop" => return self.bindings(args, false),
+                "let" | "loop" => return self.bindings(args, local),
                 "if-let" | "if-some" => return self.conditional_binding(args, true),
                 "when-let" | "when-some" | "when-first" => {
                     return self.conditional_binding(args, false);
@@ -1191,19 +1190,23 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         self.locals.truncate(scope);
     }
 
-    fn bindings(&mut self, args: &'a [Form], stock_let: bool) {
+    fn bindings(&mut self, args: &'a [Form], operator: &str) {
         if self.template_scope.is_some() {
             return;
         }
         if let Some((bindings, body)) = args.split_first()
             && let Some(bindings) = bindings.vector()
             && let (pairs, []) = bindings.as_chunks::<2>()
+            && (!matches!(operator, "let*" | "loop*")
+                || pairs
+                    .iter()
+                    .all(|[pattern, _]| raw_local_symbol(pattern).is_some()))
         {
             let scope = self.locals.len();
             for [pattern, value] in pairs {
                 self.forms(std::slice::from_ref(value));
                 self.bind_pattern(pattern);
-                if stock_let
+                if matches!(operator, "let" | "let*")
                     && matches!(&pattern.kind, Kind::Symbol(_))
                     && matches!(
                         &value.kind,

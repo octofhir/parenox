@@ -965,6 +965,16 @@ fn completes_only_visible_lexical_names_in_written_expressions() {
             ".field.name",
             &[],
         ),
+        (
+            "(defn f [fragment] (let* [local-name fragment] local-na|me))",
+            "local-name",
+            &["local-name"],
+        ),
+        (
+            "(defn f [fragment] (let* [[local-name] fragment] local-na|me))",
+            "local-name",
+            &[],
+        ),
     ];
     let initial = format!("{prefix}(defn f [] nil)\n");
     fs::write(&path, &initial).unwrap();
