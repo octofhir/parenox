@@ -8,8 +8,8 @@ use std::ops::Range;
 
 pub use dependencies::DependencyCompletions;
 use parenox_analysis::reader;
-use parenox_analysis::syntax::SyntaxKind;
-use parenox_analysis::{ArgumentKeyword, Session};
+use parenox_analysis::syntax::{SyntaxKind, SyntaxNode};
+use parenox_analysis::{ArgumentKeyword, LocalCompletion, Session};
 use parenox_classpath::JavaMemberKind;
 use serde_json::{Value, json};
 
@@ -138,9 +138,8 @@ struct Site {
 }
 
 impl Site {
-    fn at(source: &str, offset: usize) -> Option<Self> {
+    fn at(node: &SyntaxNode, offset: usize) -> Option<Self> {
         use SyntaxKind::*;
-        let node = reader::parse(source).syntax();
         let token = node
             .token_at_offset(u32::try_from(offset).ok()?.into())
             .find(|token| {
@@ -184,6 +183,41 @@ impl Site {
     }
 }
 
+fn gap_at(node: &SyntaxNode, offset: usize) -> bool {
+    use SyntaxKind::*;
+    let Ok(offset) = u32::try_from(offset) else {
+        return false;
+    };
+    node.token_at_offset(offset.into()).any(|token| {
+        matches!(
+            token.kind(),
+            Whitespace
+                | Comma
+                | OpenParen
+                | CloseParen
+                | OpenBracket
+                | CloseBracket
+                | OpenBrace
+                | CloseBrace
+                | OpenSet
+                | OpenAnonymousFunction
+        ) && token.parent().is_some_and(|node| {
+            !node
+                .ancestors()
+                .any(|node| matches!(node.kind(), Discard | Quote | SyntaxQuote | VarQuote))
+        })
+    })
+}
+
+fn local_item(local: &LocalCompletion<'_>, range: &Value) -> Value {
+    let name = local.name.as_ref();
+    let mut item = json!({"label":name,"kind":6,"textEdit":{"range":range,"newText":name}});
+    if let Some(detail) = &local.inferred_type {
+        item["detail"] = json!(detail);
+    }
+    item
+}
+
 pub fn complete(
     session: &Session,
     path: &str,
@@ -195,7 +229,21 @@ pub fn complete(
 ) -> Option<Value> {
     const LIMIT: usize = 60;
     let source = lines.source();
-    let site = Site::at(source, offset)?;
+    let node = reader::parse(source).syntax();
+    let Some(site) = Site::at(&node, offset) else {
+        if !gap_at(&node, offset) {
+            return None;
+        }
+        let locals = session.complete_local_gap(path, offset, LIMIT + 1)?;
+        let cursor = lines.position(offset)?;
+        let range = json!({"start":cursor,"end":cursor});
+        let items: Vec<_> = locals
+            .iter()
+            .take(LIMIT)
+            .map(|local| local_item(local, &range))
+            .collect();
+        return Some(json!({"isIncomplete":locals.len() > LIMIT,"items":items}));
+    };
     let prefix = &source[site.range.start..offset];
     let range =
         json!({"start": lines.position(site.range.start)?, "end": lines.position(site.range.end)?});
@@ -341,15 +389,7 @@ pub fn complete(
         });
         locals
             .iter()
-            .map(|local| {
-                let name = local.name;
-                let mut item =
-                    json!({"label":name,"kind":6,"textEdit":{"range":range,"newText":name}});
-                if let Some(detail) = &local.inferred_type {
-                    item["detail"] = json!(detail);
-                }
-                item
-            })
+            .map(|local| local_item(local, &range))
             .chain(core)
             .take(LIMIT + 1)
             .collect()

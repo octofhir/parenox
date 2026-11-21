@@ -127,6 +127,7 @@ struct FileCache {
     hover_types: TypeQueries<String>,
     checked_calls: TypeQueries<Arc<CheckedCall>>,
     completion_types: TypeQueries<Arc<BTreeMap<String, String>>, (usize, usize, usize)>,
+    gap_completions: TypeQueries<Arc<[LocalCompletion<'static>]>, (usize, usize)>,
     spec_fingerprint: Option<Arc<SpecFingerprint>>,
     model: Option<Model>,
     interface: Option<InterfaceKey>,
@@ -521,6 +522,7 @@ impl Session {
             cache.hover_types.take();
             cache.checked_calls.take();
             cache.completion_types.take();
+            cache.gap_completions.take();
             cache.recovered_delimiters.take();
             if let Some(fallback) = &mut cache.navigation_fallback {
                 fallback.checked_prefix.take();

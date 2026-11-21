@@ -1,13 +1,20 @@
-//! Local names and their checked types at a written expression.
+//! Local names and their checked types at expression positions.
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::checker::ProjectCall;
+use crate::checker::{Declarations, ProjectCall};
 use crate::core_names::known_core_function;
+use crate::reader::Form;
 
-use super::{Session, cached_type_query, symbol_form_at};
+use super::{
+    Session, cached_type_query,
+    recovered_types::{TypeScope, close_eof_delimiters},
+    symbol_form_at,
+};
 
 pub struct LocalCompletion<'a> {
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
     pub inferred_type: Option<String>,
 }
 
@@ -38,10 +45,92 @@ impl Session {
         let Some((declarations, forms)) = source else {
             return Vec::new();
         };
+        let names = self.visible_local_names(declarations, forms, token_start, prefix, limit);
+        let types = if names.is_empty() {
+            None
+        } else {
+            cached_type_query(&file.completion_types, (token_start, end, limit), || {
+                let scope = self.typing_during_edit(file, path, token_start)?;
+                completion_types(&scope, token_start, &names).map(Arc::new)
+            })
+        };
+        names
+            .into_iter()
+            .map(|name| LocalCompletion {
+                name: Cow::Borrowed(name),
+                inferred_type: types.as_ref().and_then(|types| types.get(name)).cloned(),
+            })
+            .collect()
+    }
+
+    /// Prove the lexical position with a temporary symbol and keep its types query-local.
+    pub fn complete_local_gap(
+        &self,
+        path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Option<Arc<[LocalCompletion<'static>]>> {
+        let file = self.current_file(path)?;
+        if !file
+            .source
+            .get(..offset)?
+            .chars()
+            .next_back()
+            .is_some_and(gap_delimiter)
+            || !file
+                .source
+                .get(offset..)?
+                .chars()
+                .next()
+                .is_none_or(gap_delimiter)
+        {
+            return None;
+        }
+        cached_type_query(&file.gap_completions, (offset, limit), || {
+            let original = if file.parse_error.is_some() && !file.needs_delimiter_recovery(offset) {
+                let (_, forms) = file.navigation_source()?;
+                file.source.get(..forms.last()?.span.end.offset)?
+            } else {
+                &file.source
+            };
+            const PLACEHOLDER: &str = " __parenox_completion_slot__ ";
+            let mut source = original.to_owned();
+            source.insert_str(offset, PLACEHOLDER);
+            let insertion = offset..offset + PLACEHOLDER.len();
+            let site = offset + 1;
+            let source = close_eof_delimiters(&source).unwrap_or(source);
+            let (declarations, forms) = self.read_navigation_for(path, &source)?;
+            let names = self.visible_local_names(&declarations, &forms, site, "", limit);
+            if names.is_empty() {
+                return None;
+            }
+            let types = self
+                .repaired_type_scope(file, path, &source, Some(insertion))
+                .and_then(|repaired| completion_types(&repaired.scope(&source), site, &names));
+            Some(
+                names
+                    .into_iter()
+                    .map(|name| LocalCompletion {
+                        name: Cow::Owned(name.to_owned()),
+                        inferred_type: types.as_ref().and_then(|types| types.get(name)).cloned(),
+                    })
+                    .collect(),
+            )
+        })
+    }
+
+    fn visible_local_names<'a>(
+        &self,
+        declarations: &'a Declarations,
+        forms: &'a [Form],
+        offset: usize,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<&'a str> {
         let mut standard_core = None;
-        let names = declarations.lexical_completions_at(
+        declarations.lexical_completions_at(
             forms,
-            token_start,
+            offset,
             prefix,
             limit,
             self.has_standard_test(),
@@ -61,32 +150,26 @@ impl Session {
                     self.navigation_call(namespace, local, actual)
                 }
             },
-        );
-        let types = if names.is_empty() {
-            None
-        } else {
-            cached_type_query(&file.completion_types, (token_start, end, limit), || {
-                let scope = self.typing_during_edit(file, path, token_start)?;
-                let site = symbol_form_at(scope.forms, token_start)?;
-                scope
-                    .declarations
-                    .completion_types(
-                        scope.forms,
-                        scope.model,
-                        scope.globals,
-                        scope.source,
-                        site.span,
-                        &names,
-                    )
-                    .map(Arc::new)
-            })
-        };
-        names
-            .into_iter()
-            .map(|name| LocalCompletion {
-                name,
-                inferred_type: types.as_ref().and_then(|types| types.get(name)).cloned(),
-            })
-            .collect()
+        )
     }
+}
+
+fn gap_delimiter(c: char) -> bool {
+    c.is_whitespace() || "()[]{},".contains(c)
+}
+
+fn completion_types(
+    scope: &TypeScope<'_>,
+    offset: usize,
+    names: &[&str],
+) -> Option<BTreeMap<String, String>> {
+    let site = symbol_form_at(scope.forms, offset)?;
+    scope.declarations.completion_types(
+        scope.forms,
+        scope.model,
+        scope.globals,
+        scope.source,
+        site.span,
+        names,
+    )
 }

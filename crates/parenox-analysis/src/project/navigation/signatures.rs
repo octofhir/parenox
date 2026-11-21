@@ -77,7 +77,7 @@ impl Session {
         let fallback = caller.navigation_fallback.as_deref()?;
         let candidates = cached_type_query(&fallback.recovered_keywords, token.start, || {
             let source = repair_keyword_source(&caller.source, &token)?;
-            let repaired = self.repaired_type_scope(caller, path, &source)?;
+            let repaired = self.repaired_type_scope(caller, path, &source, None)?;
             let scope = repaired.scope(&source);
             let site = call_at(scope.forms, token.end)?;
             let slot = site.keyword_slot(scope.source, &token)?;

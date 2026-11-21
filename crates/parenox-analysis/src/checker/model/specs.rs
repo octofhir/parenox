@@ -7,6 +7,7 @@ pub(crate) use projection::{
 };
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use super::Globals;
@@ -28,6 +29,34 @@ pub(crate) struct SpecFingerprint {
     duplicates: BTreeSet<String>,
     contextual: BTreeMap<String, SpecConversion>,
     registration_barriers: Vec<usize>,
+}
+
+impl SpecFingerprint {
+    pub(crate) fn matches_after_insertion(&self, other: &Self, insertion: &Range<usize>) -> bool {
+        let shift = |offset| offset + usize::from(offset >= insertion.start) * insertion.len();
+        let same_span = |before: Span, after: Span| {
+            shift(before.start.offset) == after.start.offset
+                && shift(before.end.offset) == after.end.offset
+        };
+        self.names == other.names
+            && self.duplicates == other.duplicates
+            && self.contextual == other.contextual
+            && self.bodies.len() == other.bodies.len()
+            && self.bodies.iter().zip(&other.bodies).all(
+                |((key, name, body, text), (other_key, other_name, other_body, other_text))| {
+                    key == other_key
+                        && text == other_text
+                        && same_span(*name, *other_name)
+                        && same_span(*body, *other_body)
+                },
+            )
+            && self
+                .registration_barriers
+                .iter()
+                .copied()
+                .map(shift)
+                .eq(other.registration_barriers.iter().copied())
+    }
 }
 
 impl Declarations {

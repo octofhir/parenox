@@ -1,7 +1,8 @@
 //! Query-local parsing and type checking after a reader failure.
+use std::ops::Range;
 use std::sync::OnceLock;
 
-use crate::checker::{Declarations, Globals, Model};
+use crate::checker::{Declarations, Globals, Model, SpecFingerprint};
 use crate::reader::{self, Conditionals, Form, NamespaceToken};
 use crate::syntax::SyntaxKind;
 
@@ -45,26 +46,35 @@ impl Session {
         file.recovered_delimiters
             .get_or_init(|| {
                 let source = close_eof_delimiters(&file.source)?;
-                let (mut read, error) = reader::read_for_check(&source, conditionals(path), None);
-                if error.is_some() {
-                    return None;
-                }
-                let declarations = Declarations::read_source(&source, &mut read).ok()?;
-                let declarations = self
-                    .query_globals
-                    .as_ref()
-                    .and_then(|globals| {
-                        declarations.with_runtime_loads(&read.forms, &globals.runtime_loads)
-                    })
-                    .unwrap_or(declarations);
+                let (declarations, forms) = self.read_navigation_for(path, &source)?;
                 Some(RecoveredDelimiters {
                     source,
                     declarations,
-                    forms: read.forms,
+                    forms,
                     checked: OnceLock::new(),
                 })
             })
             .as_ref()
+    }
+
+    pub(super) fn read_navigation_for(
+        &self,
+        path: &str,
+        source: &str,
+    ) -> Option<(Declarations, Vec<Form>)> {
+        let (mut read, error) = reader::read_for_check(source, conditionals(path), None);
+        if error.is_some() {
+            return None;
+        }
+        let declarations = Declarations::read_source(source, &mut read).ok()?;
+        let declarations = self
+            .query_globals
+            .as_ref()
+            .and_then(|globals| {
+                declarations.with_runtime_loads(&read.forms, &globals.runtime_loads)
+            })
+            .unwrap_or(declarations);
+        Some((declarations, read.forms))
     }
 
     pub(super) fn typing_during_edit<'a>(
@@ -79,7 +89,7 @@ impl Session {
         let recovered = self.recovered_delimited_source(file, path)?;
         let checked = recovered
             .checked
-            .get_or_init(|| self.repaired_type_scope(file, path, &recovered.source))
+            .get_or_init(|| self.repaired_type_scope(file, path, &recovered.source, None))
             .as_ref()?;
         Some(checked.scope(&recovered.source))
     }
@@ -128,9 +138,10 @@ impl Session {
         file: &FileCache,
         path: &str,
         source: &str,
+        insertion: Option<Range<usize>>,
     ) -> Option<CheckedPrefix> {
-        let fallback = file.navigation_fallback.as_deref()?;
-        let namespace = fallback.declarations.namespace();
+        let (original, _) = file.navigation_source()?;
+        let namespace = original.namespace();
         if matches!(namespace, "clojure.core" | "clojure.set") {
             return None;
         }
@@ -142,7 +153,14 @@ impl Session {
         if error.is_some() {
             return None;
         }
-        CheckedPrefix::from_read(read, source, path, namespace, self.query_globals.as_ref()?)
+        CheckedPrefix::from_read(
+            read,
+            source,
+            path,
+            namespace,
+            self.query_globals.as_ref()?,
+            insertion.zip(file.spec_fingerprint.as_deref()),
+        )
     }
 }
 
@@ -192,6 +210,7 @@ impl CheckedPrefix {
             path,
             fallback.declarations.namespace(),
             globals,
+            None,
         )
     }
 
@@ -201,14 +220,24 @@ impl CheckedPrefix {
         path: &str,
         namespace: &str,
         globals: &Globals,
+        original_specs: Option<(Range<usize>, &SpecFingerprint)>,
     ) -> Option<Self> {
         let declarations = Declarations::read_source(source, &mut read).ok()?;
         let declarations = declarations
             .with_runtime_loads(&read.forms, &globals.runtime_loads)
             .unwrap_or(declarations);
-        // The strict snapshot omits this file. A copied registry can contain
-        // entries that its source declarations would hide or conflict with.
-        if declarations.namespace() != namespace || declarations.has_prefix_spec_conflict(globals) {
+        // A fully read document can reuse its spec registrations when the
+        // query's insertion preserves their source and order.
+        if declarations.namespace() != namespace
+            || (declarations.has_prefix_spec_conflict(globals)
+                && !original_specs.is_some_and(|(insertion, original)| {
+                    declarations
+                        .spec_fingerprint(source, &read.forms)
+                        .is_some_and(|current| {
+                            original.matches_after_insertion(&current, &insertion)
+                        })
+                }))
+        {
             return None;
         }
         // Publish only in the environment owned by this recovered document.

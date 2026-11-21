@@ -1220,6 +1220,108 @@ fn completion_distinguishes_stock_and_project_owned_core_calls() {
 }
 
 #[test]
+fn local_completion_inserts_at_empty_expression_positions() {
+    let fixture = Fixture::new("empty lexical completion");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    let namespace = "(ns app (:require [clojure.spec.alpha :as s]))\n";
+    let initial = format!("{namespace}(defn f [] nil)\n");
+    fs::write(&path, &initial).unwrap();
+    let cases = [
+        ("(nil? |))", Some(("value", Some("Nil | String")))),
+        (
+            "(when (some? value) (identity #_\"🦊\" |)))",
+            Some(("value", Some("String"))),
+        ),
+        (
+            "(when (some? value) (identity |",
+            Some(("value", Some("String"))),
+        ),
+        (
+            "(when (some? value) {:key |}))",
+            Some(("value", Some("String"))),
+        ),
+        ("(let [worker (fn [] nil)] (|)))", Some(("worker", None))),
+        ("(quote [ |]))", None),
+        ("(fn [ |] nil))", None),
+        ("(opaque.macro/hold |))", None),
+        ("(str \"inside | text\"))", None),
+        ("(str ; inside | comment", None),
+        ("(str #_[ |] value))", None),
+        (
+            "(when (some? value) (identity |)))\n]",
+            Some(("value", Some("String"))),
+        ),
+        (
+            "(nil? |))\n(s/def ::later string?)",
+            Some(("value", Some("Nil | String"))),
+        ),
+    ];
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":file,"languageId":"clojure","version":1,"text":initial
+        }}}),
+    ];
+    let mut columns = Vec::new();
+    for (index, (body, _)) in cases.into_iter().enumerate() {
+        let line = format!("(defn f {{:t/sig '[(s/nilable string?) :-> t/any]}} [value] {body}");
+        let column = line[..line.find('|').unwrap()].encode_utf16().count();
+        columns.push(column);
+        let line = line.replace('|', "");
+        let id = index + 2;
+        requests.push(json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":id},"contentChanges":[{"text":format!("{namespace}{line}")}]
+        }}));
+        requests.push(
+            json!({"jsonrpc":"2.0","id":id,"method":"textDocument/completion","params":{
+                "textDocument":{"uri":file},"position":{"line":1,"character":column}
+            }}),
+        );
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    for (index, ((body, expected), column)) in cases.into_iter().zip(columns).enumerate() {
+        let result = &replies
+            .iter()
+            .find(|reply| reply["id"] == index + 2)
+            .unwrap()["result"];
+        let Some((name, detail)) = expected else {
+            assert!(result.is_null(), "{body}: {result:#?}");
+            continue;
+        };
+        let item = result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == name)
+            .unwrap_or_else(|| panic!("{body}: {result:#?}"));
+        assert_eq!(item["detail"].as_str(), detail, "{body}");
+        let position = json!({"line":1,"character":column});
+        assert_eq!(
+            item["textEdit"],
+            json!({"newText":name,"range":{"start":position,"end":position}})
+        );
+    }
+    let diagnostics = |version| {
+        &replies
+            .iter()
+            .find(|reply| {
+                reply["method"] == "textDocument/publishDiagnostics"
+                    && reply["params"]["version"] == version
+            })
+            .unwrap()["params"]["diagnostics"]
+    };
+    assert_eq!(diagnostics(2)[0]["code"], "PNX2554");
+    for version in [4, 5] {
+        assert_eq!(diagnostics(version).as_array().unwrap().len(), 1);
+        assert_eq!(diagnostics(version)[0]["code"], "PNX9000");
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), initial);
+}
+
+#[test]
 fn local_completion_shows_types_at_reachable_use_sites() {
     let fixture = Fixture::new("flow types in completion");
     let path = fixture.0.join("src/app.clj");
