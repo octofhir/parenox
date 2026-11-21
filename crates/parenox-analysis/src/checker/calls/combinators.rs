@@ -12,7 +12,7 @@ pub(super) enum Combiner {
 
 pub(super) struct CombinedCallable<'form, 'model> {
     combiner: Combiner,
-    stages: Vec<PreparedCallable<'form, 'model>>,
+    pub(super) stages: Vec<PreparedCallable<'form, 'model>>,
     pub(super) returns: bool,
 }
 

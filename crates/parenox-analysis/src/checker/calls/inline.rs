@@ -48,7 +48,7 @@ impl CapturedInline {
         }))
     }
 
-    fn syntax(&self) -> (&Form, InlineFunction<'_>) {
+    pub(super) fn syntax(&self) -> (&Form, InlineFunction<'_>) {
         match self {
             Self::Single(function) => {
                 // Capture construction resolved the head in the definition scope.
@@ -123,7 +123,7 @@ impl ContextualCallback {
 }
 
 pub(super) struct Fnil<'form, 'model> {
-    target: PreparedCallable<'form, 'model>,
+    pub(super) target: PreparedCallable<'form, 'model>,
     defaults: Vec<(Value, Span)>,
     pub(super) returns: bool,
 }

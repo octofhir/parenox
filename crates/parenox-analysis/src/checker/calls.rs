@@ -343,6 +343,11 @@ impl<'model> Checker<'model> {
                     if resolved == "clojure.core/deref" {
                         return self.deref_call(&xs[1..], span, env);
                     }
+                    if resolved == "clojure.core/into"
+                        && let Some(result) = self.collect_vector_transducer(xs, span, env)
+                    {
+                        return result;
+                    }
                     if let Some(form) = CoreForm::resolve(&resolved) {
                         return self.core_form(form, &resolved, xs, span, env, tail);
                     }
@@ -723,6 +728,31 @@ impl<'model> Checker<'model> {
             env,
             invoked,
         )
+    }
+
+    fn withhold_callback_facts(&mut self, callback: &PreparedCallable<'_, '_>) {
+        if self.type_query.is_none() || !self.path_reachable {
+            return;
+        }
+        match &callback.kind {
+            Callable::Inline(_) => self.withhold_type_facts(callback.span),
+            Callable::Captured { function, .. } => {
+                self.withhold_type_facts(function.syntax().0.span);
+            }
+            Callable::Private(function) => self.withhold_type_facts(function.span),
+            Callable::Fnil(wrapper) => self.withhold_callback_facts(&wrapper.target),
+            Callable::Partial(wrapper) => self.withhold_callback_facts(&wrapper.target),
+            Callable::Combined(combined) => {
+                for stage in &combined.stages {
+                    self.withhold_callback_facts(stage);
+                }
+            }
+            Callable::Value(_) | Callable::Builtin(_) => {
+                if let Some(keyword) = callback.literal_keyword {
+                    self.withhold_type_facts(keyword.span);
+                }
+            }
+        }
     }
 
     fn call_prepared_with_forms(

@@ -7,7 +7,7 @@ use super::{
     sequences::{collection_emptiness, iteration_may_throw},
 };
 use crate::ContractKind;
-use crate::reader::{Form, Span};
+use crate::reader::{Form, Kind, Span};
 use crate::types::{IntegerClass, IntegerType, Type};
 
 const MAX_VECTOR_TRANSFORM_STEPS: usize = 128;
@@ -75,6 +75,84 @@ pub(in crate::checker) fn narrow_vector_predicate(input: &Type, truth: bool) -> 
 }
 
 impl Checker<'_> {
+    pub(super) fn collect_vector_transducer(
+        &mut self,
+        forms: &[Form],
+        span: Span,
+        env: &Env,
+    ) -> Option<Value> {
+        let [into, target, transducer, source] = forms else {
+            return None;
+        };
+        // An empty vector literal has no evaluation effects and supplies the
+        // ordinary conj! step and completion used by into.
+        if !matches!(&target.kind, Kind::Vector(items) if items.is_empty())
+            || !self
+                .model
+                .can_use_standard_core(into.symbol()?, self.globals)
+        {
+            return None;
+        }
+        let Kind::List(form) = &transducer.kind else {
+            return None;
+        };
+        let [operator, callback] = form.as_slice() else {
+            return None;
+        };
+        let name = operator.symbol()?;
+        let predicate = match self.model.resolve(name).as_str() {
+            "clojure.core/map" => None,
+            "clojure.core/filter" => Some(callback),
+            _ => return None,
+        };
+        if env.contains_key(name)
+            || self
+                .model
+                .local_function_at(name, operator.span.start.offset)
+                .is_some()
+            || self
+                .model
+                .declared_value(name, self.globals, operator.span.start.offset)
+                .is_some()
+            || !self.model.can_use_standard_core(name, self.globals)
+        {
+            return None;
+        }
+
+        let callable = self.prepare_callable(callback, env);
+        let input = self.infer_path(source, env, callable.returns(), false);
+        let input = match input.known {
+            Type::Never => {
+                self.call_prepared(&callable, Vec::new(), span, env, false);
+                return Some(input);
+            }
+            Type::Nil => literal_vector_value(std::iter::empty(), 0, true),
+            _ => input,
+        };
+        let sources = std::slice::from_ref(source);
+        let start = self.diagnostics.len();
+        if let Some(result) = self.transform_fixed_vectors(
+            &callable,
+            &[(input, source.span)],
+            sources,
+            predicate,
+            span,
+            env,
+        ) {
+            self.explain_projected_arguments(start, sources);
+            self.dedup_diagnostics(start);
+            return Some(result);
+        }
+        // A custom reducer can call this callback with different values. An
+        // earlier ordinary visit cannot justify precise types for its body.
+        self.withhold_callback_facts(&callable);
+        self.call_prepared(&callable, Vec::new(), span, env, false);
+        Some(self.unchecked_form(
+            source.span,
+            "into with map or filter currently needs a proven ordinary vector or Nil source",
+        ))
+    }
+
     pub(super) fn vector_transform(
         &mut self,
         xs: &[Form],
@@ -212,14 +290,9 @@ impl Checker<'_> {
             if self.vector_transform_steps >= MAX_VECTOR_TRANSFORM_STEPS {
                 self.type_query = None;
                 self.call_prepared(callable, Vec::new(), span, env, false);
-                let name = if predicate.is_some() {
-                    "filterv"
-                } else {
-                    "mapv"
-                };
                 return Some(self.unchecked_form(
                     span,
-                    &format!("{name} step analysis limit ({MAX_VECTOR_TRANSFORM_STEPS}) exceeded"),
+                    &format!("Vector callback step analysis limit ({MAX_VECTOR_TRANSFORM_STEPS}) exceeded"),
                 ));
             }
             self.vector_transform_steps += 1;

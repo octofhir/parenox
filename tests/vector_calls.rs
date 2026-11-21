@@ -1,4 +1,4 @@
-use parenox::{Report, Session};
+use parenox::{DocumentHover, Report, Session};
 
 fn check(body: &str) -> Report {
     let source = format!("(ns demo (:require [clojure.spec.alpha :as s]))\n{body}");
@@ -31,6 +31,84 @@ fn checks_vector_pipelines_and_narrows_elements_with_core_predicates() {
         ));
         assert!(report.ok && report.complete, "{expr}: {report:#?}");
     }
+}
+
+#[test]
+fn into_checks_transducers_with_the_actual_vector_positions() {
+    let report = check(
+        r#"
+(defn namespace-usages
+  {:t/sig '[:-> (s/tuple {:to #{example.source} :name #{read-config}})]} []
+  (let [namespace 'example.source
+        uri "file:///example.clj"
+        db {:analysis {"file:///example.clj"
+                       {:var-usages [{:to 'example.source :name 'read-config}
+                                     {:to 'example.dest :name 'some-key}]}}}]
+    (into [] (filter #(= namespace (:to %))) (get-in db [:analysis uri :var-usages]))))
+(defn names {:t/sig '[:-> (s/tuple #{"read"} #{"write"})]} []
+  (into [] (map (fn [element] (:name element))) [{:name "read"} {:name "write"}]))
+(defn map-falsey {:t/sig '[:-> (s/tuple nil? #{false})]} []
+  (into [] (map identity) [nil false]))
+(defn keep-false {:t/sig '[:-> (s/tuple #{false})]} []
+  (into [] (filter some?) [nil false]))
+(defn no-input {:t/sig '[:-> #{:empty}]} []
+  (when (empty? (into [] (map nil) nil)) :empty))
+(defn constructor-before-source {:t/sig '[:-> #{:callback}]} []
+  (try
+    (into [] (map (throw (ex-info "callback" {:part :callback})))
+             (throw (ex-info "source" {:part :source})))
+    (catch clojure.lang.ExceptionInfo error (:part (ex-data error)))))
+"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn into_checks_reached_callback_uses_and_leaves_custom_traversal_open() {
+    let body = r#"(ns lens (:require [clojure.spec.alpha :as s]))
+(defn range-for {:t/sig '[{:row int?} :-> int?]} [position] (:row position))
+(defn direct {:t/sig '[:-> any?]} []
+  (into [] (map range-for) [{:row "wrong"}]))
+(defn structural {:t/sig '[(s/tuple {:row string?}) :-> any?]} [source]
+  (into [] (map range-for) source))"#;
+    let report = Session::default().check("lens.clj", body);
+    let [error, gap] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(gap.code, "PNX9001");
+    assert_eq!(gap.severity, "warning");
+    let at = |diagnostic: &parenox::Diagnostic| {
+        &body[diagnostic.span.start.offset..diagnostic.span.end.offset]
+    };
+    assert_eq!(at(error), "\"wrong\"");
+    assert_eq!(at(gap), "source");
+}
+
+#[test]
+fn unchecked_into_visits_withhold_only_callback_hovers() {
+    let source = r#"(ns traversal (:require [clojure.spec.alpha :as s]))
+(defn inline {:t/sig '[(s/tuple keyword?) :-> any?]} [custom]
+  (mapv (fn [source] (into [] (map (fn [item] item)) source))
+        [[:known] custom]))
+(defn saved {:t/sig '[(s/tuple keyword?) :-> any?]} [custom]
+  (let [mark :outside
+        mapper (fn [item] item)]
+    (mapv (fn [source] (into [] (map (fnil mapper :default)) source))
+          [[:known] custom])
+    mark))"#;
+    let mut session = Session::default();
+    let report = session.check("traversal.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    for (offset, _) in source.match_indices("item)") {
+        assert!(session.document_hover_at("traversal.clj", offset).is_none());
+    }
+    let offset = source.rfind("mark").unwrap();
+    let Some(DocumentHover::Local(hover)) = session.document_hover_at("traversal.clj", offset)
+    else {
+        panic!("missing hover outside the callback");
+    };
+    assert_eq!(hover.inferred_type, ":outside");
 }
 
 #[test]
