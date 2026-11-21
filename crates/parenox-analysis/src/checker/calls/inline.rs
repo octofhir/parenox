@@ -225,6 +225,31 @@ impl<'model> Checker<'model> {
         )
     }
 
+    pub(super) fn with_callback_choice(
+        &mut self,
+        callback: &Form,
+        env: &Env,
+        mut check: impl FnMut(&mut Self, &Form, &Env) -> Value,
+    ) -> Value {
+        if let Kind::List(parts) = &callback.without_metadata().kind
+            && let [head, test, yes, no] = parts.as_slice()
+            && head.symbol() == Some("if")
+            && self.inline_callback_literal(yes, env)
+            && self.inline_callback_literal(no, env)
+        {
+            let start = self.diagnostics.len();
+            // Choose the callback before evaluating later arguments, and
+            // hold that choice through the entire collection operation.
+            let [left, right] = self.check_if_paths(test, env, true, |checker, scope, truth| {
+                check(checker, if truth { yes } else { no }, scope)
+            });
+            self.dedup_diagnostics(start);
+            left.join(right)
+        } else {
+            check(self, callback, env)
+        }
+    }
+
     pub(super) fn contextual_callback_form(&self, form: &Form, env: &Env) -> bool {
         form.symbol()
             .and_then(|name| env.inline_function(name))

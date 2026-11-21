@@ -11,6 +11,7 @@ mod inline;
 mod interop;
 mod macro_scopes;
 mod reduction;
+mod search;
 mod sequences;
 mod strings;
 mod vectors;

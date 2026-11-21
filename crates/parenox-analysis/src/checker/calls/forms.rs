@@ -29,6 +29,7 @@ pub(super) enum CoreForm {
     Apply,
     Reduce,
     ReduceKv,
+    Some,
     VectorTransform,
     RegexMatch,
     Substring,
@@ -66,6 +67,7 @@ impl CoreForm {
             "apply" => Self::Apply,
             "reduce" => Self::Reduce,
             "reduce-kv" => Self::ReduceKv,
+            "some" => Self::Some,
             "mapv" | "filterv" => Self::VectorTransform,
             "re-find" | "re-matches" => Self::RegexMatch,
             "subs" => Self::Substring,
@@ -114,6 +116,16 @@ impl Checker<'_> {
             CoreForm::Apply => self.apply_form(&xs[1..], span, env),
             CoreForm::Reduce => self.reduce_form(&xs[1..], span, env),
             CoreForm::ReduceKv => self.reduce_kv_form(&xs[1..], span, env),
+            CoreForm::Some => {
+                if self
+                    .model
+                    .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
+                {
+                    self.some_form(&xs[1..], span, env)
+                } else {
+                    self.unchecked_form(xs[0].span, "Standard clojure.core/some is unconfirmed")
+                }
+            }
             CoreForm::VectorTransform => self.vector_transform(xs, span, env, name),
             CoreForm::RegexMatch => self.regex_match(&xs[1..], span, env, name),
             CoreForm::Substring => self.substring(&xs[1..], span, env),

@@ -8,7 +8,7 @@ use super::{
     Callable, Checker, Env, PreparedCallable, Value, vectors::CollectionError,
     vectors::element_type,
 };
-use crate::reader::{Form, Kind, Span};
+use crate::reader::{Form, Span};
 use crate::types::Type;
 
 const MAX_REDUCE_ALTERNATIVES: usize = 16;
@@ -35,23 +35,9 @@ impl Checker<'_> {
             }
         };
         let inputs = &forms[1..];
-        if let Kind::List(parts) = &reducer.without_metadata().kind
-            && let [head, test, yes, no] = parts.as_slice()
-            && head.symbol() == Some("if")
-            && self.inline_callback_literal(yes, env)
-            && self.inline_callback_literal(no, env)
-        {
-            let start = self.diagnostics.len();
-            // The reducer is chosen before the initial value and collection
-            // are evaluated. Keep that same choice for the entire fold.
-            let [left, right] = self.check_if_paths(test, env, true, |checker, scope, truth| {
-                let selected = if truth { yes } else { no };
-                checker.reduce_using(selected, inputs, span, scope)
-            });
-            self.dedup_diagnostics(start);
-            return left.join(right);
-        }
-        self.reduce_using(reducer, inputs, span, env)
+        self.with_callback_choice(reducer, env, |checker, selected, scope| {
+            checker.reduce_using(selected, inputs, span, scope)
+        })
     }
 
     fn reduce_using(&mut self, reducer: &Form, inputs: &[Form], span: Span, env: &Env) -> Value {
