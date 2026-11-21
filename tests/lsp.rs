@@ -12,6 +12,8 @@ mod clojuredocs;
 mod collections;
 #[path = "lsp/cond_to_if.rs"]
 mod cond_to_if;
+#[path = "lsp/contract_locations.rs"]
+mod contract_locations;
 #[path = "lsp/cycle_privacy.rs"]
 mod cycle_privacy;
 #[path = "lsp/formatting.rs"]

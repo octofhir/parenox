@@ -39,12 +39,20 @@ use super::{
     Contract, Function, FunctionArity, Globals, Model, Signature,
     type_forms::read_type_with_parameters,
 };
-use crate::ContractKind;
 use crate::checker::function_forms::{function_clauses, split_rest};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, MAX_TYPE_PARAMETERS, Parameter, Parameters, Type};
+use crate::{ContractKind, ContractOrigin};
 
 impl Model {
+    pub(crate) fn source_contract_span(&self, origin: &ContractOrigin) -> Option<Span> {
+        let function = self.functions.get(&origin.name)?;
+        if function.contract.as_ref()?.origin.as_ref() != origin {
+            return None;
+        }
+        function.contract_span
+    }
+
     fn contract_type(
         &mut self,
         form: &Form,
@@ -232,29 +240,33 @@ impl Model {
         } else {
             None
         };
-        let contract = if let Some((signatures, signature_span, kind)) = declared.or(spec_signature)
-        {
-            if !arities
-                .keys()
-                .copied()
-                .eq(signatures.iter().map(Signature::arity))
-            {
-                self.error(
-                    "PNX2554",
-                    signature_span,
-                    "Signature arities must match the function's parameters",
-                );
-                return;
-            }
-            Some(Contract::new(signatures, &name, kind, &self.path))
-        } else {
-            None
-        };
+        let (contract, contract_span) =
+            if let Some((signatures, signature_span, kind)) = declared.or(spec_signature) {
+                if !arities
+                    .keys()
+                    .copied()
+                    .eq(signatures.iter().map(Signature::arity))
+                {
+                    self.error(
+                        "PNX2554",
+                        signature_span,
+                        "Signature arities must match the function's parameters",
+                    );
+                    return;
+                }
+                (
+                    Some(Contract::new(signatures, &name, kind, &self.path)),
+                    Some(signature_span),
+                )
+            } else {
+                (None, None)
+            };
         let function = Function {
             name: name.clone(),
             private,
             arities,
             contract,
+            contract_span,
             data_body_eligible,
             span,
         };

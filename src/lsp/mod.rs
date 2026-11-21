@@ -1,5 +1,6 @@
 //! Editor-facing LSP requests over stdin and stdout.
 mod clojuredocs;
+mod contract_locations;
 mod extern_buffers;
 mod projects;
 mod workspace;

@@ -4,14 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use parenox::{
-    ContractOrigin, Diagnostic, Session,
-    output::{callback_contract_note, contract_note},
-};
-use parenox_lsp::diagnostics::RelatedInformation;
-
-use super::text::{Lines, file_uri, normalize};
-use crate::workspace::FileSnapshot;
+use super::text::normalize;
 
 #[derive(Clone, Default)]
 pub(super) struct ExternBuffers(Rc<RefCell<BTreeMap<PathBuf, OpenEdn>>>);
@@ -48,66 +41,6 @@ impl ExternBuffers {
             .borrow()
             .get(path)
             .map(|buffer| buffer.physical.clone())
-    }
-}
-
-pub(super) struct ExternLocations<'a> {
-    session: &'a Session,
-    snapshots: &'a [FileSnapshot],
-    buffers: Option<&'a ExternBuffers>,
-    lines: BTreeMap<&'a str, Option<Lines<'a>>>,
-}
-
-impl<'a> ExternLocations<'a> {
-    pub fn new(
-        session: &'a Session,
-        snapshots: &'a [FileSnapshot],
-        buffers: Option<&'a ExternBuffers>,
-    ) -> Self {
-        Self {
-            session,
-            snapshots,
-            buffers,
-            lines: BTreeMap::new(),
-        }
-    }
-
-    pub fn related(&mut self, finding: &Diagnostic) -> Vec<RelatedInformation> {
-        let contract = finding.contract.as_ref();
-        let callback = finding
-            .callback_contract
-            .as_ref()
-            .filter(|&origin| Some(origin) != contract);
-        let direct = contract.and_then(|origin| self.location(origin, contract_note));
-        let context = callback.and_then(|origin| self.location(origin, callback_contract_note));
-        direct.into_iter().chain(context).collect()
-    }
-
-    fn location(
-        &mut self,
-        origin: &ContractOrigin,
-        message: fn(&ContractOrigin) -> String,
-    ) -> Option<RelatedInformation> {
-        let buffers = self.buffers?;
-        let span = self.session.extern_declaration_span(origin)?;
-        let path = origin.path.as_deref()?;
-        let snapshot = self
-            .snapshots
-            .iter()
-            .find(|snapshot| snapshot.path == path)?;
-        let lines = self
-            .lines
-            .entry(&snapshot.path)
-            .or_insert_with(|| {
-                (!buffers.is_dirty(Path::new(path), &snapshot.source))
-                    .then(|| Lines::new(&snapshot.source))
-            })
-            .as_ref()?;
-        Some(RelatedInformation::new(
-            file_uri(path),
-            lines.range(span)?,
-            message(origin),
-        ))
     }
 }
 

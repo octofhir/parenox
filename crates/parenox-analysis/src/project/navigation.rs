@@ -33,7 +33,7 @@ use crate::ContractOrigin;
 use crate::checker::{Declarations, ProjectCall, ScopedReference, java_type_tag_at};
 use crate::reader::{Form, Kind, Span};
 
-use super::{FileCache, Session, TypeQueries};
+use super::{FileCache, Session, Source, TypeQueries};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Definition {
@@ -102,6 +102,25 @@ enum SourceTarget<'a> {
 }
 
 impl Session {
+    /// Find an active source contract in the provider's current snapshot.
+    pub fn source_contract_declaration(
+        &self,
+        origin: &ContractOrigin,
+    ) -> Option<(Source<'_>, Span)> {
+        let (path, file) = self.files.get_key_value(origin.path.as_deref()?)?;
+        if file.snapshot != self.snapshot {
+            return None;
+        }
+        let span = file.model.as_ref()?.source_contract_span(origin)?;
+        Some((
+            Source {
+                path,
+                source: &file.source,
+            },
+            span,
+        ))
+    }
+
     /// Resolves a source var, local binding, namespace or named spec at a UTF-8 byte offset.
     /// Ambiguous declarations and references outside successfully read forms have no target.
     pub fn definition(&self, path: &str, offset: usize) -> Option<Definition> {

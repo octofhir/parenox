@@ -26,7 +26,8 @@ use serde_json::{Value, json};
 
 use super::WATCH_REQUEST_ID;
 use super::completion;
-use super::extern_buffers::{ExternBuffers, ExternLocations, physical_path};
+use super::contract_locations::ContractLocations;
+use super::extern_buffers::{ExternBuffers, physical_path};
 use super::protocol::write_message;
 use super::symbols;
 use super::text::{Lines, Position, Range, file_path, file_uri, normalize};
@@ -485,7 +486,7 @@ impl Workspace {
             Ok(()) => {
                 self.check(output)?;
                 for (path, document) in &mut self.documents {
-                    document.check_standalone(path, output)?;
+                    document.check_standalone(path, self.extern_buffers.as_ref(), output)?;
                 }
                 if self.test_tree {
                     let paths: Vec<_> = self
@@ -1026,7 +1027,7 @@ impl Workspace {
         } else if !is_clojure_source(Path::new(path)) {
             return Ok(());
         } else if document.standalone.is_some() {
-            document.check_standalone(path, output)?;
+            document.check_standalone(path, self.extern_buffers.as_ref(), output)?;
         } else {
             self.check(output)?;
         }
@@ -1080,12 +1081,20 @@ impl Workspace {
             .check_project_documents(&sources, &externs, &open);
         self.session_ready = true;
         let mut locations =
-            ExternLocations::new(&self.session, &self.externs, self.extern_buffers.as_ref());
+            ContractLocations::new(&self.session, &self.externs, self.extern_buffers.as_ref());
         for file in report.files {
-            if let Some(document) = self.documents.get_mut(&file.path) {
-                let rendered = document
-                    .render_diagnostics(&file.diagnostics, |finding| locations.related(finding));
-                document.publish_rendered(rendered, output)?;
+            if let Some(document) = self.documents.get(&file.path) {
+                let rendered = document.render_diagnostics(&file.diagnostics, |finding| {
+                    locations.related(finding, |path| {
+                        self.documents
+                            .get(path)
+                            .map_or_else(|| file_uri(path), |doc| doc.uri(path))
+                    })
+                });
+                self.documents
+                    .get_mut(&file.path)
+                    .unwrap()
+                    .publish_rendered(rendered, output)?;
             }
         }
         Ok(())
@@ -1143,12 +1152,22 @@ impl Document {
             .map_or_else(|| file_uri(path), |editor| editor.uri.clone())
     }
 
-    fn check_standalone(&mut self, path: &str, output: &mut impl Write) -> io::Result<()> {
-        if let Some(session) = &mut self.standalone {
-            let report = session.check(path, &self.source);
-            self.publish(&report.diagnostics, output)?;
-        }
-        Ok(())
+    fn check_standalone(
+        &mut self,
+        path: &str,
+        buffers: Option<&ExternBuffers>,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        let Some(session) = self.standalone.as_deref_mut() else {
+            return Ok(());
+        };
+        let report = session.check(path, &self.source);
+        let mut locations =
+            ContractLocations::new(self.standalone.as_deref().unwrap(), &[], buffers);
+        let rendered = self.render_diagnostics(&report.diagnostics, |finding| {
+            locations.related(finding, |path| self.uri(path))
+        });
+        self.publish_rendered(rendered, output)
     }
 
     fn publish(&mut self, diagnostics: &[Diagnostic], output: &mut impl Write) -> io::Result<()> {

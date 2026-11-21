@@ -669,10 +669,11 @@ project, a buffer has no project context.
 - `.clj` and `.cljc`: diagnostics, completion, definition, hover, find usages,
   highlights, document outline, and workspace symbols. Closed files contribute
   declarations and usages. Opaque macro expansions are not indexed.
-- **Diagnostic locations** link to the EDN key of an extern that supplied a
-  contract or callback type when the client supports related information. The
-  link uses the analysed file on disk and is hidden while an open editor for
-  that extern contains unsaved changes.
+- **Diagnostic locations** link to the `:t/sig` annotation, `s/fdef`
+  registration or EDN key that supplied a contract or callback type when the
+  client supports related information. Source links follow unsaved edits.
+  Extern links use the analysed EDN file on disk and are hidden while an open
+  editor for that extern contains unsaved changes.
 - **Hover** shows the var's docstring and argument lists from project source
   or a local dependency JAR. For `defmulti`, a literal `fn` dispatcher
   supplies argument lists unless the author specifies `:arglists`. Checked

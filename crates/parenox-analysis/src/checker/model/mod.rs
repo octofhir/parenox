@@ -47,6 +47,7 @@ pub(crate) struct Function {
     pub private: bool,
     pub arities: BTreeMap<Arity, FunctionArity>,
     pub contract: Option<Contract>,
+    pub(super) contract_span: Option<Span>,
     data_body_eligible: bool,
     pub span: Span,
 }
