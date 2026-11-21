@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::checker::{
     Checker, Env, Value,
+    bindings::dotted_binding_error,
     env::{CapturedInline, LetFnGroup},
     function_forms::{letfn_bindings, letfn_definition},
 };
@@ -64,6 +65,10 @@ impl Checker<'_> {
                 );
                 return Value::new(Type::Unknown);
             };
+            if let Some(diagnostic) = dotted_binding_error(symbol, name.without_metadata().span) {
+                self.diagnostics.push(diagnostic);
+                return Value::new(Type::Unknown);
+            }
             local.insert(symbol.to_owned(), Value::new(Type::Unknown));
             definitions.push((symbol.to_owned(), spec.clone()));
         }

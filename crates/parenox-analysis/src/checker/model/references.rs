@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use crate::Diagnostic;
-use crate::checker::bindings::binding_names;
+use crate::checker::bindings::{binding_names, dotted_binding_error};
 use crate::checker::calls::arity_counts;
 use crate::checker::function_forms::{
     Clause, function_clauses, letfn_bindings, letfn_definition, lexical_fn_star_clauses,
@@ -521,6 +521,7 @@ struct NavigationTarget<'source> {
     lexical_binding: Option<bool>,
     java_class: Option<&'source str>,
     completions: Vec<&'source str>,
+    dotted_fn_names: Vec<usize>,
 }
 
 struct References<'source, 'query, F> {
@@ -580,6 +581,13 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
     fn bind_pattern(&mut self, pattern: &'a Form) {
         let first = self.locals.len();
         binding_names(pattern, &mut self.locals);
+        if let Purpose::Check(diagnostics) = &mut self.purpose {
+            diagnostics.extend(
+                self.locals[first..]
+                    .iter()
+                    .filter_map(|&(name, span)| dotted_binding_error(name, span)),
+            );
+        }
         if matches!(self.purpose, Purpose::Navigate { .. })
             && self.locals.get(first).map(|(_, span)| *span)
                 == Some(pattern.without_metadata().span)
@@ -602,6 +610,13 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         {
             occurrences.bindings.push(span);
         }
+    }
+
+    fn bind_runtime_name(&mut self, name: &'a str, span: Span) {
+        if let Purpose::Check(diagnostics) = &mut self.purpose {
+            diagnostics.extend(dotted_binding_error(name, span));
+        }
+        self.bind(name, span);
     }
 
     fn method(&mut self, form: &'a Form) {
@@ -678,12 +693,12 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         }
         if matches!(self.purpose, Purpose::Navigate { .. }) {
             if let Some(receiver) = args.first()
-                && (symbol == "."
-                    || symbol
-                        .strip_prefix('.')
-                        .is_some_and(|member| !member.is_empty() && !member.contains(['.', '/'])))
+                && (symbol == "." || jvm_member_shorthand(symbol))
             {
                 self.select_type_hint(receiver);
+                if self.completing_locals() && symbol != "." {
+                    return self.forms(args);
+                }
             }
             if symbol == "new" {
                 if let Some((class, arguments)) = args.split_first() {
@@ -694,11 +709,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 }
                 return;
             }
-            if let Some(class) = symbol.strip_suffix('.')
-                && !class.is_empty()
-                && !class.starts_with('.')
-                && !class.contains('/')
-            {
+            if let Some(class) = jvm_constructor_class(symbol) {
                 self.select_class(class, span);
                 self.forms(args);
                 return;
@@ -985,12 +996,14 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             self.locals
                 .iter()
                 .rev()
-                .map(|&(name, _)| name)
-                .filter(|name| {
-                    name.starts_with(*prefix)
-                        && (!name.contains('/') || *name == "/")
-                        && (!callee || !special_callee(name))
-                        && seen.insert(*name)
+                .filter_map(|&(name, binding)| {
+                    (name.starts_with(*prefix)
+                        && (!name.contains('/') || name == "/")
+                        && seen.insert(name)
+                        && (!name.contains('.')
+                            || target.dotted_fn_names.contains(&binding.start.offset))
+                        && (!callee || !special_callee(name)))
+                    .then_some(name)
                 })
                 .take(*limit),
         );
@@ -1107,7 +1120,17 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         let clauses = if let Some((name, tail)) = args.split_first()
             && let Some(symbol) = name.symbol()
         {
-            self.bind(symbol, name.without_metadata().span);
+            let span = name.without_metadata().span;
+            if symbol.contains('.')
+                && let Purpose::Navigate {
+                    lexical: Some(LexicalQuery::Completion { .. }),
+                    target,
+                    ..
+                } = &mut self.purpose
+            {
+                target.dotted_fn_names.push(span.start.offset);
+            }
+            self.bind(symbol, span);
             tail
         } else {
             args
@@ -1153,7 +1176,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         }
         let scope = self.locals.len();
         for &((name, span), _) in &functions {
-            self.bind(name, span);
+            self.bind_runtime_name(name, span);
         }
         for (binding, clauses) in &functions {
             // A duplicate name can shadow the group binding. The named fn
@@ -1246,7 +1269,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                         return;
                     };
                     let scope = self.locals.len();
-                    self.bind(name, binding.without_metadata().span);
+                    self.bind_runtime_name(name, binding.without_metadata().span);
                     self.forms(body);
                     self.locals.truncate(scope);
                 }
@@ -1361,7 +1384,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         };
         self.forms(std::slice::from_ref(input));
         let scope = self.locals.len();
-        self.bind(name, binding.without_metadata().span);
+        self.bind_runtime_name(name, binding.without_metadata().span);
         self.forms(steps);
         self.locals.truncate(scope);
     }
@@ -1443,5 +1466,15 @@ fn special_callee(name: &str) -> bool {
             | "try"
             | "var"
             | "clojure.core/import*"
-    )
+    ) || (!name.contains('/') && (name.starts_with('.') || name.ends_with('.')))
+}
+
+fn jvm_member_shorthand(name: &str) -> bool {
+    name.strip_prefix('.')
+        .is_some_and(|member| !member.is_empty() && !member.contains(['.', '/']))
+}
+
+fn jvm_constructor_class(name: &str) -> Option<&str> {
+    name.strip_suffix('.')
+        .filter(|class| !class.is_empty() && !class.starts_with('.') && !class.contains('/'))
 }

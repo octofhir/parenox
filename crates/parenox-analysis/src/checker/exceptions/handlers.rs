@@ -1,5 +1,6 @@
 //! Clojure try, catch and finally scopes.
 use super::Throws;
+use crate::checker::bindings::dotted_binding_error;
 use crate::checker::{Checker, Env, Value};
 use crate::reader::{Form, Kind};
 use crate::types::Type;
@@ -143,6 +144,7 @@ impl Checker<'_> {
             self.error("PNX1001", class.span, "catch requires a class symbol");
             return None;
         };
+        let binding_span = binding.without_metadata().span;
         let Some(binding) = binding
             .symbol()
             .filter(|symbol| !symbol.contains('/') || *symbol == "/")
@@ -154,6 +156,10 @@ impl Checker<'_> {
             );
             return None;
         };
+        if let Some(diagnostic) = dotted_binding_error(binding, binding_span) {
+            self.diagnostics.push(diagnostic);
+            return None;
+        }
         let qualified = self.model.class_name(name);
         let resolved = ExceptionClass::resolve(qualified);
         if resolved.is_none() {

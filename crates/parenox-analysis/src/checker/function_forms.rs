@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use super::Value;
+use super::bindings::dotted_pattern_error;
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, MAX_TUPLE_ITEMS, Type};
@@ -78,6 +79,21 @@ pub(super) fn lexical_fn_star_clauses(
     span: Span,
 ) -> Result<BTreeMap<Arity, Clause<'_>>, Box<Diagnostic>> {
     read_function_clauses(forms, span, ClauseMode::FnStar)
+}
+
+pub(super) fn fn_literal_binding_error(forms: &[Form], span: Span) -> Option<Diagnostic> {
+    let params = if let Some((name, tail)) = forms.split_first()
+        && name.symbol().is_some()
+    {
+        tail
+    } else {
+        forms
+    };
+    lexical_function_clauses(params, span)
+        .ok()?
+        .values()
+        .flat_map(Clause::parameters)
+        .find_map(dotted_pattern_error)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -195,6 +211,9 @@ fn function_clause(
         )));
     }
     for param in params.iter().chain(rest) {
+        if check_types && let Some(diagnostic) = dotted_pattern_error(param) {
+            return Err(Box::new(diagnostic));
+        }
         match &param.without_metadata().kind {
             Kind::Symbol(name) | Kind::AnonymousArgument(name)
                 if !name.contains('/') || name == "/" => {}

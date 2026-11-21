@@ -934,6 +934,37 @@ fn completes_only_visible_lexical_names_in_written_expressions() {
             "context",
             &[],
         ),
+        ("(defn f [fragment.bad] frag|ment.bad)", "fragment.bad", &[]),
+        (
+            "(defn f [] (fn called.with.dot [arg] (called.w|ith.dot arg)))",
+            "called.with.dot",
+            &["called.with.dot"],
+        ),
+        (
+            "(defn f [] (fn .length [arg] (do .len|gth)))",
+            ".length",
+            &[".length"],
+        ),
+        (
+            "(defn f [] (fn .length [arg] (.len|gth arg)))",
+            ".length",
+            &[],
+        ),
+        (
+            "(defn f [] (fn String. [arg] (do Str|ing.)))",
+            "String.",
+            &["String."],
+        ),
+        (
+            "(defn f [] (fn String. [arg] (Str|ing. arg)))",
+            "String.",
+            &[],
+        ),
+        (
+            "(defn f [] (fn .field.name [arg] (.field.na|me arg)))",
+            ".field.name",
+            &[],
+        ),
     ];
     let initial = format!("{prefix}(defn f [] nil)\n");
     fs::write(&path, &initial).unwrap();
@@ -1007,6 +1038,116 @@ fn completes_only_visible_lexical_names_in_written_expressions() {
     assert_eq!(eof[0]["code"], "PNX9000");
     assert_eq!(eof.as_array().unwrap().len(), 1);
     assert_eq!(fs::read_to_string(&path).unwrap(), initial);
+}
+
+#[test]
+fn reports_dotted_local_bindings_at_the_written_declaration() {
+    let fixture = Fixture::new("dotted JVM local bindings");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    let namespace = "(ns app)\n";
+    let initial = format!("{namespace}(defn f [] nil)\n");
+    fs::write(&path, &initial).unwrap();
+    let cases = [
+        (
+            "(defn f {:t/sig '[string? :-> string?]} [^java.lang.String text.bad] text.bad)",
+            Some("text.bad"),
+        ),
+        (
+            "(defn f {:t/sig '[:-> t/any]} [] (let [[text.bad] [\"value\"]] text.bad))",
+            Some("text.bad"),
+        ),
+        (
+            "(defn f {:t/sig '[:-> t/any]} [] (let [{:keys [schema.path/text.bad]} {}] text.bad))",
+            Some("schema.path/text.bad"),
+        ),
+        (
+            "(defn f {:t/sig '[:-> t/any]} [] (try 0 (catch Exception error.bad error.bad)))",
+            Some("error.bad"),
+        ),
+        (
+            "(defn f {:t/sig '[:-> t/any]} [] (letfn [(call.bad [] 0)] (call.bad)))",
+            Some("call.bad"),
+        ),
+        (
+            "(defn f [] (do \"🦊\" (let [text.bad \"value\"] text.bad)))",
+            Some("text.bad"),
+        ),
+        (
+            "(defn f {:t/sig '[:-> t/any]} [] (fn legal.name [param.bad] param.bad))",
+            Some("param.bad"),
+        ),
+        (
+            "(defn f {:t/sig '[:-> t/any]} [] (let [[items.bad] [[1 2]]] (subvec items.bad 1)))",
+            Some("items.bad"),
+        ),
+        (
+            "(defn f {:t/sig '[:-> t/any]} [] (let [{:keys [schema.path/text]} {:schema.path/text 1}] text))",
+            None,
+        ),
+        (
+            "(defn f {:t/sig '[:-> t/any]} [] (let [{text :schema.path/item.value} {:schema.path/item.value 1}] text))",
+            None,
+        ),
+    ];
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":file,"languageId":"clojure","version":1,"text":initial
+        }}}),
+    ];
+    for (index, (row, _)) in cases.into_iter().enumerate() {
+        requests.push(json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+            "textDocument":{"uri":file,"version":index+2},"contentChanges":[{"text":format!("{namespace}{row}")}]
+        }}));
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    for (index, (row, token)) in cases.into_iter().enumerate() {
+        let findings = &replies
+            .iter()
+            .find(|reply| {
+                reply["method"] == "textDocument/publishDiagnostics"
+                    && reply["params"]["version"] == index + 2
+            })
+            .unwrap()["params"]["diagnostics"];
+        let dots = findings
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|finding| finding["code"] == "PNX1001")
+            .collect::<Vec<_>>();
+        if let Some(token) = token {
+            let [finding] = dots.as_slice() else {
+                panic!("{row}\n{findings:#?}");
+            };
+            let start = row[..row.find(token).unwrap()].encode_utf16().count();
+            assert_eq!(
+                finding["range"],
+                json!({
+                    "start":{"line":1,"character":start},
+                    "end":{"line":1,"character":start+token.len()}
+                })
+            );
+            assert!(
+                finding["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("cannot contain a dot")
+            );
+            assert!(
+                findings
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|item| item["code"] != "PNX9001"),
+                "{row}\n{findings:#?}"
+            );
+        } else {
+            assert!(dots.is_empty(), "{row}\n{findings:#?}");
+        }
+    }
 }
 
 #[test]

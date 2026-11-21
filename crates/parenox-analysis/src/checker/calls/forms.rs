@@ -1,8 +1,10 @@
 //! Names of core forms with their own evaluation rules.
 use super::{Conditional, search::Search};
+use crate::checker::function_forms::fn_literal_binding_error;
 use crate::checker::{Checker, Env, Value};
 use crate::expand::Threading;
 use crate::reader::{Form, Span};
+use crate::types::Type;
 
 pub(super) enum CoreForm {
     Thread(Threading),
@@ -120,6 +122,16 @@ impl Checker<'_> {
             CoreForm::AssocIn => self.assoc_in(xs, span, env),
             CoreForm::Fn | CoreForm::Fnil => {
                 self.withhold_captured_facts(env.inline_functions());
+                if matches!(form, CoreForm::Fn)
+                    && self
+                        .model
+                        .can_use_standard_core(xs[0].symbol().unwrap(), self.globals)
+                    && let Some(diagnostic) = fn_literal_binding_error(&xs[1..], span)
+                {
+                    self.type_query = None;
+                    self.diagnostics.push(diagnostic);
+                    return Value::new(Type::Unknown);
+                }
                 self.unsupported(
                     span,
                     format!(

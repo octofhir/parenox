@@ -573,6 +573,9 @@ In a direct map destructuring binding, Clojure 1.13 evaluates the `:or`
 defaults before the value to destructure. A default can run even when its
 key is present or unused. A proven runtime failure in a default or initializer
 leaves later bindings and the body subject to compiler checks.
+On the JVM, a dot in a local parameter or binding name produces `PNX1001`
+on the written binding. Dots in destructuring keys are allowed when the local
+name is valid. A named `fn` can use dots in its own name.
 `recur` must target a supported tail position and analysis is
 bounded when argument types keep growing.
 

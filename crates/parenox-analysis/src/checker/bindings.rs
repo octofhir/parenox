@@ -5,8 +5,34 @@ use std::collections::BTreeMap;
 use super::env::Selector;
 use super::maps::Lookup;
 use super::{Checker, Env, Value};
+use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
+
+pub(super) fn dotted_binding_error(name: &str, span: Span) -> Option<Diagnostic> {
+    (!name.contains('/') && name.contains('.')).then(|| {
+        Diagnostic::new(
+            "PNX1001",
+            span,
+            format!("Clojure/JVM local binding {name} cannot contain a dot"),
+        )
+    })
+}
+
+pub(super) fn dotted_pattern_error(form: &Form) -> Option<Diagnostic> {
+    let target = form.without_metadata();
+    if let Some(name) = target.symbol() {
+        return dotted_binding_error(name, target.span);
+    }
+    if !matches!(target.kind, Kind::Map(_) | Kind::Vector(_)) {
+        return None;
+    }
+    let mut names = Vec::new();
+    binding_names(target, &mut names);
+    names
+        .into_iter()
+        .find_map(|(name, span)| dotted_binding_error(name, span))
+}
 
 /// Collect the names introduced by a binding without evaluating defaults or selectors.
 pub(super) fn binding_names<'a>(form: &'a Form, names: &mut Vec<(&'a str, Span)>) {
@@ -210,7 +236,12 @@ impl Checker<'_> {
         source: Option<Selector>,
         env: &mut Env,
     ) {
-        if env.reachable() {
+        if let Some(diagnostic) = dotted_binding_error(name, span) {
+            self.diagnostics.push(diagnostic);
+            // Keep the value for the remaining checks and drop editor facts
+            // from the body whose binding the compiler will reject.
+            self.type_query = None;
+        } else if env.reachable() {
             self.observe_binding(name, span, &value);
         }
         if value.known == Type::Never {

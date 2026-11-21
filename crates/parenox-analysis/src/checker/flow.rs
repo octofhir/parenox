@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 
 pub(super) use selectors::{narrow_literal, refine_owner};
 
+use super::bindings::dotted_binding_error;
 use super::calls::{is_builtin, narrow_emptiness, narrow_vector_predicate, predicate_type};
 use super::maps::narrow_map_predicate;
 use super::model::DeclaredValue;
@@ -374,6 +375,10 @@ impl Checker<'_> {
                 xs[2].span,
                 "as-> requires an unqualified local binding name",
             );
+            return Value::new(Type::Unknown);
+        }
+        if let Some(diagnostic) = dotted_binding_error(binding, xs[2].without_metadata().span) {
+            self.diagnostics.push(diagnostic);
             return Value::new(Type::Unknown);
         }
         self.with_thread_expansion(span, 1, |checker| {
