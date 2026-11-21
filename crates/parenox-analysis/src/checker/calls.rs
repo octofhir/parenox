@@ -28,6 +28,7 @@ use super::{
     function_forms::pack_arguments,
     model::{DeclaredValue, Function},
     nil_part,
+    queries::InferredCall,
 };
 use crate::reader::{Form, Span};
 use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
@@ -265,11 +266,27 @@ impl<'model> Checker<'model> {
                 .local_function_at(name, xs[0].span.start.offset)
                 .filter(|f| f.inferred())
         {
-            let args = self
+            let start = self.diagnostics.len();
+            let args: Vec<_> = self
                 .eval_args(&xs[1..], env, true)
                 .map(|(value, _)| value)
                 .collect();
-            return self.inferred_call(function, args, span);
+            let observe = self.observes_inferred_call_at(span)
+                && args.iter().all(|arg| arg.known != Type::Never);
+            let inferred = (observe
+                && function.arities.contains_key(&Arity::Fixed(args.len()))
+                && args.iter().all(|arg| !arg.known.contains_unknown()))
+            .then(|| InferredCall {
+                definition: function.span,
+                labels: None,
+                args: args.iter().map(|arg| arg.known.clone()).collect(),
+            });
+            let result = self.inferred_call(function, args, span);
+            if observe {
+                let inferred = inferred.filter(|_| start == self.diagnostics.len());
+                self.observe_inferred_call(span, &xs[1..], inferred, &result);
+            }
+            return result;
         }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
@@ -344,13 +361,13 @@ impl<'model> Checker<'model> {
             // Prepared callbacks elsewhere use synthetic arguments. Only
             // this call has the written forms for signature help.
             if invoked
-                && self.observes_local_call_at(span)
+                && self.observes_inferred_call_at(span)
                 && let Callable::Captured { function, .. } = &callable.kind
             {
                 let local = self.local_call(function, &args);
                 let result = self.call_prepared(&callable, args, span, env, true);
                 let local = local.filter(|_| start == self.diagnostics.len());
-                self.observe_local_call(span, &xs[1..], local, &result);
+                self.observe_inferred_call(span, &xs[1..], local, &result);
                 return result;
             }
             return self.call_prepared(&callable, args, span, env, invoked);

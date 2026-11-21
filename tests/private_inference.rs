@@ -28,6 +28,69 @@ fn helpers_infer_from_typed_calls_and_preserve_collections_and_literal_contracts
 }
 
 #[test]
+fn signature_help_keeps_private_source_labels_and_specializes_the_checked_call() {
+    let source = r#"
+(ns malli-helper)
+(defn- -dissoc-map-keys
+  "Dissoc all keys in `keyset-map` from `from-map`."
+  [from-map keyset-map]
+  (reduce-kv (fn [acc k _] (dissoc acc k)) from-map keyset-map))
+(defn parser-label {:t/sig '[:-> string?]} []
+  (let [extras (-dissoc-map-keys {:label "kept" :omit :parser} {:omit true})]
+    (:label extras)))
+"#;
+    let mut session = Session::default();
+    let report = session.check("private.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let offset = source.find("{:omit true}").unwrap();
+    let help = session.call_signatures("private.clj", offset).unwrap();
+    assert_eq!(help.active_parameter, Some(1));
+    assert_eq!(
+        help.documentation.as_deref(),
+        Some("Dissoc all keys in `keyset-map` from `from-map`.")
+    );
+    assert_eq!(
+        help.signatures[0].parameters,
+        [
+            r#"from-map: {:label: "kept", :omit: :parser}"#,
+            "keyset-map: {:omit: true}"
+        ]
+    );
+    assert_eq!(
+        help.signatures[0].result.as_deref(),
+        Some(r#"{:label: "kept"}"#)
+    );
+
+    let changed = source.replace("{:omit true}", "{:label true}");
+    let report = session.check("private.clj", &changed);
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    let help = session.call_signatures("private.clj", offset).unwrap();
+    assert_eq!(
+        help.signatures[0].result.as_deref(),
+        Some("{:omit: :parser}")
+    );
+}
+
+#[test]
+fn conflicting_private_specializations_keep_the_source_only_signature() {
+    let source = r#"
+(ns private-context)
+(defn- keep [value] value)
+(defn example {:t/sig '[:-> keyword?]} []
+  (let [call (fn [value] (keep value))]
+    (call :first)
+    (call :second)))
+"#;
+    let mut session = Session::default();
+    let report = session.check("private.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let offset = source.find("keep value").unwrap() + "keep ".len();
+    let help = session.call_signatures("private.clj", offset).unwrap();
+    assert_eq!(help.signatures[0].parameters, ["value"]);
+    assert!(help.signatures[0].result.is_none());
+}
+
+#[test]
 fn helper_errors_point_to_body_and_explain_the_call() {
     let source = "(ns demo (:require [clojure.string :as str]))\n\
         (defn- loud [name] (str/upper-case name))\n\

@@ -30,15 +30,15 @@ pub(crate) struct CheckedCall {
 #[derive(PartialEq, Eq)]
 enum CallDeclaration {
     Typed(Signature),
-    Local {
+    Inferred {
         definition: Span,
-        labels: Vec<String>,
+        labels: Option<Vec<String>>,
     },
 }
 
-pub(super) struct LocalCall {
+pub(super) struct InferredCall {
     pub definition: Span,
-    pub labels: Vec<String>,
+    pub labels: Option<Vec<String>>,
     pub args: Vec<Type>,
 }
 
@@ -55,7 +55,7 @@ impl CheckedCall {
 
     pub(crate) fn local_labels(&self) -> Option<&[String]> {
         match &self.declaration {
-            CallDeclaration::Local { labels, .. } => Some(labels),
+            CallDeclaration::Inferred { labels, .. } => labels.as_deref(),
             CallDeclaration::Typed(_) => None,
         }
     }
@@ -167,27 +167,27 @@ impl<'model> Checker<'model> {
         }
     }
 
-    pub(super) fn observes_local_call_at(&self, span: Span) -> bool {
+    pub(super) fn observes_inferred_call_at(&self, span: Span) -> bool {
         self.path_reachable
             && matches!(&self.type_query, Some(TypeQuery::Call(query))
                 if query.span == span && !query.declared_only)
     }
 
-    pub(super) fn observe_local_call(
+    pub(super) fn observe_inferred_call(
         &mut self,
         span: Span,
         forms: &[Form],
-        local: Option<LocalCall>,
+        call: Option<InferredCall>,
         result: &Value,
     ) {
         let Some(query) = self.call_query_at(span) else {
             return;
         };
-        let checked = local
+        let checked = call
             .filter(|_| result.known != Type::Never && !result.known.contains_unknown())
-            .map(|local| CheckedCall {
+            .map(|call| CheckedCall {
                 signature: Signature {
-                    args: local.args,
+                    args: call.args,
                     ret: result.known.clone(),
                     rest: None,
                     parameters: None,
@@ -195,9 +195,9 @@ impl<'model> Checker<'model> {
                 origin: None,
                 explicit_offset: None,
                 argument_count: None,
-                declaration: CallDeclaration::Local {
-                    definition: local.definition,
-                    labels: local.labels,
+                declaration: CallDeclaration::Inferred {
+                    definition: call.definition,
+                    labels: call.labels,
                 },
             });
         if !query.record(checked, forms) {
@@ -277,7 +277,7 @@ impl CallQuery<'_> {
         if let Some(checked) = &mut self.checked {
             match &checked.declaration {
                 CallDeclaration::Typed(declared) => checked.signature = declared.clone(),
-                CallDeclaration::Local { .. } => self.checked = None,
+                CallDeclaration::Inferred { .. } => self.checked = None,
             }
         }
     }

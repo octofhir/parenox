@@ -8,7 +8,7 @@ use super::super::{
     env::{CapturedFn, CapturedInline},
     function_forms::{MAX_FIXED_PARAMETERS, function_clauses, letfn_definition, pack_arguments},
     nil_part,
-    queries::LocalCall,
+    queries::InferredCall,
 };
 use super::{Callable, PreparedCallable, call_returns, combinators::Combiner};
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
@@ -139,7 +139,7 @@ impl<'model> Checker<'model> {
         &self,
         captured: &CapturedInline,
         arguments: &[(Value, Span)],
-    ) -> Option<LocalCall> {
+    ) -> Option<InferredCall> {
         if arguments
             .iter()
             .any(|(value, _)| value.known.contains_unknown())
@@ -172,9 +172,9 @@ impl<'model> Checker<'model> {
             }
             InlineFunction::Literal(_) => return None,
         };
-        Some(LocalCall {
+        Some(InferredCall {
             definition: definition.span,
-            labels,
+            labels: Some(labels),
             args: arguments
                 .iter()
                 .map(|(value, _)| value.known.clone())
