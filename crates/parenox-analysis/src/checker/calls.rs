@@ -63,9 +63,18 @@ impl Callable<'_, '_> {
 pub(super) struct PreparedCallable<'form, 'model> {
     kind: Callable<'form, 'model>,
     span: Span,
+    literal_keyword: Option<&'form Form>,
 }
 
-impl PreparedCallable<'_, '_> {
+impl<'form, 'model> PreparedCallable<'form, 'model> {
+    fn new(kind: Callable<'form, 'model>, span: Span) -> Self {
+        Self {
+            kind,
+            span,
+            literal_keyword: None,
+        }
+    }
+
     pub(super) fn returns(&self) -> bool {
         self.kind.returns()
     }
@@ -599,6 +608,7 @@ impl<'model> Checker<'model> {
         let prepare = |kind| PreparedCallable {
             kind,
             span: callee.span,
+            literal_keyword: callee.keyword().map(|_| callee.without_metadata()),
         };
         if let Some(callable) = self.prepare_inline(callee, env) {
             return callable;
@@ -654,16 +664,22 @@ impl<'model> Checker<'model> {
                 span,
             ),
             Callable::Builtin(name) => self.builtin(name, &args, span),
-            Callable::Value(function) => self.call_value(
-                function,
-                CallArguments {
-                    values: &args,
-                    forms: &[],
-                    output_gap_explained: false,
-                },
-                callable.span,
-                span,
-            ),
+            Callable::Value(function) => {
+                let result = self.call_value(
+                    function,
+                    CallArguments {
+                        values: &args,
+                        forms: &[],
+                        output_gap_explained: false,
+                    },
+                    callable.span,
+                    span,
+                );
+                if let Some(keyword) = callable.literal_keyword {
+                    self.observe_lookup(keyword.span, &result);
+                }
+                result
+            }
         }
     }
 

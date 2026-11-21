@@ -96,10 +96,7 @@ impl<'model> Checker<'model> {
                 }
             }
         };
-        Some(PreparedCallable {
-            kind,
-            span: form.span,
-        })
+        Some(PreparedCallable::new(kind, form.span))
     }
 
     pub(in crate::checker) fn bind_inline(
@@ -555,10 +552,7 @@ impl<'model> Checker<'model> {
         let [callee, bound @ ..] = parts else {
             self.error("PNX2554", span, "partial requires a function");
             self.arity_error();
-            return PreparedCallable {
-                kind: Callable::Value(Value::new(Type::Never)),
-                span,
-            };
+            return PreparedCallable::new(Callable::Value(Value::new(Type::Never)), span);
         };
         let target = self.prepare_callable(callee, env);
         // The one-argument arity returns the original value, including
@@ -568,14 +562,14 @@ impl<'model> Checker<'model> {
         }
         let prefix: Vec<_> = self.eval_args(bound, env, target.returns()).collect();
         let returns = target.returns() && call_returns(&prefix);
-        PreparedCallable {
-            kind: Callable::Partial(Box::new(Partial {
+        PreparedCallable::new(
+            Callable::Partial(Box::new(Partial {
                 target,
                 prefix,
                 returns,
             })),
             span,
-        }
+        )
     }
 
     pub(super) fn call_fnil(

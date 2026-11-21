@@ -392,3 +392,40 @@ fn a_throwing_binding_does_not_return_nil_from_an_empty_body() {
     let report = Session::default().check("demo.clj", source);
     assert!(report.ok && report.complete, "{report:#?}");
 }
+
+#[test]
+fn keyword_callback_hover_joins_reached_lookups_at_the_literal() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn search {:t/sig '[:-> #{:hit}]} []
+          (some :result [{:result nil} {:result false} {:result :hit} {:result :unvisited}]))
+        (defn project {:t/sig '[:-> (s/tuple string? number?)]} []
+          ((juxt :left :right) {:left "left" :right 42}))
+        (defn no-items {:t/sig '[:-> nil?]} []
+          (some :empty []))
+        (defn computed {:t/sig '[:-> #{:result}]} []
+          (let [key :dynamic] (some key [{:dynamic :result}])))"#;
+    let mut session = Session::default();
+    let report = session.check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let hover = |marker: &str| {
+        let offset = source.find(marker).unwrap();
+        match session.document_hover_at("demo.clj", offset) {
+            Some(DocumentHover::Lookup {
+                key,
+                inferred_type,
+                span,
+            }) => {
+                assert_eq!(key, &source[span.start.offset..span.end.offset]);
+                Some(inferred_type)
+            }
+            Some(_) => panic!("expected lookup at {marker}"),
+            None => None,
+        }
+    };
+    assert_eq!(hover(":result [{").as_deref(), Some("Nil | false | :hit"));
+    assert_eq!(hover(":left :right").as_deref(), Some("\"left\""));
+    assert_eq!(hover(":right) {:left").as_deref(), Some("42"));
+    assert_eq!(hover(":result :hit"), None);
+    assert_eq!(hover(":empty []"), None);
+    assert_eq!(hover(":dynamic]"), None);
+}

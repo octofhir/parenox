@@ -48,7 +48,7 @@ impl<'model> Checker<'model> {
                 })
             }
         };
-        PreparedCallable { kind, span }
+        PreparedCallable::new(kind, span)
     }
 
     pub(super) fn call_combiner(

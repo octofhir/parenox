@@ -655,6 +655,9 @@ project, a buffer has no project context.
   including keyword calls, `get`, `req!`, and each segment of an inlined
   two-argument `get-in` with a literal path. With a default argument, the
   final path keyword shows the result of the whole lookup.
+  A keyword passed as a callback shows the combined type of its reached
+  lookup results. An empty collection or an earlier stop can leave it
+  uninvoked.
   A reader error later in the buffer can leave local types available in
   preceding complete functions. These prefix types are scoped to queries
   in that buffer. A named spec defined in the same file needs a complete
