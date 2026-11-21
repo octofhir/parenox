@@ -28,12 +28,9 @@ impl Session {
         if file.source.get(token_start..end) != Some(prefix) {
             return Vec::new();
         }
-        let recovered = file
-            .parse_error
-            .as_ref()
-            .is_some_and(|error| token_start >= error.span.start.offset);
-        let source = if recovered {
-            self.recovered_delimited_forms(file, path)
+        let source = if file.needs_delimiter_recovery(token_start) {
+            self.recovered_delimited_source(file, path)
+                .map(|recovered| recovered.navigation())
         } else {
             file.navigation_source()
         };
@@ -58,11 +55,11 @@ impl Session {
                 }
             },
         );
-        let types = if recovered || names.is_empty() {
+        let types = if names.is_empty() {
             None
         } else {
             cached_type_query(&file.completion_types, (token_start, end, limit), || {
-                let scope = self.typing_at(file, path, token_start)?;
+                let scope = self.typing_during_edit(file, path, token_start)?;
                 let site = symbol_form_at(scope.forms, token_start)?;
                 scope
                     .declarations
@@ -70,7 +67,7 @@ impl Session {
                         scope.forms,
                         scope.model,
                         scope.globals,
-                        &file.source,
+                        scope.source,
                         site.span,
                         &names,
                     )

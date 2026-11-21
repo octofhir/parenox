@@ -7,11 +7,13 @@ use std::{
 
 use crate::ContractOrigin;
 use crate::checker::{CheckedCall, Declarations};
-use crate::reader::{self, Conditionals, Form, Kind, Span};
+use crate::reader::{self, Form, Kind, Span};
 use crate::syntax::SyntaxKind;
 use crate::types::{Arity, MapType, Type};
 
-use super::{FileCache, Session, SourceTarget, cached_type_query};
+use super::{
+    FileCache, Session, SourceTarget, cached_type_query, recovered_types::close_eof_delimiters,
+};
 
 pub struct CallSignature {
     pub parameters: Vec<String>,
@@ -76,14 +78,14 @@ impl Session {
         let candidates = cached_type_query(&fallback.recovered_keywords, token.start, || {
             let source = repair_keyword_source(&caller.source, &token)?;
             let repaired = self.repaired_type_scope(caller, path, &source)?;
-            let scope = repaired.scope();
+            let scope = repaired.scope(&source);
             let site = call_at(scope.forms, token.end)?;
-            let slot = site.keyword_slot(&source, &token)?;
+            let slot = site.keyword_slot(scope.source, &token)?;
             let checked = scope.declarations.checked_call(
                 scope.forms,
                 scope.model,
                 scope.globals,
-                &source,
+                scope.source,
                 site.span,
                 site.written,
             )?;
@@ -117,7 +119,7 @@ impl Session {
             };
         }
         caller.parse_error.as_ref()?;
-        let (declarations, forms) = self.recovered_delimited_forms(caller, path)?;
+        let (declarations, forms) = self.recovered_delimited_source(caller, path)?.navigation();
         let site = call_at(forms, offset)?;
         let source = self.signatures_at(path, declarations, forms, &site);
         let declared = self.query_globals.as_ref().and_then(|globals| {
@@ -127,28 +129,6 @@ impl Session {
             Some(signature) => Some(typed_signatures(&site, &signature, source)),
             None => source,
         }
-    }
-
-    pub(super) fn recovered_delimited_forms<'a>(
-        &self,
-        caller: &'a FileCache,
-        path: &str,
-    ) -> Option<(&'a Declarations, &'a [Form])> {
-        let (declarations, forms) = caller
-            .recovered_delimited_forms
-            .get_or_init(|| {
-                let (declarations, forms) = recover_delimited_forms(path, &caller.source)?;
-                let declarations = self
-                    .query_globals
-                    .as_ref()
-                    .and_then(|globals| {
-                        declarations.with_runtime_loads(&forms, &globals.runtime_loads)
-                    })
-                    .unwrap_or(declarations);
-                Some((declarations, forms))
-            })
-            .as_ref()?;
-        Some((declarations, forms))
     }
 
     fn checked_call(
@@ -165,7 +145,7 @@ impl Session {
                     scope.forms,
                     scope.model,
                     scope.globals,
-                    &caller.source,
+                    scope.source,
                     site.span,
                     site.written,
                 )
@@ -529,47 +509,6 @@ fn call_in(form: &Form, offset: usize, top_level: bool) -> Option<CallSite<'_>> 
         }
         _ => None,
     }
-}
-
-/// Repair missing closing delimiters at EOF for this query alone.
-fn recover_delimited_forms(path: &str, source: &str) -> Option<(Declarations, Vec<Form>)> {
-    let repaired = close_eof_delimiters(source)?;
-    let conditionals = if path.ends_with(".cljc") {
-        Conditionals::Select(":clj")
-    } else {
-        Conditionals::Reject
-    };
-    let (mut read, error) = reader::read_for_check(&repaired, conditionals, None);
-    if error.is_some() {
-        return None;
-    }
-    let declarations = Declarations::read_source(&repaired, &mut read).ok()?;
-    Some((declarations, read.forms))
-}
-
-fn close_eof_delimiters(source: &str) -> Option<String> {
-    use SyntaxKind::*;
-    let tree = reader::parse(source).syntax();
-    let mut closers = Vec::new();
-    for node in tree
-        .descendants()
-        .filter(|node| node.kind() == Error && usize::from(node.text_range().end()) == source.len())
-    {
-        let closer = match node.first_child_or_token()?.kind() {
-            OpenParen | OpenAnonymousFunction => ')',
-            OpenBracket => ']',
-            OpenBrace | OpenSet => '}',
-            _ => return None,
-        };
-        closers.push(closer);
-    }
-    if closers.is_empty() {
-        return None;
-    }
-    let mut repaired = source.to_owned();
-    repaired.push('\n');
-    repaired.extend(closers.into_iter().rev());
-    Some(repaired)
 }
 
 fn repair_keyword_source(source: &str, token: &Range<usize>) -> Option<String> {

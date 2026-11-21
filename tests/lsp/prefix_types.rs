@@ -1,6 +1,104 @@
 use super::*;
 
 #[test]
+fn unfinished_delimiters_preserve_checked_hover_and_completion() {
+    let fixture = Fixture::new("checked EOF recovery");
+    let path = fixture.0.join("src/app.clj");
+    let document = uri(&path);
+    let namespace = "(ns app (:require [clojure.spec.alpha :as s]))\n";
+    let row = r#"(defn f {:t/sig '[(s/nilable string?) :-> t/any]} [value] (when-some [text value] (do #_"🦊" text (:name {:name text})"#;
+    let local = row.find(" text (:name").unwrap() + 1;
+    let key = row.find("(:name").unwrap() + 1;
+    let column = |index: usize| row[..index].encode_utf16().count();
+    let span = |start, end| json!({"start":{"line":1,"character":column(start)},"end":{"line":1,"character":column(end)}});
+    let source = |tail| format!("{namespace}{row}{tail}");
+    let complete = source(")))");
+    fs::write(&path, &complete).unwrap();
+    let cases = [
+        (")))", true, true),
+        ("", true, false),
+        (" ; missing closers", true, false),
+        (" [0", true, false),
+        ("]", false, false),
+        (" \"unfinished", false, false),
+        (")))", true, true),
+    ];
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":document,"languageId":"clojure","version":1,"text":complete
+        }}}),
+    ];
+    for (index, (tail, _, _)) in cases.into_iter().enumerate() {
+        if index != 0 {
+            requests.push(json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+                "textDocument":{"uri":document,"version":index+1},"contentChanges":[{"text":source(tail)}]
+            }}));
+        }
+        for (step, (method, offset)) in [
+            ("textDocument/hover", local),
+            ("textDocument/completion", local + 2),
+            ("textDocument/hover", key + 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            requests.push(
+                json!({"jsonrpc":"2.0","id":2+3*index+step,"method":method,"params":{
+                    "textDocument":{"uri":document},"position":{"line":1,"character":column(offset)}
+                }}),
+            );
+        }
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    for (index, (tail, checked, read)) in cases.into_iter().enumerate() {
+        let result = |step| {
+            &replies
+                .iter()
+                .find(|msg| msg["id"] == 2 + 3 * index + step)
+                .unwrap()["result"]
+        };
+        let items = result(1)["items"].as_array().unwrap();
+        if checked {
+            assert_eq!(result(0)["contents"]["value"], "text\nString", "{tail:?}");
+            assert_eq!(result(0)["range"], span(local, local + 4));
+            let [item] = items.as_slice() else {
+                panic!("{items:#?}");
+            };
+            assert_eq!(item["label"], "text");
+            assert_eq!(item["detail"], "String");
+            assert_eq!(
+                item["textEdit"],
+                json!({"newText":"text","range":span(local, local + 4)})
+            );
+            assert_eq!(result(2)["contents"]["value"], ":name\nString", "{tail:?}");
+            assert_eq!(result(2)["range"], span(key, key + 5));
+        } else {
+            assert!(
+                result(0).is_null() && result(2).is_null() && items.is_empty(),
+                "{tail:?}"
+            );
+        }
+        let diagnostics = &replies
+            .iter()
+            .find(|msg| {
+                msg["method"] == "textDocument/publishDiagnostics"
+                    && msg["params"]["version"] == index + 1
+            })
+            .unwrap()["params"]["diagnostics"];
+        if read {
+            assert_eq!(diagnostics, &json!([]), "{tail:?}");
+        } else {
+            assert_eq!(diagnostics.as_array().unwrap().len(), 1, "{diagnostics:#?}");
+            assert_eq!(diagnostics[0]["code"], "PNX9000", "{tail:?}");
+        }
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), complete);
+}
+
+#[test]
 fn a_recovered_core_namespace_cannot_enable_standard_core_spec_conversions() {
     use parenox::{Session, Source};
 

@@ -112,7 +112,7 @@ impl Session {
                 functions,
                 scope.model,
                 scope.globals,
-                &file.source,
+                scope.source,
                 bindings,
             )
             .into_iter()
@@ -133,16 +133,20 @@ impl Session {
         if !file.source.is_char_boundary(offset) {
             return None;
         }
-        let (_, forms) = file.navigation_source()?;
+        let (_, forms) = if file.needs_delimiter_recovery(offset) {
+            self.recovered_delimited_source(file, path)?.navigation()
+        } else {
+            file.navigation_source()?
+        };
         let Some(site) = source_symbol_form_at(forms, offset, SymbolSite::Hover) else {
             let key = keyword_at(forms, offset)?;
             let inferred_type = file.cached_hover_type(key.span, || {
-                let scope = self.typing_at(file, path, offset)?;
+                let scope = self.typing_during_edit(file, path, offset)?;
                 scope.declarations.lookup_type(
                     scope.forms,
                     scope.model,
                     scope.globals,
-                    &file.source,
+                    scope.source,
                     key,
                 )
             })?;
@@ -159,12 +163,12 @@ impl Session {
             return None;
         }
         let inferred_type = file.cached_hover_type(site.span, || {
-            let scope = self.typing_at(file, path, offset)?;
+            let scope = self.typing_during_edit(file, path, offset)?;
             scope.declarations.local_type(
                 scope.forms,
                 scope.model,
                 scope.globals,
-                &file.source,
+                scope.source,
                 site,
             )
         })?;

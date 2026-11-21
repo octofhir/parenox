@@ -1018,7 +1018,7 @@ fn local_completion_shows_types_at_reachable_use_sites() {
             None,
             None,
         ),
-        ("(when (some? label) (lab|", None, None),
+        ("(when (some? label) (lab|", Some("String"), None),
         ("(if (some? label) (lab|) label))", Some("String"), None),
     ];
     let initial = format!("{namespace}(defn f [] nil)\n");

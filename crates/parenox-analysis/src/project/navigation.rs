@@ -25,7 +25,7 @@ use completion_require::LiteralRequireSite;
 pub use hover::{
     BindingType, DocumentHover, LocalHover, SourceHover, VarDocumentation, namespace_documentation,
 };
-pub(super) use recovered_types::CheckedPrefix;
+pub(super) use recovered_types::{CheckedPrefix, RecoveredDelimiters};
 pub use semantic::{InspectedReference, SemanticSymbol, SemanticSymbolKind};
 use serde::Serialize;
 pub use signatures::{ArgumentKeyword, CallSignature, CallSignatures};

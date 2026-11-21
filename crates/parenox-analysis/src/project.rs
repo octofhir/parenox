@@ -123,7 +123,7 @@ struct FileCache {
     declarations: Option<Declarations>,
     known_var_surface: OnceLock<bool>,
     navigation_fallback: Option<Box<NavigationFallback>>,
-    recovered_delimited_forms: OnceLock<Option<(Declarations, Vec<Form>)>>,
+    recovered_delimiters: OnceLock<Option<navigation::RecoveredDelimiters>>,
     hover_types: TypeQueries<String>,
     checked_calls: TypeQueries<Arc<CheckedCall>>,
     completion_types: TypeQueries<Arc<BTreeMap<String, String>>, (usize, usize, usize)>,
@@ -295,6 +295,15 @@ impl FileCache {
             let recovered = self.navigation_fallback.as_deref()?;
             Some((&recovered.declarations, &recovered.forms))
         }
+    }
+
+    fn needs_delimiter_recovery(&self, offset: usize) -> bool {
+        self.parse_error.is_some()
+            && self
+                .navigation_fallback
+                .as_ref()
+                .and_then(|fallback| fallback.forms.last())
+                .is_none_or(|form| offset >= form.span.end.offset)
     }
 
     fn start_span(&self) -> Span {
@@ -512,7 +521,7 @@ impl Session {
             cache.hover_types.take();
             cache.checked_calls.take();
             cache.completion_types.take();
-            cache.recovered_delimited_forms.take();
+            cache.recovered_delimiters.take();
             if let Some(fallback) = &mut cache.navigation_fallback {
                 fallback.checked_prefix.take();
                 fallback.recovered_keywords.take();

@@ -1,11 +1,15 @@
-//! Type queries for complete forms before a reader failure.
+//! Query-local parsing and type checking after a reader failure.
+use std::sync::OnceLock;
+
 use crate::checker::{Declarations, Globals, Model};
 use crate::reader::{self, Conditionals, Form, NamespaceToken};
+use crate::syntax::SyntaxKind;
 
 use super::{FileCache, Session};
 use crate::project::NavigationFallback;
 
 pub(super) struct TypeScope<'a> {
+    pub source: &'a str,
     pub declarations: &'a Declarations,
     pub forms: &'a [Form],
     pub model: &'a Model,
@@ -19,7 +23,67 @@ pub(in crate::project) struct CheckedPrefix {
     globals: Globals,
 }
 
+pub(in crate::project) struct RecoveredDelimiters {
+    source: String,
+    declarations: Declarations,
+    forms: Vec<Form>,
+    checked: OnceLock<Option<CheckedPrefix>>,
+}
+
+impl RecoveredDelimiters {
+    pub(super) fn navigation(&self) -> (&Declarations, &[Form]) {
+        (&self.declarations, &self.forms)
+    }
+}
+
 impl Session {
+    pub(super) fn recovered_delimited_source<'a>(
+        &self,
+        file: &'a FileCache,
+        path: &str,
+    ) -> Option<&'a RecoveredDelimiters> {
+        file.recovered_delimiters
+            .get_or_init(|| {
+                let source = close_eof_delimiters(&file.source)?;
+                let (mut read, error) = reader::read_for_check(&source, conditionals(path), None);
+                if error.is_some() {
+                    return None;
+                }
+                let declarations = Declarations::read_source(&source, &mut read).ok()?;
+                let declarations = self
+                    .query_globals
+                    .as_ref()
+                    .and_then(|globals| {
+                        declarations.with_runtime_loads(&read.forms, &globals.runtime_loads)
+                    })
+                    .unwrap_or(declarations);
+                Some(RecoveredDelimiters {
+                    source,
+                    declarations,
+                    forms: read.forms,
+                    checked: OnceLock::new(),
+                })
+            })
+            .as_ref()
+    }
+
+    pub(super) fn typing_during_edit<'a>(
+        &'a self,
+        file: &'a FileCache,
+        path: &str,
+        offset: usize,
+    ) -> Option<TypeScope<'a>> {
+        if !file.needs_delimiter_recovery(offset) {
+            return self.typing_at(file, path, offset);
+        }
+        let recovered = self.recovered_delimited_source(file, path)?;
+        let checked = recovered
+            .checked
+            .get_or_init(|| self.repaired_type_scope(file, path, &recovered.source))
+            .as_ref()?;
+        Some(checked.scope(&recovered.source))
+    }
+
     pub(super) fn typing_at<'a>(
         &'a self,
         file: &'a FileCache,
@@ -29,6 +93,7 @@ impl Session {
         let globals = self.query_globals.as_ref()?;
         if let Some(declarations) = &file.declarations {
             return Some(TypeScope {
+                source: &file.source,
                 declarations,
                 forms: &file.forms,
                 model: file.model.as_ref()?,
@@ -55,7 +120,7 @@ impl Session {
                 CheckedPrefix::read(file, fallback, path, cutoff, globals)
             })
             .as_ref()?;
-        Some(prefix.scope())
+        Some(prefix.scope(&file.source))
     }
 
     pub(super) fn repaired_type_scope(
@@ -82,8 +147,9 @@ impl Session {
 }
 
 impl CheckedPrefix {
-    pub(super) fn scope(&self) -> TypeScope<'_> {
+    pub(super) fn scope<'a>(&'a self, source: &'a str) -> TypeScope<'a> {
         TypeScope {
+            source,
             declarations: &self.declarations,
             forms: &self.forms,
             model: &self.model,
@@ -158,6 +224,32 @@ impl CheckedPrefix {
             globals,
         })
     }
+}
+
+/// Append closing delimiters only. The ranges of written tokens stay valid.
+pub(super) fn close_eof_delimiters(source: &str) -> Option<String> {
+    use SyntaxKind::*;
+    let tree = reader::parse(source).syntax();
+    let mut closers = Vec::new();
+    for node in tree
+        .descendants()
+        .filter(|node| node.kind() == Error && usize::from(node.text_range().end()) == source.len())
+    {
+        let closer = match node.first_child_or_token()?.kind() {
+            OpenParen | OpenAnonymousFunction => ')',
+            OpenBracket => ']',
+            OpenBrace | OpenSet => '}',
+            _ => return None,
+        };
+        closers.push(closer);
+    }
+    if closers.is_empty() {
+        return None;
+    }
+    let mut repaired = source.to_owned();
+    repaired.push('\n');
+    repaired.extend(closers.into_iter().rev());
+    Some(repaired)
 }
 
 fn conditionals(path: &str) -> Conditionals<'static> {
