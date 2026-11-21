@@ -350,6 +350,9 @@ fn reducer_argument(ty: &Type) -> bool {
 }
 
 fn partition_reduced(value: Value) -> (Value, Value) {
+    if value.literal_container.is_some() {
+        return (value, Value::new(Type::Never));
+    }
     let types = match value.known {
         Type::Union(parts) => parts,
         ty => vec![ty],

@@ -1,7 +1,7 @@
 //! Vector and sequence traversal and accumulation.
 use std::collections::BTreeMap;
 
-use super::super::{Checker, LiteralContainer, Value};
+use super::super::{Checker, LiteralContainer, Value, literal_vector_value};
 use crate::Diagnostic;
 use crate::reader::Span;
 use crate::types::{ExtraFields, IntegerType, MAX_TUPLE_ITEMS, MapType, Type};
@@ -92,14 +92,56 @@ impl Checker<'_> {
 
     pub(super) fn conj(&mut self, args: &[(Value, Span)]) -> Value {
         let Some(((collection, span), items)) = args.split_first() else {
-            return Value::new(Type::Tuple(Box::new([])));
+            return literal_vector_value(std::iter::empty(), 0, true);
         };
         if items.is_empty() {
             return collection.clone();
         }
-        let items: Vec<_> = items.iter().map(|(value, _)| value.known.clone()).collect();
-        let result = self.conj_type(&collection.known, &items, *span);
-        Value::with_notes(result, collection.notes.clone())
+        let added: Vec<_> = items.iter().map(|(value, _)| value.known.clone()).collect();
+        let result = self.conj_type(&collection.known, &added, *span);
+        let mut result = Value::with_notes(result, collection.notes.clone());
+        if let (Type::Tuple(previous), Some(vector @ LiteralContainer::Vector(children))) =
+            (&collection.known, &collection.literal_container)
+        {
+            if matches!(result.known, Type::Tuple(_)) {
+                let nested = children.is_some()
+                    || items
+                        .iter()
+                        .any(|(item, _)| item.literal_container.is_some());
+                let proofs = nested.then(|| {
+                    (0..previous.len())
+                        .map(|index| vector.vector_item(index).cloned())
+                        .chain(items.iter().map(|(item, _)| item.literal_container.clone()))
+                        .collect()
+                });
+                result.literal_container = Some(LiteralContainer::Vector(proofs));
+            }
+        } else {
+            self.may_throw();
+        }
+        result
+    }
+
+    pub(super) fn peek(&mut self, (collection, span): &(Value, Span)) -> Value {
+        if collection.known == Type::Nil {
+            return collection.clone();
+        }
+        if let (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) =
+            (&collection.known, &collection.literal_container)
+        {
+            let known = items.last().cloned().unwrap_or(Type::Nil);
+            let mut item = Value::with_notes(known, collection.notes.clone());
+            item.literal_container = items
+                .len()
+                .checked_sub(1)
+                .and_then(|index| vector.vector_item(index))
+                .cloned();
+            return item;
+        }
+        self.unchecked_form(
+            *span,
+            "peek currently needs a proven ordinary vector or Nil",
+        )
     }
 
     fn conj_type(&mut self, collection: &Type, items: &[Type], span: Span) -> Type {

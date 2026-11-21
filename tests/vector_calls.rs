@@ -103,6 +103,53 @@ fn into_keep_retains_false_and_narrows_optional_results() {
 }
 
 #[test]
+fn repeated_conj_and_peek_keep_the_actual_reduction_positions() {
+    let report = check(
+        r#"
+(defn next-row
+  {:t/sig '[:-> (s/tuple (s/and int? #{1}) (s/and int? #{1}) (s/and int? #{2}))]} []
+  (let [previous [0 1 2]
+        current \b]
+    (reduce
+      (fn [row [diagonal above other]]
+        (let [update-val (if (= other current) diagonal (inc (min diagonal above (peek row))))]
+          (conj row update-val)))
+      [(inc (first previous))]
+      [[0 1 \a] [1 2 \c]])))
+(defn nested {:t/sig '[:-> (s/tuple #{"x"} #{"y"})]} []
+  (mapv first (conj [["x"]] ["y"])))
+(defn backed {:t/sig '[:-> #{"leaf"}]} []
+  (try (peek (peek (conj [] ["leaf"])))
+       (catch Throwable _ :unexpected)))
+(defn empty-vector {:t/sig '[:-> nil?]} [] (peek (conj)))
+(defn nil-stack {:t/sig '[:-> nil?]} [] (peek nil))
+"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn a_structural_tuple_does_not_prove_peek_or_conj_behavior() {
+    let report = check(
+        r#"
+(defn direct {:t/sig '[(s/tuple #{:first}) :-> any?]} [source]
+  (peek source))
+(defn appended {:t/sig '[(s/tuple #{:first}) :-> any?]} [source]
+  (peek (conj source :last)))
+"#,
+    );
+    assert!(!report.complete, "{report:#?}");
+    let [direct, appended] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    for finding in [direct, appended] {
+        assert_eq!(finding.code, "PNX9001");
+        assert_eq!(finding.severity, "warning");
+        assert!(finding.message.contains("peek"));
+    }
+}
+
+#[test]
 fn unchecked_into_visits_withhold_only_callback_hovers() {
     let source = r#"(ns traversal (:require [clojure.spec.alpha :as s]))
 (defn inline {:t/sig '[(s/tuple keyword?) :-> any?]} [custom]

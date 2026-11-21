@@ -709,6 +709,8 @@ impl<'model> Checker<'model> {
                     | "clojure.core/first"
                     | "clojure.core/inc"
                     | "clojure.core/dec"
+                    | "clojure.core/conj"
+                    | "clojure.core/peek"
                     | "clojure.core/min"
                     | "clojure.core/max"
             ) || self.model.can_use_standard_core(spelling, self.globals))
@@ -902,6 +904,8 @@ impl<'model> Checker<'model> {
                     | "clojure.core/find"
                     | "clojure.core/list"
                     | "clojure.core/cons"
+                    | "clojure.core/conj"
+                    | "clojure.core/peek"
                     | "clojure.core/seq"
                     | "clojure.core/first"
                     | "clojure.core/next"
@@ -938,6 +942,7 @@ impl<'model> Checker<'model> {
             "clojure.core/list" => return sequences::list_value(args),
             "clojure.core/cons" => return self.cons(args),
             "clojure.core/conj" => return self.conj(args),
+            "clojure.core/peek" => return self.peek(&args[0]),
             "clojure.core/merge" => return self.merge(args, span),
             "clojure.core/dissoc" => return self.dissoc(args),
             "clojure.core/find" => return self.find_entry(&args[0], &args[1]),
@@ -1244,6 +1249,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/keys"
             | "clojure.core/vals"
             | "clojure.core/conj"
+            | "clojure.core/peek"
             | "clojure.core/merge"
             | "clojure.core/dissoc"
             | "clojure.core/find"
