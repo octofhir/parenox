@@ -1,12 +1,12 @@
 //! Argument positions and parameter lists for source calls.
-use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::{collections::BTreeMap, ops::Range};
 
 use crate::ContractOrigin;
 use crate::checker::{CheckedCall, Declarations};
 use crate::reader::{self, Conditionals, Form, Kind, Span};
 use crate::syntax::SyntaxKind;
-use crate::types::Arity;
+use crate::types::{Arity, Type};
 
 use super::{FileCache, Session, SourceTarget, cached_type_query};
 
@@ -26,6 +26,46 @@ pub struct CallSignatures {
 }
 
 impl Session {
+    /// Complete a written keyword with values from an observed call's declaration.
+    pub fn complete_argument_keyword(
+        &self,
+        path: &str,
+        token: Range<usize>,
+        offset: usize,
+        limit: usize,
+    ) -> Option<Vec<String>> {
+        let caller = self.current_file(path)?;
+        let prefix = caller.source.get(token.start..offset)?;
+        if !prefix.starts_with(':') || prefix.starts_with("::") || offset > token.end {
+            return None;
+        }
+        let (_, forms) = caller.navigation_source()?;
+        let site = call_at(forms, offset)?;
+        let argument = site.written.get(site.argument)?;
+        if !matches!(argument.kind, Kind::Keyword(_))
+            || argument.span.start.offset != token.start
+            || argument.span.end.offset != token.end
+        {
+            return None;
+        }
+        let checked = self.checked_call(caller, path, &site)?;
+        let expected = checked.declared_argument_type(site.argument)?;
+        let mut values = Vec::new();
+        if !keyword_values(expected, &mut values) || values.is_empty() {
+            return None;
+        }
+        values.sort_unstable();
+        values.dedup();
+        Some(
+            values
+                .into_iter()
+                .filter(|value| value.starts_with(prefix))
+                .take(limit)
+                .map(str::to_owned)
+                .collect(),
+        )
+    }
+
     /// Find the innermost source call whose argument list contains the cursor.
     pub fn call_signatures(&self, path: &str, offset: usize) -> Option<CallSignatures> {
         let caller = self.current_file(path)?;
@@ -115,6 +155,18 @@ impl Session {
             active_signature,
             active_parameter,
         })
+    }
+}
+
+fn keyword_values<'a>(ty: &'a Type, values: &mut Vec<&'a str>) -> bool {
+    match ty {
+        Type::Key(value) => {
+            values.push(value);
+            true
+        }
+        Type::Nil => true,
+        Type::Union(parts) => parts.iter().all(|part| keyword_values(part, values)),
+        _ => false,
     }
 }
 

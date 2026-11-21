@@ -212,12 +212,24 @@ pub fn complete(
             dependencies,
         )
     } else if site.kind == SyntaxKind::Keyword {
-        if !prefix.starts_with("::") && !prefix.contains('/') {
-            return None;
+        if let Some(values) =
+            session.complete_argument_keyword(path, site.range.clone(), offset, LIMIT + 1)
+        {
+            values
+                .into_iter()
+                .map(|value| {
+                    json!({"label":value,"kind":20,"detail":"Allowed argument value",
+                           "textEdit":{"range":range,"newText":value}})
+                })
+                .collect()
+        } else {
+            if !prefix.starts_with("::") && !prefix.contains('/') {
+                return None;
+            }
+            session.complete_spec_key(path, prefix, LIMIT + 1).into_iter().map(|key| {
+                json!({"label":key,"kind":14,"detail":"Project spec","textEdit":{"range":range,"newText":key}})
+            }).collect()
         }
-        session.complete_spec_key(path, prefix, LIMIT + 1).into_iter().map(|key| {
-            json!({"label":key,"kind":14,"detail":"Project spec","textEdit":{"range":range,"newText":key}})
-        }).collect()
     } else if let Some((qualifier, member)) = prefix.split_once('/')
         && qualifier != "clojure.core"
     {

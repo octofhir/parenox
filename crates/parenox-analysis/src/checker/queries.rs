@@ -71,6 +71,18 @@ impl CheckedCall {
             CallDeclaration::Typed(_) => None,
         }
     }
+
+    pub(crate) fn declared_argument_type(&self, written: usize) -> Option<&Type> {
+        let CallDeclaration::Typed(signature) = &self.declaration else {
+            return None;
+        };
+        let count = self.argument_count?;
+        let index = written.checked_add(self.explicit_offset?)?;
+        if index >= count || !signature.arity().accepts(count) {
+            return None;
+        }
+        signature.args.get(index).or(signature.rest.as_ref())
+    }
 }
 
 impl<'a> TypeQuery<'a> {
