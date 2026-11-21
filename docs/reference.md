@@ -515,7 +515,7 @@ nested field.
 | Maps | Presence, required/optional fields, open and closed shapes, dictionaries, stable lookup narrowing, and supported reads, updates, and projections |
 | Collections | Vectors, sets, map entries, sequences, positional destructuring, and selected calls including `mapv`, `filterv`, `reduce`, and `reduce-kv` |
 | JVM | Selected regex and string operations and known exception classes, not general Java interop |
-| Unannotated code | Source name resolution, known arities, and selected string mismatches; no claim of full type coverage |
+| Unannotated code | Source name resolution, known arities, selected string checks, and argument mismatches against explicit externs |
 
 Clojure truthiness distinguishes nil and false from zero and empty
 collections. A missing key is not a present nil or false. `get` and map
@@ -539,6 +539,10 @@ expression. `some->` and `some->>` skip the remaining steps on nil and pass
 false through. A stable read of the original input keeps the non-nil type
 in later steps. `recur` must target a supported tail position and analysis is
 bounded when argument types keep growing.
+
+When `if` chooses between two inline functions passed to `reduce`, each
+possible fold uses the chosen function throughout. The callback body sees
+the branch's types for captured locals, the accumulator and each element.
 
 Vector `:pre` conditions are checked after parameter binding and on each
 `recur` iteration. Vector `:post` conditions run after a normal return, with

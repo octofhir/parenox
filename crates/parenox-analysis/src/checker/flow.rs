@@ -395,34 +395,43 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         }
-        let condition = self.infer(&xs[1], env);
-        let truthy = condition.known.truthy() != Type::Never;
-        let falsey = condition.known.falsey() != Type::Never;
         let runs_on_truth = matches!(mode, Conditional::If | Conditional::When);
-        let (yes_reachable, no_reachable) = if runs_on_truth {
-            (truthy, falsey)
-        } else {
-            (falsey, truthy)
-        };
-        let yes = {
-            let mut local = env.clone();
-            self.narrow(&xs[1], runs_on_truth, &mut local);
-            self.check_path(yes_reachable && local.reachable(), |checker| {
-                checker.body(&xs[2..if when { xs.len() } else { 3 }], &local, tail)
-            })
-        };
-        let no = {
-            let mut local = env.clone();
-            self.narrow(&xs[1], !runs_on_truth, &mut local);
-            let body = if when { &[] } else { &xs[3..] };
-            self.check_path(no_reachable && local.reachable(), |checker| {
-                checker.body(body, &local, tail)
-            })
-        };
+        let [yes, no] = self.check_if_paths(&xs[1], env, runs_on_truth, |checker, scope, truth| {
+            let body = if truth == runs_on_truth {
+                &xs[2..if when { xs.len() } else { 3 }]
+            } else if when {
+                &[]
+            } else {
+                &xs[3..]
+            };
+            checker.body(body, scope, tail)
+        });
         Value::with_notes(
             Type::union([yes.known, no.known]),
             [yes.notes, no.notes].concat(),
         )
+    }
+
+    pub(super) fn check_if_paths(
+        &mut self,
+        test: &Form,
+        env: &Env,
+        first_truth: bool,
+        mut branch: impl FnMut(&mut Self, &Env, bool) -> Value,
+    ) -> [Value; 2] {
+        let condition = self.infer(test, env);
+        [first_truth, !first_truth].map(|truth| {
+            let possible = if truth {
+                condition.known.truthy()
+            } else {
+                condition.known.falsey()
+            };
+            let mut scope = env.clone();
+            self.narrow(test, truth, &mut scope);
+            self.check_path(possible != Type::Never && scope.reachable(), |checker| {
+                branch(checker, &scope, truth)
+            })
+        })
     }
 
     pub(super) fn cond_form(

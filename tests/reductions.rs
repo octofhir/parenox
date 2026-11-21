@@ -1,4 +1,4 @@
-use parenox::{Report, Session};
+use parenox::{DocumentHover, Report, Session};
 
 fn check(expression: &str, ret: &str) -> Report {
     let source = format!("(ns demo) (defn run {{:t/sig '[:-> {ret}]}} [] {expression})");
@@ -74,6 +74,64 @@ fn reduction_arguments_follow_jvm_evaluation_order() {
     assert!(report.ok && report.complete, "{report:#?}");
     let report = check("(reduce + 0 false)", "number?");
     assert_eq!(report.diagnostics[0].code, "PNX2322", "{report:#?}");
+}
+
+#[test]
+fn conditional_reducers_keep_the_selected_function_and_its_capture_types() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn run {:t/sig '[boolean? :-> #{:left :right}]} [left?]
+          (reduce (if left?
+                    (fn [acc _] (case acc :start :left :left :left :mixed))
+                    (fn [acc _] (case acc :start :right :right :right :mixed)))
+                  :start [1 2]))
+        (defn label {:t/sig '[(s/nilable string?) :-> string?]} [label]
+          (reduce (if (some? label)
+                    (fn [_ index] (subs label index))
+                    (fn [acc _] (str acc label)))
+                  "" [0]))"#;
+    let mut session = Session::default();
+    let report = session.check("conditional.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    for (marker, ty) in [("label index", "String"), ("label)))", "Nil")] {
+        let offset = source.find(marker).unwrap();
+        let Some(DocumentHover::Local(value)) =
+            session.document_hover_at("conditional.clj", offset)
+        else {
+            panic!("expected a local type for {marker}");
+        };
+        assert_eq!(value.inferred_type, ty);
+    }
+}
+
+#[test]
+fn conditional_reducers_preserve_eager_argument_order_and_compile_inactive_bodies() {
+    let report = check(
+        r#"(try
+               (reduce (if (throw (ex-info "test" {:stage :test}))
+                         (fn [_ _] (throw (ex-info "body" {:stage :body})))
+                         (fn [a _] a))
+                       (throw (ex-info "init" {:stage :init}))
+                       (throw (ex-info "source" {:stage :source})))
+               (catch clojure.lang.ExceptionInfo e (:stage (ex-data e))))"#,
+        "#{:test}",
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+    let report = check(
+        "(reduce (if false (fn [a b] (+ a b)) (fn [a _] a)) \"safe\" [nil])",
+        "string?",
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+    let report = check(
+        "(reduce (if nil (fn [a _] (missing-left a)) (fn [a _] (missing-right a))) 0 [])",
+        "number?",
+    );
+    let [left, right] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(left.code, "PNX2304");
+    assert!(left.message.contains("missing-left"));
+    assert_eq!(right.code, "PNX2304");
+    assert!(right.message.contains("missing-right"));
 }
 
 #[test]
