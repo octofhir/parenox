@@ -788,6 +788,9 @@ project, a buffer has no project context.
   core var appears once as a plain name. Missing closing delimiters at EOF can
   be supplied for the query. Completion replaces the whole written symbol.
   At an empty expression position it inserts the selected name at the cursor.
+  In `:or` values of a direct map destructuring in `let` or a function
+  parameter, completion uses the scope before the pattern introduces names.
+  A parameter default can also use ordinary parameters written later.
   A candidate can show its inferred type at the cursor, including narrowing
   inside a branch. Details combine types when the checker visits the same
   occurrence more than once. Names remain available when a type cannot be

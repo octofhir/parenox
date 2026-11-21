@@ -3,7 +3,9 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use crate::Diagnostic;
-use crate::checker::bindings::{binding_names, dotted_binding_error, raw_local_symbol};
+use crate::checker::bindings::{
+    binding_names, dotted_binding_error, map_defaults_form, raw_local_symbol,
+};
 use crate::checker::calls::arity_counts;
 use crate::checker::function_forms::{
     Clause, function_clauses, letfn_bindings, letfn_definition, lexical_fn_star_clauses,
@@ -559,8 +561,19 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
     fn clause(&mut self, clause: &Clause<'a>) {
         let scope = self.locals.len();
         self.select_type_hint(clause.parameter_vector);
-        for parameter in clause.parameters() {
-            self.bind_pattern(parameter);
+        if self.completing_locals() {
+            // The compiler installs the ordinary formals before destructuring.
+            for parameter in clause.parameters().filter(|param| param.symbol().is_some()) {
+                self.bind_pattern(parameter);
+            }
+            for parameter in clause.parameters().filter(|param| param.symbol().is_none()) {
+                self.direct_map_defaults(parameter);
+                self.bind_pattern(parameter);
+            }
+        } else {
+            for parameter in clause.parameters() {
+                self.bind_pattern(parameter);
+            }
         }
         // These forms can be elided by the compiler. Typed checking reports
         // their findings with the activation condition.
@@ -576,6 +589,17 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
             self.post_result_scope = previous;
         }
         self.locals.truncate(scope);
+    }
+
+    fn direct_map_defaults(&mut self, pattern: &'a Form) {
+        if let Some(entries) = pattern.map()
+            && let Some(defaults) =
+                map_defaults_form(entries.as_chunks::<2>().0).and_then(Form::map)
+        {
+            for [_, value] in defaults.as_chunks::<2>().0 {
+                self.forms(std::slice::from_ref(value));
+            }
+        }
     }
 
     fn bind_pattern(&mut self, pattern: &'a Form) {
@@ -1205,6 +1229,9 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         {
             let scope = self.locals.len();
             for [pattern, value] in pairs {
+                if operator == "let" && self.completing_locals() {
+                    self.direct_map_defaults(pattern);
+                }
                 self.forms(std::slice::from_ref(value));
                 self.bind_pattern(pattern);
                 if matches!(operator, "let" | "let*")

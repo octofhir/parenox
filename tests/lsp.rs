@@ -1322,6 +1322,101 @@ fn local_completion_inserts_at_empty_expression_positions() {
 }
 
 #[test]
+fn completes_locals_in_direct_map_defaults() {
+    let fixture = Fixture::new("map default lexical completion");
+    let path = fixture.0.join("src/app.clj");
+    let file = uri(&path);
+    let initial = "(ns app)\n(defn f [] nil)\n";
+    fs::write(&path, initial).unwrap();
+    let cases = [
+        (
+            r#"(let [label "prior" {:keys [label] :or {label (do #_"🦊" lab|)} :as label-map} {}] label)"#,
+            Some(r#""prior""#),
+        ),
+        (
+            r#"(let [label "prior" {:keys [label] :or {label (identity |)} :as label-map} {}] label)"#,
+            Some(r#""prior""#),
+        ),
+        (
+            r#"((fn [{:keys [choice] :or {choice lab|}} label] choice) {} "later")"#,
+            Some(r#""later""#),
+        ),
+        (
+            r#"((fn [{:keys [label]} {:keys [choice] :or {choice lab|}}] choice) {:label "earlier"} {})"#,
+            Some(r#""earlier""#),
+        ),
+        (
+            r#"(let [label "prior" {:keys [choice] :or {lab| label}} {}] choice)"#,
+            None,
+        ),
+        (
+            r#"((fn [{:keys [choice] :or {choice lab|}} {:keys [label]}] choice) {} {:label "later"})"#,
+            None,
+        ),
+    ];
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri(&fixture.0)}}),
+        json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
+            "uri":file,"languageId":"clojure","version":1,"text":initial
+        }}}),
+    ];
+    let range = |body: &str| {
+        let prefix = &body[..body.find('|').unwrap()];
+        let cursor = "(defn f {:t/sig '[:-> t/any]} [] ".len() + prefix.encode_utf16().count();
+        let start = if prefix.ends_with("lab") {
+            cursor - 3
+        } else {
+            cursor
+        };
+        json!({"start":{"line":1,"character":start},"end":{"line":1,"character":cursor}})
+    };
+    for (index, (body, _)) in cases.iter().enumerate() {
+        let id = index + 2;
+        let text = format!(
+            "(ns app)\n(defn f {{:t/sig '[:-> t/any]}} [] {})\n",
+            body.replace('|', "")
+        );
+        requests.push(
+            json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
+                "textDocument":{"uri":file,"version":id},"contentChanges":[{"text":text}]
+            }}),
+        );
+        requests.push(
+            json!({"jsonrpc":"2.0","id":id,"method":"textDocument/completion","params":{
+                "textDocument":{"uri":file},"position":range(body)["end"]
+            }}),
+        );
+    }
+    requests.push(json!({"jsonrpc":"2.0","id":100,"method":"shutdown"}));
+    requests.push(json!({"jsonrpc":"2.0","method":"exit"}));
+    let replies = transcript(&requests);
+    for (index, (body, detail)) in cases.into_iter().enumerate() {
+        let result = &replies
+            .iter()
+            .find(|reply| reply["id"] == index + 2)
+            .unwrap()["result"];
+        let locals: Vec<_> = result["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["kind"] == 6)
+            .collect();
+        if let Some(detail) = detail {
+            assert_eq!(
+                locals,
+                [&json!({
+                    "label":"label","kind":6,"detail":detail,
+                    "textEdit":{"range":range(body),"newText":"label"}
+                })],
+                "{body}: {result:#?}"
+            );
+        } else {
+            assert!(locals.is_empty(), "{body}: {result:#?}");
+        }
+    }
+}
+
+#[test]
 fn local_completion_shows_types_at_reachable_use_sites() {
     let fixture = Fixture::new("flow types in completion");
     let path = fixture.0.join("src/app.clj");

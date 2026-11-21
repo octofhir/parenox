@@ -84,6 +84,12 @@ fn map_binding_names<'a>(entries: &'a [Form], names: &mut Vec<(&'a str, Span)>) 
     }
 }
 
+pub(super) fn map_defaults_form(pairs: &[[Form; 2]]) -> Option<&Form> {
+    pairs
+        .iter()
+        .find_map(|[key, form]| (key.keyword() == Some(":or")).then_some(form))
+}
+
 fn map_binding_name<'a>(form: &'a Form, names: &mut Vec<(&'a str, Span)>) {
     if let Some(name) = form.symbol().or_else(|| form.keyword()) {
         let local = name.trim_start_matches(':').rsplit('/').next().unwrap();
@@ -500,7 +506,7 @@ impl Checker<'_> {
             stopped: !reachable,
             ..Defaults::default()
         };
-        let Some([_, form]) = pairs.iter().find(|[key, _]| key.keyword() == Some(":or")) else {
+        let Some(form) = map_defaults_form(pairs) else {
             return defaults;
         };
         let Some(entries) = form.map() else {
