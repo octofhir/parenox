@@ -1,11 +1,38 @@
 //! Lookup and presence for keys supplied as expressions.
-use super::super::{Checker, Env, Value, calls::call_returns};
+use super::super::{Checker, Env, Value, calls::call_returns, model::DeclaredValue};
 use super::{Lookup, key_presence, narrow_key_presence};
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{IndexedItem, MapSlot, Type};
 
 impl Checker<'_> {
+    pub(super) fn single_symbol_map_key(&mut self, form: &Form, env: &Env) -> Option<Type> {
+        let Kind::Symbol(name) = &form.kind else {
+            return None;
+        };
+        if !name.contains('/') && name.find('.').is_some_and(|dot| dot > 0) {
+            return None;
+        }
+        let known = if let Some(binding) = env.get(name) {
+            &binding.known
+        } else {
+            match self
+                .model
+                .declared_value(name, self.globals, form.span.start.offset)?
+            {
+                DeclaredValue::Literal(ty) | DeclaredValue::ExternLiteral(ty, _) => ty,
+                _ => return None,
+            }
+        };
+        if !known.is_literal_map_key() {
+            return None;
+        }
+        // The key of a single-entry map is read before the value. Use the
+        // ordinary expression path to record the type at the written symbol.
+        let checked = self.infer(form, env).known;
+        checked.is_literal_map_key().then_some(checked)
+    }
+
     pub(in crate::checker) fn literal_map_key(&self, form: &Form) -> Option<Type> {
         match &form.without_metadata().kind {
             Kind::Keyword(key) => Some(Type::Key(self.model.key(key))),

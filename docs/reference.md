@@ -574,6 +574,10 @@ top-level `def` that calls standard `str` with literal strings, keywords and nil
 Auto-resolved keywords use the initializer's namespace and its declared aliases.
 An opaque top-level effect ends this analysis for later initializers. The bounded
 result is a source literal that can be exported as EDN.
+In a single-entry map expression, a symbol can supply the key when its checked
+value is one exact keyword, string or integer. Branch narrowing can establish
+that value. The resulting map preserves the exact key in lookup and call checks.
+A type mismatch for its value points at the supplied value expression.
 In a direct map destructuring binding, Clojure 1.13 evaluates the `:or`
 defaults before the value to destructure. A default can run even when its
 key is present or unused. A proven runtime failure in a default or initializer

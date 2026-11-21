@@ -1,6 +1,6 @@
 //! Connect failed type obligations to the literal expression that supplied them.
 use crate::checker::Checker;
-use crate::reader::Form;
+use crate::reader::{Form, Kind};
 use crate::types::Type;
 use crate::{Diagnostic, ExternMismatchReason, ExternPathStep};
 
@@ -63,20 +63,25 @@ impl Checker<'_> {
         while let Some(step) = path.next() {
             form = match step {
                 ExternPathStep::Field { key } => {
-                    let mut fields =
-                        form.map()?
-                            .as_chunks::<2>()
-                            .0
-                            .iter()
-                            .filter(|[candidate, _]| {
-                                self.literal_map_key(candidate)
-                                    .or_else(|| Type::integer_literal(candidate, self.source))
-                                    .is_some_and(|candidate| candidate.to_string() == *key)
-                            });
-                    let [key, value] = fields.next()?;
-                    if fields.next().is_some() {
-                        return None;
-                    }
+                    let entries = form.map()?.as_chunks::<2>().0;
+                    let [key, value] = if let [entry] = entries
+                        && matches!(entry[0].kind, Kind::Symbol(_))
+                    {
+                        // A checked single-entry map has only one written
+                        // value that can supply the field in this mismatch.
+                        entry
+                    } else {
+                        let mut fields = entries.iter().filter(|[candidate, _]| {
+                            self.literal_map_key(candidate)
+                                .or_else(|| Type::integer_literal(candidate, self.source))
+                                .is_some_and(|candidate| candidate.to_string() == *key)
+                        });
+                        let field = fields.next()?;
+                        if fields.next().is_some() {
+                            return None;
+                        }
+                        field
+                    };
                     if matches!(path.peek(), Some(ExternPathStep::MapKey)) {
                         path.next();
                         key

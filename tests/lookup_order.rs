@@ -98,6 +98,85 @@ fn a_literal_get_in_lookup_can_throw_before_the_next_key_expression() {
 }
 
 #[test]
+fn single_entry_maps_preserve_narrowed_symbol_keys() {
+    let source = r#"(ns demo.handlers (:require [clojure.spec.alpha :as s]))
+        (def transport-key (str ::file))
+        (defn lookup {:t/sig '[:-> #{"reader"}]} []
+          (get {transport-key "reader"} transport-key))
+        (defn invalid {:t/sig '[(s/nilable #{":demo.handlers/file"}) :-> t/any]} [tag]
+          (when (some? tag)
+            (let [handlers {tag "reader"}
+                  picked (get handlers tag)]
+              (inc picked))))
+        (defn consume {:t/sig '[{":demo.handlers/file" string?} :-> t/any]} [handlers]
+          handlers)
+        (defn wrong-handler {:t/sig '[:-> t/any]} []
+          (consume {transport-key 42}))"#;
+    let mut session = Session::default();
+    let report = session.check("handlers.clj", source);
+    assert!(report.complete, "{report:#?}");
+    let [error, wrong_handler] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(
+        &source[error.span.start.offset..error.span.end.offset],
+        "picked"
+    );
+    assert_eq!(wrong_handler.code, "PNX2322");
+    assert_eq!(
+        &source[wrong_handler.span.start.offset..wrong_handler.span.end.offset],
+        "42"
+    );
+    let key = source.find("{tag").unwrap() + 1;
+    let Some(DocumentHover::Local(local)) = session.document_hover_at("handlers.clj", key) else {
+        panic!("Expected a type at the key read");
+    };
+    assert_eq!(local.inferred_type, "\":demo.handlers/file\"");
+}
+
+#[test]
+fn single_entry_maps_keep_unknown_keys_and_value_failures_explicit() {
+    let source = r#"(ns demo.handlers)
+        (defn broad {:t/sig '[string? :-> t/any]} [tag] {tag "reader"})
+        (defn failed {:t/sig '[:-> #{:failed}]} []
+          (let [tag :file]
+            (try {tag (throw (ex-info "bad reader" {}))}
+                 (catch ExceptionInfo _ :failed))))"#;
+    let report = Session::default().check("handlers.clj", source);
+    let [gap] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(gap.code, "PNX9001");
+    assert_eq!(&source[gap.span.start.offset..gap.span.end.offset], "tag");
+    assert!(!report.complete);
+}
+
+#[test]
+fn single_entry_map_keys_preserve_class_resolution_and_runtime_rejections() {
+    let source = r#"(ns demo.handlers)
+        (def end. "reader")
+        (def .start "reader")
+        (defn class-read {:t/sig '[:-> t/any]} [] {end. 1})
+        (defn ordinary-read {:t/sig '[:-> #{:ready}]} [] (get {.start :ready} .start))
+        (defn no-result {:t/sig '[:-> t/any]} []
+          (let [tag :file
+                handlers {tag (subs 42 0)}]
+            (inc "unreachable")))"#;
+    let report = Session::default().check("handlers.clj", source);
+    let [gap, error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(gap.code, "PNX9001");
+    assert_eq!(&source[gap.span.start.offset..gap.span.end.offset], "end.");
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(
+        &source[error.span.start.offset..error.span.end.offset],
+        "42"
+    );
+}
+
+#[test]
 fn an_opaque_macro_shadowing_get_in_has_no_standard_lookup_proof() {
     let source = r#"(ns demo)
         (defmacro get-in [& _] :real)

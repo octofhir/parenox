@@ -91,6 +91,10 @@ impl Checker<'_> {
     }
 
     pub(super) fn map_literal(&mut self, xs: &[Form], context: MapLiteral<'_>) -> Value {
+        let mut symbol_key = match (&context, xs) {
+            (MapLiteral::Expression(env), [key, _]) => self.single_symbol_map_key(key, env),
+            _ => None,
+        };
         let mut fields = BTreeMap::new();
         let mut container_fields = BTreeMap::new();
         let mut extra_keys = Vec::new();
@@ -105,10 +109,11 @@ impl Checker<'_> {
                     self.quoted_data_with_symbols(&pair[1], precise_symbols)
                 }
             };
-            returns &= value.known != Type::Never;
+            returns &= !value.stops_evaluation();
             if let Some(key) = self
                 .literal_map_key(&pair[0])
                 .or_else(|| Type::integer_literal(&pair[0], self.source))
+                .or_else(|| symbol_key.take())
             {
                 if fields
                     .insert(key.clone(), Field::new(value.known, true))
