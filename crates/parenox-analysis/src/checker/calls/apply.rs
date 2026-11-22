@@ -39,6 +39,21 @@ impl Checker<'_> {
         {
             return self.apply_string_mapping(mapper, source, env);
         }
+        if prefix.is_empty()
+            && let Kind::Vector(items) = &spread.kind
+            && let Callable::Value(function) = &callable.kind
+            && matches!(function.known, Type::Function(_))
+        {
+            // A bare vector supplies every argument without an intervening metadata step.
+            let args = self.call_args(function, items, span, env);
+            let written: Vec<_> = items.iter().map(Some).collect();
+            return self.call_value(
+                function,
+                args.arguments(ArgumentForms::Projected(&written)),
+                callable.span,
+                span,
+            );
+        }
         if let Some(items) = spread.vector() {
             // The literal's syntax supplies every position even for large vectors.
             args.extend(self.eval_args(items, env, reachable));

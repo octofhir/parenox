@@ -130,6 +130,17 @@ struct EvaluatedArguments {
     output_callback_span: Option<Span>,
 }
 
+impl EvaluatedArguments {
+    fn arguments<'a>(&'a self, forms: ArgumentForms<'a>) -> CallArguments<'a> {
+        CallArguments {
+            values: &self.values,
+            forms,
+            output_gap_explained: self.output_gap_explained,
+            output_callback_span: self.output_callback_span,
+        }
+    }
+}
+
 struct ContextualArgument<'a> {
     callback: &'a Form,
     expected: &'a Type,
@@ -557,12 +568,7 @@ impl<'model> Checker<'model> {
         let args = self.call_args(&function, &xs[1..], span, env);
         let value = self.call_value(
             &function,
-            CallArguments {
-                values: &args.values,
-                forms: ArgumentForms::Written(&xs[1..]),
-                output_gap_explained: args.output_gap_explained,
-                output_callback_span: args.output_callback_span,
-            },
+            args.arguments(ArgumentForms::Written(&xs[1..])),
             xs[0].span,
             span,
         );
