@@ -1,6 +1,6 @@
 //! Query-local parsing and type checking after a reader failure.
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::checker::{Declarations, Globals, Model, SpecFingerprint};
 use crate::reader::{self, Conditionals, Form, NamespaceToken};
@@ -19,7 +19,7 @@ pub(super) struct TypeScope<'a> {
 
 pub(in crate::project) struct CheckedPrefix {
     declarations: Declarations,
-    forms: Vec<Form>,
+    forms: Arc<[Form]>,
     model: Model,
     globals: Globals,
 }
@@ -246,11 +246,12 @@ impl CheckedPrefix {
         // The project's diagnostics and exports still use fully read files.
         let mut globals = globals.clone();
         globals.register_namespace(declarations.namespace());
-        let model = Model::build(&declarations, &read.forms, source, path, &globals);
+        let forms = read.forms.into();
+        let model = Model::build(&declarations, &forms, source, path, &globals);
         model.publish(&mut globals, true);
         Some(Self {
             declarations,
-            forms: read.forms,
+            forms,
             model,
             globals,
         })

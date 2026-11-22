@@ -96,7 +96,7 @@ pub(super) fn local_fn_name(name: &str, raw: bool) -> &str {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ClauseMode {
+pub(super) enum ClauseMode {
     Checked,
     Lexical,
     CheckedFnStar,
@@ -188,7 +188,7 @@ pub(super) fn pack_arguments(arity: Arity, mut values: Vec<Value>) -> Vec<Value>
     values
 }
 
-fn function_clause(
+pub(super) fn function_clause(
     forms: &[Form],
     span: Span,
     mode: ClauseMode,

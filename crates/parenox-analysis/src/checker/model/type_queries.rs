@@ -75,7 +75,7 @@ impl Declarations {
                 && let Some(contract) = &function.contract
             {
                 for signature in contract.signatures.iter() {
-                    let clause = function.arities[&signature.arity()].span;
+                    let clause = function.arities[&signature.arity()];
                     let Some(query) = query_for(clause) else {
                         continue;
                     };
@@ -257,7 +257,7 @@ impl Declarations {
             && let Some(contract) = &function.contract
         {
             let signature = contract.signatures.iter().find(|signature| {
-                let span = function.arities[&signature.arity()].span;
+                let span = function.arities[&signature.arity()];
                 offset >= span.start.offset && offset < span.end.offset
             })?;
             checker.declared_function_body(function, signature);

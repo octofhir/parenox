@@ -282,10 +282,10 @@ impl<'model> Checker<'model> {
 
     fn inferred_call(&mut self, function: &Function, args: Vec<Value>, span: Span) -> Value {
         let returns = args.iter().all(|arg| arg.known != Type::Never);
-        let Some((&arity, clause)) = function
+        let Some(&arity) = function
             .arities
-            .iter()
-            .find(|(arity, _)| arity.accepts(args.len()))
+            .keys()
+            .find(|arity| arity.accepts(args.len()))
         else {
             if self.path_reachable && returns {
                 self.error(
@@ -343,10 +343,11 @@ impl<'model> Checker<'model> {
             }
             self.active_helpers.push(function.name.clone());
             let enclosing = std::mem::replace(&mut self.throws, tracking.then(Throws::default));
+            let clause = self.model.source_clause(function, arity);
             let result = self.function_body(
-                &clause.params,
-                clause.conditions(),
-                &clause.body,
+                &clause.bindings(),
+                clause.conditions,
+                clause.body,
                 pack_arguments(arity, key.1.clone()),
                 &Env::new(),
                 clause.span,

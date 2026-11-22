@@ -112,16 +112,15 @@ fn prove(
             ":t/guard requires a fixed arity and a Boolean return contract",
         ));
     }
-    let arm = &function.arities[&signature.arity()];
-    if !arm.preconditions.is_empty() || arm.postconditions.is_some() {
+    let arm = model.source_clause(function, signature.arity());
+    if !arm.conditions.pre.is_empty() || arm.conditions.post.is_some() {
         return Err(invalid(
             ":t/guard verification requires an arity without preconditions or postconditions",
         ));
     }
     let mut names = BTreeSet::new();
     let params: Vec<_> = arm
-        .params
-        .iter()
+        .parameters()
         .enumerate()
         .map(|(index, form)| {
             let name = match &form.kind {
@@ -139,7 +138,7 @@ fn prove(
     let Some(argument) = params.iter().position(|(name, _)| *name == param) else {
         return Err(invalid(":t/guard must name a parameter of this function"));
     };
-    let [body] = arm.body.as_slice() else {
+    let [body] = arm.body else {
         return Err(invalid(
             ":t/guard requires a single boolean expression as the body",
         ));

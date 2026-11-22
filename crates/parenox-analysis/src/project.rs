@@ -117,7 +117,7 @@ struct FileCache {
     snapshot: u64,
     parsed: bool,
     kind: FileKind,
-    forms: Vec<Form>,
+    forms: Arc<[Form]>,
     parse_error: Option<Diagnostic>,
     suppressions: Suppressions,
     declarations: Option<Declarations>,
@@ -271,10 +271,10 @@ impl FileCache {
                 }
                 self.declarations = declarations;
                 self.suppressions = Suppressions::read(source, &read.forms, read.comments);
-                self.forms = read.forms;
+                self.forms = read.forms.into();
             }
             Err(error) => {
-                self.forms.clear();
+                self.forms = Arc::default();
                 if kind == FileKind::Source {
                     if !reader_failed {
                         // Preserve the valid prefix when namespace validation fails.

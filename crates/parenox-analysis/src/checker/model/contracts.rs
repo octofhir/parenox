@@ -35,11 +35,10 @@ fn attributes(maps: [Option<&Form>; 2]) -> impl Iterator<Item = &[Form; 2]> + Cl
 }
 use std::sync::Arc;
 
-use super::{
-    Contract, Function, FunctionArity, Globals, Model, Signature,
-    type_forms::read_type_with_parameters,
+use super::{Contract, Function, Globals, Model, Signature, type_forms::read_type_with_parameters};
+use crate::checker::function_forms::{
+    Clause, ClauseMode, function_clause, function_clauses, split_rest,
 };
-use crate::checker::function_forms::{function_clauses, split_rest};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{
     Arity, ExtraFields, MAX_CALLBACK_MAP_DEPTH, MAX_TYPE_PARAMETERS, Parameter, Parameters, Type,
@@ -89,7 +88,7 @@ impl Model {
 
     pub(super) fn read_function<'a>(
         &mut self,
-        form: &'a Form,
+        (index, form): (usize, &'a Form),
         source: &str,
         globals: &Globals,
         fdefs: &mut BTreeMap<String, &[Form]>,
@@ -208,18 +207,7 @@ impl Model {
             });
         let arities: BTreeMap<_, _> = clauses
             .into_iter()
-            .map(|(count, clause)| {
-                (
-                    count,
-                    FunctionArity {
-                        params: clause.bindings().into_owned(),
-                        preconditions: clause.conditions.pre.to_vec(),
-                        postconditions: clause.conditions.post.map(<[Form]>::to_vec),
-                        body: clause.body.to_vec(),
-                        span: clause.span,
-                    },
-                )
-            })
+            .map(|(arity, clause)| (arity, clause.span))
             .collect();
         let declared = if let Some(signature) = signature {
             if signature.quote_operand().is_none() {
@@ -286,6 +274,7 @@ impl Model {
             data_body_eligible,
             ordinary_dotted: super::bare_dotted_name(symbol) && !opaque_callable(),
             span,
+            source_index: index,
         };
         if let Some(guard) = guard {
             guards.insert(name.clone(), guard);
@@ -296,6 +285,32 @@ impl Model {
         if self.functions.insert(name.clone(), function).is_some() {
             self.error("PNX2790", span, format!("Duplicate function {name}"));
         }
+    }
+
+    pub(in crate::checker) fn source_clause(
+        &self,
+        function: &Function,
+        arity: Arity,
+    ) -> Clause<'_> {
+        let form = &self.source_forms[function.source_index];
+        let Kind::List(items) = &form.without_metadata().kind else {
+            unreachable!("function declarations point to source lists");
+        };
+        let (arms, _) = function_parts_with_attributes(&items[2..]);
+        let span = function.arities[&arity];
+        let forms = if arms.first().and_then(Form::vector).is_some() {
+            arms
+        } else {
+            let arm = arms
+                .iter()
+                .find(|arm| arm.span == span)
+                .expect("checked arity belongs to this definition");
+            let Kind::List(forms) = &arm.without_metadata().kind else {
+                unreachable!("checked arity declarations are lists");
+            };
+            forms
+        };
+        function_clause(forms, span, ClauseMode::Checked).expect("validated function clause")
     }
 
     pub(super) fn read_unchecked_function(&mut self, name_form: &Form, op: &str, private: bool) {

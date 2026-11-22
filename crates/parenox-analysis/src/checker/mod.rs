@@ -74,12 +74,11 @@ impl Model {
             .as_ref()
             .expect("checked functions have contracts");
         for signature in contract.signatures.iter() {
-            let arity = &function.arities[&signature.arity()];
-            let result = checker.declared_function_body(function, signature);
+            let (result, return_span) = checker.declared_function_body(function, signature);
             checker.expect_contract(
                 &result,
                 &signature.ret,
-                arity.body.last().map_or(arity.span, |form| form.span),
+                return_span,
                 &format!("Return value of {}", function.name),
                 Some(&contract.origin),
             );
@@ -596,8 +595,12 @@ impl<'a> Checker<'a> {
 }
 
 impl Checker<'_> {
-    fn declared_function_body(&mut self, function: &Function, signature: &Signature) -> Value {
-        let arity = &function.arities[&signature.arity()];
+    fn declared_function_body(
+        &mut self,
+        function: &Function,
+        signature: &Signature,
+    ) -> (Value, Span) {
+        let clause = self.model.source_clause(function, signature.arity());
         let mut args: Vec<_> = signature.args.iter().cloned().map(Value::new).collect();
         if let Some(rest) = &signature.rest {
             let seq = Type::Seq(Box::new(rest.clone()));
@@ -612,14 +615,16 @@ impl Checker<'_> {
             };
             args.push(Value::new(rest));
         }
-        self.function_body(
-            &arity.params,
-            arity.conditions(),
-            &arity.body,
+        let result = self.function_body(
+            &clause.bindings(),
+            clause.conditions,
+            clause.body,
             args,
             &Env::new(),
-            arity.span,
-        )
+            clause.span,
+        );
+        let return_span = clause.body.last().map_or(clause.span, |form| form.span);
+        (result, return_span)
     }
 
     fn read_spec(&mut self, key: &str) -> (Option<&Type>, Option<SpecConversion>) {

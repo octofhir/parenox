@@ -37,14 +37,15 @@ impl Model {
         if !function.data_body_eligible || function.arities.len() != 1 {
             return false;
         }
-        let Some((Arity::Fixed(count), arity)) = function.arities.first_key_value() else {
+        let Some(&Arity::Fixed(count)) = function.arities.keys().next() else {
             return false;
         };
-        let [body] = arity.body.as_slice() else {
+        let clause = self.source_clause(function, Arity::Fixed(count));
+        let [body] = clause.body else {
             return false;
         };
-        let mut names = Vec::with_capacity(*count);
-        for param in &arity.params {
+        let mut names = Vec::with_capacity(count);
+        for param in clause.parameters() {
             let Kind::Symbol(name) = &param.kind else {
                 return false;
             };
@@ -69,12 +70,12 @@ impl Model {
             .collect();
         let mut checker = Checker::new(self, globals, source);
         let result = checker.function_body(
-            &arity.params,
-            arity.conditions(),
-            &arity.body,
+            &clause.bindings(),
+            clause.conditions,
+            clause.body,
             args,
             &Env::new(),
-            arity.span,
+            clause.span,
         );
         checker.diagnostics.is_empty()
             && result.known != Type::Never

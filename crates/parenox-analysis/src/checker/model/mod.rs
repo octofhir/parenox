@@ -40,7 +40,6 @@ pub(crate) use specs::{
 };
 use vars::{CapturedInitializer, LiteralVar};
 
-use super::function_forms::FunctionConditions;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, Signature, Type};
 use crate::{ContractKind, ContractOrigin, Diagnostic};
@@ -49,12 +48,14 @@ use crate::{ContractKind, ContractOrigin, Diagnostic};
 pub(crate) struct Function {
     pub name: String,
     pub private: bool,
-    pub arities: BTreeMap<Arity, FunctionArity>,
+    pub arities: BTreeMap<Arity, Span>,
     pub contract: Option<Contract>,
     pub(super) contract_span: Option<Span>,
     data_body_eligible: bool,
     ordinary_dotted: bool,
     pub span: Span,
+    // Index in the immutable source forms shared with the file snapshot.
+    source_index: usize,
 }
 
 impl Function {
@@ -93,24 +94,6 @@ impl Contract {
                 .iter()
                 .zip(other.signatures.iter())
                 .all(|(a, b)| a.same_type(b))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct FunctionArity {
-    pub params: Vec<Form>,
-    pub preconditions: Vec<Form>,
-    pub postconditions: Option<Vec<Form>>,
-    pub body: Vec<Form>,
-    pub span: Span,
-}
-
-impl FunctionArity {
-    pub(in crate::checker) fn conditions(&self) -> FunctionConditions<'_> {
-        FunctionConditions {
-            pre: &self.preconditions,
-            post: self.postconditions.as_deref(),
-        }
     }
 }
 
@@ -204,6 +187,7 @@ impl Globals {
 pub(crate) struct Model {
     names: Names,
     path: String,
+    source_forms: Arc<[Form]>,
     externs: Option<Arc<ExternFile>>,
     literals: BTreeMap<String, LiteralVar>,
     captured_initializers: BTreeMap<usize, CapturedInitializer>,
@@ -243,11 +227,12 @@ impl Model {
 
     pub fn build(
         declarations: &Declarations,
-        forms: &[Form],
+        source_forms: &Arc<[Form]>,
         source: &str,
         path: &str,
         globals: &Globals,
     ) -> Self {
+        let forms = source_forms.as_ref();
         let resolved;
         let comment_core_in_project = (!declarations.discarded_comments.is_empty())
             .then(|| globals.project_namespaces.contains("clojure.core"));
@@ -276,6 +261,7 @@ impl Model {
         let mut model = Self {
             names: declarations.names.clone(),
             path: path.into(),
+            source_forms: source_forms.clone(),
             core_in_project: comment_core_in_project,
             diagnostics: declarations.diagnostics.clone(),
             external_refers: declarations
@@ -368,7 +354,7 @@ impl Model {
         let source_arities_known = !opaque_definition && declarations.has_known_var_surface(forms);
         for &index in &declarations.functions {
             model.read_function(
-                &forms[index],
+                (index, &forms[index]),
                 source,
                 globals,
                 &mut fdefs,
@@ -650,15 +636,16 @@ impl Model {
         }
         for function in self.functions.values() {
             let mut names = BTreeSet::new();
-            for arity in function.arities.values() {
-                for param in &arity.params {
+            for &arity in function.arities.keys() {
+                let clause = self.source_clause(function, arity);
+                for param in clause.parameters() {
                     visit_defaults(param, self, &mut names);
                 }
-                visit(&arity.preconditions, self, &mut names);
-                if let Some(postconditions) = &arity.postconditions {
+                visit(clause.conditions.pre, self, &mut names);
+                if let Some(postconditions) = clause.conditions.post {
                     visit(postconditions, self, &mut names);
                 }
-                visit(&arity.body, self, &mut names);
+                visit(clause.body, self, &mut names);
             }
             self.helper_dependencies
                 .insert(function.name.clone(), names);

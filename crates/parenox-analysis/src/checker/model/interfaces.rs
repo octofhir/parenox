@@ -329,13 +329,13 @@ impl InterfaceChanges<'_> {
                     .map(|name| &model.functions[name]),
             )
             .all(|function| {
-                function.arities.values().all(|arity| {
-                    arity
-                        .params
-                        .iter()
-                        .chain(&arity.preconditions)
-                        .chain(arity.postconditions.iter().flatten())
-                        .chain(&arity.body)
+                function.arities.keys().all(|&arity| {
+                    let clause = model.source_clause(function, arity);
+                    clause
+                        .parameters()
+                        .chain(clause.conditions.pre)
+                        .chain(clause.conditions.post.into_iter().flatten())
+                        .chain(clause.body)
                         .all(|form| symbols_match(form, &mut unchanged))
                 })
             })
