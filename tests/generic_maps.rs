@@ -300,6 +300,76 @@ fn a_result_bound_points_to_the_selected_nested_callback() {
 }
 
 #[test]
+fn optional_sibling_fields_keep_the_required_callback_result() {
+    let provider = Source {
+        path: "reports.clj",
+        source: r#"(ns reports (:require [clojure.spec.alpha :as s]))
+            (defn message
+              {:t/sig '(t/all [(result :< string?)]
+                         [(t/map {:req {:result-code number?
+                                        :message-fn (s/fspec :args (s/cat) :ret result)}
+                                  :opt {:edits (s/coll-of map? :kind vector?)}})
+                          :-> result])}
+              [report] ((:message-fn report)))"#,
+    };
+    let export = Session::default().export_externs(&[provider], &[]);
+    let edn = export.edn.unwrap_or_else(|| panic!("{:?}", export.report));
+    let externs = Source {
+        path: "reports.edn",
+        source: &edn,
+    };
+    let source = r#"(ns app (:require [reports :as r]))
+        (defn no-edits {:t/sig '[:-> string?]} []
+          (r/message {:result-code 0 :message-fn (fn [] "clean")}))
+        (defn with-edits {:t/sig '[:-> string?]} []
+          (r/message {:result-code 1 :message-fn (fn [] "diff") :edits [{:uri "memory:source"}]}))"#;
+    let broken_callback = source.replace("\"diff\"", "42");
+    let broken_edits = source.replace("[{:uri \"memory:source\"}]", "nil");
+    for (dependencies, externs) in [(&[provider][..], None), (&[][..], Some(externs))] {
+        let mut session = Session::default();
+        let check = |session: &mut Session, source| {
+            let files = [Source {
+                path: "app.clj",
+                source,
+            }]
+            .into_iter()
+            .chain(dependencies.iter().copied())
+            .collect::<Vec<_>>();
+            session.check_project(&files, externs)
+        };
+        let good = check(&mut session, source);
+        assert!(good.ok && good.complete, "{good:#?}");
+
+        let bad = check(&mut session, &broken_callback);
+        let [finding] = bad.files[0].diagnostics.as_slice() else {
+            panic!("{bad:#?}");
+        };
+        assert!(bad.complete, "{bad:#?}");
+        assert_eq!(finding.code, "PNX2322");
+        assert!(finding.message.contains("Bound for type parameter result"));
+        assert_eq!(
+            &broken_callback[finding.span.start.offset..finding.span.end.offset],
+            "(fn [] 42)"
+        );
+        let cold = check(&mut Session::default(), &broken_callback);
+        assert_eq!(
+            serde_json::to_value(&bad.files[0].diagnostics).unwrap(),
+            serde_json::to_value(&cold.files[0].diagnostics).unwrap()
+        );
+
+        let bad = check(&mut session, &broken_edits);
+        let [finding] = bad.files[0].diagnostics.as_slice() else {
+            panic!("{bad:#?}");
+        };
+        assert!(bad.complete, "{bad:#?}");
+        assert_eq!(finding.code, "PNX2322");
+        assert!(finding.message.contains(":edits"));
+        let restored = check(&mut session, source);
+        assert!(restored.ok && restored.complete, "{restored:#?}");
+    }
+}
+
+#[test]
 fn a_required_map_callback_can_supply_the_calls_result_type() {
     let source = r#"(ns demo.result-options (:require [clojure.spec.alpha :as s]))
         (defn render

@@ -244,7 +244,8 @@ Exporting the regex object as an EDN literal value is unsupported.
   inferred from other arguments of the call or from ordinary fields in the
   outer map. The callback can be nested through required fields of closed maps.
   A single callback field can supply the result type parameter when the other
-  fields have independent types.
+  fields have independent types. Optional fields can carry independent types
+  and are checked when present.
   See [generic callbacks](../examples/generic_callbacks.clj),
   [two-input inference](../examples/generic_zip.clj), and
   [typed map boundaries](../examples/map_boundary).
