@@ -1360,6 +1360,22 @@
 (assert (= \b (eval '(. "abc" (charAt 1) (interop-provider/ignored-tail)))))
 (println "Clojure/JVM project references in interop operands: 5 assertions passed")
 
+(create-ns 'parenox.smoke.external-scope)
+(binding [*ns* (the-ns 'parenox.smoke.external-scope)]
+  (clojure.core/refer 'clojure.core)
+  (eval '(defmacro with-value [[name value] body _] `(let [~name ~value] ~body))))
+(alias 'external-scope 'parenox.smoke.external-scope)
+(assert (= "bc" (eval '(external-scope/with-value [local "abc"]
+                          (subs local 1)
+                          (subs false 0)))))
+(binding [*ns* (the-ns 'parenox.smoke.external-scope)]
+  (eval '(defn with-value [binding body extra] body)))
+(assert (try (eval '(external-scope/with-value [local "abc"] (subs local 1) (subs false 0)))
+             false
+             (catch clojure.lang.Compiler$CompilerException e
+               (= "Unable to resolve symbol: local in this context" (ex-message (ex-cause e))))))
+(println "Clojure/JVM unknown external operand scope: 2 assertions passed")
+
 (import '[java.io File])
 (assert (= java.io.File File))
 (assert (= java.lang.String String))

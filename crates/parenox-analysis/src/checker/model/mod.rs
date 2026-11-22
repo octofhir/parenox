@@ -496,6 +496,14 @@ impl Model {
         }
     }
 
+    pub(super) fn is_external_value_reference(&self, name: &str, globals: &Globals) -> bool {
+        if !(name != "/" && name.contains('/') || self.names.refers.contains_key(name)) {
+            return false;
+        }
+        let (namespace, _) = self.names.resolve_parts(name);
+        namespace != self.namespace() && !globals.project_namespaces.contains(namespace)
+    }
+
     fn check_project_core(&mut self, globals: &Globals) -> bool {
         let present = globals.project_namespaces.contains("clojure.core");
         self.core_in_project = Some(present);

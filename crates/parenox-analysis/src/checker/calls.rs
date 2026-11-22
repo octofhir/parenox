@@ -470,6 +470,15 @@ impl<'model> Checker<'model> {
                     {
                         return self.unchecked_macro(&resolved, xs[0].span, env);
                     }
+                    if self.model.is_external_value_reference(name, self.globals) {
+                        // Without a declaration, the call could introduce bindings
+                        // or treat its operands as syntax.
+                        let value = self.infer(&xs[0], env);
+                        self.withhold_captured_facts(env.inline_functions());
+                        self.withhold_literals_after_opaque_form();
+                        self.may_throw();
+                        return value;
+                    }
                 }
                 _ => {}
             }

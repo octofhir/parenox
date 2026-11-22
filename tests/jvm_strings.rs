@@ -413,10 +413,14 @@ fn an_unresolved_operator_does_not_prove_an_argument_is_evaluated() {
 "#;
     let mut session = Session::default();
     let report = session.check("demo.clj", source);
-    assert!(report.diagnostics.iter().any(|finding| {
-        finding.code == "PNX2801"
-            && &source[finding.span.start.offset..finding.span.end.offset] == "-6"
-    }));
+    assert_eq!(report.diagnostics.len(), 2, "{report:#?}");
+    for finding in &report.diagnostics {
+        assert_eq!(finding.code, "PNX9003");
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            "opaque.macros/maybe-discard"
+        );
+    }
     let offset = source.rfind("continuation").unwrap();
     let Some(DocumentHover::Local(hover)) = session.document_hover_at("demo.clj", offset) else {
         panic!("an unresolved operator can discard the failing form");

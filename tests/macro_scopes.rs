@@ -10,6 +10,68 @@ const USE: Source<'_> = Source {
 };
 
 #[test]
+fn an_unavailable_external_operator_keeps_the_operand_scope_opaque() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [fixtures.macros :as m :refer [with-value]]))
+(defn qualified {:t/sig '[:-> string?]} []
+  (m/with-value [local "abc"] (subs local 1) (subs false 0)))
+(defn referred {:t/sig '[:-> string?]} []
+  (with-value [local "abc"] (subs local 1) (subs false 0)))"#,
+    };
+    let provider = Source {
+        path: "fixtures/macros.clj",
+        source: r#"(ns fixtures.macros)
+(defn with-value {:t/sig '[t/any t/any t/any :-> string?]} [binding body extra] "ok")"#,
+    };
+    let mut session = Session::default();
+    let diagnostics = |report: &parenox::ProjectReport| {
+        report.files[0]
+            .diagnostics
+            .iter()
+            .map(|finding| {
+                (
+                    finding.code.clone(),
+                    &app.source[finding.span.start.offset..finding.span.end.offset],
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let missing = session.check_project(&[app], None);
+    assert!(!missing.complete);
+    assert_eq!(
+        diagnostics(&missing),
+        [
+            ("PNX9003".into(), "m/with-value"),
+            ("PNX9003".into(), "with-value"),
+        ],
+        "{missing:#?}"
+    );
+
+    let provided = session.check_project(&[app, provider], None);
+    let cold = Session::default().check_project(&[app, provider], None);
+    assert_eq!(
+        serde_json::to_value(&provided.files[0].diagnostics).unwrap(),
+        serde_json::to_value(&cold.files[0].diagnostics).unwrap()
+    );
+    let eager_findings = [
+        ("PNX2304".into(), "local"),
+        ("PNX2304".into(), "local"),
+        ("PNX2322".into(), "false"),
+    ];
+    assert_eq!(
+        diagnostics(&provided),
+        [eager_findings.clone(), eager_findings].concat(),
+        "{provided:#?}"
+    );
+    assert_eq!(
+        serde_json::to_value(&session.check_project(&[app], None).files[0].diagnostics).unwrap(),
+        serde_json::to_value(&missing.files[0].diagnostics).unwrap()
+    );
+}
+
+#[test]
 fn extern_scope_resolves_sequential_bindings_without_claiming_let_semantics() {
     let report = Session::default().check_project(&[USE], Some(EXTERNS));
     assert!(!report.ok && !report.complete, "{report:#?}");
