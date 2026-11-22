@@ -90,24 +90,32 @@ impl Model {
         ) {
             return None;
         }
-        let (previous, name, root) = initializers::adjacent_root(
-            declarations,
-            forms,
-            source,
-            index,
-            &self.captured_initializers,
-        )?;
-        let literal = self
-            .literals
-            .get(&format!("{}/{name}", self.names.namespace))?;
-        if literal.ty.contains_unknown() {
-            return None;
-        }
-        if let Some(captured) = self.captured_initializers.get(&previous) {
-            return matches!(&initializer.kind, Kind::Symbol(symbol) if symbol == name)
-                .then(|| captured.clone());
-        }
-        initializers::substitute(initializer, name, root).map(CapturedInitializer::from_form)
+        let known_root = |name: &str| {
+            self.literals
+                .get(&format!("{}/{name}", self.names.namespace))
+                .is_some_and(|root| !root.ty.contains_unknown())
+        };
+        let adjacent = (|| {
+            let (previous, name, root) = initializers::adjacent_root(
+                declarations,
+                forms,
+                source,
+                index,
+                &self.captured_initializers,
+            )?;
+            if !known_root(name) {
+                return None;
+            }
+            if let Some(captured) = self.captured_initializers.get(&previous) {
+                return matches!(&initializer.kind, Kind::Symbol(symbol) if symbol == name)
+                    .then(|| captured.clone());
+            }
+            initializers::substitute(initializer, name, root).map(CapturedInitializer::from_form)
+        })();
+        adjacent.or_else(|| {
+            initializers::capture_literal_run(declarations, forms, index, known_root)
+                .map(CapturedInitializer::from_form)
+        })
     }
 
     pub(super) fn definition_name(&mut self, symbol: &str, span: Span, op: &str) -> Option<String> {

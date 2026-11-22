@@ -1,5 +1,5 @@
-//! Statically capture a local root from the immediately preceding `def`.
-use std::collections::BTreeMap;
+//! Statically capture local roots from consecutive inert `def` forms.
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::Declarations;
 use super::super::declarations::{SourceDeclaration, static_namespace_prelude};
@@ -127,8 +127,85 @@ fn plain_def(form: &Form, allow_const: bool) -> Option<(&str, &Form)> {
     (!name.contains('/')).then_some((name, def_initializer(tail)?))
 }
 
+pub(super) fn capture_literal_run(
+    declarations: &Declarations,
+    forms: &[Form],
+    index: usize,
+    known_root: impl Fn(&str) -> bool,
+) -> Option<Form> {
+    let current = forms.get(index)?;
+    let (current_name, initializer) = plain_def(current, false)?;
+    let mut needed = BTreeSet::new();
+    collect_roots(initializer, &mut needed)?;
+    if needed.is_empty() || !forms.first().is_some_and(static_namespace_prelude) {
+        return None;
+    }
+    let mut roots = BTreeMap::new();
+    for (at, previous) in forms[..index].iter().enumerate().rev() {
+        if declarations.discarded_comments.binary_search(&at).is_ok() {
+            continue;
+        }
+        let (name, value) = plain_def(previous, false)?;
+        if !inert(value, false) {
+            return None;
+        }
+        if !needed.remove(name) {
+            continue;
+        }
+        if name == current_name
+            || declarations.forward_vars.contains_key(name)
+            || declarations
+                .source_declarations(forms, name)
+                .nth(1)
+                .is_some()
+            || !known_root(name)
+        {
+            return None;
+        }
+        roots.insert(name, value);
+        if needed.is_empty() {
+            declarations.reader_namespace_before(forms, previous.span.start.offset)?;
+            if declarations.has_unchecked_dispatch(Span {
+                start: previous.span.start,
+                end: current.span.end,
+            }) {
+                return None;
+            }
+            return substitute_roots(initializer, |name| roots.get(name).copied());
+        }
+    }
+    None
+}
+
+fn collect_roots<'a>(form: &'a Form, names: &mut BTreeSet<&'a str>) -> Option<()> {
+    match &form.kind {
+        Kind::Symbol(name) => {
+            names.insert(name);
+        }
+        Kind::Vector(items) => {
+            for value in items {
+                collect_roots(value, names)?;
+            }
+        }
+        Kind::Map(entries) => {
+            for [key, value] in entries.as_chunks::<2>().0 {
+                inert(key, false).then_some(())?;
+                collect_roots(value, names)?;
+            }
+        }
+        _ => inert(form, false).then_some(())?,
+    }
+    Some(())
+}
+
 pub(super) fn substitute(initializer: &Form, name: &str, root: &Form) -> Option<Form> {
-    let root_bytes = root.span.end.offset.checked_sub(root.span.start.offset)?;
+    substitute_roots(initializer, |symbol| (symbol == name).then_some(root))
+}
+
+fn substitute_roots<'a>(
+    initializer: &Form,
+    lookup: impl Fn(&str) -> Option<&'a Form>,
+) -> Option<Form> {
     let initializer_bytes = initializer
         .span
         .end
@@ -137,25 +214,25 @@ pub(super) fn substitute(initializer: &Form, name: &str, root: &Form) -> Option<
     let budget = MAX_SUBSTITUTED_BYTES.checked_sub(initializer_bytes)?;
     let mut remaining = budget;
     let mut result = initializer.clone();
-    replace_values(&mut result, name, root, root_bytes, &mut remaining)?;
+    replace_values(&mut result, &lookup, &mut remaining)?;
     (remaining < budget).then_some(result)
 }
 
-fn replace_values(
+fn replace_values<'a>(
     form: &mut Form,
-    name: &str,
-    root: &Form,
-    root_bytes: usize,
+    lookup: &impl Fn(&str) -> Option<&'a Form>,
     remaining: &mut usize,
 ) -> Option<()> {
     match &mut form.kind {
-        Kind::Symbol(symbol) if symbol == name => {
+        Kind::Symbol(symbol) => {
+            let root = lookup(symbol)?;
+            let root_bytes = root.span.end.offset.checked_sub(root.span.start.offset)?;
             *remaining = remaining.checked_sub(root_bytes)?;
             *form = root.clone();
         }
         Kind::Vector(items) => {
             for value in items {
-                replace_values(value, name, root, root_bytes, remaining)?;
+                replace_values(value, lookup, remaining)?;
             }
         }
         Kind::Map(entries) => {
@@ -163,7 +240,7 @@ fn replace_values(
                 if !inert(key, false) {
                     return None;
                 }
-                replace_values(value, name, root, root_bytes, remaining)?;
+                replace_values(value, lookup, remaining)?;
             }
         }
         _ => inert(form, false).then_some(())?,

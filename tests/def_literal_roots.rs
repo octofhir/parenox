@@ -47,6 +47,90 @@ fn captures_exact_nil_and_false_from_adjacent_roots() {
 }
 
 #[test]
+fn captures_several_roots_through_consecutive_inert_definitions() {
+    let provider = Source {
+        path: "settings.clj",
+        source: r#"(ns reports.settings)
+            (def ^:private limit 80)
+            (def ^:private layout :text)
+            (def ^:private unrelated 'example)
+            (comment (alter-var-root #'limit (constantly "unexecuted")))
+            (def options {:layout layout :page [limit {:size limit}] :source 'limit})"#,
+    };
+    let consumer = Source {
+        path: "client.clj",
+        source: r#"(ns reports.client (:require [reports.settings :as settings]))
+            (defn limit {:t/sig '[:-> number?]} [] (get-in settings/options [:page 1 :size]))
+            (defn layout {:t/sig '[:-> #{:text}]} [] (:layout settings/options))
+            (defn stable {:t/sig '[:-> boolean?]} [] true)"#,
+    };
+    let mut session = Session::default();
+    let original = session.check_project(&[consumer, provider], None);
+    assert!(original.ok && original.complete, "{original:#?}");
+
+    let changed = provider.source.replace("limit 80", "limit \"many\"");
+    let edited = [
+        consumer,
+        Source {
+            source: &changed,
+            ..provider
+        },
+    ];
+    let warm = session.check_project(&edited, None);
+    let [finding] = warm.files[0].diagnostics.as_slice() else {
+        panic!("{warm:#?}");
+    };
+    assert!(warm.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &consumer.source[finding.span.start.offset..finding.span.end.offset],
+        "(get-in settings/options [:page 1 :size])"
+    );
+    let cold = Session::default().check_project(&edited, None);
+    assert_eq!(
+        serde_json::to_value(&warm.files[0].diagnostics).unwrap(),
+        serde_json::to_value(&cold.files[0].diagnostics).unwrap()
+    );
+    let restored = session.check_project(&[consumer, provider], None);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+
+    let export = session.export_externs(&[provider], &[]);
+    let edn = export.edn.unwrap_or_else(|| panic!("{:#?}", export.report));
+    let externs = Source {
+        path: "settings.edn",
+        source: &edn,
+    };
+    let isolated = Session::default().check_project_with_externs(&[consumer], &[externs]);
+    assert!(isolated.ok && isolated.complete, "{isolated:#?}");
+}
+
+#[test]
+fn a_root_capture_stops_at_evaluated_forms_and_discarded_reader_effects() {
+    let source = r#"(ns reports.settings)
+        (def ^:private limit 80)
+        BARRIER
+        (def ^:private layout :text)
+        (def options {:layout layout :limit limit})"#;
+    for barrier in [
+        r#"(def changed (alter-var-root #'limit (constantly "updated")))"#,
+        "#_ #custom/reader :can-change-root",
+    ] {
+        let input = source.replace("BARRIER", barrier);
+        let report = Session::default().check("settings.clj", &input);
+        assert!(!report.complete, "{report:#?}");
+        assert!(
+            report.diagnostics.iter().any(|finding| {
+                finding.code == "PNX9001"
+                    && &input[finding.span.start.offset..finding.span.end.offset]
+                        == "{:layout layout :limit limit}"
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn exports_a_public_value_captured_from_a_private_root() {
     let exported = Session::default().export_externs(&[PROVIDER], &[]);
     let snapshot = exported
@@ -268,10 +352,6 @@ fn name_vector_capture_requires_proven_core_operators_and_input() {
 fn unsupported_initializer_paths_keep_a_gap_at_the_captured_definition() {
     for (prefix, initializer) in [
         ("(ns root-cases) (def root :ready)", "root-cases/root"),
-        (
-            "(ns root-cases) (def root :ready) (def unrelated false)",
-            "root",
-        ),
         (
             "(ns root-cases) (def root :ready) (alter-var-root #'root (constantly :changed))",
             "root",

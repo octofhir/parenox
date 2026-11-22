@@ -142,14 +142,14 @@ literal data from plain parameters. Recursive helpers and helpers passed
 as values require a signature. Other private bodies need a reachable typed
 call or a signature.
 
-An initializer can capture the immediately preceding local `def` when its
-root contains inert data. Parenox supports a bare read, vector elements, and
-map values after a static namespace declaration. Public snapshots contain
-the captured data, including values read from a private root. Reader discards
-with checked read behavior and proven standard `comment` forms can appear
-between the definitions. Possible reader effects, opaque intervening
-expressions, dynamic roots, evaluated metadata, and reads in map keys or set
-members leave an analysis gap.
+An initializer can capture local roots from consecutive `def` forms with
+inert initializers. Parenox supports bare reads, vector elements, and map
+values after a static namespace declaration. Public snapshots contain the
+captured data, including values read from private roots. Reader discards with
+checked read behavior and proven standard `comment` forms can appear between
+the definitions. Possible reader effects, opaque intervening expressions,
+dynamic roots, evaluated metadata, and reads in map keys or set members leave
+an analysis gap.
 Consecutive bare aliases can forward the same captured literal data. Each
 public alias can export that value to EDN. A proven bare read keeps later
 initializers eligible for folding. An unchecked effect ends that proof.
