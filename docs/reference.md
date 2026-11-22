@@ -863,8 +863,9 @@ later expressions still get compiler checks such as name resolution. Their
 runtime types and diagnostics are withheld, including when a vector literal
 supplies `apply` arguments.
 A literal vector, `nil`, or a call to standard `list` can supply the final
-arguments to `apply`. The checker uses their written positions to infer
-contextual callback types for a checked function.
+arguments to `apply`. Standard `concat` also supplies exact positions when
+all operands are literal vectors without metadata or `nil`. The checker
+uses the written positions to infer callback types for a checked function.
 Modeled ordinary built-ins, checked function values, and inferred private
 helpers report wrong arity once the call can run and its operands can return.
 A reached arity failure participates in `catch clojure.lang.ArityException`.

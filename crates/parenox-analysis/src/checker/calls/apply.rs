@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 
 use super::super::{LiteralContainer, metadata::MetadataTarget};
 use super::{
-    ArgumentForms, CallOperands, Callable, Checker, Env, PreparedCallable, Value, arity_counts,
-    builtin_arities, call_returns, vectors::CollectionError, vectors::element_type,
+    ArgumentForms, CallOperands, Callable, Checker, Env, OperandTail, PreparedCallable, Value,
+    arity_counts, builtin_arities, call_returns, vectors::CollectionError, vectors::element_type,
 };
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, IntegerClass, IntegerType, Signature, Type};
@@ -32,11 +32,11 @@ impl Checker<'_> {
         let callable = self.prepare_callable(callee, env);
         if let Callable::Value(function) = &callable.kind
             && matches!(function.known, Type::Function(_))
-            && let Some(items) = self.exact_spread_items(spread, env)
+            && let Some(tail) = self.exact_spread(spread, env)
         {
             let operands = CallOperands {
                 prefix,
-                tail: items,
+                tail,
                 vector_metadata: matches!(spread.kind, Kind::Metadata(..)).then_some(spread),
             };
             let mut args = self.call_args(function, operands, span, env);
@@ -83,8 +83,8 @@ impl Checker<'_> {
         if apply
             .symbol()
             .is_some_and(|name| self.model.can_use_standard_core(name, self.globals))
-            && let Some(operands) =
-                self.standard_collection_operands(spread, env, "clojure.core/concat")
+            && let Some((constructor, operands)) = self.standard_collection_call(spread, env)
+            && constructor == "clojure.core/concat"
         {
             // concat constructs a lazy result only after evaluating all its
             // operands. Traversing the proved vectors adds no effects.
@@ -280,25 +280,37 @@ impl Checker<'_> {
         Value::new(self.str_result(&mapped))
     }
 
-    fn exact_spread_items<'form>(&self, form: &'form Form, env: &Env) -> Option<&'form [Form]> {
+    fn exact_spread<'form>(&self, form: &'form Form, env: &Env) -> Option<OperandTail<'form>> {
         if matches!(form.kind, Kind::Nil) {
-            return Some(&[]);
+            return Some(OperandTail::Items(&[]));
         }
-        form.vector()
-            .or_else(|| self.standard_collection_operands(form, env, "clojure.core/list"))
+        if let Some(items) = form.vector() {
+            return Some(OperandTail::Items(items));
+        }
+        let (constructor, operands) = self.standard_collection_call(form, env)?;
+        match constructor.as_str() {
+            "clojure.core/list" => Some(OperandTail::Items(operands)),
+            "clojure.core/concat"
+                if operands
+                    .iter()
+                    .all(|operand| matches!(operand.kind, Kind::Vector(_) | Kind::Nil)) =>
+            {
+                Some(OperandTail::Concat(operands))
+            }
+            _ => None,
+        }
     }
 
-    fn standard_collection_operands<'form>(
+    fn standard_collection_call<'form>(
         &self,
         form: &'form Form,
         env: &Env,
-        constructor: &str,
-    ) -> Option<&'form [Form]> {
+    ) -> Option<(String, &'form [Form])> {
         let Kind::List(forms) = &form.kind else {
             return None;
         };
         let (head, operands) = forms.split_first()?;
-        (self.standard_core_name(head, env)? == constructor).then_some(operands)
+        Some((self.standard_core_name(head, env)?, operands))
     }
 
     fn apply_open(

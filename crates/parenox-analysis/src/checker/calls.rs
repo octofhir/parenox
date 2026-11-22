@@ -111,17 +111,38 @@ enum ArgumentForms<'a> {
 #[derive(Clone, Copy)]
 struct CallOperands<'a> {
     prefix: &'a [Form],
-    tail: &'a [Form],
+    tail: OperandTail<'a>,
     vector_metadata: Option<&'a Form>,
+}
+
+#[derive(Clone, Copy)]
+enum OperandTail<'a> {
+    Items(&'a [Form]),
+    Concat(&'a [Form]),
 }
 
 impl<'a> CallOperands<'a> {
     fn iter(self) -> impl Iterator<Item = &'a Form> {
-        self.prefix.iter().chain(self.tail)
+        let (items, vectors) = match self.tail {
+            OperandTail::Items(items) => (items, &[][..]),
+            OperandTail::Concat(vectors) => (&[][..], vectors),
+        };
+        self.prefix
+            .iter()
+            .chain(items)
+            .chain(vectors.iter().filter_map(Form::vector).flatten())
     }
 
     fn len(self) -> usize {
-        self.prefix.len() + self.tail.len()
+        let tail = match self.tail {
+            OperandTail::Items(items) => items.len(),
+            OperandTail::Concat(vectors) => vectors
+                .iter()
+                .filter_map(Form::vector)
+                .map(<[Form]>::len)
+                .sum(),
+        };
+        self.prefix.len() + tail
     }
 
     fn metadata_outcome(
@@ -603,7 +624,7 @@ impl<'model> Checker<'model> {
         }
         let operands = CallOperands {
             prefix: &xs[1..],
-            tail: &[],
+            tail: OperandTail::Items(&[]),
             vector_metadata: None,
         };
         let args = self.call_args(&function, operands, span, env);
