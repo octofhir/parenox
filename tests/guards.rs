@@ -7,6 +7,52 @@ fn check(body: &str) -> Report {
 }
 
 #[test]
+fn matching_a_literal_does_not_establish_the_class_of_an_open_value() {
+    for expression in [
+        "(if (= f nil) (f :called) :missed)",
+        "(case f nil (f :called) :missed)",
+    ] {
+        let report = check(&format!(
+            "(defn decide {{:t/sig '[t/any :-> t/any]}} [f] {expression})"
+        ));
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{expression}: {report:#?}");
+        };
+        assert!(!report.complete);
+        assert_eq!(finding.code, "PNX9001", "{expression}: {report:#?}");
+    }
+
+    for expression in [
+        r#"(if (= "tag" f) (f "wrong") :missed)"#,
+        r#"(case f "tag" (f "wrong") :missed)"#,
+    ] {
+        let report = check(&format!(
+            "(defn decide
+               {{:t/sig '[(s/fspec :args (s/cat :value keyword?) :ret keyword?) :-> keyword?]}}
+               [f] {expression})"
+        ));
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{expression}: {report:#?}");
+        };
+        assert!(report.complete);
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(finding.expected.as_deref(), Some("Keyword"));
+        assert_eq!(finding.actual.as_deref(), Some("String"));
+    }
+}
+
+#[test]
+fn stock_values_keep_literal_narrowings_and_nil_on_the_left_proves_nil() {
+    let report = check(
+        r#"(defn non-null-class {:t/sig '[string? :-> #{"tag"}]} [value]
+             (if (= value "tag") value "tag"))
+           (defn nullable {:t/sig '[t/any :-> nil?]} [value]
+             (if (= nil value) value nil))"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
 fn binding_guards_follow_clojure_truthiness_and_preserve_nil_results() {
     let report = Session::default().check("guards.clj", include_str!("../examples/guards.clj"));
     assert!(report.ok && report.complete, "{report:#?}");

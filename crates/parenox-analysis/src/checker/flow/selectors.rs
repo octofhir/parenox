@@ -1,8 +1,8 @@
 //! Narrow immutable map reads back to their lexical owner.
-use super::narrow_by_type;
+use super::{known_nonnumeric_scalar, narrow_by_type};
 use crate::checker::{
     Checker, Env, LiteralContainer,
-    calls::{narrow_emptiness, narrow_seq_emptiness},
+    calls::{definitely_noncallable, narrow_emptiness, narrow_seq_emptiness},
     env::{MAX_SELECTOR_KEYS, Selector},
     quote::quoted_symbol,
 };
@@ -191,6 +191,15 @@ pub(in crate::checker) fn narrow_literal(actual: &Type, literal: &Type, truth: b
                 .iter()
                 .map(|part| narrow_literal(part, literal, truth)),
         ),
-        _ => narrow_by_type(actual, literal, truth),
+        _ if literal.exact_long_value().is_some()
+            || (!truth && *literal == Type::Nil)
+            || known_nonnumeric_scalar(actual)
+            || definitely_noncallable(actual) =>
+        {
+            narrow_by_type(actual, literal, truth)
+        }
+        // User implementations of equals and equiv can match a scalar
+        // literal without having its JVM class.
+        _ => actual.clone(),
     }
 }

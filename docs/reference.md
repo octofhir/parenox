@@ -848,6 +848,11 @@ It keeps exact sizes for tuple shapes and map entries, and counts UTF-16
 code units in literal strings. Counting an open sequence can realize
 values and throw.
 
+Nonnumeric literal matches in `case` and guards using `=` refine values
+with a known scalar class. Open JVM values keep their original type
+because custom `equals` or `equiv` can match a literal. For `(= nil value)`,
+the left operand makes the test exact.
+
 Standard `condp =` checks literal nil, boolean, character, string, keyword,
 and quoted symbol tests with a known subject of those types. Matching clauses
 narrow a local or stable map selector in the result expression. Tests run in

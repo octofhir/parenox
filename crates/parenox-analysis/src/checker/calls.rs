@@ -1684,7 +1684,7 @@ pub(super) fn call_returns(args: &[(Value, Span)]) -> bool {
     args.iter().all(|(value, _)| value.known != Type::Never)
 }
 
-fn definitely_noncallable(ty: &Type) -> bool {
+pub(super) fn definitely_noncallable(ty: &Type) -> bool {
     // A general Number can implement IFn. Restrict this test to known
     // classes whose values cannot implement that interface.
     match ty {

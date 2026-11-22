@@ -18,9 +18,9 @@ use crate::types::Type;
 
 const MAX_THREAD_EXPANSION_DEPTH: usize = 32;
 
-fn condp_scalar(ty: &Type) -> bool {
+fn known_nonnumeric_scalar(ty: &Type) -> bool {
     match ty {
-        Type::Union(parts) => parts.iter().all(condp_scalar),
+        Type::Union(parts) => parts.iter().all(known_nonnumeric_scalar),
         Type::Never
         | Type::Nil
         | Type::Boolean
@@ -666,7 +666,7 @@ impl Checker<'_> {
             value.known.clone()
         };
         // JVM equality can delegate to a collection operand's custom equiv.
-        if !tests.is_empty() && !condp_scalar(&remaining) {
+        if !tests.is_empty() && !known_nonnumeric_scalar(&remaining) {
             return self.unchecked_condp(
                 subject.span,
                 "condp = analysis requires a known scalar expression",
@@ -695,7 +695,7 @@ impl Checker<'_> {
         if let Some(default) = fallback.first() {
             outcomes.push(self.infer_path(default, &fallthrough, remaining != Type::Never, tail));
         } else if remaining != Type::Never {
-            if condp_scalar(&remaining) {
+            if known_nonnumeric_scalar(&remaining) {
                 self.illegal_argument();
             } else {
                 // With no tests the macro still prints the subject in its error.
@@ -985,10 +985,22 @@ impl Checker<'_> {
             ("clojure.core/=", [left, right]) => {
                 let pair = self
                     .guard_literal(left)
-                    .map(|ty| (right, ty))
-                    .or_else(|| self.guard_literal(right).map(|ty| (left, ty)));
-                if let Some((subject, literal)) = pair {
-                    self.narrow_subject(subject, env, |ty| narrow_literal(ty, &literal, truth));
+                    .map(|ty| (right, ty, true))
+                    .or_else(|| self.guard_literal(right).map(|ty| (left, ty, false)));
+                if let Some((subject, literal, literal_first)) = pair {
+                    self.narrow_subject(subject, env, |ty| {
+                        if literal_first && literal == Type::Nil {
+                            // Util.equiv checks a null first operand before
+                            // consulting user equality on the other value.
+                            if truth {
+                                nil_part(ty)
+                            } else {
+                                ty.without_nil()
+                            }
+                        } else {
+                            narrow_literal(ty, &literal, truth)
+                        }
+                    });
                 }
             }
             ("clojure.core/and" | "clojure.core/or", [operand]) => self.narrow(operand, truth, env),
