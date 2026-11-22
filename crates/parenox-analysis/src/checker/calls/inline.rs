@@ -1476,14 +1476,8 @@ impl<'model> Checker<'model> {
                 } else {
                     vec![Value::new(Type::Never); arity.bindings()]
                 };
-                checker.function_body(
-                    &clause.bindings(),
-                    clause.conditions,
-                    clause.body,
-                    parameters,
-                    env,
-                    clause.span,
-                )
+                let invocation = (selected && site.callback.is_none()).then_some(args.as_slice());
+                checker.function_body(&clause, parameters, env, invocation)
             });
             if selected {
                 if let Some(CallbackCheck {

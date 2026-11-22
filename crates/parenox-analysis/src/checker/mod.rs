@@ -6,6 +6,7 @@ mod env;
 mod exceptions;
 mod flow;
 mod function_forms;
+mod jvm_primitives;
 mod maps;
 mod metadata;
 mod model;
@@ -615,14 +616,7 @@ impl Checker<'_> {
             };
             args.push(Value::new(rest));
         }
-        let result = self.function_body(
-            &clause.bindings(),
-            clause.conditions,
-            clause.body,
-            args,
-            &Env::new(),
-            clause.span,
-        );
+        let result = self.function_body(&clause, args, &Env::new(), None);
         let return_span = clause.body.last().map_or(clause.span, |form| form.span);
         (result, return_span)
     }

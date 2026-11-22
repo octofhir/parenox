@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::Value;
+use super::jvm_primitives::JvmValueClass;
 use super::metadata::{JavaTypeHint, java_type_hint};
 use crate::reader::{Form, Kind};
 use crate::types::Type;
@@ -29,6 +30,7 @@ struct BindingId(usize);
 struct Binding {
     id: BindingId,
     value: Value,
+    jvm_class: JvmValueClass,
 }
 
 #[derive(Clone)]
@@ -148,7 +150,12 @@ impl Env {
         let id = self.next_binding_id();
         // An initializer can capture an old owner even when this binding
         // uses its name again. Only keep values with surviving selectors.
-        if let Some(old) = self.bindings.insert(name, Binding { id, value })
+        let binding = Binding {
+            id,
+            value,
+            jvm_class: JvmValueClass::Unknown,
+        };
+        if let Some(old) = self.bindings.insert(name, binding)
             && self.owner_in_use(old.id)
         {
             self.retained_owners.insert(old.id, old.value);
@@ -208,6 +215,16 @@ impl Env {
 
     pub(super) fn set_java_hint(&mut self, name: &str, hint: JavaTypeHint<String>) {
         self.java_hints.insert(name.into(), hint);
+    }
+
+    pub(super) fn jvm_class(&self, name: &str) -> JvmValueClass {
+        self.bindings
+            .get(name)
+            .map_or(JvmValueClass::Unknown, |binding| binding.jvm_class)
+    }
+
+    pub(super) fn set_jvm_class(&mut self, name: &str, class: JvmValueClass) {
+        self.bindings.get_mut(name).unwrap().jvm_class = class;
     }
 
     pub(super) fn is_alias(&self, name: &str) -> bool {

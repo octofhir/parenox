@@ -778,6 +778,11 @@ fixed arguments. Parenox checks these restrictions and reports illegal
 type hints on named rest parameters at the tag. An unboxed numeric
 literal or a direct primitive conversion determines the JVM class of a
 `let` initializer. Parenox reports a conflicting explicit tag at the binding.
+Primitive function arguments supply the converted numeric type inside the
+body. A boxed return can be converted to the declared primitive. An
+incompatible unboxed return or `recur` operand gets a compiler diagnostic at
+the expression. When the compiler class cannot be established, the checker
+reports incomplete analysis.
 [Clojure Java interop](https://clojure.org/reference/java_interop)
 
 Set invocation and lookups through `get`, `get-in` and `req!` use the stored

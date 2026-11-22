@@ -69,14 +69,7 @@ impl Model {
             })
             .collect();
         let mut checker = Checker::new(self, globals, source);
-        let result = checker.function_body(
-            &clause.bindings(),
-            clause.conditions,
-            clause.body,
-            args,
-            &Env::new(),
-            clause.span,
-        );
+        let result = checker.function_body(&clause, args, &Env::new(), None);
         checker.diagnostics.is_empty()
             && result.known != Type::Never
             && !result.known.contains_unknown()

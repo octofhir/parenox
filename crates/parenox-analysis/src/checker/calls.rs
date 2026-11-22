@@ -356,12 +356,10 @@ impl<'model> Checker<'model> {
             let enclosing = std::mem::replace(&mut self.throws, tracking.then(Throws::default));
             let clause = self.model.source_clause(function, arity);
             let result = self.function_body(
-                &clause.bindings(),
-                clause.conditions,
-                clause.body,
+                &clause,
                 pack_arguments(arity, key.1.clone()),
                 &Env::new(),
-                clause.span,
+                None,
             );
             self.active_helpers.pop();
             let throws = std::mem::replace(&mut self.throws, enclosing);

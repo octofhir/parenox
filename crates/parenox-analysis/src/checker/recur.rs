@@ -2,7 +2,8 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use super::bindings::raw_local_symbol;
-use super::function_forms::FunctionConditions;
+use super::function_forms::Clause;
+use super::jvm_primitives::{JvmPrimitive, JvmValueClass, MAX_NATIVE_ARGS};
 use super::{Checker, Env, Value, has_evaluated_metadata};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{ExtraFields, IntegerType, Type};
@@ -17,8 +18,11 @@ pub(super) struct RecurTarget {
     arity: usize,
     pub(super) reachable: bool,
     pub(super) blocked_by_try: bool,
+    native: NativeParameters,
     edges: Vec<RecurEdge>,
 }
+
+type NativeParameters = [Option<JvmPrimitive>; MAX_NATIVE_ARGS];
 
 struct RecurEdge {
     args: Vec<Value>,
@@ -52,9 +56,46 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         }
+        let native = target.native;
+        let mut valid = true;
+        for (arg, native) in args.iter().zip(native) {
+            let Some(expected) = native else { continue };
+            let actual = match self.compiler_value_class(arg, env) {
+                JvmValueClass::Primitive(actual) if expected.accepts_unboxed(actual) => continue,
+                JvmValueClass::Primitive(actual) => format!("a primitive {}", actual.name()),
+                JvmValueClass::Boxed => "a boxed value".into(),
+                JvmValueClass::Unknown | JvmValueClass::Recur => {
+                    self.diagnostics.push(crate::Diagnostic::analysis_gap(
+                        "PNX9001",
+                        arg.span,
+                        format!(
+                            "JVM {} compiler type for this recur argument is unchecked",
+                            expected.name()
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            self.error(
+                "PNX1001",
+                arg.span,
+                format!(
+                    "recur to a JVM {} parameter cannot take {actual}",
+                    expected.name()
+                ),
+            );
+            valid = false;
+        }
         let args: Vec<_> = self
-            .eval_args(args, env, true)
-            .map(|(value, _)| value)
+            .eval_args(args, env, valid)
+            .enumerate()
+            .map(|(index, (value, _))| {
+                if let Some(&Some(primitive)) = native.get(index) {
+                    Value::new(primitive.function_value(&value.known))
+                } else {
+                    value
+                }
+            })
             .collect();
         let target = self.recur_target.as_mut().unwrap();
         if target.reachable && args.iter().all(|arg| arg.known != Type::Never) {
@@ -102,35 +143,41 @@ impl Checker<'_> {
             initial.push(value);
         }
 
-        let result = self.recur_body("loop", span, initial, |checker, state| {
-            // The loop macro retains the initial let scope for destructuring.
-            // Each iteration starts with all raw slots in scope, then expands
-            // the patterns in order. Recur's arity is the number of raw slots.
-            let mut local = if destructures {
-                outer.clone()
-            } else {
-                env.clone()
-            };
-            for ([pattern, _], value) in bindings.iter().zip(state) {
-                if let Some(name) = pattern.symbol() {
-                    if !destructures {
-                        checker.observe_binding(name, pattern.without_metadata().span, value);
-                    }
-                    local.insert(name.to_string(), value.clone());
-                }
-            }
-            if destructures {
+        let result = self.recur_body(
+            "loop",
+            span,
+            initial,
+            [None; MAX_NATIVE_ARGS],
+            |checker, state| {
+                // The loop macro retains the initial let scope for destructuring.
+                // Each iteration starts with all raw slots in scope, then expands
+                // the patterns in order. Recur's arity is the number of raw slots.
+                let mut local = if destructures {
+                    outer.clone()
+                } else {
+                    env.clone()
+                };
                 for ([pattern, _], value) in bindings.iter().zip(state) {
-                    let value = pattern
-                        .symbol()
-                        .and_then(|name| local.get(name))
-                        .unwrap_or(value)
-                        .clone();
-                    checker.bind(pattern, value, &mut local);
+                    if let Some(name) = pattern.symbol() {
+                        if !destructures {
+                            checker.observe_binding(name, pattern.without_metadata().span, value);
+                        }
+                        local.insert(name.to_string(), value.clone());
+                    }
                 }
-            }
-            checker.body(&xs[2..], &local, true)
-        });
+                if destructures {
+                    for ([pattern, _], value) in bindings.iter().zip(state) {
+                        let value = pattern
+                            .symbol()
+                            .and_then(|name| local.get(name))
+                            .unwrap_or(value)
+                            .clone();
+                        checker.bind(pattern, value, &mut local);
+                    }
+                }
+                checker.body(&xs[2..], &local, true)
+            },
+        );
         if destructures {
             self.dedup_diagnostics(start);
         }
@@ -139,13 +186,14 @@ impl Checker<'_> {
 
     pub(super) fn function_body(
         &mut self,
-        params: &[Form],
-        conditions: FunctionConditions<'_>,
-        body: &[Form],
-        args: Vec<Value>,
+        clause: &Clause<'_>,
+        mut args: Vec<Value>,
         env: &Env,
-        span: Span,
+        invocation: Option<&[(Value, Span)]>,
     ) -> Value {
+        let params = clause.bindings();
+        let conditions = clause.conditions;
+        let body = clause.body;
         if self.path_reachable
             && self.untyped_binding_budget.is_some()
             && params
@@ -158,8 +206,25 @@ impl Checker<'_> {
             self.type_query = None;
             return Value::new(Type::Unknown);
         }
-        self.recur_body("fn", span, args, |checker, state| {
-            let local = checker.bind_parameters(env.clone(), params, |index| state[index].clone());
+        let mut native = [None; MAX_NATIVE_ARGS];
+        let mut reachable = self.path_reachable && args.iter().all(|arg| !arg.stops_evaluation());
+        for (index, ((param, slot), arg)) in
+            params.iter().zip(&mut native).zip(&mut args).enumerate()
+        {
+            *slot = JvmPrimitive::function_argument(param);
+            if let Some(primitive) = *slot
+                && reachable
+            {
+                let span = invocation
+                    .and_then(|args| args.get(index))
+                    .map_or_else(|| param.metadata(":tag").unwrap().span, |(_, span)| *span);
+                *arg = self.convert_primitive_argument(primitive, span, arg);
+                reachable = !arg.stops_evaluation();
+            }
+        }
+        let native_return = JvmPrimitive::function_return(clause.parameter_vector);
+        self.recur_body("fn", clause.span, args, native, |checker, state| {
+            let local = checker.bind_parameters(env.clone(), &params, |index| state[index].clone());
             let mut active = (!conditions.pre.is_empty()).then(|| local.clone());
             let preconditions_pass = active.as_mut().map_or(checker.path_reachable, |env| {
                 checker.check_conditions(
@@ -172,6 +237,14 @@ impl Checker<'_> {
             // The body can also run with assertions disabled. A postcondition
             // wrapper removes its tail position in both compiler modes.
             let result = checker.body(body, &local, conditions.post.is_none());
+            let return_boundary = native_return.map(|primitive| {
+                let (class, span) = body
+                    .last()
+                    .map_or((JvmValueClass::Boxed, clause.span), |form| {
+                        (checker.compiler_value_class(form, &local), form.span)
+                    });
+                (primitive, class, span)
+            });
             if let Some(post) = conditions.post.filter(|post| !post.is_empty()) {
                 let mut active = active.unwrap_or(local);
                 let reachable =
@@ -188,7 +261,11 @@ impl Checker<'_> {
                 active.insert("%".into(), post_value);
                 checker.check_conditions(post, &mut active, reachable, "postcondition");
             }
-            result
+            if let Some((primitive, class, span)) = return_boundary {
+                checker.primitive_return(primitive, class, span, result)
+            } else {
+                result
+            }
         })
     }
 
@@ -237,6 +314,7 @@ impl Checker<'_> {
         kind: &'static str,
         span: Span,
         initial: Vec<Value>,
+        native: NativeParameters,
         check: impl Fn(&mut Self, &[Value]) -> Value,
     ) -> Value {
         let enclosing = self.recur_target.replace(RecurTarget {
@@ -244,6 +322,7 @@ impl Checker<'_> {
             arity: initial.len(),
             reachable: true,
             blocked_by_try: false,
+            native,
             edges: Vec::new(),
         });
         let start = self.diagnostics.len();

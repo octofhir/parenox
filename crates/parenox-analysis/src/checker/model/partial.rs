@@ -214,16 +214,8 @@ impl Checker<'_> {
     pub(in crate::checker::model) fn untyped_clause(&mut self, clause: &Clause<'_>) {
         let diagnostics_start = self.diagnostics.len();
         self.partial_method_opaque = false;
-        let params = clause.bindings();
-        let args = vec![Value::new(Type::Unknown); params.len()];
-        self.function_body(
-            &params,
-            clause.conditions,
-            clause.body,
-            args,
-            &Env::new(),
-            clause.span,
-        );
+        let args = vec![Value::new(Type::Unknown); clause.parameters().count()];
+        self.function_body(clause, args, &Env::new(), None);
         // An opaque form may change which operations are reached or which vars are called.
         if self.partial_method_opaque {
             self.diagnostics.truncate(diagnostics_start);

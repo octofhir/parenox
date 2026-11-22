@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use super::Value;
 use super::bindings::{dotted_pattern_error, raw_local_symbol};
+use super::jvm_primitives::MAX_NATIVE_ARGS;
 use super::metadata::java_type_hint;
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
@@ -347,11 +348,11 @@ fn validate_function_hints(
                 "fns taking primitives cannot be variadic",
             ));
         }
-        if params.len() > 4 {
+        if params.len() > MAX_NATIVE_ARGS {
             return Err(error(
                 "PNX1001",
                 span,
-                "fns taking primitives support only 4 or fewer args",
+                format!("fns taking primitives support only {MAX_NATIVE_ARGS} or fewer args"),
             ));
         }
     }

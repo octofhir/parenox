@@ -4,13 +4,12 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use super::env::Selector;
+use super::jvm_primitives::{JvmPrimitive, JvmValueClass};
 use super::maps::{Lookup, literal_map_in_source_order};
 use super::metadata::java_type_hint;
 use super::{Checker, Env, Value};
 use crate::Diagnostic;
-use crate::reader::{
-    Form, IntegerLiteralClass, Kind, NumericLiteral, Span, classify_number_with_class,
-};
+use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 
 pub(super) fn raw_local_symbol(form: &Form) -> Option<&str> {
@@ -390,6 +389,9 @@ impl Checker<'_> {
             .filter(|(_, p)| p.symbol().is_some())
         {
             self.bind(param, value(index), &mut env);
+            let class = JvmPrimitive::function_argument(param)
+                .map_or(JvmValueClass::Boxed, JvmValueClass::Primitive);
+            env.set_jvm_class(param.symbol().unwrap(), class);
         }
         for (index, param) in params
             .iter()
@@ -430,9 +432,11 @@ impl Checker<'_> {
             .map()
             .map(|entries| self.map_defaults(entries.as_chunks::<2>().0, env, reachable));
         let reachable = reachable && defaults.as_ref().is_none_or(|defaults| !defaults.stopped);
-        let invalid_hint = (pattern.symbol().is_some()
-            && java_type_hint(pattern).is_some()
-            && self.primitive_let_initializer(init, env))
+        let class = pattern.symbol().map_or(JvmValueClass::Unknown, |_| {
+            self.compiler_value_class(init, env)
+        });
+        let invalid_hint = (matches!(class, JvmValueClass::Primitive(_))
+            && java_type_hint(pattern).is_some())
         .then(|| pattern.metadata(":tag").unwrap().span);
         let value = self.infer_path(init, env, reachable && invalid_hint.is_none(), false);
         if let Some(span) = invalid_hint {
@@ -457,36 +461,11 @@ impl Checker<'_> {
             if let Some((name, hint)) = inherited_hint {
                 env.set_java_hint(name, hint);
             }
+            if class != JvmValueClass::Unknown {
+                env.set_jvm_class(pattern.symbol().unwrap(), class);
+            }
         });
         returns && env.reachable()
-    }
-
-    fn primitive_let_initializer(&self, init: &Form, env: &Env) -> bool {
-        let init = init.without_metadata();
-        match &init.kind {
-            Kind::Number => self
-                .source
-                .get(init.span.start.offset..init.span.end.offset)
-                .is_some_and(|text| match classify_number_with_class(text) {
-                    (_, Some(IntegerLiteralClass::Long)) => true,
-                    (NumericLiteral::NonInteger, _) => !text.contains('/') && !text.ends_with('M'),
-                    _ => false,
-                }),
-            Kind::SymbolicNumber(_) => true,
-            Kind::List(items) if let [operator, _] = items.as_slice() => matches!(
-                self.standard_core_name(operator, env).as_deref(),
-                Some(
-                    "clojure.core/long"
-                        | "clojure.core/double"
-                        | "clojure.core/int"
-                        | "clojure.core/float"
-                        | "clojure.core/short"
-                        | "clojure.core/byte"
-                        | "clojure.core/char"
-                )
-            ),
-            _ => false,
-        }
     }
 
     fn binding_selector(&self, form: &Form, init: &Form, env: &Env) -> Option<Selector> {
