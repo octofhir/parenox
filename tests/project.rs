@@ -607,6 +607,80 @@ fn checks_calls_in_untyped_try_and_case_without_visiting_case_constants() {
 }
 
 #[test]
+fn checks_project_calls_in_explicit_jvm_operands_of_untyped_bodies() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [api :as a]))
+(defn from-receiver [] (. (a/receiver "abc") (length)))
+(defn from-member [] (. "abc" (charAt (a/nested-index)) (a/ignored-tail)))
+(defn from-flat-member [] (. "abc" charAt (a/flat-index)))
+(defn from-constructor [] (new java.io.File (a/path)))"#,
+    };
+    let provider = Source {
+        path: "api.clj",
+        source: "(ns api)",
+    };
+    let updated = Source {
+        source: r#"(ns api)
+(defn receiver [x] x)
+(defn nested-index [] 1)
+(defn flat-index [] 1)
+(defn path [] "file.txt")"#,
+        ..provider
+    };
+    let findings = |report: &parenox::ProjectReport| {
+        serde_json::to_value(
+            &report
+                .files
+                .iter()
+                .find(|file| file.path == app.path)
+                .unwrap()
+                .diagnostics,
+        )
+        .unwrap()
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app, provider], None);
+    let errors: Vec<_> = report
+        .files
+        .iter()
+        .find(|file| file.path == app.path)
+        .unwrap()
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &app.source[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            ("PNX2304", "a/receiver"),
+            ("PNX2304", "a/nested-index"),
+            ("PNX2304", "a/flat-index"),
+            ("PNX2304", "a/path"),
+        ],
+        "{report:#?}"
+    );
+
+    let warm = session.check_project(&[app, updated], None);
+    let cold = Session::default().check_project(&[app, updated], None);
+    assert_eq!(findings(&warm), findings(&cold));
+    assert!(
+        warm.files
+            .iter()
+            .all(|file| file.diagnostics.iter().all(|d| d.severity != "error")),
+        "{warm:#?}"
+    );
+    let reverted = session.check_project(&[app, provider], None);
+    assert_eq!(findings(&reverted), findings(&report));
+}
+
+#[test]
 fn checks_untyped_thread_steps_with_the_implicit_argument_and_named_scope() {
     let app = Source {
         path: "app.clj",

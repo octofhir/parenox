@@ -6,7 +6,7 @@ use crate::Diagnostic;
 use crate::checker::bindings::{
     binding_names, dotted_binding_error, map_defaults_form, raw_local_symbol,
 };
-use crate::checker::calls::arity_counts;
+use crate::checker::calls::{arity_counts, dot_form, new_arguments};
 use crate::checker::function_forms::{
     Clause, function_clauses, letfn_bindings, letfn_definition, lexical_fn_star_clauses,
     lexical_function_clauses, local_fn_name,
@@ -796,6 +796,19 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         }
         match symbol {
             "quote" => return,
+            "." if matches!(self.purpose, Purpose::Check(_)) => {
+                if let Some((receiver, _, arguments)) = dot_form(args) {
+                    self.forms(std::slice::from_ref(receiver));
+                    self.forms(arguments);
+                }
+                return;
+            }
+            "new" if matches!(self.purpose, Purpose::Check(_)) => {
+                if let Some(arguments) = new_arguments(args) {
+                    self.forms(arguments);
+                }
+                return;
+            }
             "var" => {
                 if let [form] = args
                     && let Some(var) = form.symbol()

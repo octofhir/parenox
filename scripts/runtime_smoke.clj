@@ -1342,6 +1342,24 @@
 (assert (= :macro (.opaque-smoke-member ignored-member-argument)))
 (println "Clojure/JVM interop syntax: 5 assertions passed")
 
+(create-ns 'parenox.smoke.interop-provider)
+(alias 'interop-provider 'parenox.smoke.interop-provider)
+(doseq [[body name] '[[(. (interop-provider/receiver "abc") (length))
+                        interop-provider/receiver]
+                       [(. "abc" (charAt (interop-provider/nested-index))
+                                 (interop-provider/ignored-tail))
+                        interop-provider/nested-index]
+                       [(. "abc" charAt (interop-provider/flat-index))
+                        interop-provider/flat-index]
+                       [(new java.io.File (interop-provider/path))
+                        interop-provider/path]]]
+  (assert (try (eval (list 'fn [] body))
+               false
+               (catch clojure.lang.Compiler$CompilerException e
+                 (= (str "No such var: " name) (ex-message (ex-cause e)))))))
+(assert (= \b (eval '(. "abc" (charAt 1) (interop-provider/ignored-tail)))))
+(println "Clojure/JVM project references in interop operands: 5 assertions passed")
+
 (import '[java.io File])
 (assert (= java.io.File File))
 (assert (= java.lang.String String))

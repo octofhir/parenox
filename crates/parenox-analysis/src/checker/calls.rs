@@ -10,6 +10,7 @@ mod identifiers;
 mod indexing;
 mod inline;
 mod interop;
+pub(super) use interop::{dot_form, new_arguments};
 mod macro_scopes;
 mod reduction;
 mod search;

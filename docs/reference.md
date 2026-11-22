@@ -885,8 +885,10 @@ Offsets count UTF-16 code units. A String hint identifies the class but
 does not rule out nil. The checker recognizes JVM member and constructor
 syntax. Dispatch outside the modeled members reports a coverage gap. In
 `(. receiver (method args...) trailing...)`, Clojure/JVM takes arguments
-from the nested method list. Known explicit throws can narrow the set of
-reachable handlers. Ordinary calls may throw.
+from the nested method list. Project reference checks in untyped bodies
+follow the receiver and evaluated operands of `.` and `new`.
+Known explicit throws can narrow the set of reachable handlers. Ordinary
+calls may throw.
 Imported classes and recognized implicit classes resolve as class values,
 which report a type analysis coverage gap.
 

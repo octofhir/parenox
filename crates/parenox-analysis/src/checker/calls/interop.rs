@@ -106,10 +106,7 @@ impl Checker<'_> {
     }
 
     pub(super) fn jvm_new_form(&mut self, forms: &[Form], span: Span, env: &Env) -> Value {
-        let Some((_, args)) = forms
-            .split_first()
-            .filter(|(class, _)| class.symbol().is_some())
-        else {
+        let Some(args) = new_arguments(forms) else {
             self.error("PNX1001", span, "new requires a JVM class name");
             return Value::new(Type::Unknown);
         };
@@ -320,7 +317,12 @@ fn tag_name(tag: &Form) -> Option<&str> {
     }
 }
 
-fn dot_form(args: &[Form]) -> Option<(&Form, &str, &[Form])> {
+pub(in crate::checker) fn new_arguments(forms: &[Form]) -> Option<&[Form]> {
+    let (class, args) = forms.split_first()?;
+    class.symbol().map(|_| args)
+}
+
+pub(in crate::checker) fn dot_form(args: &[Form]) -> Option<(&Form, &str, &[Form])> {
     let [receiver, member, tail @ ..] = args else {
         return None;
     };
