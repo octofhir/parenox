@@ -1,4 +1,4 @@
-use parenox_frontend::reader::{parse, read, read_edn};
+use parenox_frontend::reader::{Conditionals, parse, read, read_edn, read_recovering};
 
 #[test]
 fn reader_rejects_equal_composite_keys_and_members() {
@@ -76,5 +76,7 @@ fn duplicate_composite_span_and_trivia_remain_available_in_the_cst() {
         "(1)"
     );
     assert_eq!(parsed.syntax().text().to_string(), source);
-    assert_eq!(parsed.forms.last().unwrap().keyword(), Some(":next"));
+    let (forms, recovered_error) = read_recovering(source, Conditionals::Preserve);
+    assert_eq!(recovered_error.as_ref(), Some(error));
+    assert_eq!(forms.last().unwrap().keyword(), Some(":next"));
 }

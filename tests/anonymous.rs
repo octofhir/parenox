@@ -1,4 +1,8 @@
-use parenox::reader::{self, Conditionals, Kind};
+#[allow(dead_code)]
+#[path = "support/reader_products.rs"]
+mod reader;
+
+use parenox::reader::{Conditionals, Kind};
 use parenox::syntax::SyntaxKind;
 use parenox::{Session, Source};
 

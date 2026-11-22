@@ -1,4 +1,7 @@
-use parenox::reader::{self, Kind};
+#[path = "support/reader_products.rs"]
+mod reader;
+
+use parenox::reader::Kind;
 use parenox::syntax::SyntaxKind;
 use parenox::{Session, Source};
 

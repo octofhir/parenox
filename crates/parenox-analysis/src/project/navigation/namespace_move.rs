@@ -69,9 +69,13 @@ impl Session {
             {
                 continue;
             }
-            let parsed = reader::parse(&file.source);
+            let mut forms = Vec::new();
+            let parsed =
+                reader::parse_visiting(&file.source, reader::Conditionals::Preserve, |form| {
+                    forms.push(form);
+                });
             let mut uses = NamespaceUses::default();
-            for form in &parsed.forms {
+            for form in &forms {
                 if let Kind::List(items) = &form.without_metadata().kind
                     && matches!(
                         items.first().and_then(Form::symbol),
@@ -101,7 +105,7 @@ impl Session {
             }).collect();
             // A direct top-level call can be an ordinary function usage even
             // when the checker has no enclosing typed declaration to visit.
-            for form in &parsed.forms {
+            for form in &forms {
                 if let Kind::List(items) = &form.without_metadata().kind
                     && let Some(head) = items.first()
                     && let Some((namespace, local)) =

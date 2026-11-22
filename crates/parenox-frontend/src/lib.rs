@@ -1,4 +1,4 @@
-//! Clojure source forms, source positions, and optional lossless syntax trees.
+//! Lossless Clojure syntax, semantic forms, and source positions.
 
 pub mod reader;
 pub mod syntax;

@@ -1,4 +1,7 @@
-use parenox::reader::{self, Kind, Parse};
+#[path = "support/reader_products.rs"]
+mod reader;
+
+use parenox::reader::{Kind, Parse};
 use parenox::syntax::SyntaxKind;
 
 fn assert_lossless(source: &str, parsed: &Parse) {

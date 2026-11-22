@@ -14,8 +14,13 @@ pub fn read_edn(source: &str) -> Result<Vec<Form>, ReadError> {
     data_reader(source).read_all()
 }
 
-fn data_reader(source: &str) -> Reader<'_> {
-    let mut reader = Reader::new(source, false, Conditionals::Reject);
+/// Reads inert EDN forms that survived recovery and the first reader error.
+pub fn read_edn_recovering(source: &str) -> (Vec<Form>, Option<ReadError>) {
+    data_reader(source).read_with_first_error(true)
+}
+
+pub(super) fn data_reader(source: &str) -> Reader<'_> {
+    let mut reader = Reader::new(source, Conditionals::Reject);
     reader.edn = true;
     reader
 }

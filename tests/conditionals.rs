@@ -1,4 +1,8 @@
-use parenox::reader::{self, Conditionals, Form, Kind};
+#[allow(dead_code)]
+#[path = "support/reader_products.rs"]
+mod reader;
+
+use parenox::reader::{Conditionals, Form, Kind};
 use parenox::syntax::SyntaxKind;
 use parenox::{Session, Source};
 
@@ -385,7 +389,7 @@ fn splicing_inserts_list_or_vector_elements_and_validates_the_resulting_map() {
 
 #[test]
 fn pending_prefix_splices_supply_entries_to_the_written_namespaced_map() {
-    use parenox::reader::{Conditionals, parse_with, read_with};
+    use reader::{Conditionals, parse_with, read_with};
 
     let policy = Conditionals::Select(":clj");
     let input = "[#:#?@(:clj [catalog :sku 7]) {:count 1}]";

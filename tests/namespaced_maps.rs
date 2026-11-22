@@ -12,7 +12,6 @@ fn a_reader_effect_can_give_equal_keyword_spellings_distinct_values() {
         let source = format!("{namespace}\n(def result {literal})");
         let parsed = parenox::reader::parse(&source);
         assert!(parsed.errors.is_empty(), "{parsed:#?}");
-        assert_eq!(parsed.forms.len(), 2);
         assert_eq!(parsed.syntax().text().to_string(), source);
         assert_eq!(parenox::reader::read(&source).unwrap().len(), 2);
 

@@ -5,7 +5,7 @@ mod numbers;
 mod regex;
 mod uniqueness;
 
-pub use edn::{read_edn, validate_edn};
+pub use edn::{read_edn, read_edn_recovering, validate_edn};
 pub use names::array_class_component;
 #[doc(hidden)]
 pub use namespace_map::{qualify_namespaced_entries, qualify_namespaced_entries_at};
@@ -242,7 +242,7 @@ pub enum Conditionals<'a> {
     SelectFeatures(&'a [&'a str]),
 }
 
-/// Fast semantic forms without capturing a CST. Rejects reader conditionals.
+/// Reads semantic forms and rejects reader conditionals.
 /// Physical line endings in literals follow the JVM source loader.
 pub fn read(source: &str) -> Result<Vec<Form>, ReadError> {
     read_with(source, Conditionals::Reject)
@@ -250,13 +250,21 @@ pub fn read(source: &str) -> Result<Vec<Form>, ReadError> {
 
 /// The same reader with an explicit conditional policy; no project code is executed.
 pub fn read_with(source: &str, conditionals: Conditionals<'_>) -> Result<Vec<Form>, ReadError> {
-    Reader::new(source, false, conditionals).read_all()
+    Reader::new(source, conditionals).read_all()
 }
 
 /// Read semantic forms before the first error. A consumer can act on each
 /// complete top-level form before reporting the failure.
 pub fn read_prefix(source: &str, conditionals: Conditionals<'_>) -> (Vec<Form>, Option<ReadError>) {
-    Reader::new(source, false, conditionals).read_with_first_error(false)
+    Reader::new(source, conditionals).read_with_first_error(false)
+}
+
+/// Reads the semantic forms that survived recovery and the first reader error.
+pub fn read_recovering(
+    source: &str,
+    conditionals: Conditionals<'_>,
+) -> (Vec<Form>, Option<ReadError>) {
+    Reader::new(source, conditionals).read_with_first_error(true)
 }
 
 #[doc(hidden)]
@@ -367,16 +375,12 @@ pub fn read_for_check(
     conditionals: Conditionals<'_>,
     comment_marker: Option<&'static str>,
 ) -> (CheckRead, Option<ReadError>) {
-    read_for_check_inner(
-        Reader::new(source, false, conditionals),
-        comment_marker,
-        false,
-    )
+    read_for_check_inner(Reader::new(source, conditionals), comment_marker, false)
 }
 
 #[doc(hidden)]
 pub fn read_externs_for_check(source: &str) -> (CheckRead, Option<ReadError>) {
-    let mut reader = Reader::new(source, false, Conditionals::Reject);
+    let mut reader = Reader::new(source, Conditionals::Reject);
     reader.preserve_literal_newlines = true;
     read_for_check_inner(reader, None, false)
 }
@@ -389,11 +393,7 @@ pub fn read_for_check_recovering(
     conditionals: Conditionals<'_>,
     comment_marker: Option<&'static str>,
 ) -> (CheckRead, Option<ReadError>) {
-    read_for_check_inner(
-        Reader::new(source, false, conditionals),
-        comment_marker,
-        true,
-    )
+    read_for_check_inner(Reader::new(source, conditionals), comment_marker, true)
 }
 
 fn read_for_check_inner(
@@ -437,7 +437,6 @@ fn read_for_check_inner(
 #[derive(Debug)]
 pub struct Parse {
     green: rowan::GreenNode,
-    pub forms: Vec<Form>,
     pub errors: Vec<ReadError>,
 }
 
@@ -449,29 +448,34 @@ impl Parse {
 }
 
 /// Retains all source bytes, including invalid and unsupported reader syntax.
-/// Forms contain only successfully read top-level values; errors must be checked before analysis.
 pub fn parse(source: &str) -> Parse {
     parse_with(source, Conditionals::Preserve)
 }
 
-/// Captures the whole CST and applies the requested policy to semantic forms in one pass.
+/// Parses the whole CST with the requested reader conditional policy.
 pub fn parse_with(source: &str, conditionals: Conditionals<'_>) -> Parse {
-    parse_tree(Reader::new(source, true, conditionals))
+    parse_visiting(source, conditionals, drop)
+}
+
+/// Visits recovered top-level forms while building the same lossless tree.
+pub fn parse_visiting(
+    source: &str,
+    conditionals: Conditionals<'_>,
+    visit: impl FnMut(Form),
+) -> Parse {
+    parse_tree(Reader::new(source, conditionals), visit)
 }
 
 /// Captures inert EDN syntax, preserving trivia just like the source reader.
 pub fn parse_edn(source: &str) -> Parse {
-    let mut reader = Reader::new(source, true, Conditionals::Reject);
-    reader.edn = true;
-    parse_tree(reader)
+    parse_tree(edn::data_reader(source), drop)
 }
 
-fn parse_tree(mut reader: Reader<'_>) -> Parse {
+fn parse_tree(mut reader: Reader<'_>, visit: impl FnMut(Form)) -> Parse {
     let mut errors = Vec::new();
-    let forms = reader.read_forms(true, |error| errors.push(error));
+    reader.visit_forms(true, visit, |error| errors.push(error));
     Parse {
-        green: reader.tree.unwrap().build(),
-        forms,
+        green: reader.tree.build(),
         errors,
     }
 }
@@ -494,7 +498,7 @@ struct Reader<'a> {
     inactive_namespace_forms: Vec<Form>,
     form_read_ends: Vec<(usize, usize)>,
     comment_capture: Option<CommentCapture>,
-    tree: Option<Builder<'a>>,
+    tree: Builder<'a>,
     conditionals: Conditionals<'a>,
     edn: bool,
     preserve_literal_newlines: bool,
@@ -530,7 +534,7 @@ impl Delimited {
 }
 
 impl<'a> Reader<'a> {
-    fn new(source: &'a str, capture: bool, conditionals: Conditionals<'a>) -> Self {
+    fn new(source: &'a str, conditionals: Conditionals<'a>) -> Self {
         Self {
             source,
             pos: Position {
@@ -552,7 +556,7 @@ impl<'a> Reader<'a> {
             inactive_namespace_forms: Vec::new(),
             form_read_ends: Vec::new(),
             comment_capture: None,
-            tree: capture.then(|| Builder::new(source)),
+            tree: Builder::new(source),
             conditionals,
             edn: false,
             preserve_literal_newlines: false,
@@ -567,16 +571,25 @@ impl<'a> Reader<'a> {
     }
 
     fn read_with_first_error(&mut self, recover: bool) -> (Vec<Form>, Option<ReadError>) {
+        let mut forms = Vec::new();
         let mut first_error = None;
-        let forms = self.read_forms(recover, |error| {
-            first_error.get_or_insert(error);
-        });
+        self.visit_forms(
+            recover,
+            |form| forms.push(form),
+            |error| {
+                first_error.get_or_insert(error);
+            },
+        );
         (forms, first_error)
     }
 
-    fn read_forms(&mut self, recover: bool, mut record_error: impl FnMut(ReadError)) -> Vec<Form> {
+    fn visit_forms(
+        &mut self,
+        recover: bool,
+        mut emit_form: impl FnMut(Form),
+        mut record_error: impl FnMut(ReadError),
+    ) {
         self.recover = recover;
-        let mut forms = Vec::new();
         loop {
             let start = self.pos;
             let regexes_before = self
@@ -596,7 +609,7 @@ impl<'a> Reader<'a> {
                         dispatches.regexes.truncate(regexes_before);
                         dispatches.regexes.push(form.span.start.offset);
                     }
-                    forms.push(form);
+                    emit_form(form);
                 }
                 Ok(None) => break,
                 Err(error) => {
@@ -619,7 +632,6 @@ impl<'a> Reader<'a> {
                 }
             }
         }
-        forms
     }
 
     #[cold]
@@ -651,21 +663,15 @@ impl<'a> Reader<'a> {
     }
 
     fn start_node(&mut self, start: Position) {
-        if let Some(tree) = &mut self.tree {
-            tree.start(start.offset);
-        }
+        self.tree.start(start.offset);
     }
 
     fn finish_node(&mut self, kind: SyntaxKind) {
-        if let Some(tree) = &mut self.tree {
-            tree.finish(kind, self.pos.offset);
-        }
+        self.tree.finish(kind, self.pos.offset);
     }
 
     fn token(&mut self, kind: SyntaxKind, start: Position) {
-        if let Some(tree) = &mut self.tree {
-            tree.token(kind, start.offset..self.pos.offset);
-        }
+        self.tree.token(kind, start.offset..self.pos.offset);
     }
 
     fn peek(&self) -> Option<char> {
@@ -925,39 +931,37 @@ impl<'a> Reader<'a> {
     }
 
     fn finish_item(&mut self, result: &Result<Item, ReadError>) {
-        if let Some(tree) = &mut self.tree {
-            let kind = match result {
-                Err(_) => SyntaxKind::Error,
-                Ok(Item::Form(form)) => match form.kind {
-                    Kind::List(_) => SyntaxKind::List,
-                    Kind::AnonymousFunction(_) => SyntaxKind::AnonymousFunction,
-                    Kind::Vector(_) => SyntaxKind::Vector,
-                    Kind::Map(_) => SyntaxKind::Map,
-                    Kind::AutoNamespacedMap { .. } => SyntaxKind::NamespacedMap,
-                    Kind::Set(_) => SyntaxKind::Set,
-                    Kind::Quote(_) => SyntaxKind::Quote,
-                    Kind::SyntaxQuote(_) => SyntaxKind::SyntaxQuote,
-                    Kind::Unquote {
-                        splicing: false, ..
-                    } => SyntaxKind::Unquote,
-                    Kind::Unquote { splicing: true, .. } => SyntaxKind::UnquoteSplicing,
-                    Kind::Symbol(_) | Kind::AnonymousArgument(_) => SyntaxKind::Symbol,
-                    Kind::Keyword(_) => SyntaxKind::Keyword,
-                    Kind::String(_) | Kind::Utf16String(_) => SyntaxKind::String,
-                    Kind::Regex { .. } => SyntaxKind::Regex,
-                    Kind::Character(_) => SyntaxKind::Character,
-                    Kind::Metadata(_, _) => SyntaxKind::Metadata,
-                    Kind::Tagged(_, _) => SyntaxKind::Tagged,
-                    Kind::Conditional { .. } => SyntaxKind::Conditional,
-                    Kind::Number => SyntaxKind::Number,
-                    Kind::SymbolicNumber(_) => SyntaxKind::SymbolicNumber,
-                    Kind::Bool(_) => SyntaxKind::Boolean,
-                    Kind::Nil => SyntaxKind::Nil,
-                },
-                Ok(Item::Omit | Item::Splice { .. }) => SyntaxKind::Conditional,
-            };
-            tree.finish(kind, self.pos.offset);
-        }
+        let kind = match result {
+            Err(_) => SyntaxKind::Error,
+            Ok(Item::Form(form)) => match form.kind {
+                Kind::List(_) => SyntaxKind::List,
+                Kind::AnonymousFunction(_) => SyntaxKind::AnonymousFunction,
+                Kind::Vector(_) => SyntaxKind::Vector,
+                Kind::Map(_) => SyntaxKind::Map,
+                Kind::AutoNamespacedMap { .. } => SyntaxKind::NamespacedMap,
+                Kind::Set(_) => SyntaxKind::Set,
+                Kind::Quote(_) => SyntaxKind::Quote,
+                Kind::SyntaxQuote(_) => SyntaxKind::SyntaxQuote,
+                Kind::Unquote {
+                    splicing: false, ..
+                } => SyntaxKind::Unquote,
+                Kind::Unquote { splicing: true, .. } => SyntaxKind::UnquoteSplicing,
+                Kind::Symbol(_) | Kind::AnonymousArgument(_) => SyntaxKind::Symbol,
+                Kind::Keyword(_) => SyntaxKind::Keyword,
+                Kind::String(_) | Kind::Utf16String(_) => SyntaxKind::String,
+                Kind::Regex { .. } => SyntaxKind::Regex,
+                Kind::Character(_) => SyntaxKind::Character,
+                Kind::Metadata(_, _) => SyntaxKind::Metadata,
+                Kind::Tagged(_, _) => SyntaxKind::Tagged,
+                Kind::Conditional { .. } => SyntaxKind::Conditional,
+                Kind::Number => SyntaxKind::Number,
+                Kind::SymbolicNumber(_) => SyntaxKind::SymbolicNumber,
+                Kind::Bool(_) => SyntaxKind::Boolean,
+                Kind::Nil => SyntaxKind::Nil,
+            },
+            Ok(Item::Omit | Item::Splice { .. }) => SyntaxKind::Conditional,
+        };
+        self.finish_node(kind);
     }
 
     fn form_inner(&mut self, start: Position, first: Option<char>) -> Result<Item, ReadError> {
