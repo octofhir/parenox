@@ -47,7 +47,7 @@ use crate::types::{
 use crate::{ContractKind, ContractOrigin};
 
 fn callback_map_argument(ty: &Type, callback_slot: &impl Fn(&Type) -> bool, depth: usize) -> bool {
-    let Type::Map(map) = ty else {
+    let Type::Map(map) = ty.nilable_member().unwrap_or(ty) else {
         return false;
     };
     matches!(map.extra, ExtraFields::Closed)

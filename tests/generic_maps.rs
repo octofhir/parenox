@@ -422,7 +422,7 @@ fn optional_callbacks_receive_context_from_required_fields() {
 }
 
 #[test]
-fn inferred_types_reach_nilable_callbacks_in_exported_contracts() {
+fn inferred_types_reach_nilable_callbacks_and_maps_in_exported_contracts() {
     let provider = Source {
         path: "reports.clj",
         source: r#"(ns reports (:require [clojure.spec.alpha :as s]))
@@ -437,7 +437,20 @@ fn inferred_types_reach_nilable_callbacks_in_exported_contracts() {
                        :opt {:message-fn (s/nilable (s/fspec :args (s/cat :text value) :ret value))}})
                :-> value])}
             [report]
-            (message (:fallback report) (:message-fn report)))"#,
+            (message (:fallback report) (:message-fn report)))
+          (defn with-report
+            {:t/sig '(t/all [value]
+              [value
+               (s/nilable {:message-fn (s/fspec :args (s/cat :text value) :ret value)})
+               :-> value])}
+            [fallback report]
+            (if-let [reply report] ((:message-fn reply) fallback) fallback))
+          (defn with-nested-report
+            {:t/sig '(t/all [value]
+              [{:fallback value
+                :reply (s/nilable {:message-fn (s/fspec :args (s/cat :text value) :ret value)})}
+               :-> value])}
+            [options] (with-report (:fallback options) (:reply options)))"#,
     };
     let export = Session::default().export_externs(&[provider], &[]);
     let edn = export.edn.unwrap_or_else(|| panic!("{:?}", export.report));
@@ -450,11 +463,17 @@ fn inferred_types_reach_nilable_callbacks_in_exported_contracts() {
         (defn absent {:t/sig '[string? :-> string?]} [text]
           (str (r/message text nil)
                (r/from-map {:fallback text})
-               (r/from-map {:fallback text :message-fn nil})))
+               (r/from-map {:fallback text :message-fn nil})
+               (r/with-report text nil)
+               (r/with-nested-report {:fallback text :reply nil})))
         (defn direct {:t/sig '[string? :-> string?]} [text]
           (r/message text (fn [value] (subs value 1))))
         (defn mapped {:t/sig '[string? :-> string?]} [text]
-          (r/from-map {:fallback text :message-fn (fn [value] (subs value 1))}))"#;
+          (r/from-map {:fallback text :message-fn (fn [value] (subs value 1))}))
+        (defn nilable-report {:t/sig '[string? :-> string?]} [text]
+          (r/with-report text {:message-fn (fn [value] (subs value 1))}))
+        (defn nested-report {:t/sig '[string? :-> string?]} [text]
+          (r/with-nested-report {:fallback text :reply {:message-fn (fn [value] (subs value 1))}}))"#;
     let mut session = Session::default();
     let check = |session: &mut Session, source| {
         session.check_project(&[Source { path, source }], Some(declarations))
@@ -463,11 +482,16 @@ fn inferred_types_reach_nilable_callbacks_in_exported_contracts() {
     assert!(good.ok && good.complete, "{good:#?}");
     let broken = source.replace("(subs value 1)", r#"(do (inc value) "bad")"#);
     let report = check(&mut session, &broken);
-    let [direct, mapped] = report.files[0].diagnostics.as_slice() else {
-        panic!("{report:#?}");
-    };
     assert!(report.complete, "{report:#?}");
-    for (finding, name) in [(direct, "reports/message"), (mapped, "reports/from-map")] {
+    let names = [
+        "reports/message",
+        "reports/from-map",
+        "reports/with-report",
+        "reports/with-nested-report",
+    ];
+    let findings = &report.files[0].diagnostics;
+    assert_eq!(findings.len(), names.len(), "{report:#?}");
+    for (finding, name) in findings.iter().zip(names) {
         assert_eq!(finding.code, "PNX2322");
         assert_eq!(finding.actual.as_deref(), Some("String"));
         assert_eq!(
@@ -944,6 +968,8 @@ fn nested_parameters_and_extra_record_fields_are_rejected() {
         "(t/all [a] [(t/map {:opt {:value a}}) :-> a])",
         "(t/all [a] [(t/map {:opt {:run (s/fspec :args (s/cat) :ret a)}}) :-> a])",
         "(t/all [a] [(s/nilable (s/fspec :args (s/cat) :ret a)) :-> a])",
+        "(t/all [a] [(s/nilable {:value a}) :-> a])",
+        "(t/all [a] [(s/nilable {:run (s/fspec :args (s/cat) :ret a)}) :-> a])",
         "(t/all [a b] [{:first (s/fspec :args (s/cat :x a) :ret b)
                         :second (s/fspec :args (s/cat :x a) :ret b) :value a} :-> b])",
     ] {

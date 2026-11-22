@@ -297,7 +297,8 @@ impl Type {
                         matches!(field.ty, Self::Parameter(_))
                             || (allow_callback_fields
                                 && (matches!(field.ty, Self::Function(_) | Self::Map(_))
-                                    || field.ty.contextual_signature().is_some()))
+                                    || field.ty.contextual_signature().is_some()
+                                    || matches!(field.ty.nilable_member(), Some(Self::Map(_)))))
                             || !field.ty.contains_parameter()
                     }) =>
                 {
@@ -331,11 +332,12 @@ impl Type {
             Self::Vector(element) if matches!(element.as_ref(), Self::Parameter(_)) => {
                 Self::Vector(Box::new(element.substitute(replacements)))
             }
-            Self::Union(_) if let Some(parameter) = self.nullable_parameter() => {
-                parameter.substitute(replacements).nilable()
-            }
-            Self::Union(_) if let Some((function, _)) = self.contextual_signature() => {
-                function.substitute(replacements).nilable()
+            Self::Union(_)
+                if let Some(member) = self.nilable_member()
+                    && (matches!(member, Self::Parameter(_) | Self::Map(_))
+                        || member.contextual_signature().is_some()) =>
+            {
+                member.substitute(replacements).nilable()
             }
             Self::Map(map) if self.contains_parameter() => {
                 let mut map = map.clone();
@@ -352,6 +354,7 @@ impl Type {
                         field.ty,
                         Self::Parameter(_) | Self::Function(_) | Self::Map(_)
                     ) || field.ty.contextual_signature().is_some()
+                        || matches!(field.ty.nilable_member(), Some(Self::Map(_)))
                     {
                         field.ty = field.ty.substitute(replacements);
                     }
