@@ -640,21 +640,41 @@ impl Checker<'_> {
     }
 
     fn dedup_diagnostics(&mut self, start: usize) {
-        if self.diagnostics.len() - start < 2 {
+        self.dedup_diagnostics_with_prior(start, None);
+    }
+
+    fn dedup_diagnostics_with_prior(&mut self, start: usize, compiled: Option<Span>) {
+        let count = self.diagnostics.len() - start;
+        if count == 0 || (count == 1 && compiled.is_none()) {
             return;
         }
+        let key = |diagnostic: &Diagnostic| {
+            (
+                diagnostic.span.start.offset,
+                diagnostic.span.end.offset,
+                diagnostic.code.clone(),
+                diagnostic.message.clone(),
+                diagnostic.contract.clone(),
+            )
+        };
         let mut reported = BTreeSet::new();
+        if let Some(span) = compiled {
+            reported.extend(
+                self.diagnostics[..start]
+                    .iter()
+                    .filter(|diagnostic| {
+                        diagnostic.span.start.offset >= span.start.offset
+                            && diagnostic.span.end.offset <= span.end.offset
+                    })
+                    .map(key),
+            );
+        }
         let diagnostics = self.diagnostics.split_off(start);
-        self.diagnostics
-            .extend(diagnostics.into_iter().filter(|diagnostic| {
-                reported.insert((
-                    diagnostic.span.start.offset,
-                    diagnostic.span.end.offset,
-                    diagnostic.code.clone(),
-                    diagnostic.message.clone(),
-                    diagnostic.contract.clone(),
-                ))
-            }));
+        self.diagnostics.extend(
+            diagnostics
+                .into_iter()
+                .filter(|diagnostic| reported.insert(key(diagnostic))),
+        );
     }
 
     fn unsupported(&mut self, span: Span, message: impl Into<String>) -> Value {

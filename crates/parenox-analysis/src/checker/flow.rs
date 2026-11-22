@@ -74,6 +74,12 @@ struct BindingPaths<'a> {
     skips_binding: bool,
 }
 
+struct LetScope {
+    local: Env,
+    reachable: bool,
+    dedup_from: Option<usize>,
+}
+
 impl Checker<'_> {
     pub(super) fn thread_form(
         &mut self,
@@ -423,6 +429,39 @@ impl Checker<'_> {
         tail: bool,
         raw: bool,
     ) -> Value {
+        self.check_let_body(xs, span, env, raw, |checker, body, scope| {
+            checker.body(body, scope, tail)
+        })
+    }
+
+    pub(super) fn check_let_body<'a>(
+        &mut self,
+        xs: &'a [Form],
+        span: Span,
+        env: &Env,
+        raw: bool,
+        body: impl FnOnce(&mut Self, &'a [Form], &Env) -> Value,
+    ) -> Value {
+        let Some(scope) = self.prepare_let_scope(xs, span, env, raw) else {
+            return Value::new(Type::Unknown);
+        };
+        let value = self.check_path(scope.reachable, |checker| {
+            body(checker, &xs[2..], &scope.local)
+        });
+        if let Some(start) = scope.dedup_from {
+            self.dedup_diagnostics(start);
+        }
+        value
+    }
+
+    #[inline(never)]
+    fn prepare_let_scope(
+        &mut self,
+        xs: &[Form],
+        span: Span,
+        env: &Env,
+        raw: bool,
+    ) -> Option<LetScope> {
         let Some(bindings) = xs.get(1).and_then(Form::vector) else {
             if raw {
                 self.error(
@@ -430,17 +469,19 @@ impl Checker<'_> {
                     xs.get(1).map_or(span, |form| form.span),
                     "let* requires a binding vector",
                 );
-                return Value::new(Type::Unknown);
+            } else {
+                self.unsupported(span, "let requires a binding vector");
             }
-            return self.unsupported(span, "let requires a binding vector");
+            return None;
         };
         let (pairs, remaining) = bindings.as_chunks::<2>();
         if !remaining.is_empty() {
             if raw {
                 self.error("PNX1001", xs[1].span, "let* requires binding/value pairs");
-                return Value::new(Type::Unknown);
+            } else {
+                self.unsupported(xs[1].span, "let requires binding/value pairs");
             }
-            return self.unsupported(xs[1].span, "let requires binding/value pairs");
+            return None;
         }
         if raw
             && let Some([pattern, _]) = pairs
@@ -452,7 +493,7 @@ impl Checker<'_> {
                 pattern.without_metadata().span,
                 "let* requires an unqualified local symbol other than &",
             );
-            return Value::new(Type::Unknown);
+            return None;
         }
         let mut local = env.clone();
         let mut reachable = true;
@@ -467,13 +508,11 @@ impl Checker<'_> {
             }
             reachable = self.let_binding(&pair[0], &pair[1], &mut local, reachable);
         }
-        let value = self.check_path(reachable && local.reachable(), |checker| {
-            checker.body(&xs[2..], &local, tail)
-        });
-        if checked_inline {
-            self.dedup_diagnostics(start);
-        }
-        value
+        Some(LetScope {
+            reachable: reachable && local.reachable(),
+            local,
+            dedup_from: checked_inline.then_some(start),
+        })
     }
 
     pub(super) fn if_form(

@@ -40,6 +40,11 @@ struct ConditionalArms<'a> {
 enum CallbackPaths<'a> {
     Sequence(&'a [Form]),
     Conditional(ConditionalArms<'a>),
+    Let {
+        forms: &'a [Form],
+        span: Span,
+        raw: bool,
+    },
 }
 
 fn do_body(form: &Form) -> Option<&[Form]> {
@@ -165,6 +170,7 @@ struct CallbackBranch<'a> {
 pub(super) struct PreparedChoice<'a> {
     callbacks: Vec<CallbackBranch<'a>>,
     eager: Option<Value>,
+    compiled_scope: Option<Span>,
 }
 
 pub(super) struct ContextualCallback {
@@ -643,11 +649,34 @@ impl<'model> Checker<'model> {
                 .contextual_callback_at_tail(body, env)
                 .then_some(CallbackPaths::Sequence(body));
         }
-        let arms = self.conditional_arms(form, env)?;
-        arms.branches
-            .iter()
-            .any(|body| self.contextual_callback_at_tail(body, env))
-            .then_some(CallbackPaths::Conditional(arms))
+        if let Some(arms) = self.conditional_arms(form, env) {
+            return arms
+                .branches
+                .iter()
+                .any(|body| self.contextual_callback_at_tail(body, env))
+                .then_some(CallbackPaths::Conditional(arms));
+        }
+        let bare = form.without_metadata();
+        let Kind::List(forms) = &bare.kind else {
+            return None;
+        };
+        let [head, bindings, body @ ..] = forms.as_slice() else {
+            return None;
+        };
+        bindings.vector()?;
+        if !self.contextual_callback_at_tail(body, env) {
+            return None;
+        }
+        let raw = head.symbol() == Some("let*");
+        let resolved = raw
+            || self
+                .standard_core_name(head, env)
+                .is_some_and(|name| matches!(CoreForm::resolve(&name), Some(CoreForm::Let)));
+        resolved.then_some(CallbackPaths::Let {
+            forms,
+            span: bare.span,
+            raw,
+        })
     }
 
     #[inline(never)]
@@ -658,6 +687,8 @@ impl<'model> Checker<'model> {
         reachable: bool,
     ) -> Option<(Box<PreparedChoice<'a>>, Value)> {
         let paths = self.contextual_choice(form, env)?;
+        // A let can compile local helpers before the contextual body calls them.
+        let compiled_scope = matches!(paths, CallbackPaths::Let { .. }).then_some(form.span);
         let mut callbacks = Vec::with_capacity(2);
         let mut deferred = [false; 2];
         let mut visit = |checker: &mut Self, scope: &Env, mut body: &'a [Form], index: usize| {
@@ -692,6 +723,12 @@ impl<'model> Checker<'model> {
             CallbackPaths::Sequence(body) => {
                 [visit(checker, env, body, 0), Value::new(Type::Never)]
             }
+            CallbackPaths::Let { forms, span, raw } => [
+                checker.check_let_body(forms, span, env, raw, |checker, body, scope| {
+                    visit(checker, scope, body, 0)
+                }),
+                Value::new(Type::Never),
+            ],
             CallbackPaths::Conditional(arms) => match &arms.test {
                 ConditionalTest::Predicate { form, first_truth } => {
                     checker.check_if_paths(form, env, *first_truth, |checker, scope, truth| {
@@ -721,7 +758,14 @@ impl<'model> Checker<'model> {
             None => first,
         });
         let value = Value::new(if returns { Type::Unknown } else { Type::Never });
-        Some((Box::new(PreparedChoice { callbacks, eager }), value))
+        Some((
+            Box::new(PreparedChoice {
+                callbacks,
+                eager,
+                compiled_scope,
+            }),
+            value,
+        ))
     }
 
     pub(super) fn prepare_contextual_argument<'a>(
@@ -799,7 +843,7 @@ impl<'model> Checker<'model> {
             })
         });
         let value = Value::union_branches(choice.eager.into_iter().chain(callbacks));
-        self.dedup_diagnostics(start);
+        self.dedup_diagnostics_with_prior(start, choice.compiled_scope);
         // Return observations from failed bodies can explain a redundant
         // inference gap. They never enter the callback choice's value.
         let rejected_return = returns.filter(|_| rejected).map(Type::union);

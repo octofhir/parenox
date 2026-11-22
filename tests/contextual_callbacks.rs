@@ -470,6 +470,77 @@ fn do_sequences_return_contextual_callbacks_after_their_eager_forms() {
 }
 
 #[test]
+fn let_tail_callbacks_capture_evaluated_bindings() {
+    let source = r#"(ns reports (:refer-clojure :rename {let bind})
+        (:require [clojure.spec.alpha :as s]))
+        (s/def ::message-fn (s/fspec :args (s/cat :text string?) :ret string?))
+        (defn render {:t/sig '[::message-fn number? :-> string?]} [callback _]
+          (callback "label"))
+        (defn prepare {:t/sig '[:-> string?]} []
+          (render (bind [{:keys [prefix] :or {prefix "root"}} {}
+                         suffix (subs prefix 1)]
+                    (count suffix)
+                    (fn [message] (str suffix (subs message 1))))
+                  (inc 2)))
+        (defn primitive {:t/sig '[string? :-> string?]} [prefix]
+          (render (let* [suffix (subs prefix 1)] #(str suffix %)) 0))"#;
+    let mut session = Session::default();
+    let path = "reports.clj";
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replace("(subs message 1)", "(inc message)");
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "message"
+    );
+
+    let throwing = source
+        .replace("prefix \"root\"", "prefix (throw (ex-info \"default\" {}))")
+        .replace("}} {}\n", "}} (inc \"initializer\")\n")
+        .replace("(inc 2)", "(inc \"later\")");
+    let report = session.check(path, &throwing);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let unresolved = throwing.replace("(count suffix)", "(count missing)");
+    let report = session.check(path, &unresolved);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2304");
+    assert_eq!(
+        &unresolved[finding.span.start.offset..finding.span.end.offset],
+        "missing"
+    );
+
+    let broken_helper = source
+        .replacen(
+            "suffix (subs prefix 1)]",
+            "suffix (subs prefix 1) helper (fn [] (inc missing))]",
+            1,
+        )
+        .replace(
+            "(str suffix (subs message 1))",
+            "(str suffix (subs message 1) (helper))",
+        );
+    let report = session.check(path, &broken_helper);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2304");
+    assert_eq!(
+        &broken_helper[finding.span.start.offset..finding.span.end.offset],
+        "missing"
+    );
+}
+
+#[test]
 fn nilable_callback_contracts_contextualize_written_closures() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))
