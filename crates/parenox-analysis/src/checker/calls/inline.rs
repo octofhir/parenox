@@ -362,11 +362,34 @@ impl<'model> Checker<'model> {
         }
     }
 
-    pub(super) fn fn_star_value(&mut self, parts: &[Form], span: Span, env: &Env) -> Value {
+    pub(super) fn fn_value(&mut self, parts: &[Form], span: Span, env: &Env, raw: bool) -> Value {
+        self.literal_fn_value(
+            InlineFunction::Function { parts, raw },
+            span,
+            env,
+            if raw { "fn*" } else { "fn" },
+        )
+    }
+
+    pub(in crate::checker) fn anonymous_fn_value(
+        &mut self,
+        function: &AnonymousFunction,
+        span: Span,
+        env: &Env,
+    ) -> Value {
+        self.literal_fn_value(InlineFunction::Literal(function), span, env, "#()")
+    }
+
+    fn literal_fn_value(
+        &mut self,
+        function: InlineFunction<'_>,
+        span: Span,
+        env: &Env,
+        name: &str,
+    ) -> Value {
         if self.path_reachable {
             self.withhold_captured_facts(env.inline_functions());
         }
-        let function = InlineFunction::Function { parts, raw: true };
         let start = self.diagnostics.len();
         let value = self.check_uninvoked_literal(function, span, env);
         if !self.path_reachable {
@@ -377,27 +400,7 @@ impl<'model> Checker<'model> {
         }
         self.unsupported(
             span,
-            "fn* is currently supported in direct calls and inline callbacks",
-        )
-    }
-
-    pub(super) fn unreached_fn_value(&mut self, parts: &[Form], span: Span, env: &Env) -> Value {
-        self.check_uninvoked_literal(InlineFunction::Function { parts, raw: false }, span, env)
-    }
-
-    pub(in crate::checker) fn anonymous_fn_value(
-        &mut self,
-        function: &AnonymousFunction,
-        span: Span,
-        env: &Env,
-    ) -> Value {
-        if !self.path_reachable {
-            return self.check_uninvoked_literal(InlineFunction::Literal(function), span, env);
-        }
-        self.withhold_captured_facts(env.inline_functions());
-        self.unsupported(
-            span,
-            "#() is currently supported in direct calls and inline callbacks",
+            format!("{name} is currently supported in direct calls and inline callbacks"),
         )
     }
 

@@ -173,3 +173,25 @@ fn unreached_function_literals_keep_their_lexical_compiler_checks() {
         );
     }
 }
+
+#[test]
+fn function_literals_used_as_data_check_names_before_reporting_type_gaps() {
+    for (literal, operand, code) in [
+        ("(fn [x] (missing x))", "missing", "PNX2304"),
+        ("#(missing %)", "missing", "PNX2304"),
+        ("(fn [] (count))", "(count)", "PNX2554"),
+        ("(fn [] (get))", "(fn [] (get))", "PNX9001"),
+        ("#(inc \"text\")", "#(inc \"text\")", "PNX9001"),
+    ] {
+        let source = format!("(defn f {{:t/sig '[:-> map?]}} [] {{:run {literal}}})");
+        let report = Session::default().check("closures.clj", &source);
+        let [diagnostic] = report.diagnostics.as_slice() else {
+            panic!("{literal}: {report:#?}");
+        };
+        assert_eq!(diagnostic.code, code, "{report:#?}");
+        assert_eq!(
+            &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+            operand
+        );
+    }
+}

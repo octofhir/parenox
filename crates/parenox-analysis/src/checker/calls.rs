@@ -313,7 +313,7 @@ impl<'model> Checker<'model> {
             Some("recur") => return self.recur_form(&xs[1..], span, env, tail),
             Some("let*") => return self.let_form(xs, span, env, tail, true),
             Some("loop*") => return self.loop_form(xs, span, env, true),
-            Some("fn*") => return self.fn_star_value(&xs[1..], span, env),
+            Some("fn*") => return self.fn_value(&xs[1..], span, env, true),
             Some("if") => return self.if_form(xs, span, env, Conditional::If, tail),
             Some("do") => return self.body(&xs[1..], env, tail),
             Some("quote") => return self.quote_form(&xs[1..], span),

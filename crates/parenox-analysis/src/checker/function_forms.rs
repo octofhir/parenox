@@ -95,21 +95,6 @@ pub(super) fn local_fn_name(name: &str, raw: bool) -> &str {
     name
 }
 
-pub(super) fn fn_literal_binding_error(forms: &[Form], span: Span) -> Option<Diagnostic> {
-    let params = if let Some((name, tail)) = forms.split_first()
-        && name.symbol().is_some()
-    {
-        tail
-    } else {
-        forms
-    };
-    lexical_function_clauses(params, span)
-        .ok()?
-        .values()
-        .flat_map(Clause::parameters)
-        .find_map(dotted_pattern_error)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClauseMode {
     Checked,

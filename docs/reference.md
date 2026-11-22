@@ -798,8 +798,10 @@ through its lexical name, including across supported arities. Its parameters
 and inner bindings can shadow that name. Recursive analysis is bounded.
 Using that function as data leaves a coverage gap.
 `fn*` supports symbol parameters in direct calls and modeled inline callbacks.
-A map at the start of its body evaluates as an ordinary expression. The
-compiler checks the body even when the function is used as a value.
+A map at the start of its body evaluates as an ordinary expression. When
+`fn`, `fn*`, and `#()` are used as values, Parenox checks their lexical names
+and clause syntax. A reachable literal with an unchecked function type
+reports a coverage gap.
 `partial` can supply a callback to modeled calls such as `mapv` and `reduce`.
 Its saved arguments evaluate at construction and are checked against the
 target when it runs. A call to `partial` with just the target keeps that value.

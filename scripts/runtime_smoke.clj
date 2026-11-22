@@ -1299,15 +1299,18 @@
                         :shorthand #(reduce)
                         :raw (fn* [x] x)})))]
   (assert (try (run) false (catch NullPointerException _ true))))
+(let [stored (eval '(fn [] {:lookup (fn [] (get)) :increment #(inc "text")}))]
+  (assert (every? fn? (vals (stored)))))
 (doseq [literal '[(fn [x] (no-such-closure-target x))
                   #(no-such-closure-target %)
-                  (fn* [x] (no-such-closure-target x))]]
-  (assert (try (eval (list 'fn [] (list 'do '(throw nil) literal)))
+                  (fn* [x] (no-such-closure-target x))]
+        body [{:run literal} (list 'do '(throw nil) literal)]]
+  (assert (try (eval (list 'fn [] body))
                false
                (catch clojure.lang.Compiler$CompilerException e
                  (= "Unable to resolve symbol: no-such-closure-target in this context"
                     (ex-message (ex-cause e)))))))
-(println "Clojure/JVM compiler checks in unreachable closures: 4 assertions passed")
+(println "Clojure/JVM compiler checks in stored closures: 8 assertions passed")
 
 (assert (= \a (. "😀a" (charAt 2))))
 (assert (Character/isHighSurrogate (.charAt "😀" 0)))
