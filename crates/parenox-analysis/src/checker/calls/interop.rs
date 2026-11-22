@@ -113,7 +113,7 @@ impl Checker<'_> {
         self.unmodeled_jvm_call(None, args, span, env)
     }
 
-    fn unmodeled_jvm_call(
+    pub(super) fn unmodeled_jvm_call(
         &mut self,
         receiver: Option<&Form>,
         forms: &[Form],

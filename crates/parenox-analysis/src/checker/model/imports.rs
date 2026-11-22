@@ -1,5 +1,5 @@
 //! Static JVM class names introduced by an ns import clause.
-use super::{Declarations, Model};
+use super::{Declarations, Globals, Model};
 use crate::reader::{Form, Kind};
 
 /// The source token of the effective symbolic type hint.
@@ -157,6 +157,17 @@ fn implicit_java_class(name: &str) -> Option<&'static str> {
 }
 
 impl Model {
+    pub(in crate::checker) fn known_java_member(&self, symbol: &str, globals: &Globals) -> bool {
+        let Some((qualifier, member)) = symbol.split_once('/') else {
+            return false;
+        };
+        // A single digit is an array class literal, such as String/1.
+        !matches!(member.as_bytes(), [b'1'..=b'9'])
+            && self.known_java_class(qualifier)
+            && !self.names.aliases.contains_key(qualifier)
+            && !globals.has_competing_class_namespace(qualifier)
+    }
+
     pub(in crate::checker) fn known_java_class(&self, name: &str) -> bool {
         let short = name.rsplit('.').next().unwrap();
         name == "java.util.Date"

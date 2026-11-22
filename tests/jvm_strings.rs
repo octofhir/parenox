@@ -113,6 +113,76 @@ fn imported_class_values_follow_lexical_resolution_and_import_edits() {
 }
 
 #[test]
+fn qualified_jvm_members_yield_to_loaded_namespaces_and_keep_operand_spans() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns demo (:import [java.io File]))
+(defn static-call {:t/sig '[:-> t/any]} [] (String/valueOf 1))
+(defn instance-call {:t/sig '[:-> t/any]} [] (String/.length "text"))
+(defn construct {:t/sig '[:-> t/any]} [] (File/new missing-path))
+(defn static-field {:t/sig '[:-> t/any]} [] Integer/MAX_VALUE)
+(defn stable {:t/sig '[:-> number?]} [] 1)"#,
+    };
+    let shadow = Source {
+        path: "shadow.clj",
+        source: "(ns String) (defn valueOf {:t/sig '[number? :-> number?]} [x] x)",
+    };
+    let findings = |report: &parenox::ProjectReport| {
+        report.files[0]
+            .diagnostics
+            .iter()
+            .map(|d| {
+                (
+                    d.code.clone(),
+                    &app.source[d.span.start.offset..d.span.end.offset],
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let normalize = |report: &parenox::ProjectReport| {
+        serde_json::to_value(&report.files[0].diagnostics).unwrap()
+    };
+    let mut session = Session::default();
+    let original = session.check_project(&[app], None);
+    assert_eq!(
+        findings(&original),
+        [
+            ("PNX9001".into(), "(String/valueOf 1)"),
+            ("PNX9001".into(), "(String/.length \"text\")"),
+            ("PNX9001".into(), "(File/new missing-path)"),
+            ("PNX2304".into(), "missing-path"),
+            ("PNX9001".into(), "Integer/MAX_VALUE"),
+        ],
+        "{original:#?}"
+    );
+    let warm = session.check_project(&[app, shadow], None);
+    let cold = Session::default().check_project(&[app, shadow], None);
+    assert_eq!(
+        findings(&warm),
+        [
+            ("PNX2304".into(), "String/.length"),
+            ("PNX9001".into(), "(File/new missing-path)"),
+            ("PNX2304".into(), "missing-path"),
+            ("PNX9001".into(), "Integer/MAX_VALUE"),
+        ],
+        "{warm:#?}"
+    );
+    assert_eq!(warm.files[0].stats.checked_functions, 2);
+    assert_eq!(warm.files[0].stats.reused_functions, 3);
+    assert_eq!(normalize(&warm), normalize(&cold));
+    assert_eq!(
+        normalize(&session.check_project(&[app], None)),
+        normalize(&original)
+    );
+
+    let alias = r#"(ns alias-user (:require [some.library :as String]))
+(defn from-alias {:t/sig '[:-> t/any]} [] (String/valueOf 1))"#;
+    let aliased = Session::default().check("alias_user.clj", alias);
+    assert_eq!(aliased.diagnostics.len(), 1, "{aliased:#?}");
+    assert_eq!(aliased.diagnostics[0].code, "PNX9003");
+}
+
+#[test]
 fn ordinary_string_calls_check_arity_only_after_eager_arguments_can_return() {
     let source = r#"(ns demo (:require [clojure.string :as str]))
 (defn dead-call {:t/sig '[:-> string?]} []

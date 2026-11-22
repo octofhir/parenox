@@ -890,7 +890,9 @@ follow the receiver and evaluated operands of `.` and `new`.
 Known explicit throws can narrow the set of reachable handlers. Ordinary
 calls may throw.
 Imported classes and recognized implicit classes resolve as class values,
-which report a type analysis coverage gap.
+which report a type analysis coverage gap. Class-qualified members such as
+`String/valueOf` and `File/new` have a dispatch coverage gap. A loaded
+namespace or alias with that name takes precedence.
 
 `clojure.string/upper-case`, `lower-case`, and `capitalize` use the
 value's JVM `toString` method. The checker accepts proven non-nil

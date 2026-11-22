@@ -470,6 +470,9 @@ impl<'model> Checker<'model> {
                     {
                         return self.unchecked_macro(&resolved, xs[0].span, env);
                     }
+                    if self.model.known_java_member(name, self.globals) {
+                        return self.unmodeled_jvm_call(None, &xs[1..], span, env);
+                    }
                     if self.model.is_external_value_reference(name, self.globals) {
                         // Without a declaration, the call could introduce bindings
                         // or treat its operands as syntax.

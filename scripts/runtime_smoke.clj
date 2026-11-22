@@ -1382,6 +1382,21 @@
 (assert (= 1 (let [File 1] File)))
 (println "Clojure/JVM class values: 3 assertions passed")
 
+(assert (= "42" (String/valueOf 42)))
+(assert (= 4 (String/.length "text")))
+(assert (= "document.txt" (.getName (File/new "document.txt"))))
+(assert (= 2147483647 Integer/MAX_VALUE))
+(create-ns 'String)
+(try
+  (intern 'String 'valueOf (constantly :namespace))
+  (assert (= :namespace (eval '(String/valueOf 42))))
+  (assert (try (eval '(String/.length "text"))
+               false
+               (catch clojure.lang.Compiler$CompilerException e
+                 (= "No such var: String/.length" (ex-message (ex-cause e))))))
+  (finally (remove-ns 'String)))
+(println "Clojure/JVM class-qualified members: 6 assertions passed")
+
 (assert (= \a (. "😀a" (charAt 2))))
 (assert (Character/isHighSurrogate (.charAt "😀" 0)))
 (assert (try (.charAt "😀" 2) false (catch StringIndexOutOfBoundsException _ true)))

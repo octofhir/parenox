@@ -1019,6 +1019,9 @@ impl Checker<'_> {
                         ));
                         return Value::new(Type::Unknown);
                     }
+                    if self.model.known_java_member(s, self.globals) {
+                        return self.unchecked_form(form.span, "JVM member values are not checked");
+                    }
                     let external = self.model.is_external_value_reference(s, self.globals);
                     self.error(
                         if external { "PNX9003" } else { "PNX2304" },
