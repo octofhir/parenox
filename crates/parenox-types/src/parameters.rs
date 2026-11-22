@@ -251,7 +251,8 @@ impl Type {
             .filter(|ty| matches!(ty, Self::Parameter(_)))
     }
 
-    fn nilable_member(&self) -> Option<&Type> {
+    /// The other type in a two-member union with nil.
+    pub fn nilable_member(&self) -> Option<&Type> {
         let Self::Union(parts) = self else {
             return None;
         };

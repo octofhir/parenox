@@ -140,9 +140,7 @@ struct ContextualArgument<'a> {
 impl ContextualArgument<'_> {
     fn expected_in<'a>(&self, mut instantiated: &'a Type) -> Option<&'a Type> {
         for key in self.map_ancestors.iter().copied().chain(self.map_key) {
-            let Type::Map(map) = instantiated else {
-                return None;
-            };
+            let map = inline::contextual_map_type(instantiated)?;
             instantiated = map.fields.get(key)?.value_constraint()?;
         }
         Some(instantiated)

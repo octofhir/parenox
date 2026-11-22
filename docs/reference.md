@@ -232,6 +232,7 @@ Exporting the regex object as an EDN literal value is unsupported.
   computed key can select the field when its value is proved exactly.
   Each such field receives its own callback type. A literal closure can use
   the function signature from `(s/nilable (s/fspec ...))`.
+  A nilable map supplies field types when the argument is a map literal.
   General callback and variadic inference remain limited.
 - `t/all` supports a fixed generic arity with up to two input type
   parameters and one immediate callback result parameter. Inference uses

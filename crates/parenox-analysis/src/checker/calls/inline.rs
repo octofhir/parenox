@@ -23,6 +23,13 @@ use crate::{ContractOrigin, Diagnostic};
 const MAX_CALLBACK_DEPTH: usize = 16;
 const MAX_LOCAL_INLINE_STEPS: usize = 128;
 
+pub(super) fn contextual_map_type(expected: &Type) -> Option<&MapType> {
+    let Type::Map(map) = expected.nilable_member().unwrap_or(expected) else {
+        return None;
+    };
+    Some(map)
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum InlineFunction<'a> {
     Function { parts: &'a [Form], raw: bool },
@@ -534,9 +541,7 @@ impl<'model> Checker<'model> {
         env: &Env,
         remaining: usize,
     ) -> Option<(&'a [Form], &'a MapType)> {
-        let Type::Map(expected) = expected else {
-            return None;
-        };
+        let expected = contextual_map_type(expected)?;
         let entries = form.map()?;
         let direct_callbacks = expected.fields.values().any(|field| {
             field
@@ -546,10 +551,12 @@ impl<'model> Checker<'model> {
         });
         let nested_maps = || {
             remaining != 0
-                && expected
-                    .fields
-                    .values()
-                    .any(|field| matches!(field.value_constraint(), Some(Type::Map(_))))
+                && expected.fields.values().any(|field| {
+                    field
+                        .value_constraint()
+                        .and_then(contextual_map_type)
+                        .is_some()
+                })
         };
         if !direct_callbacks && !nested_maps() {
             return None;
@@ -628,7 +635,7 @@ impl<'model> Checker<'model> {
                             );
                             return checker.contextual_callback_argument(field, env, reachable);
                         }
-                        if remaining != 0 && matches!(expected, Type::Map(_)) {
+                        if remaining != 0 && contextual_map_type(expected).is_some() {
                             ancestors.push(key);
                             let value = checker.contextual_map_argument_at(
                                 field, expected, env, reachable, ancestors, defer,

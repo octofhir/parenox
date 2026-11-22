@@ -71,6 +71,50 @@ fn nilable_callback_contracts_contextualize_written_closures() {
 }
 
 #[test]
+fn nilable_maps_keep_context_for_their_callback_fields() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::message-fn (s/fspec :args (s/cat :text string?) :ret string?))
+        (s/def ::report (s/nilable (s/keys :req-un [::message-fn])))
+        (defn message {:t/sig '[::report :-> string?]} [report]
+          (if-let [reply report] ((:message-fn reply) "label") "fallback"))
+        (defn forward {:t/sig '(t/all [value] [value {:report ::report} :-> value])}
+          [value options] (message (:report options)) value)
+        (defn absent {:t/sig '[:-> number?]} []
+          (message nil)
+          (forward 42 {:report nil}))
+        (defn direct {:t/sig '[:-> string?]} []
+          (message {:message-fn (fn [text] (subs text 1))}))
+        (defn nested {:t/sig '[:-> number?]} []
+          (forward 42 {:report {:message-fn (fn [text] (subs text 1))}}))"#;
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+    let broken = source.replace("(subs text 1)", r#"(do (inc text) "bad")"#);
+    let report = session.check(path, &broken);
+    assert!(report.complete, "{report:#?}");
+    let [direct, nested] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    for (finding, name) in [(direct, "reports/message"), (nested, "reports/forward")] {
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(finding.actual.as_deref(), Some("String"));
+        assert_eq!(finding.callback_contract.as_ref().unwrap().name, name);
+        assert_eq!(
+            &broken[finding.span.start.offset..finding.span.end.offset],
+            "text"
+        );
+    }
+    let cold = Session::default().check(path, &broken);
+    assert_eq!(
+        serde_json::to_value(&report.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
+#[test]
 fn callback_argument_use_and_return_errors_point_inside_the_body() {
     let source = format!(
         "{EXAMPLE}
