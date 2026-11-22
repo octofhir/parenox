@@ -773,6 +773,13 @@ nil and ordinary literal vectors with compatible elements. Two-argument
 initializers and opaque sequence inputs report incomplete analysis.
 [Clojure Java interop](https://clojure.org/reference/java_interop)
 
+Clojure primitive function clauses use `long` and `double` with up to four
+fixed arguments. Parenox checks these restrictions and reports illegal
+type hints on named rest parameters at the tag. An unboxed numeric
+literal or a direct primitive conversion determines the JVM class of a
+`let` initializer. Parenox reports a conflicting explicit tag at the binding.
+[Clojure Java interop](https://clojure.org/reference/java_interop)
+
 Set invocation and lookups through `get`, `get-in` and `req!` use the stored
 element's type. An ordinary literal set can prove that a key is absent.
 Small literal sets with exact scalar

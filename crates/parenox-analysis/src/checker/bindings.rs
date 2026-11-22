@@ -8,7 +8,9 @@ use super::maps::{Lookup, literal_map_in_source_order};
 use super::metadata::java_type_hint;
 use super::{Checker, Env, Value};
 use crate::Diagnostic;
-use crate::reader::{Form, Kind, Span};
+use crate::reader::{
+    Form, IntegerLiteralClass, Kind, NumericLiteral, Span, classify_number_with_class,
+};
 use crate::types::Type;
 
 pub(super) fn raw_local_symbol(form: &Form) -> Option<&str> {
@@ -428,8 +430,19 @@ impl Checker<'_> {
             .map()
             .map(|entries| self.map_defaults(entries.as_chunks::<2>().0, env, reachable));
         let reachable = reachable && defaults.as_ref().is_none_or(|defaults| !defaults.stopped);
-        let value = self.infer_path(init, env, reachable, false);
-        let returns = !value.stops_evaluation();
+        let invalid_hint = (pattern.symbol().is_some()
+            && java_type_hint(pattern).is_some()
+            && self.primitive_let_initializer(init, env))
+        .then(|| pattern.metadata(":tag").unwrap().span);
+        let value = self.infer_path(init, env, reachable && invalid_hint.is_none(), false);
+        if let Some(span) = invalid_hint {
+            self.error(
+                "PNX1001",
+                span,
+                "Can't type hint a local with a primitive initializer",
+            );
+        }
+        let returns = invalid_hint.is_none() && !value.stops_evaluation();
         self.inspect_path(returns, |checker| {
             let source = checker.binding_selector(pattern, init, env);
             // Read the initializer's class selection in the previous scope.
@@ -446,6 +459,34 @@ impl Checker<'_> {
             }
         });
         returns && env.reachable()
+    }
+
+    fn primitive_let_initializer(&self, init: &Form, env: &Env) -> bool {
+        let init = init.without_metadata();
+        match &init.kind {
+            Kind::Number => self
+                .source
+                .get(init.span.start.offset..init.span.end.offset)
+                .is_some_and(|text| match classify_number_with_class(text) {
+                    (_, Some(IntegerLiteralClass::Long)) => true,
+                    (NumericLiteral::NonInteger, _) => !text.contains('/') && !text.ends_with('M'),
+                    _ => false,
+                }),
+            Kind::SymbolicNumber(_) => true,
+            Kind::List(items) if let [operator, _] = items.as_slice() => matches!(
+                self.standard_core_name(operator, env).as_deref(),
+                Some(
+                    "clojure.core/long"
+                        | "clojure.core/double"
+                        | "clojure.core/int"
+                        | "clojure.core/float"
+                        | "clojure.core/short"
+                        | "clojure.core/byte"
+                        | "clojure.core/char"
+                )
+            ),
+            _ => false,
+        }
     }
 
     fn binding_selector(&self, form: &Form, init: &Form, env: &Env) -> Option<Selector> {

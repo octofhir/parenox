@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use super::Value;
 use super::bindings::{dotted_pattern_error, raw_local_symbol};
+use super::metadata::java_type_hint;
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, MAX_TUPLE_ITEMS, Type};
@@ -210,6 +211,9 @@ pub(super) fn function_clause(
     };
     let (params, rest) = split_rest(params)
         .map_err(|span| error("PNX1001", span, "& requires exactly one rest binding"))?;
+    if check_types {
+        validate_function_hints(parameters, params, rest)?;
+    }
     if check_types
         && !mode.raw()
         && let Some(rest) = rest
@@ -300,6 +304,58 @@ pub(super) fn function_clause(
         body,
         span,
     })
+}
+
+fn validate_function_hints(
+    parameters: &Form,
+    params: &[Form],
+    rest: Option<&Form>,
+) -> Result<(), Box<Diagnostic>> {
+    if let Some(binding) = rest
+        && binding.symbol().is_some()
+        && java_type_hint(binding).is_some()
+    {
+        return Err(error(
+            "PNX1001",
+            binding.metadata(":tag").unwrap().span,
+            "& arg cannot have type hint",
+        ));
+    }
+    let mut primitive = None;
+    for form in
+        std::iter::once(parameters).chain(params.iter().filter(|form| form.symbol().is_some()))
+    {
+        match java_type_hint(form).and_then(|hint| hint.name()) {
+            Some("long" | "double") => {
+                primitive.get_or_insert_with(|| form.metadata(":tag").unwrap().span);
+            }
+            Some("boolean" | "byte" | "char" | "short" | "int" | "float" | "void") => {
+                return Err(error(
+                    "PNX1001",
+                    form.metadata(":tag").unwrap().span,
+                    "Only long and double primitives are supported in JVM functions",
+                ));
+            }
+            _ => {}
+        }
+    }
+    if let Some(span) = primitive {
+        if rest.is_some() {
+            return Err(error(
+                "PNX1001",
+                span,
+                "fns taking primitives cannot be variadic",
+            ));
+        }
+        if params.len() > 4 {
+            return Err(error(
+                "PNX1001",
+                span,
+                "fns taking primitives support only 4 or fewer args",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn error(code: &str, span: Span, message: impl Into<String>) -> Box<Diagnostic> {
