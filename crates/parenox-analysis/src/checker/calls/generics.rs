@@ -36,9 +36,15 @@ fn output_evidence<'a>(
         return Ok(Cow::Owned(Type::union(candidates)));
     }
     let expected = witness.signature;
-    let selected = callback
-        .signature_at(expected.arity())
-        .ok_or(Compatibility::Unproven)?;
+    let Some(selected) = callback.signature_at(expected.arity()) else {
+        let context = expected.with_type_arguments(parameters, evidence, Some(&Type::Unknown));
+        let callable = Type::Function([context].into());
+        // The argument check explains a proven mismatch. Otherwise the
+        // missing signature leaves its result type unproved.
+        return Err(callback
+            .compatibility(&callable)
+            .min(Compatibility::Unproven));
+    };
     if selected.parameters.is_some() || selected.nil_preserving {
         let context = expected.with_type_arguments(parameters, evidence, None);
         let specialized = if selected.parameters.is_some() {

@@ -16,6 +16,41 @@ fn direct_conditional_callback_can_infer_a_generic_result() {
 }
 
 #[test]
+fn a_proven_callback_mismatch_does_not_also_report_missing_result_evidence() {
+    let source = format!(
+        r#"{EXAMPLE}
+        (defn no-args {{:t/sig '[:-> number?]}} [] 7)
+        (defn nil-callback {{:t/sig '[boolean? :-> number?]}} [enabled?]
+          (convert (when enabled? #(count %)) "label"))
+        (defn wrong-arity {{:t/sig '[:-> number?]}} []
+          (convert no-args "label"))
+        (defn unknown {{:t/sig '[t/any :-> number?]}} [callback]
+          (convert callback "label"))
+        (defn always-ready {{:t/sig '[:-> number?]}} []
+          (convert (when true #(count %)) "label"))"#
+    );
+    let report = Session::default().check("callback_evidence.clj", &source);
+    let [nil, arity, unknown] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    for (finding, code, operand) in [
+        (nil, "PNX2322", "(when enabled? #(count %))"),
+        (arity, "PNX2322", "no-args"),
+        (unknown, "PNX9010", "callback"),
+    ] {
+        assert_eq!(finding.code, code);
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            operand
+        );
+        assert_eq!(
+            finding.contract.as_ref().unwrap().name,
+            "demo.generic-callbacks/convert"
+        );
+    }
+}
+
+#[test]
 fn infers_one_type_for_lambdas_and_generic_forwarding() {
     let report = check(
         "(defn returns-nil {:t/sig '[:-> nil?]} []
