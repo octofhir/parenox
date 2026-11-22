@@ -320,15 +320,7 @@ impl<'model> Checker<'model> {
             Some("if") => return self.if_form(xs, span, env, Conditional::If, tail),
             Some("do") => return self.body(&xs[1..], env, tail),
             Some("quote") => return self.quote_form(&xs[1..], span),
-            Some("var") => {
-                if let [target] = &xs[1..]
-                    && target.symbol().is_some()
-                {
-                    return self.unchecked_form(span, "Var object types are not supported");
-                }
-                self.error("PNX1001", span, "var requires one symbol");
-                return Value::new(Type::Unknown);
-            }
+            Some("var") => return self.var_form(&xs[1..], span),
             Some("throw") => return self.throw_form(&xs[1..], span, env),
             Some("try") => return self.try_form(&xs[1..], env, tail),
             Some("new") => return self.jvm_new_form(&xs[1..], span, env),
@@ -340,6 +332,24 @@ impl<'model> Checker<'model> {
             _ => {}
         }
         self.resolve_call(xs, span, env, tail)
+    }
+
+    fn var_form(&mut self, forms: &[Form], span: Span) -> Value {
+        if let [target] = forms
+            && let Some(name) = target.symbol()
+        {
+            if self.model.proves_missing_qualified_var(name, self.globals) {
+                self.error(
+                    "PNX2304",
+                    target.without_metadata().span,
+                    format!("Could not resolve Var {name}"),
+                );
+                return Value::new(Type::Unknown);
+            }
+            return self.unchecked_form(span, "Var object types are not supported");
+        }
+        self.error("PNX1001", span, "var requires one symbol");
+        Value::new(Type::Unknown)
     }
 
     fn resolve_call(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {

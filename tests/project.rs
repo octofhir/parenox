@@ -607,6 +607,67 @@ fn checks_calls_in_untyped_try_and_case_without_visiting_case_constants() {
 }
 
 #[test]
+fn qualified_var_references_distinguish_proven_absence_from_private_vars() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [dep :as d]))
+(defn missing {:t/sig '[:-> t/any]} [] #'d/absent)
+(defn private-source {:t/sig '[:-> t/any]} [] (var d/secret))
+(defn unsupported-signature {:t/sig '[:-> t/any]} [] #'d/present)
+(defn builtin-private {:t/sig '[:-> t/any]} [] #'clojure.core/*loaded-libs*)"#,
+    };
+    let provider = Source {
+        path: "dep.clj",
+        source: r#"(ns dep)
+(def ^:private secret 1)
+(defn present {:t/sig 'unknown-signature} [] :value)"#,
+    };
+    let updated = format!("{}\n(def ^:private absent 2)", provider.source);
+    let updated = Source {
+        source: &updated,
+        ..provider
+    };
+    let findings = |report: &parenox::ProjectReport| {
+        report.files[0]
+            .diagnostics
+            .iter()
+            .map(|d| {
+                (
+                    d.code.clone(),
+                    &app.source[d.span.start.offset..d.span.end.offset],
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let normalize = |report: &parenox::ProjectReport| {
+        serde_json::to_value(&report.files[0].diagnostics).unwrap()
+    };
+    let mut session = Session::default();
+    let initial = session.check_project(&[app, provider], None);
+    assert_eq!(
+        findings(&initial),
+        [
+            ("PNX2304".into(), "d/absent"),
+            ("PNX9001".into(), "(var d/secret)"),
+            ("PNX9001".into(), "#'d/present"),
+            ("PNX9001".into(), "#'clojure.core/*loaded-libs*"),
+        ],
+        "{initial:#?}"
+    );
+
+    let warm = session.check_project(&[app, updated], None);
+    let cold = Session::default().check_project(&[app, updated], None);
+    assert_eq!(findings(&warm)[0], ("PNX9001".into(), "#'d/absent"));
+    assert_eq!(warm.files[0].stats.checked_functions, 1);
+    assert_eq!(warm.files[0].stats.reused_functions, 3);
+    assert_eq!(normalize(&warm), normalize(&cold));
+    assert_eq!(
+        normalize(&session.check_project(&[app, provider], None)),
+        normalize(&initial)
+    );
+}
+
+#[test]
 fn checks_project_calls_in_explicit_jvm_operands_of_untyped_bodies() {
     let app = Source {
         path: "app.clj",

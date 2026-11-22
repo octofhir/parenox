@@ -1440,6 +1440,19 @@
     (assert (= "bc" (eval '(with-value [label "abc"] (clojure.core/subs label 1)))))))
 (println "Clojure/JVM dynamic wildcard exports: 1 assertion passed")
 
+(let [provider 'parenox.smoke.var-provider
+      target (create-ns provider)]
+  (intern target (with-meta 'secret {:private true}) 1)
+  (alias 'var-provider provider)
+  (assert (var? (eval '(var var-provider/secret))))
+  (assert (var? #'clojure.core/*loaded-libs*))
+  (assert (try (eval '(var var-provider/absent))
+               false
+               (catch clojure.lang.Compiler$CompilerException e
+                 (= "Unable to resolve var: var-provider/absent in this context"
+                    (ex-message (ex-cause e)))))))
+(println "Clojure/JVM qualified Var references: 3 assertions passed")
+
 (import '[java.io File])
 (assert (= java.io.File File))
 (assert (= java.lang.String String))

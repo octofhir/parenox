@@ -29,7 +29,9 @@ use externs::{ExternFile, ExternalDeclaration, Externs, LiteralExtern};
 pub(super) use guards::VerifiedGuard;
 pub(crate) use imports::{bare_dotted_name, java_type_tag_at};
 pub(crate) use interfaces::InterfaceKey;
-use interfaces::{Exports, LocalInterface, source_macro_value, visible_value};
+use interfaces::{
+    Exports, LocalInterface, VarInventory, proves_missing_var, source_macro_value, visible_value,
+};
 pub(crate) use references::{DocumentReferences, ProjectCall, ScopedReference};
 pub(crate) use require::RuntimeLoads;
 pub(crate) use specs::{
@@ -425,12 +427,22 @@ impl Model {
         model.check_data_functions(source, globals);
         model.collect_helpers();
         // With an otherwise known surface, absent arity proof means a possible Var mutation.
-        model.freeze_interfaces(
-            specs,
-            declarations.dependencies.clone(),
-            declarations.has_unmodeled_var_exports()
-                || (!declarations.opaque_var_surface && !source_arities_known),
-        );
+        let var_inventory = if declarations.has_unmodeled_var_exports()
+            || (!declarations.opaque_var_surface && !source_arities_known)
+        {
+            VarInventory::Incomplete
+        } else if source_arities_known {
+            VarInventory::Complete(
+                declarations
+                    .top_level_names(forms)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        } else {
+            VarInventory::DeclaredOnly
+        };
+        model.freeze_interfaces(specs, declarations.dependencies.clone(), var_inventory);
         model
     }
 
@@ -553,7 +565,8 @@ impl Model {
                     match (previous.as_ref(), globals.exports.get(namespace)) {
                         (Some(old), Some(current)) if Arc::ptr_eq(old, current) => true,
                         (Some(old), Some(current))
-                            if old.incomplete_var_inventory == current.incomplete_var_inventory
+                            if old.var_inventory.is_incomplete()
+                                == current.var_inventory.is_incomplete()
                                 && old.public_var_names().eq(current.public_var_names()) =>
                         {
                             *previous = Some(current.clone());
@@ -733,6 +746,28 @@ impl Model {
 
     pub(super) fn runtime_alias_gap(&self, symbol: &str) -> Option<&str> {
         self.names.runtime_alias_gap(symbol)
+    }
+
+    pub(super) fn proves_missing_qualified_var(&self, name: &str, globals: &Globals) -> bool {
+        if name == "/" || !name.contains('/') || self.runtime_alias_gap(name).is_some() {
+            return false;
+        }
+        let (namespace, local) = self.names.resolve_parts(name);
+        if namespace == self.namespace() {
+            return false;
+        }
+        let Some(source) = globals.exports.get(namespace) else {
+            return false;
+        };
+        let externs = globals
+            .externs
+            .as_ref()
+            .and_then(|table| table.namespaces.get(namespace));
+        proves_missing_var(
+            Some(source),
+            externs.map(Arc::as_ref),
+            &format!("{namespace}/{local}"),
+        )
     }
 
     pub(super) fn declared_value<'a>(

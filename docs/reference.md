@@ -934,6 +934,11 @@ untyped source call reports `PNX9002` and a comparison without enough
 type information can report `PNX9004`. An unknown field does not hide a
 definite mismatch elsewhere in the value.
 
+For `#'alias/name` and `(var alias/name)`, a complete source inventory can
+prove that the target Var is absent and report `PNX2304` at its name.
+Private Vars in source can be referenced this way. Var object types remain
+outside the checked subset.
+
 ## Lossless syntax
 
 `parenox syntax FILE` prints the Rowan concrete syntax tree and reports

@@ -14,6 +14,20 @@ use crate::types::{Arity, Type};
 pub(super) type Contracts = BTreeMap<String, Contract>;
 
 #[derive(Clone, Default)]
+pub(super) enum VarInventory {
+    #[default]
+    DeclaredOnly,
+    Complete(BTreeSet<String>),
+    Incomplete,
+}
+
+impl VarInventory {
+    pub(super) fn is_incomplete(&self) -> bool {
+        matches!(self, Self::Incomplete)
+    }
+}
+
+#[derive(Clone, Default)]
 pub(super) struct Exports {
     pub functions: Contracts,
     pub ordinary_dotted_functions: BTreeSet<String>,
@@ -21,7 +35,7 @@ pub(super) struct Exports {
     unchecked_functions: BTreeMap<String, UncheckedFunction>,
     macros: BTreeMap<String, bool>,
     private_vars: BTreeSet<String>,
-    pub(super) incomplete_var_inventory: bool,
+    pub(super) var_inventory: VarInventory,
 }
 
 impl Exports {
@@ -53,6 +67,29 @@ impl Exports {
                 },
             )
     }
+}
+
+// The var special form can use private Vars. The inventory includes source
+// names whose type annotations or initializer types could not be checked.
+pub(super) fn proves_missing_var(
+    source: Option<&Exports>,
+    externs: Option<&ExternalDeclarations>,
+    name: &str,
+) -> bool {
+    let Some(source) = source else {
+        return false;
+    };
+    let VarInventory::Complete(names) = &source.var_inventory else {
+        return false;
+    };
+    let (_, local) = name.split_once('/').expect("qualified Var name");
+    !names.contains(local)
+        && !source.functions.contains_key(name)
+        && !source.literals.contains_key(name)
+        && !source.unchecked_functions.contains_key(name)
+        && !source.private_vars.contains(name)
+        && !source.macros.contains_key(name)
+        && externs.is_none_or(|table| !table.contains_key(name))
 }
 
 impl Globals {
@@ -313,6 +350,15 @@ impl InterfaceChanges<'_> {
             current.in_project == old.in_project
                 && current.proves_ordinary_dotted_function(&qualified)
                     == old.proves_ordinary_dotted_function(&qualified)
+                && proves_missing_var(
+                    current.source.as_deref(),
+                    current.externs.as_deref(),
+                    &qualified,
+                ) == proves_missing_var(
+                    old.source.as_deref(),
+                    old.externs.as_deref(),
+                    &qualified,
+                )
                 && same_visible_value(
                     current.value(&qualified),
                     old.value(&qualified),
@@ -354,11 +400,11 @@ impl Model {
         &mut self,
         specs: BTreeMap<String, Type>,
         dependencies: Vec<String>,
-        incomplete_var_inventory: bool,
+        var_inventory: VarInventory,
     ) {
         let specs = Arc::new(specs);
         let mut exports = Exports {
-            incomplete_var_inventory,
+            var_inventory,
             ..Exports::default()
         };
         let mut functions = BTreeMap::new();
@@ -426,10 +472,11 @@ impl Model {
     pub fn publish(&self, globals: &mut Globals, unambiguous: bool) {
         let mut exports = self.exports.clone();
         if !unambiguous
-            && (!exports.incomplete_var_inventory || !exports.ordinary_dotted_functions.is_empty())
+            && (!exports.var_inventory.is_incomplete()
+                || !exports.ordinary_dotted_functions.is_empty())
         {
             let exports = Arc::make_mut(&mut exports);
-            exports.incomplete_var_inventory = true;
+            exports.var_inventory = VarInventory::Incomplete;
             exports.ordinary_dotted_functions.clear();
         }
         globals

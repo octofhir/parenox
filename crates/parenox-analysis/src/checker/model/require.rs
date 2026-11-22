@@ -432,7 +432,7 @@ impl Declarations {
                     );
                     return;
                 };
-                if exports.incomplete_var_inventory {
+                if exports.var_inventory.is_incomplete() {
                     self.unavailable_all_refers = true;
                     self.error(
                         "PNX9001",
