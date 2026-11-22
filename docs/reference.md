@@ -884,6 +884,8 @@ provide an inline or local callback with parameters typed by the contract. Each
 closure retains the branch's narrowed types for captured locals. Other branch
 expressions are checked at argument evaluation, and their resulting values
 must satisfy the same contract.
+An omitted alternative supplies `nil`. Standard `if-not`, `when`, and
+`when-not` with a single form in each branch also support this inference.
 The same rule applies to a declared callback field in a literal map. With a
 generic contract, each reachable alternative can use inferred input types and
 contribute evidence for the result parameter.

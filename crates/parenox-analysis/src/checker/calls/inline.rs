@@ -15,7 +15,10 @@ use super::super::{
     nil_part,
     queries::InferredCall,
 };
-use super::{Callable, ContextualArgument, PreparedCallable, call_returns, combinators::Combiner};
+use super::{
+    Callable, Conditional, ContextualArgument, CoreForm, PreparedCallable, call_returns,
+    combinators::Combiner,
+};
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
 use crate::types::{Arity, MAX_CALLBACK_MAP_DEPTH, MapType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
@@ -30,14 +33,10 @@ pub(super) fn contextual_map_type(expected: &Type) -> Option<&MapType> {
     Some(map)
 }
 
-fn conditional_arms(form: &Form) -> Option<(&Form, &Form, &Form)> {
-    let Kind::List(parts) = &form.without_metadata().kind else {
-        return None;
-    };
-    let [head, test, yes, no] = parts.as_slice() else {
-        return None;
-    };
-    (head.symbol() == Some("if")).then_some((test, yes, no))
+struct ConditionalArms<'a> {
+    test: &'a Form,
+    branches: [Option<&'a Form>; 2],
+    first_truth: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -518,22 +517,60 @@ impl<'model> Checker<'model> {
         )
     }
 
+    fn conditional_arms<'a>(&self, form: &'a Form, env: &Env) -> Option<ConditionalArms<'a>> {
+        let Kind::List(parts) = &form.without_metadata().kind else {
+            return None;
+        };
+        let [head, test, body, rest @ ..] = parts.as_slice() else {
+            return None;
+        };
+        let mode = if head.symbol() == Some("if") {
+            Conditional::If
+        } else {
+            let name = self.standard_core_name(head, env)?;
+            let CoreForm::If(mode) = CoreForm::resolve(&name)? else {
+                return None;
+            };
+            mode
+        };
+        let other = match rest {
+            [] => None,
+            [form] if matches!(mode, Conditional::If | Conditional::IfNot) => Some(form),
+            _ => return None,
+        };
+        Some(ConditionalArms {
+            test,
+            branches: [Some(body), other],
+            first_truth: mode.runs_on_truth(),
+        })
+    }
+
     pub(super) fn with_callback_choice(
         &mut self,
         callback: &Form,
         env: &Env,
         mut check: impl FnMut(&mut Self, &Form, &Env) -> Value,
     ) -> Value {
-        if let Some((test, yes, no)) = conditional_arms(callback)
-            && self.inline_callback_literal(yes, env)
-            && self.inline_callback_literal(no, env)
+        if let Some(arms) = self.conditional_arms(callback, env)
+            && let [Some(first), Some(other)] = arms.branches
+            && self.inline_callback_literal(first, env)
+            && self.inline_callback_literal(other, env)
         {
             let start = self.diagnostics.len();
             // Choose the callback before evaluating later arguments, and
             // hold that choice through the entire collection operation.
-            let [left, right] = self.check_if_paths(test, env, true, |checker, scope, truth| {
-                check(checker, if truth { yes } else { no }, scope)
-            });
+            let [left, right] =
+                self.check_if_paths(arms.test, env, arms.first_truth, |checker, scope, truth| {
+                    check(
+                        checker,
+                        if truth == arms.first_truth {
+                            first
+                        } else {
+                            other
+                        },
+                        scope,
+                    )
+                });
             self.dedup_diagnostics(start);
             left.join(right)
         } else {
@@ -545,12 +582,12 @@ impl<'model> Checker<'model> {
         &self,
         form: &'a Form,
         env: &Env,
-    ) -> Option<(&'a Form, [(&'a Form, bool); 2])> {
-        let (test, yes, no) = conditional_arms(form)?;
-        let yes_is_callback = self.contextual_callback_form(yes, env);
-        let no_is_callback = self.contextual_callback_form(no, env);
-        (yes_is_callback || no_is_callback)
-            .then_some((test, [(yes, yes_is_callback), (no, no_is_callback)]))
+    ) -> Option<(ConditionalArms<'a>, [bool; 2])> {
+        let arms = self.conditional_arms(form, env)?;
+        let callbacks = arms
+            .branches
+            .map(|form| form.is_some_and(|form| self.contextual_callback_form(form, env)));
+        callbacks.contains(&true).then_some((arms, callbacks))
     }
 
     #[inline(never)]
@@ -560,12 +597,15 @@ impl<'model> Checker<'model> {
         env: &Env,
         reachable: bool,
     ) -> Option<(Box<PreparedChoice<'a>>, Value)> {
-        let (test, choices) = self.contextual_choice(form, env)?;
+        let (arms, choices) = self.contextual_choice(form, env)?;
         let mut callbacks = Vec::with_capacity(2);
         let branches = self.inspect_path(reachable, |checker| {
-            checker.check_if_paths(test, env, true, |checker, scope, truth| {
-                let (form, is_callback) = choices[usize::from(!truth)];
-                if !is_callback {
+            checker.check_if_paths(arms.test, env, arms.first_truth, |checker, scope, truth| {
+                let index = usize::from(truth != arms.first_truth);
+                let Some(form) = arms.branches[index] else {
+                    return Value::new(Type::Nil);
+                };
+                if !choices[index] {
                     return checker.infer(form, scope);
                 }
                 let value =
@@ -582,7 +622,7 @@ impl<'model> Checker<'model> {
         let eager = branches
             .into_iter()
             .zip(choices)
-            .find_map(|(branch, (_, is_callback))| (!is_callback).then_some(branch));
+            .find_map(|(branch, is_callback)| (!is_callback).then_some(branch));
         let value = Value::new(if returns { Type::Unknown } else { Type::Never });
         Some((Box::new(PreparedChoice { callbacks, eager }), value))
     }

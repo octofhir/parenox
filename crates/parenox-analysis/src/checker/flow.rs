@@ -49,6 +49,10 @@ pub(super) enum Conditional {
 }
 
 impl Conditional {
+    pub(super) fn runs_on_truth(self) -> bool {
+        matches!(self, Self::If | Self::When)
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::If => "if",
@@ -477,7 +481,7 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         }
-        let runs_on_truth = matches!(mode, Conditional::If | Conditional::When);
+        let runs_on_truth = mode.runs_on_truth();
         let branches = self.check_if_paths(&xs[1], env, runs_on_truth, |checker, scope, truth| {
             let body = if truth == runs_on_truth {
                 &xs[2..if when { xs.len() } else { 3 }]

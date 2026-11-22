@@ -170,6 +170,76 @@ fn conditional_callbacks_keep_ordinary_branches() {
 }
 
 #[test]
+fn conditional_callback_fields_can_have_an_implicit_nil_branch() {
+    let source = r#"(ns reports (:refer-clojure :rename {when when-ready})
+                       (:require [clojure.spec.alpha :as s]))
+        (s/def ::message-fn (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))
+        (defn render {:t/sig '[{:message-fn ::message-fn} :-> string?]} [report]
+          (if-let [f (:message-fn report)] (f "label") "fallback"))
+        (defn raw {:t/sig '[(s/nilable string?) :-> string?]} [prefix]
+          (render {:message-fn (if (some? prefix) (fn [text] (str (subs prefix 1) text)))}))
+        (defn renamed {:t/sig '[(s/nilable string?) :-> string?]} [prefix]
+          (render {:message-fn (when-ready (some? prefix) (fn [label] (str (subs prefix 1) label)))}))
+        (defn negative {:t/sig '[(s/nilable string?) :-> string?]} [prefix]
+          (render {:message-fn (when-not (nil? prefix) #(str (subs prefix 1) %))}))
+        (defn inverted {:t/sig '[(s/nilable string?) :-> string?]} [prefix]
+          (render {:message-fn (if-not (nil? prefix) #(str (subs prefix 1) %))}))"#;
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+
+    let edited = source.replace(
+        "(str (subs prefix 1) label)",
+        "(do (inc label) (subs prefix 1))",
+    );
+    let warm = session.check(path, &edited);
+    let [finding] = warm.diagnostics.as_slice() else {
+        panic!("{warm:#?}");
+    };
+    assert!(warm.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "label"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "reports/render"
+    );
+    let cold = Session::default().check(path, &edited);
+    assert_eq!(
+        serde_json::to_value(&warm.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+
+    let shadowed = format!(
+        r#"{source}
+        (defn shadowed {{:t/sig '[:-> string?]}} []
+          (let [when-ready (fn [_ _] "different operation")]
+            (render {{:message-fn (when-ready true (fn [text] (inc text)))}})))"#
+    );
+    let report = session.check(path, &shadowed);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "PNX9001" && d.message.contains("fn is currently supported")),
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| d.callback_contract.is_none()),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn nilable_callback_contracts_contextualize_written_closures() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))
