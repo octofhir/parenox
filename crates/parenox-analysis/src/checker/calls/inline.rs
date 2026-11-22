@@ -123,6 +123,12 @@ pub(super) enum CallbackReturn {
     Infer,
 }
 
+pub(super) struct CallbackBranch<'a> {
+    pub(super) form: &'a Form,
+    pub(super) scope: Env,
+    pub(super) returns: bool,
+}
+
 pub(super) struct ContextualCallback {
     pub value: Value,
     pub rejected_return: Option<Type>,
@@ -499,12 +505,7 @@ impl<'model> Checker<'model> {
         env: &Env,
         mut check: impl FnMut(&mut Self, &Form, &Env) -> Value,
     ) -> Value {
-        if let Kind::List(parts) = &callback.without_metadata().kind
-            && let [head, test, yes, no] = parts.as_slice()
-            && head.symbol() == Some("if")
-            && self.inline_callback_literal(yes, env)
-            && self.inline_callback_literal(no, env)
-        {
+        if let Some((test, yes, no)) = self.callback_choice(callback, env) {
             let start = self.diagnostics.len();
             // Choose the callback before evaluating later arguments, and
             // hold that choice through the entire collection operation.
@@ -516,6 +517,49 @@ impl<'model> Checker<'model> {
         } else {
             check(self, callback, env)
         }
+    }
+
+    fn callback_choice<'a>(
+        &self,
+        callback: &'a Form,
+        env: &Env,
+    ) -> Option<(&'a Form, &'a Form, &'a Form)> {
+        let Kind::List(parts) = &callback.without_metadata().kind else {
+            return None;
+        };
+        let [head, test, yes, no] = parts.as_slice() else {
+            return None;
+        };
+        (head.symbol() == Some("if")
+            && self.inline_callback_literal(yes, env)
+            && self.inline_callback_literal(no, env))
+        .then_some((test, yes, no))
+    }
+
+    #[inline(never)]
+    pub(super) fn prepare_callback_choice<'a>(
+        &mut self,
+        form: &'a Form,
+        env: &Env,
+        reachable: bool,
+    ) -> Option<(Vec<CallbackBranch<'a>>, Value)> {
+        let (test, yes, no) = self.callback_choice(form, env)?;
+        let mut callbacks = Vec::with_capacity(2);
+        let value = self.check_path(reachable, |checker| {
+            let branches = checker.check_if_paths(test, env, true, |checker, scope, truth| {
+                let form = if truth { yes } else { no };
+                let value =
+                    checker.contextual_callback_argument(form, scope, checker.path_reachable);
+                callbacks.push(CallbackBranch {
+                    form,
+                    scope: scope.clone(),
+                    returns: !value.stops_evaluation(),
+                });
+                value
+            });
+            Value::union_branches(branches)
+        });
+        Some((callbacks, value))
     }
 
     pub(super) fn contextual_callback_form(&self, form: &Form, env: &Env) -> bool {

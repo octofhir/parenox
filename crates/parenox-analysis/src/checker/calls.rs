@@ -39,7 +39,7 @@ use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use combinators::CombinedCallable;
 use forms::CoreForm;
-use inline::{CallbackReturn, Fnil, InlineFunction, Partial};
+use inline::{CallbackBranch, CallbackReturn, Fnil, InlineFunction, Partial};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
@@ -202,6 +202,14 @@ struct ContextualArgument<'a> {
     expected: &'a Type,
     map_key: Option<&'a Type>,
     map_ancestors: Box<[&'a Type]>,
+}
+
+enum DeferredCallback<'a> {
+    Argument(ContextualArgument<'a>),
+    Choice {
+        branches: Vec<CallbackBranch<'a>>,
+        expected: &'a Type,
+    },
 }
 
 impl ContextualArgument<'_> {
@@ -754,21 +762,22 @@ impl<'model> Checker<'model> {
         call: Span,
         env: &Env,
     ) -> EvaluatedArguments {
-        let infer_argument = |checker: &mut Self, form: &Form, expected: &Type, reachable| {
-            checker.check_path(reachable, |checker| {
-                checker
-                    .contextual_callback(
-                        form,
-                        expected,
-                        call,
-                        function.contract.as_deref(),
-                        env,
-                        CallbackReturn::Check,
-                    )
-                    .map(|callback| callback.value)
-                    .unwrap_or_else(|| checker.infer(form, env))
-            })
-        };
+        let infer_argument =
+            |checker: &mut Self, form: &Form, expected: &Type, reachable, env: &Env| {
+                checker.check_path(reachable, |checker| {
+                    checker
+                        .contextual_callback(
+                            form,
+                            expected,
+                            call,
+                            function.contract.as_deref(),
+                            env,
+                            CallbackReturn::Check,
+                        )
+                        .map(|callback| callback.value)
+                        .unwrap_or_else(|| checker.infer(form, env))
+                })
+            };
         let mut values = Vec::with_capacity(forms.len());
         let mut deferred = Vec::new();
         let mut reachable = env.reachable();
@@ -778,28 +787,37 @@ impl<'model> Checker<'model> {
                 .get(index)
                 .or(signature.rest.as_ref())
                 .unwrap();
-            if expected.contextual_signature().is_some() && self.contextual_callback_form(form, env)
-            {
+            let expects_callback = expected.contextual_signature().is_some();
+            if expects_callback && self.contextual_callback_form(form, env) {
                 // Reading or creating an ordinary closure does not run its body.
                 let argument = self.contextual_callback_argument(form, env, reachable);
                 reachable = !argument.stops_evaluation();
                 deferred.push((
                     index,
-                    ContextualArgument {
+                    DeferredCallback::Argument(ContextualArgument {
                         callback: form,
                         expected,
                         map_key: None,
                         map_ancestors: Box::new([]),
-                    },
+                    }),
                 ));
+                values.push((argument, form.span));
+                continue;
+            }
+            if expects_callback
+                && let Some((branches, argument)) =
+                    self.prepare_callback_choice(form, env, reachable)
+            {
+                reachable = !argument.stops_evaluation();
+                deferred.push((index, DeferredCallback::Choice { branches, expected }));
                 values.push((argument, form.span));
                 continue;
             }
             let mut value = self
                 .contextual_map_argument(form, expected, env, reachable, |callback, _| {
-                    deferred.push((index, callback))
+                    deferred.push((index, DeferredCallback::Argument(callback)))
                 })
-                .unwrap_or_else(|| infer_argument(self, form, expected, reachable));
+                .unwrap_or_else(|| infer_argument(self, form, expected, reachable, env));
             reachable = !value.stops_evaluation();
             if !reachable {
                 value.narrow(Type::Never);
@@ -808,10 +826,36 @@ impl<'model> Checker<'model> {
         }
         let tail_outcome = forms.metadata_outcome(self, env, reachable);
         reachable &= tail_outcome.is_none();
-        for (index, contextual) in deferred {
-            let value = infer_argument(self, contextual.callback, contextual.expected, reachable);
-            if reachable {
-                contextual.apply(&mut values[index].0, value);
+        for (index, callback) in deferred {
+            match callback {
+                DeferredCallback::Argument(contextual) => {
+                    let value = infer_argument(
+                        self,
+                        contextual.callback,
+                        contextual.expected,
+                        reachable,
+                        env,
+                    );
+                    if reachable {
+                        contextual.apply(&mut values[index].0, value);
+                    }
+                }
+                DeferredCallback::Choice { branches, expected } => {
+                    let start = self.diagnostics.len();
+                    let value = Value::union_branches(branches.into_iter().map(|branch| {
+                        infer_argument(
+                            self,
+                            branch.form,
+                            expected,
+                            reachable && branch.returns,
+                            &branch.scope,
+                        )
+                    }));
+                    self.dedup_diagnostics(start);
+                    if reachable {
+                        values[index].0 = value;
+                    }
+                }
             }
         }
         EvaluatedArguments {

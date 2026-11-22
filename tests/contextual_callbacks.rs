@@ -14,6 +14,94 @@ fn expected_signature_types_fn_parameters_and_anonymous_arguments() {
 }
 
 #[test]
+fn conditional_callback_has_argument_context_and_branch_narrowing() {
+    let source = format!(
+        r#"{EXAMPLE}
+        (defn selected {{:t/sig '[(s/nilable string?) :-> string?]}} [suffix]
+          (transform (if (some? suffix)
+                       (fn [text] (str (subs suffix 1) text))
+                       #(subs % 1))
+                     "label"))"#
+    );
+    let path = "conditional_callback.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, &source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+    let capture = source.rfind("(subs suffix 1)").unwrap() + "(subs ".len();
+    let Some(DocumentHover::Local(hover)) = session.document_hover_at(path, capture) else {
+        panic!("Expected a narrowed type for the captured suffix");
+    };
+    assert_eq!(hover.inferred_type, "String");
+    let broken = source.replace(
+        "(str (subs suffix 1) text)",
+        "(do (inc text) (subs suffix 1))",
+    );
+    let report = session.check(path, &broken);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &broken[finding.span.start.offset..finding.span.end.offset],
+        "text"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "demo.contextual-callbacks/transform"
+    );
+    let Some(DocumentHover::Local(hover)) =
+        session.document_hover_at(path, finding.span.start.offset)
+    else {
+        panic!("Expected a type for the callback operand");
+    };
+    assert_eq!(hover.inferred_type, "String");
+    let cold = Session::default().check(path, &broken);
+    assert_eq!(
+        serde_json::to_value(&report.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, &source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
+#[test]
+fn conditional_callback_keeps_eager_failures_and_compiler_checks() {
+    let source = format!(
+        r#"{EXAMPLE}
+        (defn blocked {{:t/sig '[boolean? :-> #{{:argument}}]}} [first?]
+          (try
+            (transform (if first?
+                         (fn [text] (inc text))
+                         (fn [text] text))
+                       (throw (ex-info "argument" {{:stage :argument}})))
+            (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))
+        (defn metadata-fails {{:t/sig '[boolean? :-> (s/or :result string? :failure #{{:metadata}})]}} [first?]
+          (try
+            (transform (if first?
+                         ^{{:trace (throw (ex-info "metadata" {{:stage :metadata}}))}}
+                         (fn [text] (inc text))
+                         (fn [text] text))
+                       "label")
+            (catch clojure.lang.ExceptionInfo _ :metadata)))"#
+    );
+    let mut session = Session::default();
+    let passing = session.check("conditional_callback.clj", &source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+    let broken = source.replacen("(inc text)", "(inc unresolved)", 1);
+    let report = session.check("conditional_callback.clj", &broken);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2304");
+    assert_eq!(
+        &broken[finding.span.start.offset..finding.span.end.offset],
+        "unresolved"
+    );
+}
+
+#[test]
 fn nilable_callback_contracts_contextualize_written_closures() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))

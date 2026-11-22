@@ -877,6 +877,9 @@ metadata at the argument position. Inline callees, prepared callbacks and
 runs after the eager operands can return. Compiler checks still cover the
 closure on unreachable paths. They resolve names and check syntax inside
 ordinary `fn`, `fn*`, and `#()` literals there.
+When a direct argument to a fixed contract is an `if` with a function literal
+in each branch, both closures receive the parameter types from the contract.
+Each closure also retains the branch's narrowed types for captured locals.
 Sequential bodies apply the same rule to later forms and to function
 postconditions. A proven failure in `finally` also prevents a normal result
 from the enclosing `try`.
