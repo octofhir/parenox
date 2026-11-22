@@ -17,7 +17,7 @@ pub(super) type Contracts = BTreeMap<String, Contract>;
 pub(super) struct Exports {
     pub functions: Contracts,
     pub ordinary_dotted_functions: BTreeSet<String>,
-    pub literals: BTreeMap<String, Type>,
+    pub literals: BTreeMap<String, LiteralVar>,
     unchecked_functions: BTreeMap<String, UncheckedFunction>,
     macros: BTreeMap<String, bool>,
     private_vars: BTreeSet<String>,
@@ -109,8 +109,8 @@ pub(super) fn visible_value<'a>(
                 source_macro_value(externs().and_then(|table| table.get(name)))
             });
         }
-        if let Some(ty) = source.literals.get(name) {
-            return Some(DeclaredValue::Literal(ty));
+        if let Some(value) = source.literals.get(name) {
+            return Some(DeclaredValue::Literal(value));
         }
         if let Some(contract) = source.functions.get(name) {
             return Some(DeclaredValue::Function(contract));
@@ -124,9 +124,7 @@ pub(super) fn visible_value<'a>(
             ExternalDeclaration::Function(contract) => DeclaredValue::Function(contract),
             ExternalDeclaration::Macro(scope) => DeclaredValue::Macro(scope),
             ExternalDeclaration::Spec(_) | ExternalDeclaration::PendingSpec(_) => return None,
-            ExternalDeclaration::Literal(literal) => {
-                DeclaredValue::ExternLiteral(&literal.ty, &literal.origin)
-            }
+            ExternalDeclaration::Literal(literal) => DeclaredValue::ExternLiteral(literal),
         });
     }
     source?
@@ -382,7 +380,7 @@ impl Model {
             if value.private {
                 exports.private_vars.insert(name.clone());
             } else {
-                exports.literals.insert(name.clone(), value.ty.clone());
+                exports.literals.insert(name.clone(), value.clone());
             }
         }
         for (name, function) in &self.unchecked_functions {

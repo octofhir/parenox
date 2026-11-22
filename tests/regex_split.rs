@@ -3,6 +3,137 @@ use parenox::{Session, Source};
 const SOURCE: &str = include_str!("../examples/regex_split.cljc");
 
 #[test]
+fn regex_literal_vars_keep_their_pattern_type_across_files() {
+    let provider = Source {
+        path: "provider.clj",
+        source: r##"(ns reader.patterns) (def jar-pattern #"^(.*\.jar):(.*)")"##,
+    };
+    let consumer = Source {
+        path: "consumer.clj",
+        source: r#"(ns reader.paths (:require [clojure.string :as str] [reader.patterns :as p]))
+            (defn fields {:t/sig '[string? :-> any?]} [text]
+              (str/split text p/jar-pattern))"#,
+    };
+    let mut session = Session::default();
+    let original = session.check_project(&[consumer, provider], None);
+    assert!(original.ok && original.complete, "{original:#?}");
+
+    let edited = Source {
+        source: r#"(ns reader.patterns) (def jar-pattern "not a pattern")"#,
+        ..provider
+    };
+    let warm = session.check_project(&[consumer, edited], None);
+    let cold = Session::default().check_project(&[consumer, edited], None);
+    assert_eq!(
+        serde_json::to_value(&warm.files[0].diagnostics).unwrap(),
+        serde_json::to_value(&cold.files[0].diagnostics).unwrap()
+    );
+    let [finding] = warm.files[0].diagnostics.as_slice() else {
+        panic!("{warm:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.expected.as_deref(), Some("Pattern"));
+    assert_eq!(
+        &consumer.source[finding.span.start.offset..finding.span.end.offset],
+        "p/jar-pattern"
+    );
+    let reverted = session.check_project(&[consumer, provider], None);
+    assert!(reverted.ok && reverted.complete, "{reverted:#?}");
+
+    let exported = session.export_externs(&[provider], &[]);
+    assert!(exported.edn.is_none(), "{exported:#?}");
+}
+
+#[test]
+fn named_regex_capture_edits_recheck_when_the_pattern_type_stays_the_same() {
+    let provider = Source {
+        path: "provider.clj",
+        source: r##"(ns reader.patterns) (def jar-pattern #"^(.*\.jar):(.*)")"##,
+    };
+    let consumer = Source {
+        path: "consumer.clj",
+        source: r#"(ns reader.paths (:require [reader.patterns :as p] [clojure.spec.alpha :as s]))
+            (defn captures
+              {:t/sig '[string? :-> (s/nilable (s/tuple string? (s/nilable string?) (s/nilable string?)))]}
+              [text]
+              (let [saved (re-pattern p/jar-pattern)] (re-find saved text)))
+            (defn independent {:t/sig '[:-> string?]} [] "fixed")"#,
+    };
+    let mut session = Session::default();
+    let original = session.check_project(&[consumer, provider], None);
+    assert!(original.ok && original.complete, "{original:#?}");
+
+    let edited = Source {
+        source: r##"(ns reader.patterns) (def jar-pattern #"^.*\.jar:(.*)")"##,
+        ..provider
+    };
+    let warm = session.check_project(&[consumer, edited], None);
+    let cold = Session::default().check_project(&[consumer, edited], None);
+    assert!(!warm.ok && warm.complete, "{warm:#?}");
+    assert_eq!(warm.stats.checked_functions, 1);
+    assert_eq!(warm.stats.reused_functions, 1);
+    assert_eq!(
+        serde_json::to_value(&warm.files[0].diagnostics).unwrap(),
+        serde_json::to_value(&cold.files[0].diagnostics).unwrap()
+    );
+    let [finding] = warm.files[0].diagnostics.as_slice() else {
+        panic!("{warm:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        finding.actual.as_deref(),
+        Some("Nil | Tuple<String, Nil | String>")
+    );
+    assert_eq!(
+        &consumer.source[finding.span.start.offset..finding.span.end.offset],
+        "(let [saved (re-pattern p/jar-pattern)] (re-find saved text))"
+    );
+    let reverted = session.check_project(&[consumer, provider], None);
+    assert!(reverted.ok && reverted.complete, "{reverted:#?}");
+}
+
+#[test]
+fn regexp_flags_preserve_capture_free_string_results() {
+    let source = r##"(ns reader.uuids (:require [clojure.spec.alpha :as s]))
+        (def ^:private uuid-re
+          #"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        (defn matches {:t/sig '[string? :-> (s/nilable string?)]} [text]
+          (re-matches uuid-re text))
+        (defn optional-prefix {:t/sig '[string? :-> (s/nilable (s/tuple string? (s/nilable string?)))]} [text]
+          (re-find #"(?:a)(?=b)(b)" text))"##;
+    let report = Session::default().check("matches.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn java_control_escapes_change_which_parentheses_capture() {
+    let source = r##"(ns reader.regex-controls (:require [clojure.spec.alpha :as s]))
+        (defn plain {:t/sig '[string? :-> (s/nilable string?)]} [text]
+          (re-matches #"\c(" text))
+        (defn grouped {:t/sig '[string? :-> (s/nilable (s/tuple string? (s/nilable string?)))]} [text]
+          (re-matches #"\c\(a)" text))"##;
+    let mut session = Session::default();
+    let report = session.check("regex-controls.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let changed = source.replacen(
+        "(s/nilable string?)",
+        "(s/nilable (s/tuple string? (s/nilable string?)))",
+        1,
+    );
+    let report = session.check("regex-controls.clj", &changed);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("Nil | String"));
+    assert_eq!(
+        &changed[finding.span.start.offset..finding.span.end.offset],
+        r##"(re-matches #"\c(" text)"##
+    );
+}
+
+#[test]
 fn regex_matches_preserve_absence_and_optional_capture_groups() {
     let source = r##"(ns matches (:require [clojure.string :as str] [clojure.spec.alpha :as s]))
         (defn prefix {:t/sig '[string? :-> (s/nilable string?)]} [text]

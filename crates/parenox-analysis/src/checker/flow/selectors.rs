@@ -32,7 +32,7 @@ impl Checker<'_> {
                 }
                 let mut selector = self.selector(target, env)?;
                 match op.as_str() {
-                    "clojure.core/get" => selector.keys.push(self.literal_map_key(key)?),
+                    "clojure.core/get" => selector.keys.push(self.written_map_key(key)?),
                     "clojure.core/get-in"
                         if self
                             .model
@@ -43,7 +43,7 @@ impl Checker<'_> {
                             return None;
                         }
                         for key in keys {
-                            selector.keys.push(self.literal_map_key(key)?);
+                            selector.keys.push(self.written_map_key(key)?);
                         }
                     }
                     _ => return None,
@@ -79,13 +79,8 @@ impl Checker<'_> {
     }
 
     pub(super) fn guard_literal(&self, form: &Form) -> Option<Type> {
-        match &form.without_metadata().kind {
-            Kind::Nil => Some(Type::Nil),
-            Kind::Bool(value) => Some(Type::Bool(*value)),
-            Kind::Character(value) => Some(Type::Char(*value)),
-            Kind::Keyword(_) | Kind::String(_) => self.literal_map_key(form),
-            _ => quoted_symbol(form).map(|symbol| Type::Sym(symbol.to_owned())),
-        }
+        self.literal_map_key(form)
+            .or_else(|| quoted_symbol(form).map(|symbol| Type::Sym(symbol.to_owned())))
     }
 
     pub(super) fn narrow_sequence_subject(&self, form: &Form, env: &mut Env, empty: bool) {

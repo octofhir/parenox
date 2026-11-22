@@ -76,7 +76,7 @@ impl Session {
         }
         let fallback = caller.navigation_fallback.as_deref()?;
         let candidates = cached_type_query(&fallback.recovered_keywords, token.start, || {
-            let source = repair_keyword_source(&caller.source, &token)?;
+            let (source, token) = repair_keyword_source(&caller.source, &token)?;
             let repaired = self.repaired_type_scope(caller, path, &source, None)?;
             let scope = repaired.scope(&source);
             let site = call_at(scope.forms, token.end)?;
@@ -515,13 +515,26 @@ fn call_in(form: &Form, offset: usize, top_level: bool) -> Option<CallSite<'_>> 
     }
 }
 
-fn repair_keyword_source(source: &str, token: &Range<usize>) -> Option<String> {
-    if !is_last_key_without_value(source, token).unwrap_or(false) {
-        return close_eof_delimiters(source);
-    }
+fn repair_keyword_source(source: &str, token: &Range<usize>) -> Option<(String, Range<usize>)> {
+    let needs_value = is_last_key_without_value(source, token).unwrap_or(false);
+    let mut range = token.clone();
     let mut repaired = source.to_owned();
-    repaired.insert_str(token.end, " nil");
-    close_eof_delimiters(&repaired).or(Some(repaired))
+    if &source[token.clone()] == ":" {
+        // The CST still locates a bare colon. Give the temporary check a valid keyword.
+        let mut suffix = String::from("parenox.completion/slot");
+        while source.contains(&suffix) {
+            suffix.push('_');
+        }
+        repaired.insert_str(range.end, &suffix);
+        range.end += suffix.len();
+    }
+    if needs_value {
+        repaired.insert_str(range.end, " nil");
+    }
+    if let Some(closed) = close_eof_delimiters(&repaired) {
+        return Some((closed, range));
+    }
+    (needs_value || range != *token).then_some((repaired, range))
 }
 
 fn is_last_key_without_value(source: &str, range: &Range<usize>) -> Option<bool> {
@@ -535,7 +548,10 @@ fn is_last_key_without_value(source: &str, range: &Range<usize>) -> Option<bool>
                 && usize::from(bytes.start()) == range.start
                 && usize::from(bytes.end()) == range.end
         })?;
-    let parent = token.parent()?;
+    let mut parent = token.parent()?;
+    if parent.kind() == Error && parent.text_range() == token.text_range() {
+        parent = parent.parent()?;
+    }
     if parent.kind() != Error || parent.first_child_or_token()?.kind() != OpenBrace {
         return Some(false);
     }
@@ -547,5 +563,5 @@ fn is_last_key_without_value(source: &str, range: &Range<usize>) -> Option<bool>
         count += 1;
         last = Some(entry);
     }
-    Some(count % 2 == 1 && last?.into_token()? == token)
+    Some(count % 2 == 1 && last?.text_range() == token.text_range())
 }

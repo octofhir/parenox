@@ -38,9 +38,15 @@ fn read_fallbacks_distinguish_missing_from_present_nil() {
         (r#"(nth [:sku] -1 "missing")"#, "string?"),
         (r#"(get [:sku nil] 1 "missing")"#, "nil?"),
         (r#"(get [:sku] 1 "missing")"#, "string?"),
+        ("(get [:sku] 010 :missing)", "#{:missing}"),
         (r#"(get-in [{:sku "A"}] [0 :sku])"#, "string?"),
         (r#"(get-in [{:sku "A"}] [9 :sku] :missing)"#, "keyword?"),
+        ("(get-in [:sku] [2147483648] :missing)", "#{:missing}"),
         (r#"(nth "😀" 1 :missing)"#, "char?"),
+        (r#"(get "😀A" 2 :missing)"#, r"#{\A}"),
+        (r#"(nth "éΩ" 1)"#, r"#{\Ω}"),
+        (r#"(.charAt "😀A" 2)"#, r"#{\A}"),
+        (r#"(nth "😀" 2 :missing)"#, "#{:missing}"),
         (r#"(let [[_ character] "ab"] character)"#, "char?"),
         ("(contains? [:sku nil] 1)", "#{true}"),
         ("(contains? [:sku] -1)", "#{false}"),
@@ -60,6 +66,21 @@ fn nth_preserves_proved_vector_elements_and_fallbacks() {
         r#"(mapv first (nth nil 1 [["x"] ["y"]]))"#,
     ] {
         let report = check(expression, r#"(clojure.spec.alpha/tuple #{"x"} #{"y"})"#);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn vector_invocation_uses_checked_indices_and_preserves_stored_vectors() {
+    for (expression, expected) in [
+        ("(let [i 4294967296N] ([:hit] i))", "#{:hit}"),
+        ("([:first :second] 0x1)", "#{:second}"),
+        (
+            r#"(let [indexed [[["x"] ["y"]]]] (mapv first (indexed 0)))"#,
+            r#"(clojure.spec.alpha/tuple #{"x"} #{"y"})"#,
+        ),
+    ] {
+        let report = check(expression, expected);
         assert!(report.ok && report.complete, "{expression}: {report:#?}");
     }
 }
@@ -113,8 +134,8 @@ fn subvec_marks_the_rejected_bound_and_only_its_exception() {
 fn keeps_unmodeled_numeric_indices_and_writes_explicit() {
     for (expression, code) in [
         ("(nth [:sku] 0.5)", "PNX9001"),
-        ("(get [:sku] 010)", "PNX9001"),
-        ("(get-in [:sku] [2147483648])", "PNX9001"),
+        ("(get [:sku] 9223372036854775808N)", "PNX9001"),
+        (r#"(get "abc" 0.5)"#, "PNX9001"),
         ("(nth [:sku] :not-an-index)", "PNX2322"),
         ("(nth #{} 0)", "PNX2322"),
         ("(req! [:sku] 1)", "PNX2741"),
@@ -127,4 +148,21 @@ fn keeps_unmodeled_numeric_indices_and_writes_explicit() {
             "{expression}: {report:#?}"
         );
     }
+}
+
+#[test]
+fn vector_and_string_reads_distinguish_the_accepted_jvm_index_classes() {
+    let (source, _) = include_str!("fixtures/index-key-classes.clj")
+        .split_once(";; JVM-only assertions.")
+        .unwrap();
+    let report = Session::default().check("indexed.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let overclaim = source.replace("#{:found :missing}", "#{:found}");
+    let report = Session::default().check("indexed.clj", &overclaim);
+    assert!(!report.ok && report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 6, "{report:#?}");
+    assert!(report.diagnostics.iter().all(|finding| {
+        finding.code == "PNX2322" && finding.actual.as_deref().unwrap().contains(":missing")
+    }));
 }

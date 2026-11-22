@@ -99,6 +99,10 @@ fn editing_the_initializer_changes_the_example_and_keeps_the_live_extern() {
 #[test]
 fn the_source_proof_requires_an_adjacent_ordinary_table_in_the_current_namespace() {
     let table = "(def modes {:off 0 :default 1 :incremental 2})";
+    let inert = SOURCE.replace("(s/def ::sync", "#_ignored\n(s/def ::sync");
+    let report = Session::default().check("sync.clj", &inert);
+    assert!(report.ok && report.complete, "{report:#?}");
+
     for source in [
         SOURCE.replace("(def modes", "(def ^:const modes"),
         SOURCE.replace("(def modes", "(defn get [& _] nil)\n(def modes"),
@@ -111,7 +115,10 @@ fn the_source_proof_requires_an_adjacent_ordinary_table_in_the_current_namespace
             "(s/def ::sync",
             "(def changed-meta (alter-meta! #'modes assoc :const true))\n(s/def ::sync",
         ),
-        SOURCE.replace("(s/def ::sync", "#_ignored\n(s/def ::sync"),
+        SOURCE
+            .replace("(s/def ::sync", "#_#test/rebind :payload\n(s/def ::sync")
+            .replace("::sync", ":demo.sync/sync")
+            .replace("::options", ":demo.sync/options"),
     ] {
         let report = Session::default().check("sync.clj", &source);
         assert!(

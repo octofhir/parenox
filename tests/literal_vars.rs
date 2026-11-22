@@ -119,6 +119,31 @@ fn literal_vars_shadow_core_builtins_and_unsupported_initializers_are_explicit()
 }
 
 #[test]
+fn folds_literal_str_across_proven_reader_and_comment_forms() {
+    let source = r#"(ns demo.reader-effects)
+(comment (ns-unmap *ns* 'str))
+(def label (str "literal #_" #_(in-ns 'ignored) ::item))
+(defn result {:t/sig '[:-> #{"literal #_:demo.reader-effects/item"}]} [] label)"#;
+    let mut session = Session::default();
+    let report = session.check("reader_effects.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let tagged = source
+        .replace("#_(in-ns 'ignored)", "#_#test/rebind :payload")
+        .replace("::item", ":demo.reader-effects/item");
+    let report = session.check("reader_effects.clj", &tagged);
+    assert!(!report.complete, "{report:#?}");
+    assert!(
+        report.diagnostics.iter().any(|finding| {
+            finding.code == "PNX9001"
+                && &tagged[finding.span.start.offset..finding.span.end.offset]
+                    == r#"(str "literal #_" #_#test/rebind :payload :demo.reader-effects/item)"#
+        }),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn folds_stock_str_initializers_in_definition_order() {
     let source = r#"(ns demo.text (:require [wire.tags :as-alias wire]))
 (def jiofile-key (str "prefix😀" ::wire/file nil))

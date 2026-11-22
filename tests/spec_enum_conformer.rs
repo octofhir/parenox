@@ -211,6 +211,14 @@ fn hidden_reader_forms_do_not_produce_portable_enums() {
             .contains("1 :open")
     );
 
+    let inert = source.replace("int?", "int? #_(unknown)");
+    assert!(
+        propose(&mut session, &inert)
+            .externs
+            .unwrap()
+            .contains("1 :open")
+    );
+
     for guard in [
         "int? #_ #test/rebind nil",
         "^{:probe #test/rebind nil} int?",

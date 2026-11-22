@@ -1,54 +1,98 @@
 //! Statically capture a local root from the immediately preceding `def`.
-use super::super::Declarations;
-use super::super::declarations::static_namespace_prelude;
-use super::def_initializer;
-use crate::reader::{Form, Kind};
+use std::collections::BTreeMap;
 
-const MAX_SUBSTITUTED_BYTES: usize = 64 * 1024;
+use super::super::Declarations;
+use super::super::declarations::{SourceDeclaration, static_namespace_prelude};
+use super::{CapturedInitializer, def_initializer};
+use crate::reader::{Form, Kind, Span};
+
+pub(super) const MAX_SUBSTITUTED_BYTES: usize = 64 * 1024;
+
+pub(in crate::checker::model) fn prior_initializer<'a>(
+    declarations: &'a Declarations,
+    forms: &'a [Form],
+    local: &'a str,
+    before: usize,
+) -> Option<&'a Form> {
+    let mut definitions = declarations.source_declarations(forms, local);
+    let SourceDeclaration::Value([head, name, tail @ ..]) = definitions.next()? else {
+        return None;
+    };
+    if definitions.next().is_some()
+        || !matches!(head.symbol(), Some("def" | "clojure.core/def"))
+        || name.span.end.offset >= before
+        || name.metadata(":dynamic").is_some_and(|value| {
+            !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
+        })
+    {
+        return None;
+    }
+    def_initializer(tail)
+}
 
 pub(super) fn adjacent_root<'a>(
-    declarations: &'a Declarations,
+    declarations: &Declarations,
     forms: &'a [Form],
     source: &str,
     index: usize,
-) -> Option<(&'a str, &'a Form)> {
-    let (name, value) = adjacent_literal_def(declarations, forms, source, index)?;
-    let (current_name, initializer) = plain_def(&forms[index])?;
+    captured: &BTreeMap<usize, CapturedInitializer>,
+) -> Option<(usize, &'a str, &'a Form)> {
+    let (previous, name, value, allow_const) =
+        adjacent_definition(declarations, forms, index, Some(captured))?;
+    let (current_name, initializer) = plain_def(&forms[index], allow_const)?;
     (name != current_name
         && source[initializer.span.start.offset..initializer.span.end.offset].contains(name))
-    .then_some((name, value))
+    .then_some((previous, name, value))
 }
 
 pub(in crate::checker::model) fn adjacent_literal_def<'a>(
-    declarations: &'a Declarations,
+    declarations: &Declarations,
     forms: &'a [Form],
-    source: &str,
     index: usize,
 ) -> Option<(&'a str, &'a Form)> {
-    let previous = forms.get(index.checked_sub(1)?)?;
-    let current = &forms[index];
-    let (name, value) = plain_def(previous)?;
+    adjacent_definition(declarations, forms, index, None).map(|(_, name, value, _)| (name, value))
+}
+
+fn adjacent_definition<'a>(
+    declarations: &Declarations,
+    forms: &'a [Form],
+    index: usize,
+    captured: Option<&BTreeMap<usize, CapturedInitializer>>,
+) -> Option<(usize, &'a str, &'a Form, bool)> {
+    let current = forms.get(index)?;
+    let (previous_index, previous) =
+        forms[..index].iter().enumerate().rev().find(|(index, _)| {
+            declarations
+                .discarded_comments
+                .binary_search(index)
+                .is_err()
+        })?;
+    let captured = captured.and_then(|values| values.get(&previous_index));
+    let allow_const = matches!(captured, Some(CapturedInitializer::PlatformLong(_)));
+    let (name, value) = plain_def(previous, allow_const)?;
     if !forms.first().is_some_and(static_namespace_prelude)
         || declarations.forward_vars.contains_key(name)
         || declarations
             .source_declarations(forms, name)
             .nth(1)
             .is_some()
-        || !inert(value, false)
+        || (captured.is_none() && !inert(value, false))
     {
         return None;
     }
     declarations.reader_namespace_before(forms, previous.span.start.offset)?;
     // Discarded forms disappear from the AST, but their reader handlers may
     // have run between the initialization and the use of the root.
-    let text = &source[previous.span.start.offset..current.span.end.offset];
-    if text.contains("#_") || text.contains("#=") {
+    if declarations.has_unchecked_dispatch(Span {
+        start: previous.span.start,
+        end: current.span.end,
+    }) {
         return None;
     }
-    Some((name, value))
+    Some((previous_index, name, value, allow_const))
 }
 
-fn plain_def(form: &Form) -> Option<(&str, &Form)> {
+fn plain_def(form: &Form, allow_const: bool) -> Option<(&str, &Form)> {
     let Kind::List(items) = &form.kind else {
         return None;
     };
@@ -58,23 +102,25 @@ fn plain_def(form: &Form) -> Option<(&str, &Form)> {
     if !matches!(&op.kind, Kind::Symbol(symbol) if symbol == "def") {
         return None;
     }
-    let name = match &name.kind {
-        Kind::Metadata(meta, target) => {
-            let Kind::Map(entries) = &meta.kind else {
-                return None;
-            };
-            let [key, value] = entries.as_slice() else {
-                return None;
-            };
-            if !matches!(&key.kind, Kind::Keyword(keyword) if keyword == ":private")
-                || !matches!(value.kind, Kind::Bool(true))
-            {
-                return None;
-            }
-            target
+    let mut name = name;
+    while let Kind::Metadata(meta, target) = &name.kind {
+        let Kind::Map(entries) = &meta.kind else {
+            return None;
+        };
+        let (entries, remainder) = entries.as_chunks::<2>();
+        if entries.is_empty()
+            || !remainder.is_empty()
+            || (!allow_const && (entries.len() != 1 || matches!(target.kind, Kind::Metadata(..))))
+            || !entries.iter().all(|[key, value]| {
+                matches!(&key.kind, Kind::Keyword(keyword)
+                    if keyword == ":private" || (allow_const && keyword == ":const"))
+                    && matches!(value.kind, Kind::Bool(true))
+            })
+        {
+            return None;
         }
-        _ => name,
-    };
+        name = target;
+    }
     let Kind::Symbol(name) = &name.kind else {
         return None;
     };
@@ -125,7 +171,7 @@ fn replace_values(
     Some(())
 }
 
-pub(super) fn inert(form: &Form, quoted: bool) -> bool {
+pub(in crate::checker::model) fn inert(form: &Form, quoted: bool) -> bool {
     match &form.kind {
         Kind::Nil
         | Kind::Bool(_)
@@ -137,10 +183,18 @@ pub(super) fn inert(form: &Form, quoted: bool) -> bool {
         | Kind::Keyword(_) => true,
         Kind::Symbol(_) => quoted,
         Kind::Quote(inner) => inert(inner, true),
-        Kind::List(items) if !quoted => items.is_empty(),
+        Kind::Unquote { form, .. } => quoted && inert(form, true),
+        Kind::List(items) if !quoted => match items.as_slice() {
+            [] => true,
+            [head, operand] if matches!(&head.kind, Kind::Symbol(name) if name == "quote") => {
+                inert(operand, true)
+            }
+            _ => false,
+        },
         Kind::List(items) | Kind::Vector(items) | Kind::Map(items) | Kind::Set(items) => {
             items.iter().all(|item| inert(item, quoted))
         }
+        Kind::AutoNamespacedMap { entries, .. } => entries.iter().all(|item| inert(item, quoted)),
         _ => false,
     }
 }

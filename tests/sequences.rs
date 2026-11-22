@@ -197,6 +197,7 @@ fn seq_operations_handle_entry_types_sets_and_jvm_string_positions() {
         ("(seq {})", "nil?"),
         ("(next {:only 1})", "nil?"),
         ("(val (first {:only \"Ada\"}))", "#{\"Ada\"}"),
+        ("(get (val (first {:only {1 :hit}})) 1N)", "#{:hit}"),
         ("(key (first (next {:a 1 :b 2})))", "keyword?"),
         ("(nth (seq {:a 1 :b 2}) 2 \"missing\")", "#{\"missing\"}"),
         ("(seq #{})", "nil?"),

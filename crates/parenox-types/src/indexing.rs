@@ -1,13 +1,36 @@
 //! Positions for the modeled Clojure indexed collections.
-use super::Type;
+use super::{IntegerClass, IntegerRange, IntegerType, Type};
 
 pub enum IndexedItem<'a> {
     Present(&'a Type),
+    PresentChar(char),
     Optional(&'a Type),
     Absent(Option<usize>),
 }
 
 impl Type {
+    /// The position when an associative operation accepts this numeric class.
+    pub fn associative_index(&self) -> Option<i32> {
+        match self {
+            Self::Integer(index) => Some(*index),
+            Self::Integral(_) if self.is_lookup_key(true) => {
+                self.exact_long_value().map(|value| value as i32)
+            }
+            _ => None,
+        }
+    }
+
+    /// Vectors reject Byte and Short keys even when their value fits an index.
+    pub fn may_be_byte_or_short(&self) -> bool {
+        matches!(
+            self.integer_type(),
+            Some(IntegerType {
+                class: IntegerClass::Any | IntegerClass::Fixed,
+                range: IntegerRange::Exact(value),
+            }) if i16::try_from(value).is_ok()
+        )
+    }
+
     pub fn sequential_item(&self, index: usize) -> Option<Type> {
         match self {
             Type::Nil | Type::Unknown | Type::Never => Some(self.clone()),
@@ -18,6 +41,7 @@ impl Type {
                 .map(Type::union),
             _ => match self.nth_item(i32::try_from(index).ok()?)? {
                 IndexedItem::Present(item) => Some(item.clone()),
+                IndexedItem::PresentChar(value) => Some(Type::Char(value)),
                 IndexedItem::Optional(item) => Some(item.clone().nilable()),
                 IndexedItem::Absent(_) => Some(Type::Nil),
             },
@@ -54,12 +78,17 @@ impl Type {
                 });
             }
             Type::Str(text) => {
-                let length = text.encode_utf16().count();
-                return Some(if position.is_some_and(|index| index < length) {
-                    IndexedItem::Present(&Type::Character)
-                } else {
-                    IndexedItem::Absent(Some(length))
-                });
+                let mut length = 0;
+                for (index, unit) in text.encode_utf16().enumerate() {
+                    if position == Some(index) {
+                        return Some(char::from_u32(u32::from(unit)).map_or(
+                            IndexedItem::Present(&Type::Character),
+                            IndexedItem::PresentChar,
+                        ));
+                    }
+                    length = index + 1;
+                }
+                return Some(IndexedItem::Absent(Some(length)));
             }
             Type::String => {
                 return Some(match position {

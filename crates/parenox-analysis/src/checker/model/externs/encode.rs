@@ -32,7 +32,12 @@ impl Model {
                 .get(name)
                 .is_some_and(|source| source.signatures == parsed.signatures),
             (Some(ExternalDeclaration::Literal(parsed)), Some(edn)) => {
-                parsed.edn == edn && self.exports.literals.get(name) == Some(&parsed.ty)
+                parsed.edn == edn
+                    && self
+                        .exports
+                        .literals
+                        .get(name)
+                        .is_some_and(|source| source.ty == parsed.ty)
             }
             _ => false,
         }
@@ -443,11 +448,17 @@ impl SnapshotWriter {
 
     pub(super) fn key(&mut self, ty: &Type) -> Encoded {
         match ty {
-            Type::Key(key) => Ok(self.write_str(key)?),
+            Type::Nil => Ok(self.write_str("nil")?),
+            Type::Bool(value) => Ok(write!(self, "{value}")?),
+            Type::Char(value) if u32::from(*value) <= 0xffff => {
+                Ok(write!(self, "\\u{:04x}", u32::from(*value))?)
+            }
+            Type::Integer(value) => Ok(write!(self, "{value}")?),
+            Type::Key(key) | Type::Sym(key) => Ok(self.write_str(key)?),
             // JSON's emitted string escapes are also accepted by the EDN reader.
             Type::Str(key) => serde_json::to_writer(self, key).map_err(|_| EncodeError::Size),
             _ => Err(EncodeError::Unsupported(
-                "map fields require literal keyword or string keys",
+                "map fields require supported scalar literal keys",
             )),
         }
     }
@@ -464,11 +475,15 @@ fn exact_integer(ty: &Type) -> Option<(&'static str, i64)> {
     match ty {
         Type::Integer(value) => Some(("int?", i64::from(*value))),
         Type::Integral(IntegerType {
+            class: IntegerClass::Fixed | IntegerClass::IntOrLong,
+            range: IntegerRange::Exact(value),
+        }) => Some(("int?", i64::from(*value))),
+        Type::Integral(IntegerType {
             class: IntegerClass::Any,
             range: IntegerRange::Exact(value),
         }) => Some(("integer?", i64::from(*value))),
         Type::Integral(IntegerType {
-            class: IntegerClass::Fixed,
+            class: IntegerClass::Fixed | IntegerClass::IntOrLong,
             range: IntegerRange::ExactLong(value),
         }) => Some(("int?", *value)),
         Type::Integral(IntegerType {

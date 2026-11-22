@@ -1,5 +1,7 @@
 //! Namespaced map keys. An explicit prefix is part of the reader syntax.
-use super::{Form, Kind, NamespaceToken, Position, ReadError, Reader, Span, uniqueness};
+use super::{
+    Form, Kind, MAX_NESTING_DEPTH, NamespaceToken, Position, ReadError, Reader, Span, uniqueness,
+};
 use crate::syntax::SyntaxKind;
 
 impl Reader<'_> {
@@ -22,45 +24,79 @@ impl Reader<'_> {
         self.token(SyntaxKind::NamespacedMapMark, start);
         let implicit = self
             .peek()
-            .is_some_and(|ch| ch.is_whitespace() || matches!(ch, ',' | '{'));
+            .is_some_and(|ch| Self::reader_whitespace(ch) || matches!(ch, ',' | '{'));
         if !self.edn && !auto && implicit {
             return Err(self.error(start, "Namespaced map requires a namespace"));
         }
         let prefix = if auto && implicit {
             None
         } else {
-            let form = self.without_comments(Self::form)?;
-            if form
+            Some(self.without_comments(Self::form)?)
+        };
+        let tag_span = prefix
+            .as_ref()
+            .and_then(|form| self.data_reader_result_span(form));
+        if let Some(form) = &prefix
+            && tag_span.is_none()
+            && form
                 .symbol()
                 .is_none_or(|name| name != "/" && name.contains('/'))
-            {
-                return Err(self.error(
-                    start,
-                    "Namespaced map requires an unqualified namespace symbol",
-                ));
-            }
-            Some(form)
-        };
+        {
+            return Err(self.error(
+                start,
+                "Namespaced map requires an unqualified namespace symbol",
+            ));
+        }
         while self.skip_space() {}
         if self.peek() != Some('{') {
             return Err(self.error(start, "Expected a map after the namespace"));
         }
-        if auto && let Some(tokens) = &mut self.namespace_tokens {
+        if auto
+            && tag_span.is_none()
+            && let Some(tokens) = &mut self.namespace_tokens
+        {
             tokens.push(NamespaceToken::Map {
                 marker,
                 alias: prefix.as_ref().map(|form| form.without_metadata().span),
             });
         }
-        let Kind::Map(mut entries) = self.form()?.kind else {
-            unreachable!("the next form begins with a map delimiter");
-        };
+        // The physical opening brace belongs to this map. Pending forms from
+        // a splicing prefix become its first entries, ahead of the brace's text.
+        let open = self.pos;
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(self.nesting_error(open));
+        }
+        self.depth += 1;
+        self.start_node(open);
+        self.bump(); // {
+        let entries = self.map(open);
+        self.finish_node(if entries.is_ok() {
+            SyntaxKind::Map
+        } else {
+            SyntaxKind::Error
+        });
+        self.depth -= 1;
+        let mut entries = entries?;
+        if let Some(span) = tag_span {
+            if let Some(prefix) = prefix {
+                self.retain_inactive_namespace_form(prefix);
+            }
+            self.retain_rejected_literal(start, Kind::Map(entries));
+            return Err(ReadError::unchecked(
+                span,
+                "Namespaced map prefix depends on the value returned by a data reader",
+            ));
+        }
         if auto {
             let alias = prefix.as_ref().and_then(Form::symbol).map(str::to_owned);
             return Ok(Kind::AutoNamespacedMap { alias, entries });
         }
         if !self.preserves_map_entries(&entries) {
             let namespace = prefix.as_ref().and_then(Form::symbol).unwrap();
-            qualify_namespaced_entries(&mut entries, namespace, self.source)?;
+            if let Err(error) = qualify_namespaced_entries(&mut entries, namespace, self.source) {
+                self.retain_rejected_literal(start, Kind::Map(entries));
+                return Err(error);
+            }
         }
         Ok(Kind::Map(entries))
     }
@@ -74,7 +110,7 @@ pub fn qualify_namespaced_entries(
     for [key, _] in entries.as_chunks_mut::<2>().0 {
         qualify_key(key, namespace);
     }
-    uniqueness::check_map(entries, source)
+    uniqueness::check_map(entries, source, false)
 }
 
 fn qualify_key(key: &mut Form, namespace: &str) {

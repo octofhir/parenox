@@ -1,7 +1,7 @@
 //! Narrow contracts for instance methods on a known JVM String receiver.
 use super::{Checker, Env, Form, Span, Type, Value, call_returns};
 use crate::reader::Kind;
-use crate::types::Compatibility;
+use crate::types::{Compatibility, IndexedItem};
 
 #[derive(Clone, Copy)]
 enum StringMethod {
@@ -201,24 +201,25 @@ impl Checker<'_> {
     fn string_char_at(&mut self, text: &Type, index: &Value, span: Span) -> Type {
         self.expect(index, &Type::Number, span, "String.charAt index");
         self.may_throw();
-        let Type::Integer(index) = index.known else {
+        let Some(index) = index.known.exact_integer_value() else {
             return Type::Character;
         };
-        let unit = match (text, usize::try_from(index)) {
-            (_, Err(_)) => None,
-            (Type::Str(text), Ok(index)) => text.encode_utf16().nth(index),
-            _ => return Type::Character,
-        };
-        if let Some(unit) = unit {
-            char::from_u32(u32::from(unit)).map_or(Type::Character, Type::Char)
-        } else {
-            self.error(
-                "PNX2801",
-                span,
-                format!("String.charAt index {index} is out of bounds"),
-            );
-            Type::Never
+        if index >= 0 {
+            if !matches!(text, Type::Str(_)) {
+                return Type::Character;
+            }
+            match text.indexed_item(index) {
+                Some(IndexedItem::Present(item)) => return item.clone(),
+                Some(IndexedItem::PresentChar(value)) => return Type::Char(value),
+                _ => {}
+            }
         }
+        self.error(
+            "PNX2801",
+            span,
+            format!("String.charAt index {index} is out of bounds"),
+        );
+        Type::Never
     }
 }
 

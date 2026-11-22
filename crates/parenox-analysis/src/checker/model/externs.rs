@@ -7,7 +7,7 @@ mod specs;
 mod validation;
 
 pub(crate) use encode::{EncodeError, SnapshotWriter};
-use literals::LiteralExtern;
+pub(super) use literals::LiteralExtern;
 use specs::{PendingSpec, SpecExtern};
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};

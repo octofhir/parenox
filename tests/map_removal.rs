@@ -93,6 +93,21 @@ fn a_dynamic_key_only_weakens_overlapping_required_fields() {
 }
 
 #[test]
+fn abstract_map_removal_does_not_assume_ordinary_numeric_key_equivalence() {
+    let source = r#"
+        (defn f {:t/sig '[{1 keyword?} :-> map?]} [value]
+          (dissoc value 1N))
+    "#;
+    let report = Session::default().check("abstract.clj", source);
+    let [gap] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.complete);
+    assert_eq!(gap.code, "PNX9001");
+    assert_eq!(&source[gap.span.start.offset..gap.span.end.offset], "1N");
+}
+
+#[test]
 fn nil_and_identity_follow_jvm_arity_semantics() {
     let source = r#"
         (defn identity-result {:t/sig '[:-> number?]} [] (dissoc 42))

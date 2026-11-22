@@ -32,7 +32,7 @@ pub(super) fn fixed_result(name: &str, args: &[(Value, Span)]) -> Option<FixedRe
     let exact = args.iter().map(|(value, _)| value.known.exact_long_value());
     match operation.fold(exact) {
         Some(value) => Some(FixedResult {
-            ty: Type::exact_long(value, IntegerClass::Fixed),
+            ty: Type::exact_long(value, IntegerClass::IntOrLong),
             may_overflow: false,
         }),
         // Both checked and unchecked compilation keep the fixed class on
@@ -151,14 +151,13 @@ impl Checker<'_> {
                 left.0.known.exact_long_value(),
                 right.0.known.exact_long_value(),
             ) {
-                (Some(left), Some(right)) => {
-                    let selected = if name == "clojure.core/min" {
-                        left.min(right)
-                    } else {
-                        left.max(right)
-                    };
-                    Type::exact_long(selected, IntegerClass::Fixed)
+                (Some(a), Some(b)) if a == b => {
+                    Type::union([left.0.known.clone(), right.0.known.clone()])
                 }
+                (Some(a), Some(b)) if (a < b) == (name == "clojure.core/min") => {
+                    left.0.known.clone()
+                }
+                (Some(_), Some(_)) => right.0.known.clone(),
                 _ => fixed,
             };
             return Value::new(ty);

@@ -14,9 +14,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Names;
 use crate::Diagnostic;
+use crate::checker::maps::literal_key_type;
 use crate::checker::quote::quoted_symbol;
 use crate::reader::{Form, Kind, Span};
-use crate::types::{ExtraFields, Field, IntegerType, MAX_TUPLE_ITEMS, MapType, Parameters, Type};
+use crate::types::{
+    ExtraFields, Field, IntegerType, MAX_TUPLE_ITEMS, MapType, Parameters, SPEC_INVALID, Type,
+};
 
 pub(super) fn read_type(
     names: &Names,
@@ -99,17 +102,20 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
         required: bool,
     ) -> Option<()> {
         for [key, ty] in forms.as_chunks::<2>().0 {
-            let name = match &key.without_metadata().kind {
-                Kind::Keyword(key) => Type::Key(self.names.key(key)),
-                Kind::String(key) => Type::Str(key.clone()),
-                _ => {
-                    self.error(
-                        "PNX9001",
-                        key.span,
-                        "A literal map type requires literal keyword or string keys",
-                    );
-                    return None;
-                }
+            let Some(name) = literal_key_type(key, |key| self.names.key(key))
+                .or_else(|| Type::integer_literal(key, self.source))
+                .or_else(|| {
+                    key.symbol()
+                        .or_else(|| quoted_symbol(key))
+                        .map(|name| Type::Sym(name.to_owned()))
+                })
+            else {
+                self.error(
+                    "PNX9001",
+                    key.span,
+                    "A literal map type requires nil, boolean, character, keyword, string, symbol or supported integer keys",
+                );
+                return None;
             };
             if fields
                 .insert(name, Field::new(self.parse(ty), required))
@@ -200,19 +206,14 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             Kind::Set(xs) => {
                 let mut types = Vec::new();
                 for x in xs {
-                    types.push(match &x.kind {
-                        Kind::String(s) => Type::Str(s.clone()),
-                        Kind::Character(c) => Type::Char(*c),
-                        Kind::Keyword(k) => Type::Key(self.names.key(k)),
-                        Kind::Bool(b) => Type::Bool(*b),
-                        Kind::Nil => Type::Nil,
-                        Kind::Symbol(symbol) if self.literal_shapes => Type::Sym(symbol.clone()),
-                        _ if let Some(symbol) = quoted_symbol(x) => Type::Sym(symbol.to_owned()),
-                        _ => {
+                    let ty = literal_union_member(self.names, x, self.literal_shapes)
+                        .unwrap_or_else(|| {
                             self.error("PNX9001", x.span, "Unsupported literal union member");
                             Type::Unknown
-                        }
-                    });
+                        });
+                    if self.literal_shapes || spec_set_accepts_member(&ty) {
+                        types.push(ty);
+                    }
                 }
                 Type::union(types)
             }
@@ -444,6 +445,27 @@ fn collection_element(element: &Type) -> bool {
     }
 }
 
+pub(in crate::checker::model) fn literal_union_member(
+    names: &Names,
+    form: &Form,
+    literal_shapes: bool,
+) -> Option<Type> {
+    Some(match &form.without_metadata().kind {
+        Kind::String(value) => Type::Str(value.clone()),
+        Kind::Character(value) => Type::Char(*value),
+        Kind::Keyword(value) => Type::Key(names.key(value)),
+        Kind::Bool(value) => Type::Bool(*value),
+        Kind::Nil => Type::Nil,
+        Kind::Symbol(value) if literal_shapes => Type::Sym(value.clone()),
+        _ => Type::Sym(quoted_symbol(form)?.to_owned()),
+    })
+}
+
+fn spec_set_accepts_member(member: &Type) -> bool {
+    !matches!(member, Type::Nil | Type::Bool(false))
+        && !matches!(member, Type::Key(key) if key == SPEC_INVALID)
+}
+
 pub(super) fn spec_field_key(qualified: &str, directive: &str) -> Option<String> {
     let (_, local) = qualified.split_once('/')?;
     Some(if directive.ends_with("-un") {
@@ -473,6 +495,7 @@ pub(super) fn core_predicate_type(name: &str) -> Option<Type> {
         "integer?" => Type::Integral(IntegerType::ANY),
         "int?" => Type::Integral(IntegerType::FIXED),
         "boolean?" => Type::Boolean,
+        "false?" => Type::Bool(false),
         "any?" => Type::SpecValue,
         "identity" => Type::SpecTruthy,
         "keyword?" => Type::Keyword,

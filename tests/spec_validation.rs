@@ -1,5 +1,46 @@
 use parenox::{Session, Source};
 
+#[test]
+fn runtime_set_predicates_exclude_falsey_and_invalid_members() {
+    let provider = Source {
+        path: "flags.clj",
+        source: r#"(ns example.flags (:require [clojure.spec.alpha :as s]))
+(s/def ::flags #{nil false true :yes ::s/invalid})
+(s/def ::nothing #{nil false})"#,
+    };
+    let consumer = Source {
+        path: "consumer.clj",
+        source: r#"(ns example.consumer (:require [example.flags :as f] [clojure.spec.alpha :as s]))
+(defn valid {:t/sig '[:-> (s/tuple #{false} #{false} #{true} #{true} #{false} #{false})]} []
+  [(s/valid? ::f/flags nil) (s/valid? ::f/flags false) (s/valid? ::f/flags true)
+   (s/valid? ::f/flags :yes) (s/valid? ::f/flags ::s/invalid) (s/valid? ::f/nothing nil)])
+(defn conformed {:t/sig '[:-> (s/tuple #{::s/invalid} #{:yes})]} []
+  [(s/conform ::f/flags false) (s/conform ::f/flags :yes)])
+(defn declared {:t/sig '[::f/flags :-> #{true}]} [flag]
+  (boolean flag))
+(defn plain-type {:t/sig '[#{nil false} :-> #{false}]} [v]
+  (boolean v))"#,
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[consumer, provider], None);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let changed = provider.source.replace("true :yes", "true :no");
+    let edited = Source {
+        source: &changed,
+        ..provider
+    };
+    let warm = session.check_project(&[consumer, edited], None);
+    let cold = Session::default().check_project(&[consumer, edited], None);
+    assert!(!warm.ok && warm.complete, "{warm:#?}");
+    assert_eq!(
+        serde_json::to_value(&warm.files[0].diagnostics).unwrap(),
+        serde_json::to_value(&cold.files[0].diagnostics).unwrap()
+    );
+    let restored = session.check_project(&[consumer, provider], None);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
 const ROW: &str = r#"
 (ns demo (:require [clojure.spec.alpha :as s]))
 (s/def ::title string?)

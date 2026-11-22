@@ -97,8 +97,7 @@ fn fnil_replaces_only_nil_for_direct_calls_and_map_updates() {
     for body in [
         r#"(defn f {:t/sig '[:-> number?]} [] (:x (update {} :x (fnil inc 0))))"#,
         r#"(defn f {:t/sig '[:-> number?]} [] (get-in (update-in {} [:p :x] (fnil + 0) 3) [:p :x]))"#,
-        r#"(s/def ::only-false #{false})
-           (defn f {:t/sig '[:-> ::only-false]} [] ((fnil identity true) false))"#,
+        r#"(defn f {:t/sig '[:-> #{false}]} [] ((fnil identity true) false))"#,
         r#"(defn f {:t/sig '[:-> number?]} [] ((fnil + 1 2 "unused") nil nil))"#,
         r#"(defn f {:t/sig '[:-> number?]} [] ((fnil + 1 2 3) nil nil nil))"#,
         r#"(defn f {:t/sig '[:-> number?]} [] ((fnil (fnil inc 0) nil) nil))"#,

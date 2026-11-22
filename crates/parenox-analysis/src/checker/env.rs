@@ -213,18 +213,19 @@ impl Env {
     }
 
     /// Keep the initializer's owner while its pattern introduces new names.
-    pub(super) fn with_owner_pinned(
+    pub(super) fn with_owner_pinned<T>(
         &mut self,
         source: Option<&Selector>,
-        bind: impl FnOnce(&mut Self),
-    ) {
+        bind: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         if let Some(source) = source {
             self.pinned_owners.push(source.root.id);
-            bind(self);
+            let bound = bind(self);
             self.pinned_owners.pop();
             self.release_unused_owner(source.root.id);
+            bound
         } else {
-            bind(self);
+            bind(self)
         }
     }
 

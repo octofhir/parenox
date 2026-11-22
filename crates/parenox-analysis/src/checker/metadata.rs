@@ -11,6 +11,7 @@ const MAX_ORDERED_METADATA_KEYS: usize = 8;
 #[derive(Clone, Copy)]
 pub(super) enum MetadataTarget {
     Vector,
+    Map,
     Function,
 }
 
@@ -35,6 +36,10 @@ impl Checker<'_> {
             MetadataTarget::Vector => (
                 "vector",
                 "Vector metadata analysis requires up to eight literal keyword keys",
+            ),
+            MetadataTarget::Map => (
+                "map",
+                "Map metadata analysis requires up to eight literal keyword keys",
             ),
             MetadataTarget::Function => (
                 "function literal",

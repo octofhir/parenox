@@ -52,7 +52,7 @@ pub(in crate::checker) fn vector_predicate(input: &Type) -> Type {
         | Type::SeqTuple(_)
         | Type::Integer(_)
         | Type::Integral(IntegerType {
-            class: IntegerClass::Fixed,
+            class: IntegerClass::Fixed | IntegerClass::IntOrLong,
             ..
         }) => Type::Bool(false),
         Type::Union(parts) => Type::union(parts.iter().map(vector_predicate)),
@@ -87,7 +87,6 @@ impl Checker<'_> {
         &mut self,
         (collection, span): &(Value, Span),
         pairs: &[[(Value, Span); 2]],
-        forms: &[[Form; 2]],
     ) -> Value {
         let (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) =
             (&collection.known, &collection.literal_container)
@@ -105,7 +104,7 @@ impl Checker<'_> {
             .collect();
         const NAME: &str = "clojure.core/assoc";
         let start = self.diagnostics.len();
-        for ([(key, span), (value, _)], [form, _]) in pairs.iter().zip(forms) {
+        for [(key, span), (value, _)] in pairs {
             let Some(index) = key.known.exact_long_value() else {
                 let integer = Type::Integral(IntegerType::ANY);
                 if key.literal_container.is_some()
@@ -118,12 +117,7 @@ impl Checker<'_> {
                 }
                 return self.unchecked_form(*span, "Vector assoc needs a known integer index");
             };
-            // APersistentVector checks integer keys, then uses Number.intValue.
-            // A boxed Byte or Short can share the type of an exact fixed index.
-            if i16::try_from(index).is_ok()
-                && !matches!(form.kind, Kind::Number)
-                && !key.known.is_arbitrary_integer()
-            {
+            if key.known.may_be_byte_or_short() {
                 self.illegal_argument();
             }
             let index = index as i32;

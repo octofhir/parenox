@@ -25,7 +25,7 @@ pub(crate) use declarations::Declarations;
 use declarations::Names;
 pub(super) use externs::MacroScope;
 pub(crate) use externs::{EncodeError, ExternCache, SnapshotWriter};
-use externs::{ExternFile, ExternalDeclaration, Externs};
+use externs::{ExternFile, ExternalDeclaration, Externs, LiteralExtern};
 pub(super) use guards::VerifiedGuard;
 pub(crate) use imports::{bare_dotted_name, java_type_tag_at};
 pub(crate) use interfaces::InterfaceKey;
@@ -36,7 +36,7 @@ pub(crate) use specs::{
     GuardedMapProjection, MapFieldConversion, SpecCache, SpecConversion, SpecFingerprint,
     SpecProvider, SpecSource, StructuredConversion,
 };
-use vars::LiteralVar;
+use vars::{CapturedInitializer, LiteralVar};
 
 use super::function_forms::FunctionConditions;
 use crate::reader::{Form, Kind, Span};
@@ -120,8 +120,8 @@ pub(super) struct UncheckedFunction {
 
 #[derive(PartialEq, Eq)]
 pub(super) enum DeclaredValue<'a> {
-    Literal(&'a Type),
-    ExternLiteral(&'a Type, &'a ContractOrigin),
+    Literal(&'a LiteralVar),
+    ExternLiteral(&'a LiteralExtern),
     Function(&'a Contract),
     UncheckedFunction(&'a UncheckedFunction),
     Macro(&'a MacroScope),
@@ -184,6 +184,14 @@ impl Globals {
         )
     }
 
+    fn has_competing_class_namespace(&self, name: &str) -> bool {
+        self.project_namespaces.contains(name)
+            || self
+                .externs
+                .as_ref()
+                .is_some_and(|table| table.namespaces.contains_key(name))
+    }
+
     fn extern_declaration(&self, name: &str) -> Option<&ExternalDeclaration> {
         let (namespace, _) = name.split_once('/')?;
         self.externs.as_ref()?.namespaces.get(namespace)?.get(name)
@@ -196,15 +204,16 @@ pub(crate) struct Model {
     path: String,
     externs: Option<Arc<ExternFile>>,
     literals: BTreeMap<String, LiteralVar>,
-    captured_initializers: BTreeMap<usize, Form>,
+    captured_initializers: BTreeMap<usize, CapturedInitializer>,
     initializer_macros: BTreeMap<String, bool>,
+    initializer_class_names: BTreeMap<String, bool>,
     unchecked_functions: BTreeMap<String, UncheckedFunction>,
     exports: Arc<Exports>,
     local_interface: Arc<LocalInterface>,
     external_specs: BTreeMap<String, (Option<Type>, bool)>,
     external_refers: BTreeMap<String, Option<Arc<Exports>>>,
     core_in_project: Option<bool>,
-    map_invert_in_project: Option<bool>,
+    set_namespace_in_project: Option<bool>,
     pub functions: BTreeMap<String, Function>,
     checked_data_functions: BTreeSet<String>,
     // Conservative references to unannotated helpers, including transitive cache dependencies.
@@ -237,28 +246,34 @@ impl Model {
         globals: &Globals,
     ) -> Self {
         let resolved;
-        let declarations = if declarations.all_refers.is_empty() {
-            declarations
-        } else {
-            let mut imports = Declarations::read_with_imports(
-                forms,
-                Some(globals),
-                declarations.proven_alias_libraries().clone(),
-            );
-            if imports.specs.keys().ne(declarations.specs.keys()) {
-                let span = forms.first().map_or(Span::default(), |form| form.span);
-                imports.error(
-                    "PNX9001",
-                    span,
-                    "Use qualified spec declarations when :refer :all changes their resolution",
+        let comment_core_in_project = (!declarations.discarded_comments.is_empty())
+            .then(|| globals.project_namespaces.contains("clojure.core"));
+        let declarations =
+            if declarations.all_refers.is_empty() && comment_core_in_project != Some(true) {
+                declarations
+            } else {
+                let mut imports = Declarations::read_with_imports(
+                    forms,
+                    Some(globals),
+                    declarations.proven_alias_libraries().clone(),
+                    declarations.unchecked_dispatches.clone(),
                 );
-            }
-            resolved = imports;
-            &resolved
-        };
+                imports.namespace_read_end = declarations.namespace_read_end;
+                if imports.specs.keys().ne(declarations.specs.keys()) {
+                    let span = forms.first().map_or(Span::default(), |form| form.span);
+                    imports.error(
+                        "PNX9001",
+                        span,
+                        "Use qualified spec declarations when :refer :all changes their resolution",
+                    );
+                }
+                resolved = imports;
+                &resolved
+            };
         let mut model = Self {
             names: declarations.names.clone(),
             path: path.into(),
+            core_in_project: comment_core_in_project,
             diagnostics: declarations.diagnostics.clone(),
             external_refers: declarations
                 .all_refers
@@ -282,7 +297,7 @@ impl Model {
             );
         }
         let project_set_namespace = globals.project_namespaces.contains("clojure.set");
-        let mut literal_strs = vars::LiteralStrScope::default();
+        let mut initializer_scope = vars::LiteralInitializerScope::new(source);
         for &index in &declarations.literal_vars {
             let form = &forms[index];
             let Kind::List(xs) = &form.without_metadata().kind else {
@@ -292,30 +307,40 @@ impl Model {
             let inverted = initializer
                 .and_then(|value| type_forms::inverted_literal(declarations, forms, source, value));
             if inverted.is_some() {
-                model.map_invert_in_project = Some(project_set_namespace);
+                model.set_namespace_in_project = Some(project_set_namespace);
             }
-            let expanded = inverted.as_ref().filter(|_| !project_set_namespace);
-            let captured = initializer.and_then(|value| {
-                model
-                    .capture_literal_root(declarations, forms, source, index, value)
-                    .or_else(|| {
-                        literal_strs
-                            .fold(declarations, forms, source, globals, value)
-                            .filter(|_| !model.check_project_core(globals))
+            let captured = inverted
+                .filter(|_| !project_set_namespace)
+                .map(CapturedInitializer::from_form)
+                .or_else(|| {
+                    initializer.and_then(|value| {
+                        model
+                            .capture_literal_root(declarations, forms, source, index, value)
+                            .or_else(|| {
+                                initializer_scope
+                                    .fold(
+                                        declarations,
+                                        forms,
+                                        globals,
+                                        index,
+                                        value,
+                                        &model.captured_initializers,
+                                    )
+                                    .filter(|_| !model.check_project_core(globals))
+                            })
                     })
-            });
-            model.read_def(
-                xs,
-                form.span,
-                source,
-                expanded.or(captured.as_ref()),
-                globals,
-            );
+                });
+            model.read_def(xs, form.span, source, captured.as_ref(), globals);
             if let Some(captured) = captured {
                 model.captured_initializers.insert(index, captured);
             }
         }
-        model.initializer_macros = literal_strs.macro_inputs;
+        model.withhold_literals_before_last_tag(declarations, forms);
+        model.initializer_macros = initializer_scope.macro_inputs;
+        model.initializer_class_names = initializer_scope.class_inputs;
+        model.set_namespace_in_project = model
+            .set_namespace_in_project
+            .or(initializer_scope.set_namespace_in_project);
         for &index in &declarations.unchecked_vars {
             let Kind::List(xs) = &forms[index].without_metadata().kind else {
                 unreachable!()
@@ -359,13 +384,9 @@ impl Model {
                 && !model.unchecked_functions.contains_key(&qualified)
             {
                 model.names.refers.remove(local);
-                model.literals.insert(
-                    qualified.clone(),
-                    LiteralVar {
-                        ty: Type::Unknown,
-                        private: var.private,
-                    },
-                );
+                model
+                    .literals
+                    .insert(qualified.clone(), LiteralVar::unknown(var.private));
                 model.diagnostics.push(Diagnostic::analysis_gap(
                     "PNX9001",
                     var.span,
@@ -419,6 +440,18 @@ impl Model {
             && (name.contains('/') || self.external_refers.values().all(Option::is_some))
     }
 
+    pub(super) fn known_standard_core_function(
+        &self,
+        spelling: &str,
+        resolved: &str,
+        globals: &Globals,
+    ) -> bool {
+        resolved
+            .strip_prefix("clojure.core/")
+            .is_some_and(crate::core_names::known_core_function)
+            && self.can_use_standard_core(spelling, globals)
+    }
+
     pub(super) fn resolve(&self, name: &str) -> String {
         self.names.resolve(name)
     }
@@ -460,11 +493,15 @@ impl Model {
         self.core_in_project
             .is_none_or(|present| present == globals.project_namespaces.contains("clojure.core"))
             && self
-                .map_invert_in_project
+                .set_namespace_in_project
                 .is_none_or(|present| present == globals.project_namespaces.contains("clojure.set"))
             && self.initializer_macros.iter().all(|(qualified, previous)| {
                 globals.may_expand_initializer_macro(qualified) == *previous
             })
+            && self
+                .initializer_class_names
+                .iter()
+                .all(|(name, previous)| globals.has_competing_class_namespace(name) == *previous)
             && self
                 .external_specs
                 .iter()
@@ -678,7 +715,7 @@ impl Model {
         }
         let qualified = self.function_name(name);
         if let Some(value) = self.literals.get(&qualified) {
-            return Some(DeclaredValue::Literal(&value.ty));
+            return Some(DeclaredValue::Literal(value));
         }
         if let Some(function) = self.functions.get(&qualified) {
             return function.contract.as_ref().map(DeclaredValue::Function);

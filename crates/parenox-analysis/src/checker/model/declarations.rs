@@ -8,6 +8,7 @@ mod var_documentation;
 pub(super) use protocol_implementations::collect_protocol_group_methods;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::Globals;
 use super::contracts::function_parts;
@@ -16,7 +17,7 @@ use super::require::{ExplicitReferral, RuntimeLoads};
 use crate::Diagnostic;
 use crate::checker::bindings::binding_names;
 use crate::checker::function_forms::{Clause, function_clauses, lexical_function_clauses};
-use crate::reader::{Form, Kind, Span};
+use crate::reader::{Form, Kind, OmittedDispatch, Span, UncheckedDispatches};
 use crate::types::Arity;
 
 pub(super) enum SourceDeclaration<'a> {
@@ -206,6 +207,7 @@ pub(super) struct DeclaredVar {
 pub(crate) struct Declarations {
     pub(super) names: Names,
     namespace_end: Option<usize>,
+    pub(super) namespace_read_end: Option<usize>,
     pub dependencies: Vec<String>,
     pub(super) all_refers: BTreeSet<String>,
     pub(super) referrals: Vec<ExplicitReferral>,
@@ -213,6 +215,7 @@ pub(crate) struct Declarations {
     pub(super) namespace_alias_sites: BTreeMap<String, Span>,
     pub(super) java_import_sites: Vec<(Span, String)>,
     pub(crate) has_top_level_require: bool,
+    has_top_level_in_ns: bool,
     pub(super) specs: BTreeMap<String, SpecDeclaration>,
     pub(super) duplicate_specs: BTreeSet<String>,
     pub(super) reflection_flags: Vec<Span>,
@@ -224,6 +227,8 @@ pub(crate) struct Declarations {
     pub(super) static_method_scope: bool,
     pub(super) literal_vars: Vec<usize>,
     pub(super) unchecked_vars: Vec<usize>,
+    pub(super) discarded_comments: Vec<usize>,
+    pub(super) unchecked_dispatches: Option<Arc<UncheckedDispatches>>,
     scoped_functions: Vec<ScopedFunction>,
     macros: Vec<usize>,
     unmodeled_calls: Vec<usize>,
@@ -259,7 +264,8 @@ impl Declarations {
     fn static_namespace_end(&self, forms: &[Form]) -> Option<usize> {
         let end = self.namespace_end?;
         let first = forms.first()?;
-        (first.span.end.offset == end && static_namespace_prelude(first)).then_some(end)
+        (first.span.end.offset == end && static_namespace_prelude(first))
+            .then_some(self.namespace_read_end.unwrap_or(end))
     }
 
     pub(super) fn has_static_requirements(&self, forms: &[Form]) -> bool {
@@ -301,7 +307,9 @@ impl Declarations {
         if proven == self.names.proven_alias_libraries {
             return None;
         }
-        let mut declarations = Self::read_with_imports(forms, None, proven);
+        let mut declarations =
+            Self::read_with_imports(forms, None, proven, self.unchecked_dispatches.clone());
+        declarations.namespace_read_end = self.namespace_read_end;
         declarations.refers_to_assert_expr = self.refers_to_assert_expr;
         Some(declarations)
     }
@@ -853,12 +861,11 @@ impl Declarations {
         self.diagnostics.push(Diagnostic::new(code, span, message));
     }
 
-    pub fn read(forms: &[Form]) -> Self {
-        Self::read_with_imports(forms, None, BTreeSet::new())
-    }
-
     fn references_assert_expr(&self, forms: &[Form]) -> bool {
-        forms.iter().any(|form| {
+        forms.iter().enumerate().any(|(index, form)| {
+            if self.discarded_comments.binary_search(&index).is_ok() {
+                return false;
+            }
             !symbols_match_inner::<true>(form, &mut |name| {
                 name != "assert-expr"
                     && (!name.ends_with("/assert-expr")
@@ -871,6 +878,7 @@ impl Declarations {
         forms: &[Form],
         globals: Option<&Globals>,
         proven_alias_libraries: BTreeSet<String>,
+        unchecked_dispatches: Option<Arc<UncheckedDispatches>>,
     ) -> Self {
         let mut model = Self {
             names: Names {
@@ -878,8 +886,33 @@ impl Declarations {
                 proven_alias_libraries,
                 ..Names::default()
             },
+            unchecked_dispatches,
             ..Self::default()
         };
+        if let Some(dispatch) = model
+            .unchecked_dispatches
+            .as_ref()
+            .and_then(|dispatches| dispatches.first_omitted)
+        {
+            let (span, message) = match dispatch {
+                OmittedDispatch::Tag(span) => (span, "A data reader call inside #_ is unchecked"),
+                OmittedDispatch::Regex(span) => (
+                    span,
+                    "JVM regex validation in a discarded or inactive form is unchecked",
+                ),
+                OmittedDispatch::MetadataTag(span) => (
+                    span,
+                    "A data reader call in a metadata descriptor is unchecked",
+                ),
+                OmittedDispatch::MetadataRegex(span) => (
+                    span,
+                    "JVM regex validation in a metadata descriptor is unchecked",
+                ),
+            };
+            model
+                .diagnostics
+                .push(Diagnostic::analysis_gap("PNX9001", span, message));
+        }
         let mut seen_ns = false;
         for form in forms {
             if let Kind::List(xs) = &form.without_metadata().kind
@@ -890,33 +923,19 @@ impl Declarations {
             {
                 if seen_ns {
                     model.error("PNX9001", form.span, "Only one ns declaration is supported");
+                    if xs
+                        .get(1)
+                        .and_then(Form::symbol)
+                        .is_some_and(|name| name != model.namespace())
+                    {
+                        model.names.aliases.clear();
+                    }
                 }
                 seen_ns = true;
                 model.namespace_end = Some(form.span.end.offset);
                 model.read_ns(xs, form.span, globals);
             }
         }
-        let mut dependencies: BTreeSet<_> = model
-            .names
-            .required_libraries
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let mut uses_spec_composition = false;
-        for form in forms {
-            symbols_match(form, &mut |name| {
-                let (namespace, local) = model.names.resolve_parts(name);
-                dependencies.insert(namespace);
-                uses_spec_composition |= (namespace == "clojure.spec.alpha"
-                    && (matches!(local, "and" | "or" | "conformer" | "coll-of")
-                        || (local == "keys" && !name.contains('/'))))
-                    || (namespace == "clojure.core" && matches!(local, "integer?" | "int?"))
-                    || (namespace == "clojure.set" && local == "map-invert");
-                true
-            });
-        }
-        dependencies.remove(model.names.namespace.as_str());
-        model.dependencies = dependencies.into_iter().map(str::to_owned).collect();
         if !model.opaque_var_surface
             && model.all_refers.is_empty()
             && let [namespace, first, rest @ ..] = forms
@@ -943,6 +962,7 @@ impl Declarations {
                 continue;
             };
             model.has_top_level_require |= matches!(op, "require" | "clojure.core/require");
+            model.has_top_level_in_ns |= matches!(op, "in-ns" | "clojure.core/in-ns");
             match op {
                 "ns" | "clojure.core/ns" => continue,
                 "def" => {
@@ -979,6 +999,21 @@ impl Declarations {
             let resolved = model.names.resolve(op);
             match resolved.as_str() {
                 "clojure.core/ns" => {}
+                "clojure.core/comment"
+                    if !model.opaque_var_surface
+                        && !model.has_unchecked_dispatch(form.span)
+                        && model.namespace() != "clojure.core"
+                        && globals
+                            .is_none_or(|g| !g.project_namespaces.contains("clojure.core"))
+                        && (op.contains('/')
+                            || (model.all_refers.is_empty()
+                                && model
+                                    .source_var_before(forms, op, form.span.start.offset)
+                                    .is_none())) =>
+                {
+                    // The standard macro expands to nil before compilation.
+                    model.discarded_comments.push(index);
+                }
                 "clojure.spec.alpha/def" if xs.len() == 3 => {
                     if let Some(key) = xs[1].keyword() {
                         let key = model.names.key(key);
@@ -1111,7 +1146,7 @@ impl Declarations {
                 _ => model.read_unmodeled_call(index, op, form.span),
             }
         }
-        if uses_spec_composition
+        if model.read_dependencies(forms)
             || model.has_inline_spec_composition(forms)
             || model.has_preserving_spec(forms)
         {
@@ -1119,6 +1154,70 @@ impl Declarations {
         }
         model.static_method_scope = model.has_static_method_scope(forms);
         model
+    }
+
+    pub(super) fn completed_before_last_tag(&self) -> usize {
+        self.unchecked_dispatches
+            .as_ref()
+            .map_or(0, |dispatches| dispatches.completed_before_last_tag)
+    }
+
+    pub(super) fn first_unchecked_dispatch(&self) -> Option<usize> {
+        let dispatches = self.unchecked_dispatches.as_ref()?;
+        dispatches
+            .first_tag
+            .into_iter()
+            .map(|tag| tag.start.offset)
+            .chain(dispatches.regexes.first().copied())
+            .min()
+    }
+
+    pub(super) fn has_unchecked_dispatch(&self, span: Span) -> bool {
+        self.unchecked_dispatches
+            .as_ref()
+            .is_some_and(|dispatches| {
+                // Earlier tags can execute code before this macro is resolved.
+                let regex = dispatches
+                    .regexes
+                    .partition_point(|offset| *offset < span.start.offset);
+                dispatches
+                    .first_tag
+                    .is_some_and(|tag| tag.start.offset < span.end.offset)
+                    || dispatches
+                        .regexes
+                        .get(regex)
+                        .is_some_and(|offset| *offset < span.end.offset)
+            })
+    }
+
+    fn read_dependencies(&mut self, forms: &[Form]) -> bool {
+        let mut dependencies: BTreeSet<_> = self
+            .names
+            .required_libraries
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let mut uses_spec_composition = false;
+        let mut comments = self.discarded_comments.iter().copied().peekable();
+        for (index, form) in forms.iter().enumerate() {
+            if comments.next_if_eq(&index).is_some() {
+                dependencies.insert("clojure.core");
+                continue;
+            }
+            symbols_match(form, &mut |name| {
+                let (namespace, local) = self.names.resolve_parts(name);
+                dependencies.insert(namespace);
+                uses_spec_composition |= (namespace == "clojure.spec.alpha"
+                    && (matches!(local, "and" | "or" | "conformer" | "coll-of")
+                        || (local == "keys" && !name.contains('/'))))
+                    || (namespace == "clojure.core" && matches!(local, "integer?" | "int?"))
+                    || (namespace == "clojure.set" && local == "map-invert");
+                true
+            });
+        }
+        dependencies.remove(self.namespace());
+        self.dependencies = dependencies.into_iter().map(str::to_owned).collect();
+        uses_spec_composition
     }
 
     fn read_unmodeled_call(&mut self, index: usize, op: &str, span: Span) {

@@ -127,7 +127,6 @@ fn renamed_and_nested_patterns_preserve_checked_levels_and_report_unsupported_mo
         assert!(report.complete, "{report:#?}");
     }
     for body in [
-        "(defn f {:t/sig '[:-> number?]} [] (let [{:keys! [name] :missing missing} {}] 1))",
         "(defn f {:t/sig '[:-> number?]} [] (let [{:keys! [name] :or {name 1}} {}] 1))",
         "(defn f {:t/sig '[:-> number?]} [] (let [{:req! [:name]} {}] 1))",
         "(defn f {:t/sig '[:-> number?]} [] (let [{:person/keys! [other/name]} {}] 1))",

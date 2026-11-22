@@ -129,12 +129,7 @@ impl Session {
                 unknown.push("Runtime value of the lookup Var");
                 unknown.push("Exception classes from live lookups");
                 declarations
-                    .live_lookup_initializer_span(
-                        &file.forms,
-                        &file.source,
-                        &projection.var,
-                        span.start.offset,
-                    )
+                    .live_lookup_initializer_span(&file.forms, &projection.var, span.start.offset)
                     .and_then(|span| file.source.get(span.start.offset..span.end.offset))
                     .map(str::to_owned)
             }

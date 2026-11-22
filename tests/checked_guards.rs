@@ -17,6 +17,41 @@ fn checked_guards_refine_true_and_proven_false_branches() {
 }
 
 #[test]
+fn explicit_quotes_preserve_contracts_guards_and_named_spec_ranges() {
+    let path = "quoted-contract.clj";
+    let source = r#"
+(ns reader.explicit-contract-quote
+  (:require [clojure.spec.alpha :as s]
+            [clojure.string :as str]))
+(s/def ::text string?)
+
+(defn ^{:t/sig (quote [(s/nilable ::text) :-> boolean?])
+        :t/guard (quote [:both value string?])}
+  text? [value] (string? value))
+
+(defn trimmed {:t/sig (quote [(s/nilable ::text) :-> string?])} [value]
+  (if (text? value) (str/trim value) "absent"))
+"#;
+    let mut session = Session::default();
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let use_site = source.rfind("::text").unwrap();
+    let definition = session.definition(path, use_site).unwrap();
+    assert_eq!(definition.span.start.offset, source.find("::text").unwrap());
+    assert_eq!(
+        &source[definition.span.start.offset..definition.span.end.offset],
+        "::text"
+    );
+
+    let qualified = source.replace("(quote [:both", "(clojure.core/quote [:both");
+    let rejected = session.check(path, &qualified);
+    assert!(!rejected.complete, "{rejected:#?}");
+    assert!(rejected.diagnostics.iter().any(|finding| {
+        finding.code == "PNX9008" && finding.message.contains("must be quoted")
+    }));
+}
+
+#[test]
 fn a_one_sided_guard_does_not_refine_its_false_branch() {
     let source = format!(
         "{EXAMPLE}

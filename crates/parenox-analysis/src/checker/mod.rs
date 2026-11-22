@@ -98,38 +98,16 @@ impl Model {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LiteralContainer {
     Map(Option<Arc<BTreeMap<Type, LiteralContainer>>>),
+    Set(Option<Arc<[Type]>>),
     Vector(Option<Arc<[Option<LiteralContainer>]>>),
+    List(Option<Arc<[Option<LiteralContainer>]>>),
     Positions(Arc<[Option<LiteralContainer>]>),
 }
 
 impl LiteralContainer {
-    fn from_inert_type(ty: &Type) -> Option<Self> {
-        match ty {
-            Type::Tuple(items) => {
-                let children: Vec<_> = items.iter().map(Self::from_inert_type).collect();
-                let children = children
-                    .iter()
-                    .any(Option::is_some)
-                    .then(|| Arc::from(children));
-                Some(Self::Vector(children))
-            }
-            Type::Map(map) => {
-                let fields: BTreeMap<_, _> = map
-                    .fields
-                    .iter()
-                    .filter_map(|(key, field)| {
-                        Self::from_inert_type(&field.ty).map(|proof| (key.clone(), proof))
-                    })
-                    .collect();
-                (!fields.is_empty()).then(|| Self::Map(Some(Arc::new(fields))))
-            }
-            _ => None,
-        }
-    }
-
     fn map_field(&self, key: &Type) -> Option<&Self> {
         let Self::Map(Some(fields)) = self else {
             return None;
@@ -144,7 +122,9 @@ impl LiteralContainer {
 
     fn child_positions(&self) -> Option<&Arc<[Option<Self>]>> {
         match self {
-            Self::Vector(Some(items)) | Self::Positions(items) => Some(items),
+            Self::Vector(Some(items)) | Self::List(Some(items)) | Self::Positions(items) => {
+                Some(items)
+            }
             _ => None,
         }
     }
@@ -152,14 +132,19 @@ impl LiteralContainer {
     fn matches_type(&self, ty: &Type) -> bool {
         match (self, ty) {
             (Self::Map(_), Type::Map(_)) => true,
-            (Self::Vector(items), Type::Tuple(types)) => items
+            (Self::Set(_), Type::Set(_)) => true,
+            (Self::Vector(items), Type::Tuple(types))
+            | (Self::List(items), Type::ListTuple(types)) => items
                 .as_ref()
                 .is_none_or(|items| items.len() == types.len()),
             (Self::Positions(items), Type::SeqTuple(types) | Type::ListTuple(types)) => {
                 items.len() == types.len()
             }
             (Self::Positions(items), Type::MapEntry(_)) => items.len() == 2,
-            (Self::Vector(_) | Self::Positions(_), Type::Union(parts)) => parts
+            (
+                Self::Vector(_) | Self::List(_) | Self::Positions(_) | Self::Set(_),
+                Type::Union(parts),
+            ) => parts
                 .iter()
                 .all(|part| matches!(part, Type::Nil) || self.matches_type(part)),
             _ => false,
@@ -168,6 +153,9 @@ impl LiteralContainer {
 
     fn join(self, other: Self) -> Option<Self> {
         match (self, other) {
+            (Self::Set(left), Self::Set(right)) => {
+                Some(Self::Set(if left == right { left } else { None }))
+            }
             (Self::Map(left), Self::Map(right)) => {
                 let fields = match (left, right) {
                     (Some(left), Some(right)) if left == right => Some(left),
@@ -188,8 +176,29 @@ impl LiteralContainer {
             } else {
                 Self::Vector(None)
             }),
+            (left @ Self::List(_), right @ Self::List(_)) => Some(if left == right {
+                left
+            } else {
+                Self::List(None)
+            }),
             (left @ Self::Positions(_), right) if left == right => Some(left),
             _ => None,
+        }
+    }
+}
+
+enum SetMembership<'a> {
+    Present(&'a Type),
+    Absent,
+    Unproven,
+}
+
+impl SetMembership<'_> {
+    fn present(self) -> Option<bool> {
+        match self {
+            Self::Present(_) => Some(true),
+            Self::Absent => Some(false),
+            Self::Unproven => None,
         }
     }
 }
@@ -205,6 +214,7 @@ struct Value {
     guard: Option<Arc<VerifiedGuard>>,
     // Structural types do not prove ordinary JVM collection behavior.
     literal_container: Option<LiteralContainer>,
+    pattern_captures: Option<u16>,
     rejection: Option<CallRejection>,
 }
 
@@ -225,6 +235,7 @@ impl Value {
             contract: None,
             guard: None,
             literal_container: None,
+            pattern_captures: None,
             rejection: None,
         }
     }
@@ -262,6 +273,89 @@ impl Value {
         matches!(self.literal_container, Some(LiteralContainer::Map(_)))
     }
 
+    fn literal_set(members: Vec<Type>) -> Self {
+        let exact = (members.len() <= MAX_TUPLE_ITEMS
+            && members.iter().all(|ty| exact_set_member(ty).is_some()))
+        .then(|| {
+            let mut proof: Arc<[Type]> = Arc::from(members.as_slice());
+            // Exact membership carries no information about iteration order.
+            Arc::make_mut(&mut proof).sort_unstable();
+            proof
+        });
+        Self {
+            literal_container: Some(LiteralContainer::Set(exact)),
+            ..Self::new(Type::Set(collection_element(members)))
+        }
+    }
+
+    fn exact_set_members(&self) -> Option<&[Type]> {
+        match (&self.known, &self.literal_container) {
+            (Type::Set(_), Some(LiteralContainer::Set(Some(members)))) => Some(members),
+            _ => None,
+        }
+    }
+
+    fn set_membership(&self, key: &Type) -> SetMembership<'_> {
+        let Some(members) = self.exact_set_members() else {
+            return SetMembership::Unproven;
+        };
+        let mut distinct = true;
+        for member in members.iter() {
+            match calls::literal_equality(member, key) {
+                Some(true) => return SetMembership::Present(member),
+                Some(false) => {}
+                None => distinct = false,
+            }
+        }
+        if distinct {
+            SetMembership::Absent
+        } else {
+            SetMembership::Unproven
+        }
+    }
+
+    fn set_lookup_type(&self, element: &Type, key: &Type, default: Type) -> Type {
+        if self.exact_set_members().is_some()
+            && let Type::Union(keys) = key
+            && keys.len() <= MAX_TUPLE_ITEMS
+        {
+            return Type::union(
+                keys.iter()
+                    .map(|key| self.set_lookup_type(element, key, default.clone())),
+            );
+        }
+        match self.set_membership(key) {
+            SetMembership::Present(member) => member.clone(),
+            SetMembership::Absent => default,
+            SetMembership::Unproven => {
+                let stored = if self.is_literal_set() {
+                    element.hash_set_member_type(key)
+                } else {
+                    // Arbitrary sets may use a custom comparator.
+                    element.clone()
+                };
+                Type::union([stored, default])
+            }
+        }
+    }
+
+    fn set_presence(&self, key: &Type) -> Option<bool> {
+        if let Type::Union(keys) = key
+            && keys.len() <= MAX_TUPLE_ITEMS
+        {
+            let mut outcomes = keys.iter().map(|key| self.set_membership(key).present());
+            let first = outcomes.next()??;
+            return outcomes
+                .all(|outcome| outcome == Some(first))
+                .then_some(first);
+        }
+        self.set_membership(key).present()
+    }
+
+    fn is_literal_set(&self) -> bool {
+        matches!(self.literal_container, Some(LiteralContainer::Set(_)))
+    }
+
     fn with_ordinary_tuple(mut self) -> Self {
         let proof = LiteralContainer::Vector(None);
         if proof.matches_type(&self.known) {
@@ -281,7 +375,7 @@ impl Value {
         value
     }
 
-    fn traversal_element(self, known: Type) -> Self {
+    fn traversal_element(&self, known: Type) -> Self {
         fn shared<'a>(
             mut origins: impl Iterator<Item = Option<&'a LiteralContainer>>,
         ) -> Option<LiteralContainer> {
@@ -308,7 +402,7 @@ impl Value {
         };
         Self {
             literal_container: origin.filter(|proof| proof.matches_type(&known)),
-            ..Self::with_notes(known, self.notes)
+            ..Self::with_notes(known, self.notes.clone())
         }
     }
 
@@ -388,32 +482,40 @@ impl Value {
         } else {
             None
         };
+        let pattern_captures = if self.pattern_captures == other.pattern_captures {
+            self.pattern_captures
+        } else {
+            None
+        };
         let known = self.known.join_values(other.known);
         Self {
             contract,
             guard,
             literal_container: literal_container.filter(|proof| proof.matches_type(&known)),
+            pattern_captures,
             ..Self::with_notes(known, self.notes)
         }
     }
 
     fn narrow(&mut self, known: Type) {
-        let keep = match &self.literal_container {
-            Some(LiteralContainer::Map(_)) => matches!(known, Type::Map(_)),
-            Some(proof @ (LiteralContainer::Vector(_) | LiteralContainer::Positions(_))) => {
-                proof.matches_type(&known)
-            }
-            None => false,
-        };
+        let keep = self
+            .literal_container
+            .as_ref()
+            .is_some_and(|proof| proof.matches_type(&known));
         if !keep {
             self.literal_container = None;
+        }
+        if known != Type::Pattern {
+            self.pattern_captures = None;
         }
         self.ty = known.inferred();
         self.known = known;
     }
 
     fn same_value_facts(&self, other: &Self) -> bool {
-        self.known == other.known && self.literal_container == other.literal_container
+        self.known == other.known
+            && self.literal_container == other.literal_container
+            && self.pattern_captures == other.pattern_captures
     }
 }
 
@@ -710,11 +812,43 @@ impl Checker<'_> {
         self.infer_position(form, env, false)
     }
 
-    fn infer_set_members(&mut self, forms: &[Form], env: &Env) -> Vec<Type> {
-        forms
+    fn infer_set_members(&mut self, forms: &[Form], env: &Env) -> Option<Vec<Type>> {
+        // Runtime visits the reader's hash-set order. A failing member prevents
+        // construction, but another member may have been evaluated first.
+        let mut stops = false;
+        let inputs: Vec<_> = forms
             .iter()
-            .map(|form| self.infer(form, env).known)
-            .collect()
+            .map(|form| {
+                let value = self.infer(form, env);
+                stops |= value.stops_evaluation();
+                value.known
+            })
+            .collect();
+        if stops {
+            return None;
+        }
+        if forms.len() >= 2
+            && forms.iter().any(|form| {
+                matches!(
+                    form.without_metadata().kind,
+                    Kind::List(_) | Kind::Symbol(_) | Kind::AnonymousArgument(_)
+                )
+            })
+        {
+            let mut members = BTreeSet::new();
+            for (form, ty) in forms.iter().zip(&inputs) {
+                if let Some(identity) = exact_set_member(ty)
+                    && !members.insert(identity)
+                {
+                    if self.path_reachable && env.reachable() {
+                        self.error("PNX2790", form.span, format!("Duplicate set element {ty}"));
+                        self.illegal_argument();
+                    }
+                    return None;
+                }
+            }
+        }
+        Some(inputs)
     }
 
     fn eval_args<'a>(
@@ -770,18 +904,26 @@ impl Checker<'_> {
             Kind::SymbolicNumber(_) => Value::new(Type::NonIntegral),
             Kind::String(s) => Value::new(Type::Str(s.clone())),
             Kind::Utf16String(_) => Value::new(Type::String),
-            Kind::Regex => Value::new(Type::Pattern),
+            Kind::Regex { captures } => Value {
+                pattern_captures: *captures,
+                ..Value::new(Type::Pattern)
+            },
             Kind::Character(c) => Value::new(Type::Char(*c)),
             Kind::Metadata(_, target) => {
                 let bare = target.without_metadata();
-                if matches!(&bare.kind, Kind::Vector(_)) {
+                let metadata_target = match &bare.kind {
+                    Kind::Vector(_) => Some(metadata::MetadataTarget::Vector),
+                    Kind::Map(_) => Some(metadata::MetadataTarget::Map),
+                    _ => None,
+                };
+                if let Some(target) = metadata_target {
                     let value = self.infer_position(bare, env, tail);
                     return self
                         .literal_metadata_outcome(
                             form,
                             env,
                             !value.stops_evaluation(),
-                            metadata::MetadataTarget::Vector,
+                            target,
                         )
                         .unwrap_or(value);
                 }
@@ -823,17 +965,21 @@ impl Checker<'_> {
                     value
                 } else if let Some(value) = self.model.declared_value(s, self.globals, form.span.start.offset) {
                     match value {
-                        DeclaredValue::Literal(ty) => Value {
-                            literal_container: LiteralContainer::from_inert_type(ty),
-                            ..Value::new(ty.clone())
+                        DeclaredValue::Literal(literal) => Value {
+                            literal_container: literal.container.clone(),
+                            pattern_captures: literal.pattern_captures,
+                            ..Value::new(literal.ty.clone())
                         },
-                        DeclaredValue::ExternLiteral(ty, origin) if self.partial_contract_visible(origin) => Value::with_notes(
-                            ty.clone(),
-                            origin.path.iter().map(|path| {
-                                format!("Literal {} is declared in {path}.", origin.name)
-                            }).collect(),
-                        ),
-                        DeclaredValue::ExternLiteral(_, _) => Value::new(Type::Unknown),
+                        DeclaredValue::ExternLiteral(literal) if self.partial_contract_visible(&literal.origin) => Value {
+                            literal_container: literal.container.clone(),
+                            ..Value::with_notes(
+                                literal.ty.clone(),
+                                literal.origin.path.iter().map(|path| {
+                                    format!("Literal {} is declared in {path}.", literal.origin.name)
+                                }).collect(),
+                            )
+                        },
+                        DeclaredValue::ExternLiteral(_) => Value::new(Type::Unknown),
                         DeclaredValue::Function(contract) if self.partial_contract_visible(&contract.origin) => Value::from_contract(contract),
                         DeclaredValue::Function(_) => Value::new(Type::Unknown),
                         DeclaredValue::UncheckedFunction(_) => self.unchecked_function(s, form.span),
@@ -851,6 +997,10 @@ impl Checker<'_> {
                 } else if self.partial_scope.is_some() {
                     Value::new(Type::Unknown)
                 } else {
+                    let resolved = self.model.resolve(s);
+                    if self.model.known_standard_core_function(s, &resolved, self.globals) {
+                        return self.unchecked_core_function(&resolved, form.span);
+                    }
                     let qualified = self.model.function_name(s);
                     let external = qualified.split_once('/').is_some_and(|(namespace, _)| {
                         namespace != self.model.namespace()
@@ -878,15 +1028,15 @@ impl Checker<'_> {
                 )
             }
             Kind::Set(xs) => {
-                let types = self.infer_set_members(xs, env);
-                if types.contains(&Type::Never) {
-                    return Value::new(Type::Never);
-                }
-                Value::new(Type::Set(collection_element(types)))
+                self.infer_set_members(xs, env)
+                    .map_or_else(|| Value::new(Type::Never), Value::literal_set)
             }
             Kind::Map(xs) => self.map_literal(xs, maps::MapLiteral::Expression(env)),
             Kind::AutoNamespacedMap { .. } => self.unchecked_form(form.span, "Namespaced map needs source namespace context"),
-            Kind::List(xs) if xs.is_empty() => Value::new(Type::empty_list()),
+            Kind::List(xs) if xs.is_empty() => Value {
+                literal_container: Some(LiteralContainer::List(None)),
+                ..Value::new(Type::empty_list())
+            },
             Kind::List(xs) => self.list(xs, form.span, env, tail),
             Kind::AnonymousFunction(_) => {
                 self.withhold_captured_facts(env.inline_functions());
@@ -946,6 +1096,17 @@ fn has_evaluated_metadata(form: &Form) -> bool {
         }
         Kind::AnonymousFunction(function) => function.body.iter().any(has_evaluated_metadata),
         _ => false,
+    }
+}
+
+fn exact_set_member(ty: &Type) -> Option<Cow<'_, Type>> {
+    match ty {
+        Type::Nil | Type::Bool(_) | Type::Key(_) | Type::Str(_) | Type::Char(_) | Type::Sym(_) => {
+            Some(Cow::Borrowed(ty))
+        }
+        _ => ty
+            .exact_long_value()
+            .map(|value| Cow::Owned(Type::exact_long(value, crate::types::IntegerClass::Fixed))),
     }
 }
 

@@ -1,12 +1,21 @@
 //! Lookup and presence for keys supplied as expressions.
-use super::super::{Checker, Env, Value, calls::call_returns, model::DeclaredValue};
-use super::{Lookup, key_presence, narrow_key_presence};
+use std::sync::Arc;
+
+use super::super::{
+    Checker, Env, LiteralContainer, Value, calls::call_returns, model::DeclaredValue,
+};
+use super::{Lookup, key_presence, literal_key_type, narrow_key_presence, scalar_without_lookup};
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
-use crate::types::{IndexedItem, MapSlot, Type};
+use crate::types::{ExtraFields, IndexedItem, Type};
 
 impl Checker<'_> {
-    pub(super) fn single_symbol_map_key(&mut self, form: &Form, env: &Env) -> Option<Type> {
+    pub(super) fn symbol_map_key(
+        &mut self,
+        form: &Form,
+        env: &Env,
+        reachable: bool,
+    ) -> Option<Type> {
         let Kind::Symbol(name) = &form.kind else {
             return None;
         };
@@ -20,25 +29,25 @@ impl Checker<'_> {
                 .model
                 .declared_value(name, self.globals, form.span.start.offset)?
             {
-                DeclaredValue::Literal(ty) | DeclaredValue::ExternLiteral(ty, _) => ty,
+                DeclaredValue::Literal(literal) => &literal.ty,
+                DeclaredValue::ExternLiteral(literal) => &literal.ty,
                 _ => return None,
             }
         };
         if !known.is_literal_map_key() {
             return None;
         }
-        // The key of a single-entry map is read before the value. Use the
-        // ordinary expression path to record the type at the written symbol.
-        let checked = self.infer(form, env).known;
+        // Record evidence at the written symbol through the ordinary expression path.
+        let checked = self
+            .inspect_path(reachable && env.reachable(), |checker| {
+                checker.infer(form, env)
+            })
+            .known;
         checked.is_literal_map_key().then_some(checked)
     }
 
     pub(in crate::checker) fn literal_map_key(&self, form: &Form) -> Option<Type> {
-        match &form.without_metadata().kind {
-            Kind::Keyword(key) => Some(Type::Key(self.model.key(key))),
-            Kind::String(key) => Some(Type::Str(key.clone())),
-            _ => None,
-        }
+        literal_key_type(form, |key| self.model.key(key))
     }
 
     pub(super) fn read_map_key(
@@ -68,7 +77,7 @@ impl Checker<'_> {
             self.unsupported(
                 span,
                 format!(
-                    "{name} analysis supports keyword and string keys{}, got {}",
+                    "{name} analysis supports nil, boolean, character, keyword, string and symbol keys{}, got {}",
                     if allow_index {
                         " and known integer keys"
                     } else {
@@ -112,16 +121,26 @@ impl Checker<'_> {
         let (target, _) = args.next().unwrap();
         let (key, key_span) = args.next().unwrap();
         let default = args.next().map(|(value, _)| value);
-        let Some(key) = self.validate_map_key(key, key_span, name, true) else {
-            self.may_throw();
-            return Value::new(Type::Unknown);
+        let scalar = scalar_without_lookup(&target.known);
+        let key = if scalar || matches!(target.known, Type::Set(_)) {
+            key.known
+        } else {
+            let Some(key) = self.validate_map_key(key, key_span, name, true) else {
+                self.may_throw();
+                return Value::new(Type::Unknown);
+            };
+            key
         };
-        if target.known.contains_unknown() || key.contains_unknown() {
+        if !scalar && (target.known.contains_unknown() || key.contains_unknown()) {
             self.may_throw();
         }
-        let presence = env.presence(&xs[1], &xs[2]);
+        let equivalent_key = target.equivalent_literal_map_key_choices(&key);
+        let key = equivalent_key.as_ref().unwrap_or(&key);
+        let presence = env
+            .presence(&xs[1], &xs[2])
+            .or_else(|| target.set_presence(key));
         let result = if required {
-            if presence.or_else(|| key_presence(&target.known, &key)) != Some(true) {
+            if presence.or_else(|| key_presence(&target.known, key)) != Some(true) {
                 self.illegal_argument();
             }
             let target = if presence == Some(false) {
@@ -129,9 +148,9 @@ impl Checker<'_> {
             } else {
                 target
             };
-            self.checked_lookup(&target, &key, Lookup::Required, key_span)
+            self.checked_lookup(&target, key, Lookup::Required, key_span)
         } else {
-            self.lookup_with_presence(&target, &key, default.as_ref(), key_span, presence)
+            self.lookup_with_presence(&target, key, default.as_ref(), key_span, presence)
         };
         self.observe_lookup(xs[2].without_metadata().span, &result);
         result
@@ -158,9 +177,33 @@ impl Checker<'_> {
         key: &(Value, Span),
     ) -> Value {
         let start = self.diagnostics.len();
-        let result = self.find_type(&target.known, key, *span);
+        let equivalent_key = target.equivalent_literal_map_key_choices(&key.0.known);
+        let result = match &equivalent_key {
+            Some(key_type) => self.find_at(&target.known, key_type, key.1),
+            None => self.find_type(&target.known, key, *span),
+        };
         self.dedup_diagnostics(start);
-        Value::with_notes(result, target.notes.clone())
+        let mut result = Value::with_notes(result, target.notes.clone());
+        if let Type::MapEntry(items) = &result.known
+            && let Some(container) = &target.literal_container
+        {
+            let stored = if matches!(target.known, Type::Map(_)) {
+                container.map_field(equivalent_key.as_ref().unwrap_or(&key.0.known))
+            } else {
+                key.0
+                    .known
+                    .associative_index()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| container.position_child(index))
+            };
+            if let Some(stored) = stored.filter(|proof| proof.matches_type(&items[1])) {
+                result.literal_container = Some(LiteralContainer::Positions(Arc::from([
+                    None,
+                    Some(stored.clone()),
+                ])));
+            }
+        }
+        result
     }
 
     fn find_type(&mut self, target: &Type, key: &(Value, Span), span: Span) -> Type {
@@ -206,33 +249,49 @@ impl Checker<'_> {
             }
             _ => {}
         }
-        let entry = |value: &Type| Type::MapEntry(Box::new([key.clone(), value.clone()]));
+        let entry = |stored_key: &Type, value: &Type| {
+            Type::MapEntry(Box::new([stored_key.clone(), value.clone()]))
+        };
         if let Type::Map(map) = target {
             // An associative input can use a comparator that rejects the key.
             self.may_throw();
-            if !key.is_literal_map_key() {
-                return match map.possible_values(key) {
-                    Some(Type::Never) => Type::Nil,
-                    Some(value) => entry(&value).nilable(),
-                    None => self.undeclared_key(key, span),
+            if let Some((stored, field)) = map.fields.get_key_value(key) {
+                return if field.required {
+                    entry(stored, &field.ty)
+                } else if field.ty == Type::Never {
+                    Type::Nil
+                } else {
+                    entry(stored, &field.ty).nilable()
                 };
             }
-            return match map.slot(key) {
-                MapSlot::Present(value) => entry(value),
-                MapSlot::Optional(value) => entry(value).nilable(),
-                MapSlot::Absent => Type::Nil,
-                MapSlot::Undeclared => self.undeclared_key(key, span),
+            let extra = match &map.extra {
+                ExtraFields::Open => return self.undeclared_key(key, span),
+                ExtraFields::Typed(types) => Some(Type::MapEntry(types.clone())),
+                ExtraFields::Closed => None,
             };
+            if key.is_literal_map_key() {
+                return extra.map_or(Type::Nil, Type::nilable);
+            }
+            let stored = map
+                .fields
+                .iter()
+                .filter(|(stored, field)| field.ty != Type::Never && key.key_overlaps(stored))
+                .map(|(stored, field)| entry(stored, &field.ty));
+            return Type::union(stored.chain(extra).chain([Type::Nil]));
         }
-        let Type::Integer(index) = key else {
+        let Some(index) = key.associative_index() else {
             return Type::Nil;
         };
         match target
-            .indexed_item(*index)
+            .indexed_item(index)
             .expect("an indexed associative target")
         {
-            IndexedItem::Present(value) => entry(value),
-            IndexedItem::Optional(value) => entry(value).nilable(),
+            IndexedItem::Present(value) if key.may_be_byte_or_short() => {
+                entry(key, value).nilable()
+            }
+            IndexedItem::Present(value) => entry(key, value),
+            IndexedItem::PresentChar(_) => unreachable!("indexed find excludes strings"),
+            IndexedItem::Optional(value) => entry(key, value).nilable(),
             IndexedItem::Absent(_) => Type::Nil,
         }
     }
@@ -242,7 +301,7 @@ impl Checker<'_> {
         let key_symbol = key
             .symbol()
             .and_then(|name| env.get(name).map(|v| (name, &v.known)));
-        let exact = self.literal_map_key(key).or_else(|| {
+        let exact = self.written_map_key(key).or_else(|| {
             key_symbol
                 .filter(|(_, ty)| ty.is_literal_map_key())
                 .map(|(_, ty)| ty.clone())

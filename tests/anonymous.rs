@@ -41,6 +41,29 @@ fn shorthand_arguments_preserve_reader_scope_and_concrete_syntax() {
 }
 
 #[test]
+fn shorthand_argument_indices_fit_the_jvm_reader_range() {
+    let source = "#(identity %2147483648) :after";
+    let parsed = reader::parse(source);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let [error] = parsed.errors.as_slice() else {
+        panic!("{:?}", parsed.errors);
+    };
+    assert_eq!(
+        &source[error.span.start.offset..error.span.end.offset],
+        "%2147483648"
+    );
+    assert_eq!(reader::read(source).unwrap_err().span, error.span);
+    assert_eq!(parsed.forms.len(), 1);
+    assert_eq!(parsed.forms[0].keyword(), Some(":after"));
+
+    let forms = reader::read("#(identity %21)").unwrap();
+    let Kind::AnonymousFunction(function) = &forms[0].kind else {
+        panic!("{forms:?}");
+    };
+    assert_eq!(function.required, 21);
+}
+
+#[test]
 fn shorthand_callbacks_check_positional_rest_and_recur_arguments() {
     let good = include_str!("../examples/anonymous.clj");
     let report = Session::default().check("callbacks.clj", good);

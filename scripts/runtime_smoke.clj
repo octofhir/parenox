@@ -26,7 +26,13 @@
 (assert (nil? (demo.sets/find-status "deleted")))
 (assert (= :active (get #{:active} :active)))
 (assert (= 1 (if #{} 1 2)))
-(println "Clojure/JVM sets: 7 assertions passed")
+(require '[clojure.set :as set])
+(assert (= [true false false]
+           (mapv #(int? (get % 1N))
+                 [(set/union #{1N} #{1 :extra})
+                  (set/union #{1N :extra} #{1})
+                  (set/union #{1N} #{1})])))
+(println "Clojure/JVM sets: 8 assertions passed")
 
 (load-file "examples/clinic/model.clj")
 (load-file "examples/clinic/store.clj")
@@ -98,6 +104,15 @@
   (assert (not (s/valid? catalog {:a nil}))))
 (println "Clojure/JVM spec generator settings: 3 assertions passed")
 
+(s/def :parenox.smoke/set-predicate #{nil false true :yes ::s/invalid})
+(assert (= [false false true true false]
+           (mapv #(s/valid? :parenox.smoke/set-predicate %) [nil false true :yes ::s/invalid])))
+(assert (= [::s/invalid :yes]
+           (mapv #(s/conform :parenox.smoke/set-predicate %) [false :yes])))
+(assert (= [true true false]
+           (mapv #(s/valid? (s/nilable false?) %) [nil false (Boolean. false)])))
+(println "Clojure/JVM set predicates: 3 assertions passed")
+
 (println "Runtime reference:" (clojure-version))
 (load-file "examples/portable.cljc")
 (assert (= "ALICE" (demo.portable/label "Alice")))
@@ -163,6 +178,7 @@
                 :unexpected-success
                 (catch ClassCastException _ :throws))))
 (println "Clojure/JVM destructuring defaults: 12 assertions passed")
+(load-file "tests/fixtures/map-binding-shorthands.clj")
 
 (load-file "examples/threading.clj")
 (load-file "examples/threading_bad.clj")
@@ -511,6 +527,9 @@
                 (catch NullPointerException _ :throws))))
 (println "Clojure/JVM indexed reads: 12 assertions passed")
 
+(load-file "tests/fixtures/index-key-classes.clj")
+(load-file "tests/fixtures/numeric-map-key-classes.clj")
+
 (load-file "examples/loops.clj")
 (assert (= 10 (demo.loops/triangular 5)))
 (assert (= "Ada" (demo.loops/carried-label "Ada")))
@@ -618,9 +637,38 @@
 (assert (= [1 "second"] (conj [1] "second")))
 (assert (= '("second" 1) (conj nil 1 "second")))
 (assert (= #{:ready :done} (conj #{:ready} :done)))
+(assert (= [true false false nil false true false]
+           [(int? (get (conj #{1} 1N) 1N))
+            (int? (get (conj #{1N} 1) 1))
+            (int? (get (conj #{} 1N 1) 1))
+            (get (conj #{:other} nil) nil :miss)
+            (get (conj #{:other} false) false :miss)
+            (contains? (conj #{:initial} :added) :added)
+            (contains? (conj #{:initial} :added) :missing)]))
 (assert (= :throws (try (demo.accumulators-bad/unchecked-labels [nil])
                         (catch NullPointerException _ :throws))))
-(println "Clojure/JVM accumulators: 11 assertions passed")
+(let [items (disj #{1 :keep false nil} 1N nil)]
+  (assert (= [false :keep false nil :same nil nil :keep]
+             [(contains? items 1) (items :keep) (get items false :wrong) (get items nil)
+              (disj :same) (disj nil :a) (disj false :a)
+              (get (apply disj [#{1 :keep} 1N]) :keep)])))
+(let [items (set [nil :item false :item])]
+  (assert (= [true false nil false true false false true]
+             [(contains? items :item) (contains? items :missing)
+              (get items nil :missing) (get items false :missing)
+              (contains? (set '(:x :x :y)) :y) (contains? (set nil) :x)
+              (int? (get (set [1 1N]) 1))
+              (int? (first (set [1 1N])))])))
+(assert (= [:head true false true nil :present nil false]
+           [(first (set [:head :head]))
+            (= 1 (count (set [:head :head])))
+            (empty? (conj #{} :head))
+            (contains? (not-empty (set [:head])) :head)
+            (not-empty (disj #{1} 1N))
+            (if (seq (set [:head])) :present :empty)
+            (next (set [:head :head]))
+            (contains? (set (rest (set [:head]))) :head)]))
+(println "Clojure/JVM accumulators: 15 assertions passed")
 
 (load-file "examples/exceptions.clj")
 (load-file "examples/exceptions_bad.clj")
@@ -1193,7 +1241,20 @@
 (assert (nil? (re-find #"\A.*/" "ab")))
 (assert (= ["a" "a" nil] (re-matches #"(a)(b)?" "a")))
 (assert (= "a" (re-find (re-matcher #"a" "ab"))))
-(println "Clojure/JVM regex matching: 4 assertions passed")
+(let [jar-pattern #"^(.*\.jar):(.*)"]
+  (assert (= ["file.jar:entry.clj" "file.jar" "entry.clj"]
+             (re-find jar-pattern "file.jar:entry.clj")))
+  (assert (nil? (re-find jar-pattern "missing"))))
+(assert (= [0 1] (mapv #(.groupCount (.matcher % "")) [#"\c(" #"\c\(a)"])))
+(println "Clojure/JVM regex matching: 7 assertions passed")
+
+(let [boxed-false (Boolean. false)]
+  (assert (= :then (if boxed-false :then :else)))
+  (assert (false? (boolean boxed-false)))
+  (assert (false? (apply boolean [boxed-false])))
+  (assert (= [false false true true true true true]
+             (mapv boolean [nil false true 0 "" [] #{}]))))
+(println "Clojure/JVM boolean conversion: 4 assertions passed")
 
 (assert (= "a" (subs "😀a" 2)))
 (assert (= "😀" (subs "😀a" 0 2)))

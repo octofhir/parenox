@@ -95,12 +95,13 @@ impl<F: FnMut(&str, crate::reader::Span) -> Option<Type>> TypeReader<'_, F> {
                 return self.conjunction_gap(form, "Custom predicate in s/and is unchecked");
             }
             Kind::Set(items)
-                if items.iter().any(|item| {
-                    matches!(item.without_metadata().kind, Kind::Nil | Kind::Bool(false))
-                        || item
-                            .keyword()
-                            .is_some_and(|key| self.names.key(key) == ":clojure.spec.alpha/invalid")
-                }) =>
+                if self.literal_shapes
+                    && items.iter().any(|item| {
+                        matches!(item.without_metadata().kind, Kind::Nil | Kind::Bool(false))
+                            || item.keyword().is_some_and(|key| {
+                                self.names.key(key) == ":clojure.spec.alpha/invalid"
+                            })
+                    }) =>
             {
                 return self.conjunction_gap(
                     form,

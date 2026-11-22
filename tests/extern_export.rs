@@ -16,6 +16,55 @@ fn export(sources: &[Source<'_>]) -> String {
 }
 
 #[test]
+fn exported_map_contract_preserves_scalar_keys_and_blames_the_field_value() {
+    let provider = Source {
+        path: "wire.clj",
+        source: r#"(ns wire)
+(defn read-map {:t/sig '[{nil string? false nil? \x number? 7 keyword? wire/label boolean?} :-> string?]}
+  [data] (req! data nil))"#,
+    };
+    let edn = export(&[provider]);
+    let externs = [Source {
+        path: "wire.edn",
+        source: &edn,
+    }];
+    let mut session = Session::default();
+    let validation = session.validate_externs(&[provider], &externs);
+    assert!(validation.ok && validation.complete, "{validation:#?}");
+
+    let client = r#"(ns client (:require [wire :as w]))
+(defn read-wire {:t/sig '[:-> string?]} []
+  (w/read-map {nil "stored" false nil \x 3 7 :ok 'wire/label true}))"#;
+    let mut session = Session::default();
+    let mut check = |source: &str| {
+        session.check_project_with_externs(
+            &[Source {
+                path: "client.clj",
+                source,
+            }],
+            &externs,
+        )
+    };
+    let valid = check(client);
+    assert!(valid.ok && valid.complete, "{valid:#?}");
+
+    let broken = client.replace(r"\x 3", r#"\x "wrong""#);
+    let invalid = check(&broken);
+    let [finding] = invalid.files[0].diagnostics.as_slice() else {
+        panic!("{invalid:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &broken[finding.span.start.offset..finding.span.end.offset],
+        "\"wrong\""
+    );
+    assert_eq!(
+        finding.contract.as_ref().unwrap().path.as_deref(),
+        Some("wire.edn")
+    );
+}
+
+#[test]
 fn exported_int_predicates_preserve_class_and_range_constraints() {
     let source = Source {
         path: "wire.clj",

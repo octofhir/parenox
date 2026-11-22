@@ -3,6 +3,124 @@ use parenox::syntax::SyntaxKind;
 use parenox::{Session, Source};
 
 #[test]
+fn file_source_and_edn_externs_keep_their_own_literal_line_endings() {
+    let source = Source {
+        path: "multiline.clj",
+        source: "(ns demo.multiline (:require [library :as lib]))\n\
+            (def text \"a\r\nb\")\n\
+            (defn source-text {:t/sig '[:-> #{\"a\\nb\"}]} [] text)\n\
+            (defn extern-text {:t/sig '[:-> #{\"a\\r\\nb\"}]} [] lib/text)",
+    };
+    let externs = Source {
+        path: "library.edn",
+        source: "{library/text {:value \"a\r\nb\"}}",
+    };
+    let report = Session::default().check_project_with_externs(&[source], &[externs]);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn malformed_tags_and_metadata_keep_their_operands_out_of_recovered_forms() {
+    for prefix in ["#nil", "#wrong/", "^nil", "^:"] {
+        for source in [
+            format!("{prefix} (def phantom 1) :after"),
+            format!("[{prefix}] :after"),
+        ] {
+            let parsed = reader::parse(&source);
+            assert_eq!(parsed.syntax().text().to_string(), source);
+            let [error] = parsed.errors.as_slice() else {
+                panic!("{source}: {:?}", parsed.errors);
+            };
+            let strict = reader::read(&source).unwrap_err();
+            assert_eq!(error.span, strict.span, "{source}");
+            let (recovered, first) =
+                reader::read_for_check_recovering(&source, reader::Conditionals::Preserve, None);
+            assert_eq!(first.unwrap().span, strict.span);
+            for forms in [parsed.forms, recovered.forms] {
+                assert_eq!(forms.len(), 1, "{source}: {forms:?}");
+                assert_eq!(forms[0].keyword(), Some(":after"));
+            }
+        }
+    }
+}
+
+#[test]
+fn recovery_keeps_nested_forms_out_of_the_file_scope() {
+    let source = "(ns recovery)\n\
+        (def before 1)\n\
+        (let [x 1 ) (defn phantom [] :hidden)] x)\n\
+        (def after before)";
+    let parsed = reader::parse(source);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let root_forms: Vec<_> = parsed
+        .forms
+        .iter()
+        .map(|form| &source[form.span.start.offset..form.span.end.offset])
+        .collect();
+    assert_eq!(
+        root_forms,
+        ["(ns recovery)", "(def before 1)", "(def after before)"]
+    );
+    assert_eq!(parsed.errors.len(), 1);
+    let error = parsed.errors[0].span;
+    assert_eq!(&source[error.start.offset..error.end.offset], ")");
+    assert_eq!(error.start.line, 3);
+
+    let mut session = Session::default();
+    let report = session.check("recovery.clj", source);
+    assert!(!report.complete);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.diagnostics[0].span, error);
+    let (_, symbols) = session.document_symbols("recovery.clj").unwrap();
+    assert_eq!(
+        symbols
+            .into_iter()
+            .map(|symbol| symbol.name)
+            .collect::<Vec<_>>(),
+        ["recovery", "before", "after"]
+    );
+}
+
+#[test]
+fn recovery_respects_prefixes_strings_and_reader_conditionals() {
+    for (broken, policy) in [
+        ("(do [1 '])", reader::Conditionals::Reject),
+        (
+            r#"(let [x "\q] (def phantom 0) "] x)"#,
+            reader::Conditionals::Reject,
+        ),
+        (
+            "(let [x 1 ) ; ] in a comment\n#_(def phantom 0) \\]] x)",
+            reader::Conditionals::Reject,
+        ),
+        (
+            "#?(42 (def phantom 0) :clj :ok)",
+            reader::Conditionals::Select(":clj"),
+        ),
+        ("#?(def phantom 0)", reader::Conditionals::Reject),
+        ("#?@(:clj [])", reader::Conditionals::Select(":clj")),
+    ] {
+        let source = format!("before\n{broken}\nafter");
+        let parsed = reader::parse_with(&source, policy);
+        let (read, error) = reader::read_for_check_recovering(&source, policy, None);
+        let (_, strict) = reader::read_prefix(&source, policy);
+        for forms in [&parsed.forms, &read.forms] {
+            assert_eq!(
+                forms.iter().map(|form| form.symbol()).collect::<Vec<_>>(),
+                [Some("before"), Some("after")],
+                "{broken}"
+            );
+        }
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        assert_eq!(parsed.errors.len(), 1, "{broken}: {:?}", parsed.errors);
+        for error in [strict.unwrap(), error.unwrap()] {
+            assert_eq!(error.span, parsed.errors[0].span, "{broken}");
+            assert_eq!(error.message, parsed.errors[0].message, "{broken}");
+        }
+    }
+}
+
+#[test]
 fn references_report_type_coverage_without_a_reader_error() {
     let source = r#"
         (ns refs)
@@ -151,6 +269,294 @@ fn top_level_evaluation_leaves_coverage_open_for_other_declarations() {
             .count(),
         2
     );
+}
+
+#[test]
+fn unchecked_dispatches_in_omitted_forms_leave_an_explicit_gap() {
+    let source = r#"(ns reader.discarded)
+#_#test/unknown :payload
+(defn f {:t/sig '[:-> #{:ready}]} [] :ready)"#;
+    let path = "discarded.cljc";
+    let mut session = Session::default();
+    let report = session.check(path, source);
+    assert!(!report.complete, "{report:#?}");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX9001");
+    assert!(finding.message.contains("#_"));
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "#test/unknown :payload"
+    );
+
+    let mismatch = source.replace("[] :ready", "[] :different");
+    let report = session.check(path, &mismatch);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX2322")
+    );
+    assert!(!report.complete, "{report:#?}");
+
+    let inactive = source.replace(
+        "#_#test/unknown :payload",
+        "#?(:clj (def active :ready) :cljs #_#test/unknown :payload nil)",
+    );
+    let report = session.check(path, &inactive);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for regex in [
+        r#"#_#"[a]""#,
+        r#"#?(:clj (def active :ready) :cljs #"[a]")"#,
+    ] {
+        let source = source.replace("#_#test/unknown :payload", regex);
+        let report = session.check(path, &source);
+        assert!(!report.complete, "{report:#?}");
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(finding.code, "PNX9001");
+        assert!(finding.message.contains("JVM regex"));
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            r#"#"[a]""#
+        );
+    }
+}
+
+#[test]
+fn standard_top_level_comment_removes_evaluation_but_keeps_reader_errors() {
+    let source = r#"(ns comment-proof)
+(comment (unloaded.ns/effect) (def unused missing-symbol) "text #a-string")
+(def answer "present")
+(defn result {:t/sig '[:-> #{"present"}]} [] answer)
+"#;
+    let path = "comment_proof.clj";
+    let mut session = Session::default();
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let shadowed = source.replace("(comment", "(def comment nil)\n(comment");
+    let report = session.check(path, &shadowed);
+    assert!(!report.complete, "{report:#?}");
+    assert!(report.diagnostics.iter().any(|d| d.code == "PNX9001"));
+
+    let invalid = source.replace("missing-symbol", "::unbound/item");
+    let report = session.check(path, &invalid);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX9000");
+    assert_eq!(
+        &invalid[error.span.start.offset..error.span.end.offset],
+        "::unbound/item"
+    );
+
+    for dispatch in ["#_#unknown :value", r#"#"[a]""#] {
+        let opaque = source.replace("missing-symbol", dispatch);
+        let report = session.check(path, &opaque);
+        assert!(!report.complete, "{report:#?}");
+        assert!(report.diagnostics.iter().any(|d| d.code == "PNX9001"));
+    }
+    let before = source.replace("(comment", "#_#unknown :value\n(comment");
+    let report = session.check(path, &before);
+    assert!(!report.complete, "{report:#?}");
+    assert!(report.diagnostics.iter().any(|d| d.code == "PNX9001"));
+
+    let inactive = source.replace("missing-symbol", "#?(:clj :ok :cljs #unknown :value)");
+    let report = session.check("comment_proof.cljc", &inactive);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for branches in [
+        r#":clj (comment) :cljs #"[a]""#,
+        r#":cljs #"[a]" :clj (comment)"#,
+    ] {
+        let source = format!("(ns comment-proof) #?({branches})");
+        let report = session.check("comment_proof.cljc", &source);
+        assert!(!report.complete, "{report:#?}");
+        assert!(report.diagnostics.iter().any(|d| d.code == "PNX9001"));
+    }
+
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+
+    let input = Source { path, source };
+    let core = Source {
+        path: "clojure/core.clj",
+        source: "(ns clojure.core) (def comment nil)",
+    };
+    let overridden = session.check_project(&[input, core], None);
+    assert!(!overridden.files[0].complete, "{overridden:#?}");
+    assert!(
+        overridden.files[0]
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "PNX9001")
+    );
+    let restored = session.check_project(&[input], None);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
+#[test]
+fn metadata_uses_immediate_syntax_quote_values() {
+    assert!(matches!(
+        reader::read(r#"^`"String" item"#).unwrap()[0].metadata(":tag").unwrap().kind,
+        Kind::String(ref name) if name == "String"
+    ));
+    assert!(matches!(
+        reader::read(r#"^`(clojure.core/unquote "String") item"#).unwrap()[0]
+            .metadata(":tag")
+            .unwrap()
+            .kind,
+        Kind::String(ref name) if name == "String"
+    ));
+    for (source, key) in [
+        ("^`:private item", ":private"),
+        ("^`~{:ready true} item", ":ready"),
+        ("^:probe `nil", ":probe"),
+        ("^:probe `true", ":probe"),
+        ("^:probe ``(clojure.core/unquote)", ":probe"),
+        ("^`(clojure.core/unquote :probe [:ignored]) item", ":probe"),
+    ] {
+        let parsed = reader::parse(source);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert!(matches!(
+            parsed.forms[0].metadata(key).unwrap().kind,
+            Kind::Bool(true)
+        ));
+    }
+
+    for operand in [
+        "`1",
+        "``1",
+        "`:value",
+        r#"`"text""#,
+        "`~nil",
+        "`##Inf",
+        "`(clojure.core/unquote 1)",
+        "`(clojure.core/unquote 1 :ignored)",
+        "`(clojure.core/unquote)",
+    ] {
+        let source = format!("^:probe {operand} :after");
+        let strict = reader::read(&source).unwrap_err();
+        let parsed = reader::parse(&source);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        assert_eq!(parsed.errors.len(), 1, "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.errors[0].span, strict.span, "{source}");
+        assert_eq!(parsed.forms.len(), 1, "{source}");
+        assert_eq!(parsed.forms[0].keyword(), Some(":after"), "{source}");
+    }
+}
+
+#[test]
+fn ignored_explicit_unquote_operands_still_undergo_reader_validation() {
+    let source = "(ns probe.metadata)\n(def ^`(clojure.core/unquote \"String\" #{::same :probe.metadata/same}) item \"value\")";
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{parsed:#?}");
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let report = Session::default().check("metadata.clj", source);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX9000");
+    assert!(error.message.contains("Duplicate element"));
+    assert_eq!(
+        &source[error.span.start.offset..error.span.end.offset],
+        ":probe.metadata/same"
+    );
+}
+
+#[test]
+fn syntax_quoted_metadata_keeps_unchecked_reader_dispatches_visible() {
+    for (operand, message) in [
+        ("#unknown/tag nil", "data reader call"),
+        (r##"#"[a]""##, "regex validation"),
+    ] {
+        let source = format!(
+            "(ns probe.metadata)\n(def ^`(clojure.core/unquote \"String\" {operand}) item \"value\")"
+        );
+        let parsed = reader::parse(&source);
+        assert!(parsed.errors.is_empty(), "{parsed:#?}");
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        let report = Session::default().check("metadata.clj", &source);
+        assert!(!report.complete);
+        let [diagnostic] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(diagnostic.code, "PNX9001");
+        assert!(diagnostic.message.contains(message));
+        assert!(diagnostic.message.contains("metadata descriptor"));
+        assert_eq!(
+            &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+            operand
+        );
+    }
+}
+
+#[test]
+fn malformed_plain_regex_literals_fail_during_the_same_source_read() {
+    for (regex, message) in [
+        (r##"#"[""##, "Unclosed character class"),
+        (r##"#"a)""##, "Unmatched closing group"),
+        (r##"#"(a(b)""##, "Unclosed group"),
+    ] {
+        let source = format!(
+            "(ns probe.patterns)\n(defn pattern {{:t/sig '[:-> java.util.regex.Pattern]}} [] {regex})"
+        );
+        let parsed = reader::parse(&source);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        let [error] = parsed.errors.as_slice() else {
+            panic!("{parsed:#?}");
+        };
+        assert!(error.message.contains(message));
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            regex
+        );
+        let report = Session::default().check("patterns.clj", &source);
+        let [diagnostic] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(diagnostic.code, "PNX9000");
+        assert_eq!(diagnostic.span, error.span);
+    }
+    for valid in [r##"#"\Q[(\E""##, r##"#"(?x)# [""##, r##"#"[()]""##] {
+        assert!(reader::read(valid).is_ok(), "{valid}");
+    }
+}
+
+#[test]
+fn active_metadata_tags_keep_their_unknown_value_and_inactive_tags_are_data() {
+    let descriptor = r#"#probe/hint "String""#;
+    let source = format!("(ns probe.metadata)\n(def ^{descriptor} item \"value\")");
+    let parsed = reader::parse(&source);
+    assert!(parsed.errors.is_empty(), "{parsed:#?}");
+    assert_eq!(parsed.syntax().text().to_string(), source);
+
+    let report = Session::default().check("metadata.clj", &source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.complete);
+    assert_eq!(finding.code, "PNX9001");
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        descriptor
+    );
+
+    let data = format!("^{descriptor} item");
+    assert!(reader::read_edn(&data).is_ok());
+    for operand in [data.as_str(), "^:ready #probe/metadata item"] {
+        let source = format!("#?(:clj 1 :cljs {operand}) :after");
+        let selected = reader::parse_with(&source, reader::Conditionals::Select(":clj"));
+        assert_eq!(selected.syntax().text().to_string(), source);
+        assert_eq!(selected.errors.len(), 1, "{selected:#?}");
+        assert!(selected.errors[0].message.contains("Metadata requires"));
+        assert_eq!(selected.forms.last().unwrap().keyword(), Some(":after"));
+    }
 }
 
 #[test]
@@ -362,6 +768,48 @@ fn characters_remain_distinct_from_strings_and_obey_literal_contracts() {
 }
 
 #[test]
+fn edn_dispatch_checks_the_initial_tag_letter_without_losing_its_payload() {
+    for source in ["#étiquette 1", "#ÿtag 1", "#vendor/λ 1"] {
+        let forms = reader::read_edn(source).unwrap();
+        assert!(matches!(forms[0].kind, Kind::Tagged(_, _)));
+    }
+    for tag in ["Ātag", "λtag", "𐐀tag"] {
+        let source = format!("#{tag} (payload) :after");
+        assert!(reader::read(&source).is_ok());
+        let strict = reader::read_edn(&source).unwrap_err();
+        let parsed = reader::parse_edn(&source);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        assert_eq!(parsed.errors.len(), 1, "{:?}", parsed.errors);
+        assert_eq!(parsed.errors[0].span, strict.span);
+        assert_eq!(parsed.forms.len(), 1);
+        assert_eq!(parsed.forms[0].keyword(), Some(":after"));
+    }
+}
+
+#[test]
+fn edn_rejects_clojure_dispatch_forms_without_publishing_their_operands() {
+    for rejected in [
+        "#(vector 1)",
+        r#"#"\d+""#,
+        "#' (quote marker)",
+        "#=(opaque)",
+    ] {
+        let source = format!("{rejected} :after");
+        let strict = reader::read_edn(&source).unwrap_err();
+        let parsed = reader::parse_edn(&source);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        assert_eq!(parsed.errors.len(), 1, "{rejected}: {:?}", parsed.errors);
+        assert_eq!(parsed.errors[0].span, strict.span, "{rejected}");
+        assert_eq!(parsed.errors[0].message, strict.message, "{rejected}");
+        let error = parsed.syntax().children().next().unwrap();
+        assert_eq!(error.kind(), SyntaxKind::Error, "{rejected}");
+        assert_eq!(error.text().to_string(), rejected);
+        assert_eq!(parsed.forms.len(), 1, "{rejected}");
+        assert_eq!(parsed.forms[0].keyword(), Some(":after"), "{rejected}");
+    }
+}
+
+#[test]
 fn tagged_values_are_preserved_as_data_without_running_or_guessing_reader_semantics() {
     let source =
         r#"{:id #uuid "f81d4fae-7dec-11d0-a765-00a0c91e6bf6" :value #app/value {:marker \a}}"#;
@@ -387,9 +835,110 @@ fn tagged_values_are_preserved_as_data_without_running_or_guessing_reader_semant
             .iter()
             .any(|d| d.message.contains("#app/value"))
     );
-    for source in ["#uuid", "#app/value", "#app//value 1", "#= (System/exit 0)"] {
+    for (source, name) in [
+        ("#-tag 1", "-tag"),
+        ("# _tag 1", "_tag"),
+        ("#/ 1", "/"),
+        ("#app//value 1", "app//value"),
+    ] {
+        let parsed = reader::parse(source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        assert!(
+            matches!(&parsed.forms[0].kind, Kind::Tagged(tag, _) if tag.symbol() == Some(name))
+        );
+    }
+    assert!(reader::read_edn("#-tag 1").is_err());
+    assert!(reader::read_edn("# _tag 1").is_err());
+    for source in ["#uuid", "#app/value", "#app/ 1", "#=(+ 1 2)"] {
         let parsed = reader::parse(source);
         assert!(!parsed.errors.is_empty(), "{source}");
         assert_eq!(parsed.syntax().text().to_string(), source);
+    }
+    let source = "#=(def phantom 0) :next";
+    let parsed = reader::parse(source);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    assert_eq!(parsed.errors.len(), 1);
+    assert_eq!(parsed.errors[0].kind, reader::ReadErrorKind::Unchecked);
+    assert_eq!(reader::read(source).unwrap_err(), parsed.errors[0]);
+    assert_eq!(parsed.forms.len(), 1);
+    assert_eq!(parsed.forms[0].keyword(), Some(":next"));
+
+    let source = "(ns demo.read-eval) (def total #=(clojure.core/+ 1 2))";
+    let report = Session::default().check("read-eval.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.complete);
+    assert_eq!(finding.code, "PNX9001");
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "#="
+    );
+    assert_eq!(
+        reader::read_edn("#=(clojure.core/+ 1 2)").unwrap_err().kind,
+        reader::ReadErrorKind::Invalid
+    );
+}
+
+#[test]
+fn a_data_reader_may_supply_reader_header_values() {
+    for (form, tagged) in [
+        ("## #probe/name Inf", "#probe/name Inf"),
+        (
+            "# #probe/name probe/list [:ready]",
+            "#probe/name probe/list",
+        ),
+        ("#:#probe/name catalog{:item 7}", "#probe/name catalog"),
+        ("#::#probe/name alias{:item 7}", "#probe/name alias"),
+    ] {
+        let source = format!("{form} :after");
+        let parsed = reader::parse(&source);
+        let [error] = parsed.errors.as_slice() else {
+            panic!("{form}: {parsed:#?}");
+        };
+        assert_eq!(error.kind, reader::ReadErrorKind::Unchecked, "{form}");
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            tagged
+        );
+        assert_eq!(reader::read(&source).unwrap_err(), *error);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        assert_eq!(parsed.forms.len(), 1);
+        assert_eq!(parsed.forms[0].keyword(), Some(":after"));
+
+        let source = format!("(ns demo.headers) (def value {form})");
+        let report = Session::default().check("headers.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{form}: {report:#?}");
+        };
+        assert!(!report.complete);
+        assert_eq!(finding.code, "PNX9001");
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            tagged
+        );
+
+        assert!(
+            parsed
+                .syntax()
+                .descendants()
+                .any(|node| { node.kind() == SyntaxKind::Tagged && node.text() == tagged })
+        );
+    }
+
+    for invalid in [
+        "## false",
+        "#false [:ready]",
+        "#:#probe/name catalog [:ready]",
+        "#:#probe/name catalog{:item}",
+        "#?(:clj :chosen :other ## #probe/name Inf)",
+    ] {
+        let error = reader::read_with(invalid, reader::Conditionals::Select(":clj")).unwrap_err();
+        assert_eq!(
+            error.kind,
+            reader::ReadErrorKind::Invalid,
+            "{invalid}: {error:#?}"
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! Infer input from an argument or a supported projection, then output from one callback.
 use std::borrow::Cow;
 
-use super::{CallArguments, EvaluatedArguments, inline::CallbackReturn};
+use super::{CallArguments, ContextualArgument, EvaluatedArguments, inline::CallbackReturn};
 use crate::Diagnostic;
 use crate::checker::{Checker, Env, Value};
 use crate::reader::{Form, Span};
@@ -57,12 +57,25 @@ impl Checker<'_> {
             if matches!(expected, Type::Function(_)) && self.contextual_callback_form(form, env) {
                 // A literal fn creates a closure; a saved local only reads one.
                 // The contextual body can wait for the other arguments' types.
-                callbacks.push((index, reachable));
+                callbacks.push((
+                    index,
+                    ContextualArgument {
+                        callback: form,
+                        expected,
+                        map_key: None,
+                        map_ancestors: Box::new([]),
+                    },
+                    reachable,
+                ));
                 let argument = self.contextual_callback_argument(form, env, reachable);
                 reachable = !argument.stops_evaluation();
                 values.push((argument, form.span));
             } else {
-                let mut value = self.infer_path(form, env, reachable, false);
+                let mut value = self
+                    .contextual_map_argument(form, expected, env, reachable, |callback, here| {
+                        callbacks.push((index, callback, here));
+                    })
+                    .unwrap_or_else(|| self.infer_path(form, env, reachable, false));
                 reachable = !value.stops_evaluation();
                 if !reachable {
                     value.narrow(Type::Never);
@@ -83,10 +96,12 @@ impl Checker<'_> {
                     signature.with_type_arguments(binders, &inputs, Some(&Type::Unknown));
                 (missing, instantiated)
             };
-            for (index, reachable_at_argument) in callbacks {
-                let form = &forms[index];
-                let template = &signature.args[index];
-                let expected = &instantiated.args[index];
+            for (index, contextual, reachable_at_argument) in callbacks {
+                let form = contextual.callback;
+                let template = contextual.expected;
+                let expected = contextual
+                    .expected_in(&instantiated.args[index])
+                    .expect("generic instantiation preserves contextual fields");
                 // A missing argument stays Unknown. Known context lets us
                 // check another input without pretending the call was proved.
                 let has_context = !binders.needs_missing_input(template, &missing)
@@ -94,9 +109,11 @@ impl Checker<'_> {
                         !missing[index] && template.mentions_parameter(param)
                     });
                 let check_body = reachable && reachable_at_argument && has_context;
-                let output = output_callback
-                    .as_ref()
-                    .filter(|(_, witness)| witness.index == index);
+                let output = output_callback.as_ref().filter(|(_, witness)| {
+                    witness.index == index
+                        && contextual.map_ancestors.is_empty()
+                        && witness.map_key == contextual.map_key
+                });
                 let mode = if output.is_some() {
                     CallbackReturn::Infer
                 } else {
@@ -128,7 +145,7 @@ impl Checker<'_> {
                         .unwrap_or_else(|| checker.infer(form, env))
                 });
                 if check_body {
-                    values[index].0 = body_checked;
+                    contextual.apply(&mut values[index].0, body_checked);
                 }
                 // A skipped or unproved body does not make closure creation
                 // diverge. Keep the placeholder for the argument's reachability.
@@ -183,7 +200,11 @@ impl Checker<'_> {
                 .iter()
                 .any(|ty| binders.needs_missing_input(ty, &missing))
             {
-                match output_evidence(&witness, &value.ty, binders, &evidence) {
+                let candidate = witness
+                    .callback_type(&value.ty)
+                    .ok_or(Compatibility::Unproven)
+                    .and_then(|ty| output_evidence(&witness, ty, binders, &evidence));
+                match candidate {
                     Ok(candidate) => {
                         output_valid = self.generic_bound(function, parameter, &candidate, *span);
                         evidence.insert(index, candidate);

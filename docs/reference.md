@@ -132,6 +132,8 @@ file would change. `--write` updates files only after the whole batch parses.
 
 Declare contracts with named `s/def` specs, source `s/fdef`, or quoted
 `:t/sig` metadata. Matching `s/fdef` and `:t/sig` declarations must agree.
+`:t/sig` and `:t/guard` accept the quote prefix and the explicit
+`(quote ...)` form.
 Public functions need a contract for full checking. Parenox can infer calls to
 supported single-arity private helpers from their arguments. A reachable typed
 call establishes coverage. The checker still resolves names in dead branches.
@@ -143,9 +145,33 @@ call or a signature.
 An initializer can capture the immediately preceding local `def` when its
 root contains inert data. Parenox supports a bare read, vector elements, and
 map values after a static namespace declaration. Public snapshots contain
-the captured data, including values read from a private root. Intervening
-expressions, dynamic roots, evaluated metadata, and reads in map keys or
-set members leave an analysis gap.
+the captured data, including values read from a private root. Reader discards
+with checked read behavior and proven standard `comment` forms can appear
+between the definitions. Possible reader effects, opaque intervening
+expressions, dynamic roots, evaluated metadata, and reads in map keys or set
+members leave an analysis gap.
+Consecutive bare aliases can forward the same captured literal data. Each
+public alias can export that value to EDN. A proven bare read keeps later
+initializers eligible for folding. An unchecked effect ends that proof.
+An initializer can also fold a two-argument call to standard
+`clojure.set/union` over inline sets or earlier local literal sets in a
+stable scope. The call supports up to 64 written members and 64 KiB per
+set literal. Supported members include symbols, keywords, strings,
+characters, Boolean values, nil, and exact integers in the signed long
+range. For equal members it keeps the object from the larger set, or
+from the left set when the sizes tie. Other members leave a coverage gap.
+
+`def` initializers may read `Long/MIN_VALUE` and `Long/MAX_VALUE` when
+the qualifier resolves to `java.lang.Long`. Parenox checks for competing
+namespaces and exports the proven values as decimal EDN integers. A bare
+read in an adjacent `def` can capture a proven bound, including from a
+source name with literal `:const` or `:private` metadata.
+A regex literal in a source `def` has type `java.util.regex.Pattern`.
+The reader records capture counts for supported syntax, including Java
+control escapes, noncapturing groups, and inline flags outside comment mode.
+`re-find` and `re-matches` use that count through source vars, local bindings,
+and `re-pattern` on an existing `Pattern`.
+Exporting the regex object as an EDN literal value is unsupported.
 
 ```clojure
 (ns example.labels (:require [clojure.spec.alpha :as s]))
@@ -196,7 +222,10 @@ set members leave an analysis gap.
   satisfies the element constraint. An individual map entry can itself
   satisfy the constraint when both its key and value have the required shape.
 - `s/fspec` uses `s/cat` and `:ret` for callback contracts. Direct
-  fixed-arity calls can supply types to `fn` and `#()` arguments.
+  fixed-arity calls can supply types to `fn` and `#()` arguments, including
+  values at declared keys in a literal map argument. Fixed callback contracts
+  also reach fields through nested literal maps when the contract declares
+  each key on the path. Each such field receives its own callback type.
   General callback and variadic inference remain limited.
 - `t/all` supports a fixed generic arity with up to two input type
   parameters and one immediate callback result parameter. Inference uses
@@ -204,6 +233,11 @@ set members leave an analysis gap.
   scalar bound. Empty collections alone do not establish an element type.
   A dictionary can supply independent key and value types through
   `(s/map-of k v)`, including for the parameters of an inline callback.
+  A required callback field in a literal map can also use type arguments
+  inferred from other arguments of the call or from ordinary fields in the
+  same map.
+  One required callback field can supply the result type parameter when
+  the other fields have independent types.
   See [generic callbacks](../examples/generic_callbacks.clj),
   [two-input inference](../examples/generic_zip.clj), and
   [typed map boundaries](../examples/map_boundary).
@@ -249,6 +283,12 @@ As a spec predicate, core `identity` accepts truthy values and excludes
 `:clojure.spec.alpha/invalid`. For a named scalar spec defined directly
 with `identity`, `s/conform` returns the input on success and `s/valid?`
 can narrow the input in the true branch.
+
+A literal set used as a spec predicate rejects `nil`, `false`, and
+`:clojure.spec.alpha/invalid`, including when those values occur in the set.
+Parenox can check `s/valid?` and `s/conform` against small sets of supported
+scalar literals. A literal union in `:t/sig` can include `nil` and `false`.
+Use `false?` or `(s/nilable false?)` to validate canonical false values.
 
 A named spec of the form `(s/and string? #(= % "create"))` checks one
 literal string when both predicates resolve to core functions. It preserves
@@ -316,7 +356,9 @@ spec with a finite, class-independent input domain. The table needs
 unique signed 32-bit decimal codes and an explicit load of `clojure.set`.
 An exported `(s/and integer? #{1 2})` accepts `1` and `1N` as the same
 code. The inverse var itself exports as an inert map, including any
-entries whose value is the spec invalid marker.
+entries whose value is the spec invalid marker. Inference and export use the
+same captured map. An unchecked data reader call before the inversion
+prevents proving the result.
 
 ### EDN externs
 
@@ -543,13 +585,59 @@ nested field.
 | Unannotated code | Source name resolution, known arities, selected string checks, and argument mismatches against explicit externs |
 
 Clojure truthiness distinguishes nil and false from zero and empty
-collections. A missing key is not a present nil or false. `get` and map
+collections. Core `boolean` converts nil and boxed Boolean values with
+the JVM's Boolean conversion. A separately boxed false can pass an `if`
+test while `boolean` returns false for that value.
+A missing key is not a present nil or false. `get` and map
 destructuring defaults apply only to absence, and their default expressions
-are evaluated eagerly. Clojure 1.13 checked lookups such as `req!` and
-`:keys!` require presence but preserve the field's value type. Positional
-bindings fill missing positions with nil; `[head & tail :as whole]`
-keeps the original collection in `whole` and a remaining seq or nil in
-`tail`. See `just checked`, `just defaults`, and `just presence`.
+are evaluated eagerly. Clojure 1.13 checked lookups such as `req!`,
+`:keys!`, and `:syms!` require presence and preserve the field's value
+type. In `:keys`, a keyword such as `::catalog/item` binds `item` from
+the resolved keyword. In `:syms`, the key is a symbol, including in
+qualified directives such as `:catalog/syms`. Checked directives can
+require supported scalar literal keys after `&`.
+[JVM fixture](../tests/fixtures/map-binding-shorthands.clj)
+
+A sequence with known positions can supply alternating keys and values to
+a map binding. Later values replace earlier ones at the same key. An
+unpaired final value can be `nil`, a proven closed ordinary map, a map
+entry, a proven ordinary vector with two elements, or a sequence of map
+entries with known positions. An empty sequence becomes an empty map,
+and a single item becomes the saved input as-is.
+Nested map evidence is retained in literal sequences
+read from source vars or EDN externs. The checker can handle finite
+alternatives of supported inputs, including branches that yield maps or
+`nil`. Open sequences and unproved trailing collections report a coverage
+gap.
+
+`:select` binds the entries for selected keys, and `:all` includes the
+rest of the input map. Both support `:or` defaults on closed maps or
+`nil` inputs. A present `nil` value takes precedence over a default.
+When the input and defaults are both `nil`, the projection yields `nil`.
+Ordered nested map bindings project their children under the parent keys.
+A named child result is read when the enclosing projection is computed.
+Open maps and nested bindings with unproved ordering or keys report a
+coverage gap.
+`:excess` binds entries outside the selection and yields `nil` when no
+entries remain. For ordered nested bindings over closed maps or `nil`, it
+collects child map leftovers under their parent keys. A local default can
+supply its binding while the excess map reflects the original input.
+`:missing` binds a map from absent required keys to `nil`, or `nil` when
+all required keys are present. A local for an absent required key also
+binds to `nil`, and present `nil` or `false` values still satisfy the key
+requirement. For ordered nested bindings over closed maps or `nil`, a
+child's missing keys are collected under its parent key. The enclosing
+projection reads a named child result after the other bindings. A local
+that shadows the accumulator reports a coverage gap.
+On a proven ordinary map, `dissoc` matches exact fixed-precision integers
+and Clojure `BigInt` keys with the same value. `select-keys` stores the
+selector's key object. A selector whose stored integer class is unmodeled
+reports a coverage gap at the selector argument.
+
+Positional bindings fill missing positions with nil. In
+`[head & tail :as whole]`, `whole` holds the original collection and
+`tail` holds the remaining seq or nil. See `just checked`, `just defaults`,
+and `just presence`.
 
 The core `map?` predicate recognizes modeled persistent maps and narrows
 an unknown local or a known field to a map in the true branch. A general
@@ -572,12 +660,109 @@ gap and withholds exact callback types. Indexed reads retain the tuple contract.
 After a static `ns` declaration, Parenox can infer the exact string for a
 top-level `def` that calls standard `str` with literal strings, keywords and nil.
 Auto-resolved keywords use the initializer's namespace and its declared aliases.
+The expression `(->> input (map name) vec)` can also produce an exact string
+vector when `input` is a literal vector of keywords and strings or names an
+adjacent literal definition of that vector. The participating core operators
+must resolve to their standard definitions.
 An opaque top-level effect ends this analysis for later initializers. The bounded
 result is a source literal that can be exported as EDN.
-In a single-entry map expression, a symbol can supply the key when its checked
-value is one exact keyword, string or integer. Branch narrowing can establish
-that value. The resulting map preserves the exact key in lookup and call checks.
-A type mismatch for its value points at the supplied value expression.
+A later data reader call can change an earlier var's root. Parenox withholds
+proofs about literals loaded before such a call, including during extern
+validation.
+A static `ns` can be followed by literal definitions and literal `require` forms
+that establish reader aliases. This covers `:as-alias` and `:as` for libraries
+the `ns` already loads. Each alias takes effect after the full `require` form
+has been read. If a top-level form with unchecked effects ends this proof,
+later uses of the introduced aliases report a coverage gap. An unresolved alias
+after a `require` that may load a library is also a coverage gap.
+A literal `in-ns` in this prelude supplies the current namespace for subsequent
+unqualified auto-resolved keywords and maps within the same evidence boundary.
+Aliases in the entered namespace and subsequent unchecked effects can leave
+the reader context unresolved. Parenox reports those cases as coverage gaps.
+A tagged literal's payload uses the reader namespace at the time it is read.
+An unchecked data reader call can change that namespace after the payload
+completes. Later auto-resolved keywords and maps then have a coverage gap.
+Duplicate checks on auto-resolved keywords in a collection with a data
+reader call require their resolved values.
+Reader discards can still call data readers while consuming their operands.
+The checker reports an active tag inside `#_` at its written span.
+The JVM also compiles regexes in discarded and inactive conditional forms.
+When that validation is unchecked, the regex receives a coverage diagnostic.
+The reader reports unmatched groups and definitely unclosed character classes
+in simple regex literals.
+A top-level call to the standard `comment` macro still goes through the reader.
+The checker omits its body from declaration and dependency collection when
+it can establish the reader and macro behavior. Unchecked regular expressions
+in the body and active tag handlers that may already have run leave coverage
+open.
+Map shapes can use literal nil, booleans, characters, keywords, strings,
+symbols and supported exact integers as keys. `{label string?}` in a contract
+describes a map such as `{'label "text"}`. In an ordered map literal, a symbol
+can supply a key when its checked value is exact. Branch narrowing can
+establish that value. Clojure 1.13 alpha11 preserves the order of literals with
+up to eight entries, or up to 64 when every key after the eighth is a keyword.
+In these maps the checker follows evaluation from each key to its value and
+retains an exact key when it can prove the result. A single-entry map also
+pinpoints a type mismatch at its value expression. A proven runtime key or set
+element collision produces `PNX2790` after operand evaluation and stops
+collection construction.
+Parenox models the JVM's 32-bit conversion for associative reads when the
+exact integer fits in a signed long. A vector rejects boxed `Byte` and
+`Short` keys, which can still satisfy `int?`. The checker accounts for a miss
+in `get` and `find` and an `IllegalArgumentException` in vector invocation.
+String lookup and `nth` accept these two classes.
+[JVM fixture](../tests/fixtures/index-key-classes.clj)
+On a known string, `get`, `nth` and `String.charAt` preserve an exact
+character at a known UTF-16 position. A surrogate code unit has type
+`Character`.
+Vector invocation retains the evidence for a stored collection at a proven
+index. A vector `find` preserves the original queried key in its entry.
+Map `find` uses the stored key domain because numeric equality and
+comparators can match a different key.
+For a dictionary contract with an unknown comparator, a disjoint key type
+alone cannot establish that `get`, `contains?` or `req!` will miss.
+Ordinary map lookups use the original key's value. The separate `nth`
+operation checks for overflow.
+For a proven ordinary map, exact integer queries with known JVM
+representations can select the same field across classes. Narrowing an
+`integer?` input to a value can still leave a custom BigInteger's hash
+behavior unchecked. `find` returns the stored key.
+For a known ordinary map, conditional keys with exact integer alternatives
+use the same equality rules. A `req!` lookup can prove presence when every
+alternative addresses a present key.
+On a proven ordinary map, `assoc` can write an exact fixed-precision
+integer key and replace a modeled stored key through an equivalent `BigInt`.
+Creating a `BigInt` key or updating an equivalent key with an unproved
+stored class reports a coverage gap.
+Ratio literals use exact arithmetic to establish integral values and their JVM
+class, including when the operands exceed 128 bits.
+[JVM fixture](../tests/fixtures/numeric-map-key-classes.clj)
+A proven lookup miss retains the evidence for a supplied default collection.
+Lookup arguments still evaluate before the lookup selects that default.
+The `number?` predicate can accept a JVM object with a custom `ILookup`.
+Parenox reports a coverage gap when the receiver's type leaves this behavior
+open.
+Set invocation and lookups through `get`, `get-in` and `req!` use the stored
+element's type. An ordinary literal set can prove that a key is absent.
+Small literal sets with exact scalar
+members can also prove presence, including `nil` and `false`. Small
+`conj` updates with exact scalar members keep that evidence and retain the
+original stored object for an equivalent member. `disj` removes equivalent
+scalar members from small ordinary sets and preserves the evidence for the
+remaining members. A one-argument call returns its input. With removal
+keys, `nil` and `false` yield `nil`. A set with an unknown comparator
+keeps lookup and `contains?` open even when the searched spelling differs
+from the known stored values.
+`set` accepts `nil` and proven ordinary vectors, fixed lists, and sets.
+For small collections of exact scalars it preserves membership evidence.
+If equivalent inputs have different JVM representations, Parenox leaves
+the stored member unresolved because traversal and lookup can return
+different objects. For an ordinary set with exact members, `count` and
+the emptiness checks are exact. `first`, `seq`, `next`, and `rest` can use
+the number of members without assuming an iteration order.
+Exact members of a small ordinary literal set remain available through
+source vars and EDN extern values. Changing membership can invalidate a
+dependent check even when the set's inferred element type stays the same.
 In a direct map destructuring binding, Clojure 1.13 evaluates the `:or`
 defaults before the value to destructure. A default can run even when its
 key is present or unused. A proven runtime failure in a default or initializer
@@ -724,6 +909,22 @@ inactive reader branches, and malformed input remain in the tree. The
 shared reader exposes semantic forms with original spans; checking does
 not build the syntax tree. `reader::parse`, `parse_with`, and `parse_edn`
 are available to Rust callers. None of these run tagged readers or macros.
+In Clojure source, physical CRLF and CR inside strings and character
+literals read as LF, matching JVM file loading. Escaped values and EDN data
+keep their original line endings. The CST retains the physical spelling.
+A tagged metadata descriptor preserves the tag and payload. Analysis reports
+the unchecked data reader call at that span.
+Selected splicing conditionals can splice the lists produced by quote and
+unquote prefixes, as well as collections returned directly by unquote in a
+syntax quote. Splices that need expansion of a general syntax quote or an
+anonymous function report `PNX9001`.
+A selected feature or splice that depends on the return
+value of a tagged reader reports `PNX9001` at the tagged form. This also covers
+tag names, symbolic number names and namespaced map prefixes supplied by a
+data reader. Read-time evaluation (`#=`) and the reader nesting limit report
+coverage gaps. EDN rejects `#=`.
+EDN tag dispatch follows Clojure/JVM 1.13 and requires an initial Latin-1
+letter after `#`. The remainder of the tag can contain Unicode.
 
 ## Editor integration
 

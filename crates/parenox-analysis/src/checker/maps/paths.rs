@@ -1,6 +1,6 @@
 //! Source-mapped key paths and nested map operations.
 use super::super::{Checker, Env, Value, calls::call_returns, metadata::MetadataTarget};
-use super::Lookup;
+use super::{LiteralContainer, Lookup, associate_literal_child, scalar_without_lookup};
 use crate::reader::{Form, Span};
 use crate::types::{MapSlot, MapType, Type};
 
@@ -33,9 +33,13 @@ impl Checker<'_> {
             let mut reachable = true;
             for form in keys {
                 let key = self.inspect_path(reachable, |checker| {
-                    checker
-                        .literal_map_key(form)
-                        .or_else(|| checker.read_map_key(form, env, name, !writing))
+                    if writing {
+                        checker
+                            .literal_map_key(form)
+                            .or_else(|| checker.read_map_key(form, env, name, false))
+                    } else {
+                        Some(checker.eval_path_key(form, env))
+                    }
                 });
                 if reachable {
                     match key {
@@ -111,9 +115,9 @@ impl Checker<'_> {
                         Type::Unknown
                     });
                 }
-                if !key.is_lookup_key(!writing) {
+                if writing && !key.is_lookup_key(false) {
                     self.unsupported(span, format!(
-                    "{name} analysis supports keyword and string keys; path item {} has type {}",
+                    "{name} analysis supports nil, boolean, character, keyword, string and symbol keys; path item {} has type {}",
                     index + 1,
                     key.inferred(),
                 ));
@@ -210,17 +214,10 @@ impl Checker<'_> {
         let mut value = self.infer(target, env);
         for (index, key) in keys.iter().enumerate() {
             let reachable = !value.stops_evaluation();
-            let ty = self.inspect_path(reachable, |checker| {
-                checker.read_map_key(key, env, "get-in", true)
-            });
+            let ty = self.inspect_path(reachable, |checker| checker.eval_path_key(key, env));
             if !reachable {
                 continue;
             }
-            let Some(ty) = ty else {
-                self.may_throw();
-                value = Value::new(Type::Unknown);
-                continue;
-            };
             if ty == Type::Never {
                 value = Value::new(Type::Never);
                 continue;
@@ -229,10 +226,40 @@ impl Checker<'_> {
                 self.may_throw();
             }
             let presence = (index == 0).then(|| env.presence(target, key)).flatten();
-            value = self.lookup_with_presence(&value, &ty, None, key.span, presence);
+            value = self
+                .unsupported_path_key(&value, &ty, key.span)
+                .unwrap_or_else(|| {
+                    self.lookup_with_presence(&value, &ty, None, key.span, presence)
+                });
             self.observe_lookup(key.without_metadata().span, &value);
         }
         value
+    }
+
+    fn eval_path_key(&mut self, form: &Form, env: &Env) -> Type {
+        if let Some(key) = self.literal_map_key(form) {
+            return key;
+        }
+        let key = self.infer(form, env);
+        if key.stops_evaluation() {
+            Type::Never
+        } else {
+            key.known
+        }
+    }
+
+    fn unsupported_path_key(&mut self, target: &Value, key: &Type, span: Span) -> Option<Value> {
+        (!matches!(target.known, Type::Set(_))
+            && !scalar_without_lookup(&target.known)
+            && !key.is_lookup_key(true)).then(|| {
+            self.unsupported(
+                span,
+                format!(
+                    "get-in analysis supports nil, boolean, character, keyword, string, symbol and known integer keys here, got {}",
+                    key.inferred()
+                ),
+            )
+        })
     }
 
     fn lookup_paths(
@@ -279,7 +306,11 @@ impl Checker<'_> {
             } else {
                 Lookup::Path(None)
             };
-            result = Some(self.lookup_value(result.as_ref().unwrap_or(value), key, mode, *span));
+            let target = result.as_ref().unwrap_or(value);
+            if let Some(gap) = self.unsupported_path_key(target, key, *span) {
+                return gap;
+            }
+            result = Some(self.lookup_value(target, key, mode, *span));
         }
         result.unwrap_or_else(|| value.clone())
     }
@@ -373,14 +404,7 @@ impl Checker<'_> {
         {
             return Value::new(Type::Unknown);
         }
-        Value::new(self.assoc_paths(
-            target.known,
-            &path,
-            &value.known,
-            target_span,
-            name,
-            presence,
-        ))
+        self.assoc_paths(target, &path, &value, target_span, name, presence)
     }
 
     pub(in crate::checker) fn assoc_in(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
@@ -413,70 +437,104 @@ impl Checker<'_> {
                 return Value::new(ty);
             }
         };
-        Value::new(self.assoc_paths(
-            target.known,
-            &path,
-            &value.known,
-            xs[1].span,
-            "assoc-in",
-            presence,
-        ))
+        self.assoc_paths(target, &path, &value, xs[1].span, "assoc-in", presence)
     }
 
     fn assoc_paths(
         &mut self,
-        target: Type,
+        target: Value,
         paths: &KeyPaths,
-        value: &Type,
+        value: &Value,
         span: Span,
         name: &str,
         presence: Option<bool>,
-    ) -> Type {
-        match paths {
-            KeyPaths::Single(path) => self.assoc_path(target, path, value, span, name, presence),
-            KeyPaths::Alternatives(paths) => Type::union(
-                paths
-                    .iter()
-                    .map(|path| self.assoc_path(target.clone(), path, value, span, name, presence)),
+    ) -> Value {
+        let value = (&value.known, value.literal_container.as_ref());
+        let (ty, proof) = match paths {
+            KeyPaths::Single(path) => self.assoc_path(
+                (target.known, target.literal_container.as_ref()),
+                path,
+                value,
+                span,
+                name,
+                presence,
             ),
-        }
+            KeyPaths::Alternatives(paths) => (
+                Type::union(paths.iter().map(|path| {
+                    self.assoc_path(
+                        (target.known.clone(), None),
+                        path,
+                        (value.0, None),
+                        span,
+                        name,
+                        presence,
+                    )
+                    .0
+                })),
+                None,
+            ),
+        };
+        let mut result = Value::new(ty);
+        result.literal_container = proof;
+        result
     }
 
     fn assoc_path(
         &mut self,
-        target: Type,
+        (target, origin): (Type, Option<&LiteralContainer>),
         path: &[(Type, Span)],
-        value: &Type,
+        value: (&Type, Option<&LiteralContainer>),
         span: Span,
         name: &str,
         presence: Option<bool>,
-    ) -> Type {
+    ) -> (Type, Option<LiteralContainer>) {
         if let Type::Union(parts) = target {
-            return Type::union(
-                parts
-                    .into_iter()
-                    .map(|part| self.assoc_path(part, path, value, span, name, presence)),
+            return (
+                Type::union(parts.into_iter().map(|part| {
+                    self.assoc_path((part, None), path, (value.0, None), span, name, presence)
+                        .0
+                })),
+                None,
             );
         }
         if presence == Some(true) && target == Type::Nil {
-            return Type::Never;
+            return (Type::Never, None);
         }
+        let ordinary = target == Type::Nil || matches!(origin, Some(LiteralContainer::Map(_)));
         let mut map = match self.assoc_map(target, span, name) {
             Ok(map) => map,
-            Err(ty) => return ty,
+            Err(ty) => return (ty, None),
         };
         let (key, key_span) = &path[0];
-        let ty = if path.len() == 1 {
-            value.clone()
+        let (ty, proof) = if path.len() == 1 {
+            (value.0.clone(), value.1.cloned())
         } else {
             let parent = self.assoc_parent(&map, key, *key_span, presence);
-            self.assoc_path(parent, &path[1..], value, *key_span, name, None)
+            let parent_origin = origin
+                .and_then(|origin| origin.map_field(key))
+                .filter(|proof| proof.matches_type(&parent));
+            self.assoc_path(
+                (parent, parent_origin),
+                &path[1..],
+                value,
+                *key_span,
+                name,
+                None,
+            )
         };
         if ty == Type::Never {
-            return Type::Never;
+            return (Type::Never, None);
         }
         map.associate(key, &ty);
-        Type::Map(map)
+        let proof = ordinary.then(|| {
+            let mut children = match origin {
+                Some(LiteralContainer::Map(children)) => children.clone(),
+                _ => None,
+            };
+            associate_literal_child(&mut children, key, &ty, proof.as_ref());
+            LiteralContainer::Map(children.filter(|children| !children.is_empty()))
+        });
+        (Type::Map(map), proof)
     }
 
     fn assoc_parent(

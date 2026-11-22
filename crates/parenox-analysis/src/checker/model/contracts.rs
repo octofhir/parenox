@@ -41,7 +41,7 @@ use super::{
 };
 use crate::checker::function_forms::{function_clauses, split_rest};
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, MAX_TYPE_PARAMETERS, Parameter, Parameters, Type};
+use crate::types::{Arity, ExtraFields, MAX_TYPE_PARAMETERS, Parameter, Parameters, Type};
 use crate::{ContractKind, ContractOrigin};
 
 impl Model {
@@ -206,7 +206,7 @@ impl Model {
             })
             .collect();
         let declared = if let Some(signature) = signature {
-            if !matches!(signature.without_metadata().kind, Kind::Quote(_)) {
+            if signature.quote_operand().is_none() {
                 self.error("PNX9001", signature.span, ":t/sig must be quoted data");
             }
             let Some(signatures) = self.parse_signatures(signature, source, &name, globals) else {
@@ -462,16 +462,24 @@ impl Model {
             |ty: &Type| leaf(ty) || parameters.iter().any(|p| ty.has_parameter_slot(p));
         let result_slot =
             |ty: &Type| value_slot(ty) || parameters.iter().any(|p| ty.has_nullable_parameter(p));
+        let callback_slot = |ty: &Type| {
+            matches!(ty, Type::Function(signatures)
+                if matches!(signatures.as_ref(), [callback] if callback.rest.is_none()
+                    && callback.parameters.is_none()
+                    && callback.args.iter().all(value_slot) && result_slot(&callback.ret)))
+        };
         if !result_slot(&signature.ret)
             || !signature.args.iter().all(|ty| {
                 value_slot(ty)
-                    || matches!(ty, Type::Function(signatures)
-                if matches!(signatures.as_ref(), [callback] if callback.rest.is_none()
-                    && callback.args.iter().all(value_slot) && result_slot(&callback.ret)))
+                    || callback_slot(ty)
+                    || matches!(ty, Type::Map(map)
+                        if matches!(map.extra, ExtraFields::Closed)
+                            && map.fields.values().all(|field| field.required
+                                && (leaf(&field.ty) || callback_slot(&field.ty))))
             })
         {
             self.error("PNX9001", span,
-                "A type parameter can appear directly, as a vector element, a dictionary key or value, a required map field, or in a nullable result");
+                "A type parameter can appear directly, as a vector element, a dictionary key or value, a required map field, in a supported callback position, or in a nullable result");
             return None;
         }
         let mut inputs = 0;

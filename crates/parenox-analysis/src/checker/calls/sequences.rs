@@ -2,7 +2,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::super::{Checker, LiteralContainer, Value, literal_vector_value};
+use super::super::{Checker, LiteralContainer, Value, exact_set_member, literal_vector_value};
+use super::literal_equality;
 use crate::Diagnostic;
 use crate::reader::Span;
 use crate::types::{ExtraFields, IntegerType, MAX_TUPLE_ITEMS, MapType, Type};
@@ -38,6 +39,19 @@ impl ReadSequence {
         }
     }
 
+    fn exact_set(self, members: &[Type]) -> Type {
+        if members.len() < 2 {
+            if matches!(self, Self::Rest) {
+                Type::empty_list()
+            } else {
+                self.fixed(members)
+            }
+        } else {
+            let member = Type::union(members.iter().cloned());
+            self.open(&member, members.len())
+        }
+    }
+
     fn list_result(self, result: Type) -> Type {
         if matches!(self, Self::Head) {
             result
@@ -61,17 +75,58 @@ pub(super) fn list_value(args: &[(Value, Span)]) -> Value {
         return Value::new(Type::List(Box::new(Type::union(items))));
     }
     let mut result = Value::new(Type::ListTuple(items.collect()));
-    if args
+    let children = args
         .iter()
         .any(|(value, _)| value.literal_container.is_some())
-    {
-        result.literal_container = Some(LiteralContainer::Positions(
+        .then(|| {
             args.iter()
                 .map(|(value, _)| value.literal_container.clone())
-                .collect(),
-        ));
-    }
+                .collect()
+        });
+    result.literal_container = Some(LiteralContainer::List(children));
     result
+}
+
+fn conj_exact_set(collection: &Value, items: &[(Value, Span)]) -> Option<Value> {
+    let previous = collection.exact_set_members()?;
+    if previous.len().saturating_add(items.len()) > MAX_TUPLE_ITEMS
+        || items
+            .iter()
+            .any(|(value, _)| exact_set_member(&value.known).is_none())
+    {
+        return None;
+    }
+    let mut members = previous.to_vec();
+    for (value, _) in items {
+        // PersistentHashSet.cons keeps the original object for an equal member.
+        if !members
+            .iter()
+            .any(|member| literal_equality(member, &value.known) == Some(true))
+        {
+            members.push(value.known.clone());
+        }
+    }
+    let mut result = Value::literal_set(members);
+    result.notes.clone_from(&collection.notes);
+    Some(result)
+}
+
+fn disj_exact_set(collection: &Value, keys: &[(Value, Span)]) -> Option<Value> {
+    let previous = collection.exact_set_members()?;
+    if keys.len() > MAX_TUPLE_ITEMS
+        || keys
+            .iter()
+            .any(|(value, _)| exact_set_member(&value.known).is_none())
+    {
+        return None;
+    }
+    let mut members = previous.to_vec();
+    for (key, _) in keys {
+        members.retain(|member| literal_equality(member, &key.known) != Some(true));
+    }
+    let mut result = Value::literal_set(members);
+    result.notes.clone_from(&collection.notes);
+    Some(result)
 }
 
 impl Checker<'_> {
@@ -111,6 +166,9 @@ impl Checker<'_> {
         if items.is_empty() {
             return collection.clone();
         }
+        if let Some(result) = conj_exact_set(collection, items) {
+            return result;
+        }
         let added: Vec<_> = items.iter().map(|(value, _)| value.known.clone()).collect();
         let result = self.conj_type(&collection.known, &added, *span);
         let mut result = Value::with_notes(result, collection.notes.clone());
@@ -134,6 +192,100 @@ impl Checker<'_> {
             self.may_throw();
         }
         result
+    }
+
+    pub(super) fn set_from_collection(&mut self, (input, span): &(Value, Span)) -> Value {
+        let items = match &input.known {
+            Type::Set(_) if input.is_literal_set() => return input.clone(),
+            Type::Nil => &[],
+            Type::ListTuple(items)
+                if matches!(input.literal_container, Some(LiteralContainer::List(_))) =>
+            {
+                items.as_ref()
+            }
+            Type::Tuple(items)
+                if matches!(input.literal_container, Some(LiteralContainer::Vector(_))) =>
+            {
+                items.as_ref()
+            }
+            Type::Unknown | Type::Never => return input.clone(),
+            _ => {
+                return self.unsupported(
+                    *span,
+                    "set analysis currently requires an ordinary vector, a fixed ordinary list, an ordinary set, or Nil",
+                );
+            }
+        };
+        if items.len() > MAX_TUPLE_ITEMS
+            || items.iter().any(|item| exact_set_member(item).is_none())
+        {
+            self.may_throw();
+            let mut result = Value::literal_set(items.to_vec());
+            result.notes.clone_from(&input.notes);
+            return result;
+        }
+        let mut members = Vec::new();
+        for item in items {
+            if let Some(previous) = members
+                .iter()
+                .find(|previous| literal_equality(previous, item) == Some(true))
+            {
+                if previous != item {
+                    // Transient construction can keep different objects for seq and lookup.
+                    return self.unsupported(
+                        *span,
+                        "set analysis cannot represent different stored classes for equivalent members",
+                    );
+                }
+            } else {
+                members.push(item.clone());
+            }
+        }
+        let mut result = Value::literal_set(members);
+        result.notes.clone_from(&input.notes);
+        result
+    }
+
+    pub(super) fn disj(&mut self, args: &[(Value, Span)]) -> Value {
+        let [(collection, span), keys @ ..] = args else {
+            unreachable!("disj needs a target");
+        };
+        if keys.is_empty() {
+            return collection.clone();
+        }
+        if let Some(result) = disj_exact_set(collection, keys) {
+            return result;
+        }
+        let start = self.diagnostics.len();
+        let result = self.disj_type(&collection.known, *span);
+        self.dedup_diagnostics(start);
+        Value::with_notes(result, collection.notes.clone())
+    }
+
+    fn disj_type(&mut self, collection: &Type, span: Span) -> Type {
+        match collection {
+            Type::Nil | Type::Bool(false) => Type::Nil,
+            Type::Never => Type::Never,
+            Type::Set(_) | Type::Unknown => {
+                self.may_throw();
+                collection.clone()
+            }
+            Type::Union(parts) => Type::union(parts.iter().map(|part| self.disj_type(part, span))),
+            Type::Bool(true) | Type::Integer(_) | Type::Key(_) | Type::Str(_) | Type::Char(_) => {
+                self.class_cast();
+                self.diagnostics.push(Diagnostic::type_mismatch(
+                    span,
+                    "clojure.core/disj",
+                    "Set, Nil or false".into(),
+                    collection.inferred().to_string(),
+                ));
+                Type::Never
+            }
+            _ => {
+                self.unsupported(span, "disj analysis requires a known Set, Nil or false")
+                    .known
+            }
+        }
     }
 
     pub(super) fn peek(&mut self, (collection, span): &(Value, Span)) -> Value {
@@ -220,7 +372,11 @@ impl Checker<'_> {
             result.narrow(result.known.clone().nilable());
             return result;
         }
-        let Some(empty) = collection_emptiness(&value.known) else {
+        let empty = value
+            .exact_set_members()
+            .map(|members| Type::Bool(members.is_empty()))
+            .or_else(|| collection_emptiness(&value.known));
+        let Some(empty) = empty else {
             self.diagnostics.push(Diagnostic::type_mismatch(
                 *span,
                 name,
@@ -255,6 +411,13 @@ impl Checker<'_> {
             "clojure.core/rest" => ReadSequence::Rest,
             _ => unreachable!(),
         };
+        if let Some(members) = value.exact_set_members() {
+            let mut result = Value::with_notes(operation.exact_set(members), value.notes.clone());
+            if matches!(operation, ReadSequence::Rest) && members.len() < 2 {
+                result.literal_container = Some(LiteralContainer::List(None));
+            }
+            return result;
+        }
         if matches!(operation, ReadSequence::Head) {
             if let (Type::Tuple(items), Some(LiteralContainer::Vector(_))) =
                 (&value.known, &value.literal_container)
@@ -276,24 +439,29 @@ impl Checker<'_> {
         }
         let result = self.read_sequence(operation, &value.known, name, span);
         if matches!(operation, ReadSequence::Head) {
+            if matches!(value.known, Type::Map(_)) {
+                return value.traversal_element(result);
+            }
             return value.position_value(result, 0);
         }
         let mut result = Value::with_notes(result, value.notes.clone());
-        if let Some(items) = value
+        let children = value
             .literal_container
             .as_ref()
             .and_then(LiteralContainer::child_positions)
-        {
-            let children = if matches!(operation, ReadSequence::Start) {
-                items.clone()
-            } else {
-                Arc::from(items.get(1..).unwrap_or_default())
-            };
-            let proof = LiteralContainer::Positions(children);
-            if proof.matches_type(&result.known) {
-                result.literal_container = Some(proof);
-            }
-        }
+            .map(|items| {
+                if matches!(operation, ReadSequence::Start) {
+                    items.clone()
+                } else {
+                    Arc::from(items.get(1..).unwrap_or_default())
+                }
+            });
+        let proof = if matches!(value.literal_container, Some(LiteralContainer::List(_))) {
+            Some(LiteralContainer::List(children))
+        } else {
+            children.map(LiteralContainer::Positions)
+        };
+        result.literal_container = proof.filter(|proof| proof.matches_type(&result.known));
         result
     }
 
@@ -597,6 +765,11 @@ fn counted_type(ty: &Type) -> Option<Type> {
 
 impl Checker<'_> {
     pub(super) fn count(&mut self, (value, span): &(Value, Span)) -> Value {
+        if let Some(members) = value.exact_set_members()
+            && let Ok(size) = i32::try_from(members.len())
+        {
+            return Value::new(Type::Integer(size));
+        }
         if let Some(size) = counted_type(&value.known) {
             return Value::new(size);
         }

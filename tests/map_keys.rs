@@ -125,3 +125,47 @@ fn preserves_fixed_string_fields_and_tracks_possible_dynamic_overwrites() {
     assert!(!duplicate.ok && !duplicate.complete, "{duplicate:#?}");
     assert_eq!(duplicate.diagnostics[0].code, "PNX9000");
 }
+
+#[test]
+fn numeric_assoc_requires_evidence_of_the_stored_key_class() {
+    let source = r#"
+        (defn abstract-map {:t/sig '[{1 keyword?} :-> map?]} [m]
+          (assoc m 1N :new))
+        (defn new-class {:t/sig '[:-> map?]} []
+          (assoc {1 :old} 2N :new))
+        (defn quoted-class {:t/sig '[:-> map?]} []
+          (assoc '{1N :old} 1 :new))
+    "#;
+    let report = Session::default().check("integer_keys.clj", source);
+    assert!(!report.complete);
+    let sites: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        sites,
+        [("PNX9001", "1N"), ("PNX9001", "2N"), ("PNX9001", "1")]
+    );
+}
+
+#[test]
+fn assoc_invalidates_a_child_that_may_be_replaced() {
+    let source = r#"
+        (defn updated {:t/sig '[{1 #{:hit}} boolean? :-> #{:hit}]} [row which]
+          (let [key (if which :nested :tag)]
+            (get (:nested (assoc {:nested {1 :hit}} key row)) 1N :missing)))
+    "#;
+    let report = Session::default().check("possible_update.clj", source);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.ok && report.complete);
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.actual.as_deref(), Some(":hit | :missing"));
+}

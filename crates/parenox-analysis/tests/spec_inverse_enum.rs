@@ -262,6 +262,78 @@ fn inverse_enums_require_an_earlier_unambiguous_loaded_table() {
 }
 
 #[test]
+fn literal_inversion_requires_a_checked_reader_prefix() {
+    let provider = Source {
+        path: "levels.clj",
+        source: r#"(ns demo.levels (:require [clojure.set :as set]))
+(def level->severity {:error 1 :warning 2 :info 3})
+#_:inert
+(def severity->level (set/map-invert level->severity))"#,
+    };
+    let consumer = Source {
+        path: "consumer.clj",
+        source: r#"(ns consumer (:require [demo.levels :as levels]))
+(defn level {:t/sig '[:-> #{:trace}]} [] (get levels/severity->level 1))"#,
+    };
+    let mut session = Session::default();
+    let baseline = session.check_project(&[consumer, provider], None);
+    let [finding] = baseline.files[0].diagnostics.as_slice() else {
+        panic!("{baseline:#?}");
+    };
+    assert!(baseline.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some(":error"));
+
+    let changed = provider
+        .source
+        .replace("#_:inert", "#_#probe/change :inert");
+    let inputs = [
+        consumer,
+        Source {
+            source: &changed,
+            ..provider
+        },
+    ];
+    let warm = session.check_project(&inputs, None);
+    let cold = Session::default().check_project(&inputs, None);
+    assert!(!warm.complete);
+    assert_eq!(warm.files[0].diagnostics.len(), 1, "{warm:#?}");
+    assert_eq!(warm.files[0].diagnostics[0].code, "PNX9004", "{warm:#?}");
+    let diagnostics = |report: &parenox_analysis::ProjectReport| {
+        report
+            .files
+            .iter()
+            .map(|file| serde_json::to_value(&file.diagnostics).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(diagnostics(&warm), diagnostics(&cold));
+    let restored = session.check_project(&[consumer, provider], None);
+    assert_eq!(diagnostics(&restored), diagnostics(&baseline));
+
+    let exported = session.export_externs(&[provider], &[]);
+    let edn = exported
+        .edn
+        .unwrap_or_else(|| panic!("{:#?}", exported.report));
+    assert!(
+        edn.contains("demo.levels/severity->level {:value {1 :error 2 :warning 3 :info}}"),
+        "{edn}"
+    );
+    let imported = Session::default().check_project_with_externs(
+        &[consumer],
+        &[Source {
+            path: "levels.edn",
+            source: &edn,
+        }],
+    );
+    let [imported] = imported.files[0].diagnostics.as_slice() else {
+        panic!("{imported:#?}");
+    };
+    assert_eq!(imported.code, finding.code);
+    assert_eq!(imported.actual, finding.actual);
+    assert_eq!(imported.span, finding.span);
+}
+
+#[test]
 fn inverse_enum_runtime_conformance_requires_the_registration_owner() {
     let provider = Source {
         path: "demo/inverse_enum.clj",

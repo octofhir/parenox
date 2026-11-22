@@ -73,6 +73,30 @@ fn zero_is_truthy_in_clojure() {
 }
 
 #[test]
+fn boolean_uses_jvm_cast_results_for_literals_contracts_and_apply() {
+    assert_ok(
+        "(defn f {:t/sig '[:-> (s/tuple #{false} #{false} #{true} #{true} #{true})]} []
+           [(boolean nil) (apply boolean [false]) (boolean 0) (boolean []) (boolean {})])
+         (defn from-nullable-false {:t/sig '[(s/nilable #{false}) :-> #{false}]} [v] (boolean v))
+         (defn from-any {:t/sig '[any? :-> boolean?]} [v] (boolean v))
+         (defn shadow {:t/sig '[:-> #{true}]} []
+           (let [boolean (fn [_] true)] (boolean false)))",
+    );
+
+    let wrong = source("(defn f {:t/sig '[:-> #{true}]} [] (boolean false))");
+    let report = Session::default().check("test.clj", &wrong);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("false"));
+    assert_eq!(
+        &wrong[finding.span.start.offset..finding.span.end.offset],
+        "(boolean false)"
+    );
+}
+
+#[test]
 fn or_preserves_falsey_nil_and_false_semantics() {
     assert_ok("(defn f {:t/sig '[:-> string?]} [] (or false nil \"value\"))");
 }
@@ -385,5 +409,6 @@ fn deeply_nested_input_is_rejected_without_overflowing_the_stack() {
     let text = format!("{}nil{}", "(".repeat(300), ")".repeat(300));
     let report = Session::default().check("test.clj", &text);
     assert!(!report.complete);
+    assert_eq!(report.diagnostics[0].code, "PNX9001");
     assert!(report.diagnostics[0].message.contains("nesting limit"));
 }

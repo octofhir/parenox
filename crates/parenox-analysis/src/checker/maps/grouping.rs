@@ -148,7 +148,7 @@ impl Checker<'_> {
             return self
                 .unsupported(
                     call.callback,
-                    "group-by currently supports keyword or string group keys",
+                    "group-by requires a supported scalar key type",
                 )
                 .known;
         }

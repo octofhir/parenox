@@ -138,14 +138,33 @@ impl MapSlot<'_> {
 
 impl Type {
     pub fn is_literal_map_key(&self) -> bool {
-        matches!(self, Self::Key(_) | Self::Str(_) | Self::Integer(_))
+        matches!(
+            self,
+            Self::Nil
+                | Self::Bool(_)
+                | Self::Char(_)
+                | Self::Key(_)
+                | Self::Str(_)
+                | Self::Sym(_)
+                | Self::Integer(_)
+        )
     }
 
     pub fn is_lookup_key(&self, allow_index: bool) -> bool {
         match self {
             Self::Union(parts) => parts.iter().all(|key| key.is_lookup_key(allow_index)),
             Self::Integer(_) => allow_index,
-            Self::String | Self::Keyword | Self::SpecKeyword | Self::Unknown | Self::Never => true,
+            Self::Integral(_) => allow_index && self.exact_long_value().is_some(),
+            Self::Boolean
+            | Self::Character
+            | Self::String
+            | Self::Keyword
+            | Self::SpecKeyword
+            | Self::Symbol
+            | Self::SimpleSymbol
+            | Self::QualifiedSymbol
+            | Self::Unknown
+            | Self::Never => true,
             key => key.is_literal_map_key(),
         }
     }
@@ -169,6 +188,13 @@ impl Type {
 }
 
 impl MapType {
+    pub fn dictionary_types(&self) -> Option<&[Type; 2]> {
+        match &self.extra {
+            ExtraFields::Typed(types) if self.fields.is_empty() => Some(types),
+            _ => None,
+        }
+    }
+
     pub fn emptiness(&self) -> Option<bool> {
         if self.fields.values().any(|field| field.required) {
             Some(false)

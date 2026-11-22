@@ -30,6 +30,38 @@ fn explicit_exceptions_preserve_data_and_terminate_the_path() {
 }
 
 #[test]
+fn evaluated_set_collisions_and_member_failures_stop_construction() {
+    let source = r#"
+(defn duplicate {:t/sig '[:-> #{:caught}]} []
+  (let [member :ready]
+    (try
+      (do #{member :ready} (inc "dead"))
+      (catch IllegalArgumentException _ :caught))))
+(defn member-failed {:t/sig '[:-> #{:caught}]} []
+  (let [member :ready]
+    (try
+      (do #{member :ready (throw nil)} (inc "dead"))
+      (catch NullPointerException _ :caught))))
+"#;
+    let report = Session::default().check("exceptions.clj", source);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2790");
+    assert_eq!(error.span.start.offset, source.find(":ready}").unwrap());
+    assert_eq!(
+        &source[error.span.start.offset..error.span.end.offset],
+        ":ready"
+    );
+
+    let valid = check("(let [member :ready] #{member :pending})", "t/any");
+    assert!(valid.ok && valid.complete, "{valid:#?}");
+    let rejected = check("#{(inc \"invalid\")}", "string?");
+    assert_eq!(rejected.diagnostics.len(), 1, "{rejected:#?}");
+    assert_eq!(rejected.diagnostics[0].code, "PNX2322");
+}
+
+#[test]
 fn nonreturning_arguments_keep_compiler_checks_in_later_forms() {
     for expression in [
         "(throw nil)",

@@ -70,6 +70,139 @@ fn successful_lookups_do_not_add_impossible_exception_paths() {
 }
 
 #[test]
+fn nested_set_paths_keep_present_falsey_members_and_eager_defaults() {
+    for (expression, expected) in [
+        ("(get-in {:choices #{nil}} [:choices nil])", "nil?"),
+        ("(get-in {:choices #{false}} [:choices false])", "#{false}"),
+        (
+            "(get-in {:choices #{false}} [:choices false] :fallback)",
+            "#{false}",
+        ),
+        (
+            "(let [path [:choices nil]] (get-in {:choices #{nil}} path :fallback))",
+            "nil?",
+        ),
+        (
+            r#"(try (get-in {:choices #{false}} [:choices false] (throw (ex-info "fallback" {})))
+                    (catch ExceptionInfo _ :throws))"#,
+            "#{:throws}",
+        ),
+    ] {
+        let report = check(expression, expected);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let gap = check("(get-in {:present 1} [[1]] :fallback)", "t/any");
+    assert!(!gap.complete);
+    assert_eq!(gap.diagnostics[0].code, "PNX9001");
+}
+
+#[test]
+fn scalar_map_keys_preserve_presence_and_lookup_values() {
+    for (expression, expected) in [
+        (
+            r#"(get {nil "stored" false nil \x 3} nil :missing)"#,
+            "string?",
+        ),
+        ("(contains? {false nil} false)", "#{true}"),
+        (
+            "(get-in {false {nil :stored}} [false nil] :missing)",
+            "#{:stored}",
+        ),
+        (r#"(let [k \x] (req! {k "stored"} \x))"#, "string?"),
+        (r#"(let [{x 7 :or {7 :fallback}} {}] x)"#, "#{:fallback}"),
+        (
+            "(req! (assoc {false :prior} nil :stored) nil)",
+            "#{:stored}",
+        ),
+        ("(get-in {:present 1} [nil] :fallback)", "#{:fallback}"),
+    ] {
+        let report = check(expression, expected);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn symbol_map_keys_distinguish_evaluation_from_quoted_data() {
+    for (expression, expected) in [
+        ("(req! {'demo/label :stored} 'demo/label)", "#{:stored}"),
+        ("(req! '{label :stored} 'label)", "#{:stored}"),
+        ("(get '{'label :stored} 'label :missing)", "#{:missing}"),
+        ("(get-in {'label {nil :stored}} ['label nil])", "#{:stored}"),
+        (
+            "(let [key 'label] (req! {key :stored} 'label))",
+            "#{:stored}",
+        ),
+        ("(contains? {'label nil} 'label)", "#{true}"),
+    ] {
+        let report = check(expression, expected);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn associative_indexed_reads_use_jvm_int_value() {
+    for (expression, expected) in [
+        ("(get [:first :second] 4294967297)", "#{:second}"),
+        (r#"(req! "AB" -4294967295N)"#, "char?"),
+        (
+            "(get-in {:items [:stored]} [:items 4294967296N] :missing)",
+            "#{:stored}",
+        ),
+        (r#"(contains? "hi" 4294967296N)"#, "#{true}"),
+        ("(int? (nth (find [42] 0N) 0))", "#{false}"),
+        ("(get {0 :stored} 4294967296 :missing)", "#{:missing}"),
+    ] {
+        let report = check(expression, expected);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+}
+
+#[test]
+fn proven_lookup_misses_keep_the_default_collection_evidence() {
+    for lookup in [
+        r#"(get {:occupied 1} :absent [["x"]])"#,
+        r#"(get nil [1 2] [["x"]])"#,
+        r#"(get [:occupied] 4 [["x"]])"#,
+        r#"(get false [1 2] [["x"]])"#,
+        r#"(get #{} :absent [["x"]])"#,
+    ] {
+        let report = check(
+            &format!("(mapv first {lookup})"),
+            r#"(clojure.spec.alpha/tuple #{"x"})"#,
+        );
+        assert!(report.ok && report.complete, "{lookup}: {report:#?}");
+    }
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+    (defn run {:t/sig '[(t/map {:opt {:maybe (s/tuple (s/tuple string?))}}) :-> any?]} [row]
+      (mapv first (get row :maybe [["fallback"]])))"#;
+    let report = Session::default().check("lookup.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX9001")
+    );
+}
+
+#[test]
+fn a_jvm_number_can_define_its_own_lookup() {
+    let source = r#"(defn read-mark {:t/sig '[number? :-> #{:fallback}]} [value]
+      (get value :mark :fallback))"#;
+    let report = Session::default().check("custom_lookup.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX9001");
+    assert!(finding.message.contains("ILookup"));
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        ":mark"
+    );
+}
+
+#[test]
 fn a_literal_get_in_lookup_can_throw_before_the_next_key_expression() {
     let source = r#"(ns demo)
         (defn inlined {:t/sig '[t/any :-> #{:later}]} [target]

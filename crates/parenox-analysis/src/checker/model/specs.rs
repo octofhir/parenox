@@ -186,7 +186,7 @@ impl Declarations {
                 .iter()
                 .filter_map(|(key, declaration)| {
                     enum_conversion(self, forms, source, &declaration.body)
-                        .or_else(|| live_lookup_conversion(self, forms, source, &declaration.body))
+                        .or_else(|| live_lookup_conversion(self, forms, &declaration.body))
                         .map(|conversion| (key.clone(), conversion))
                 })
                 .collect(),

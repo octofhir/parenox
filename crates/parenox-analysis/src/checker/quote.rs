@@ -1,17 +1,13 @@
 //! Clojure's quoted literals keep symbols and lists as data.
-use super::{Checker, Env, Value, collection_element, literal_vector_value, maps::MapLiteral};
+use super::{
+    Checker, Env, LiteralContainer, Value, collection_element, literal_vector_value,
+    maps::MapLiteral,
+};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{MAX_TUPLE_ITEMS, Type};
 
 pub(super) fn quoted_symbol(form: &Form) -> Option<&str> {
-    let target = match &form.without_metadata().kind {
-        Kind::Quote(target) => target.as_ref(),
-        Kind::List(forms) => match forms.as_slice() {
-            [head, target] if head.symbol() == Some("quote") => target,
-            _ => return None,
-        },
-        _ => return None,
-    };
+    let target = form.quote_operand()?;
     match &target.without_metadata().kind {
         Kind::Symbol(symbol) => Some(symbol),
         _ => None,
@@ -40,11 +36,23 @@ impl Checker<'_> {
             Kind::Symbol(_) | Kind::AnonymousArgument(_) => Type::SimpleSymbol,
             Kind::List(items) => {
                 let precise_symbols = precise_symbols && items.len() <= MAX_TUPLE_ITEMS;
-                let values = items
-                    .iter()
-                    .map(|item| self.quoted_data_with_symbols(item, precise_symbols).known)
-                    .collect();
-                sequence_type(values)
+                let mut types = Vec::with_capacity(items.len());
+                let mut proofs = None;
+                for item in items {
+                    let value = self.quoted_data_with_symbols(item, precise_symbols);
+                    if items.len() <= MAX_TUPLE_ITEMS
+                        && let Some(proof) = value.literal_container
+                    {
+                        proofs.get_or_insert_with(|| vec![None; items.len()])[types.len()] =
+                            Some(proof);
+                    }
+                    types.push(value.known);
+                }
+                let mut value = Value::new(sequence_type(types));
+                if items.len() <= MAX_TUPLE_ITEMS {
+                    value.literal_container = Some(LiteralContainer::List(proofs.map(Into::into)));
+                }
+                return value;
             }
             Kind::Vector(items) => {
                 let precise_symbols = precise_symbols && items.len() <= MAX_TUPLE_ITEMS;
@@ -64,23 +72,30 @@ impl Checker<'_> {
                 // Large inventories use a shared element type. Keeping a
                 // separate shape for every symbol also duplicates nested maps.
                 let precise_symbols = precise_symbols && items.len() <= MAX_TUPLE_ITEMS;
-                Type::Set(collection_element(
+                return Value::literal_set(
                     items
                         .iter()
                         .map(|item| self.quoted_data_with_symbols(item, precise_symbols).known)
                         .collect(),
-                ))
+                );
             }
-            Kind::Quote(item) => {
-                let quote = if precise_symbols {
-                    Type::Sym("quote".into())
+            Kind::Quote(_) | Kind::Unquote { .. } => {
+                let (prefix, item) = form.prefixed_list().unwrap();
+                let head = if precise_symbols {
+                    Type::Sym(prefix.into())
+                } else if prefix.contains('/') {
+                    Type::QualifiedSymbol
                 } else {
                     Type::SimpleSymbol
                 };
-                sequence_type(vec![
-                    quote,
-                    self.quoted_data_with_symbols(item, precise_symbols).known,
-                ])
+                let item = self.quoted_data_with_symbols(item, precise_symbols);
+                let children = item
+                    .literal_container
+                    .map(|proof| [None, Some(proof)].into());
+                return Value {
+                    literal_container: Some(LiteralContainer::List(children)),
+                    ..Value::new(sequence_type(vec![head, item.known]))
+                };
             }
             Kind::AnonymousFunction(_) => {
                 return self.unsupported(

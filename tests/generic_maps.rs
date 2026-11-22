@@ -1,4 +1,4 @@
-use parenox::{Report, Session, Source};
+use parenox::{DocumentHover, Report, Session, Source};
 
 const MODEL: &str = include_str!("../examples/map_boundary/src/map_boundary/model.clj");
 const RESPONSE: &str = include_str!("../examples/map_boundary/src/map_boundary/response.clj");
@@ -31,6 +31,258 @@ fn sources<'a>(response: &'a str, http: &'a str) -> [Source<'a>; 3] {
 
 fn check(extra: &str) -> Report {
     Session::default().check("examples.clj", &format!("{RESPONSE}\n{extra}"))
+}
+
+#[test]
+fn nested_callback_context_tracks_contract_edits_and_eager_map_fields() {
+    let consumer = Source {
+        path: "consumer.clj",
+        source: r#"(ns nested.consumer (:require [nested.options :as o]))
+            (defn use-options {:t/sig '[:-> string?]} []
+              (o/render {:stage {:run (fn [label] (do (inc label) "ok")) :guard "ready"}}
+                        (o/input)))"#,
+    };
+    let provider = Source {
+        path: "options.clj",
+        source: r#"(ns nested.options (:require [clojure.spec.alpha :as s]))
+            (s/def ::input string?)
+            (defn render
+              {:t/sig '[{:stage {:run (s/fspec :args (s/cat :value ::input) :ret string?)
+                                 :guard string?}} ::input :-> string?]}
+              [options value] ((get-in options [:stage :run]) value))
+            (defn input {:t/sig '[:-> ::input]} [] "text")"#,
+    };
+    let mut session = Session::default();
+    let original = session.check_project(&[consumer, provider], None);
+    let [finding] = original.files[0].diagnostics.as_slice() else {
+        panic!("{original:#?}");
+    };
+    assert!(original.complete, "{original:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &consumer.source[finding.span.start.offset..finding.span.end.offset],
+        "label"
+    );
+
+    let source = provider
+        .source
+        .replace("::input string?", "::input number?")
+        .replace("\"text\"", "7");
+    let edited = Source {
+        source: &source,
+        ..provider
+    };
+    let warm = session.check_project(&[consumer, edited], None);
+    let cold = Session::default().check_project(&[consumer, edited], None);
+    assert!(
+        warm.ok && warm.complete && cold.ok && cold.complete,
+        "{warm:#?}\n{cold:#?}"
+    );
+    let reverted = session.check_project(&[consumer, provider], None);
+    assert_eq!(
+        serde_json::to_value(&reverted.files[0].diagnostics).unwrap(),
+        serde_json::to_value(&original.files[0].diagnostics).unwrap()
+    );
+
+    let eager = consumer.source.replace("\"ready\"", "(subs nil 0)");
+    let report = session.check_project(
+        &[
+            Source {
+                source: &eager,
+                ..consumer
+            },
+            provider,
+        ],
+        None,
+    );
+    let [finding] = report.files[0].diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &eager[finding.span.start.offset..finding.span.end.offset],
+        "nil"
+    );
+}
+
+#[test]
+fn a_nested_fixed_callback_has_a_distinct_path_from_a_generic_result_callback() {
+    let source = r#"(ns demo.callback-paths (:require [clojure.spec.alpha :as s]))
+        (defn run
+          {:t/sig '(t/all [a b]
+            [{:run (s/fspec :args (s/cat :value a) :ret b)
+              :stage {:run (s/fspec :args (s/cat :value number?) :ret string?)}}
+             a :-> b])}
+          [options value]
+          (do ((get-in options [:stage :run]) 1) ((:run options) value)))
+        (defn render {:t/sig '[:-> number?]} []
+          (run {:run #(count %) :stage {:run (fn [n] (str (inc n)))}} "text"))"#;
+    let report = Session::default().check("callback-paths.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn map_callbacks_use_generic_input_types_from_other_arguments() {
+    let source = r#"(ns demo.generic-options (:require [clojure.spec.alpha :as s]))
+        (defn render
+          {:t/sig '(t/all [a] [{:run (s/fspec :args (s/cat :value a) :ret string?)} a :-> string?])}
+          [options value] ((:run options) value))
+        (defn length-text {:t/sig '[string? :-> string?]} [text]
+          (render {:run #(str (count %))} text))
+        (defn invalid {:t/sig '[string? :-> string?]} [text]
+          (let [key :run]
+            (render {key (fn [label] (do (inc label) "ok"))} text)))"#;
+    let mut session = Session::default();
+    let report = session.check("options.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "label"
+    );
+    let Some(DocumentHover::Local(hover)) =
+        session.document_hover_at("options.clj", finding.span.start.offset)
+    else {
+        panic!("Expected the callback parameter type at the operand");
+    };
+    assert_eq!(hover.inferred_type, "String");
+}
+
+#[test]
+fn an_eager_field_can_supply_the_type_for_a_callback_in_the_same_map() {
+    let source = r#"(ns demo.same-options (:require [clojure.spec.alpha :as s]))
+        (defn render
+          {:t/sig '(t/all [a] [{:run (s/fspec :args (s/cat :value a) :ret string?) :value a} :-> string?])}
+          [options] ((:run options) (:value options)))
+        (defn length-text {:t/sig '[string? :-> string?]} [text]
+          (render {:run #(str (count %)) :value text}))
+        (defn invalid {:t/sig '[string? :-> string?]} [text]
+          (render {:run (fn [label] (do (inc label) "ok")) :value text}))"#;
+    let report = Session::default().check("same-options.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "label"
+    );
+}
+
+#[test]
+fn a_required_map_callback_can_supply_the_calls_result_type() {
+    let source = r#"(ns demo.result-options (:require [clojure.spec.alpha :as s]))
+        (defn render
+          {:t/sig '(t/all [a b] [{:run (s/fspec :args (s/cat :value a) :ret b) :value a} :-> b])}
+          [options] ((:run options) (:value options)))
+        (defn count-text {:t/sig '[string? :-> number?]} [text] (count text))
+        (defn via-inline {:t/sig '[string? :-> number?]} [text]
+          (render {:run #(count %) :value text}))
+        (defn via-named {:t/sig '[string? :-> number?]} [text]
+          (render {:run count-text :value text}))
+        (defn use-renderer
+          {:t/sig '[(s/fspec :args (s/cat :options {:run (s/fspec :args (s/cat :x string?) :ret number?)
+                                                 :value string?})
+                             :ret number?)
+                    string? :-> number?]}
+          [renderer text]
+          (renderer {:run count-text :value text}))
+        (defn via-specialization {:t/sig '[string? :-> number?]} [text]
+          (use-renderer render text))
+        (defn wrong-result {:t/sig '[string? :-> string?]} [text]
+          (render {:run #(count %) :value text}))"#;
+    let report = Session::default().check("result-options.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert!(
+        finding
+            .message
+            .contains("Return value of demo.result-options/wrong-result")
+    );
+    assert_eq!(
+        finding.actual.as_deref(),
+        Some("JVM fixed-precision integer in the JVM int range")
+    );
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "(render {:run #(count %) :value text})"
+    );
+}
+
+#[test]
+fn map_callback_context_refreshes_after_an_input_contract_edit() {
+    let consumer = Source {
+        path: "consumer.clj",
+        source: r#"(ns demo.consumer (:require [demo.options :as o]))
+            (defn render {:t/sig '[:-> string?]} []
+              (o/render {:run (fn [label] (do (inc label) "ok"))} (o/input)))"#,
+    };
+    let provider = Source {
+        path: "options.clj",
+        source: r#"(ns demo.options (:require [clojure.spec.alpha :as s]))
+            (defn render
+              {:t/sig '(t/all [a] [{:run (s/fspec :args (s/cat :value a) :ret string?)} a :-> string?])}
+              [options value] ((:run options) value))
+            (defn input {:t/sig '[:-> string?]} [] "text")"#,
+    };
+    let changed = provider
+        .source
+        .replace(r#"[:-> string?]} [] "text""#, "[:-> number?]} [] 7");
+    let mut session = Session::default();
+    let original = [consumer, provider];
+    let warm = session.check_project(&original, None);
+    let [finding] = warm.files[0].diagnostics.as_slice() else {
+        panic!("{warm:#?}");
+    };
+    assert!(warm.complete, "{warm:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+
+    let edited = [
+        consumer,
+        Source {
+            source: &changed,
+            ..provider
+        },
+    ];
+    let accepted = session.check_project(&edited, None);
+    let cold = Session::default().check_project(&edited, None);
+    assert!(accepted.ok && accepted.complete, "{accepted:#?}");
+    assert!(cold.ok && cold.complete, "{cold:#?}");
+    let restored = session.check_project(&original, None);
+    assert_eq!(
+        serde_json::to_value(&restored.files[0].diagnostics).unwrap(),
+        serde_json::to_value(&warm.files[0].diagnostics).unwrap(),
+    );
+
+    let exported = Session::default().export_externs(&[provider], &[]);
+    let snapshot = exported
+        .edn
+        .unwrap_or_else(|| panic!("{:#?}", exported.report));
+    let imported = Session::default().check_project(
+        &[consumer],
+        Some(Source {
+            path: "options.edn",
+            source: &snapshot,
+        }),
+    );
+    let [imported_finding] = imported.files[0].diagnostics.as_slice() else {
+        panic!("{imported:#?}");
+    };
+    assert!(imported.complete, "{imported:#?}");
+    assert_eq!(imported_finding.code, finding.code);
+    assert_eq!(imported_finding.span, finding.span);
+    assert_eq!(imported_finding.actual, finding.actual);
 }
 
 #[test]
@@ -213,6 +465,8 @@ fn nested_parameters_and_extra_record_fields_are_rejected() {
         "(t/all [a] [a :-> (s/map-of (s/coll-of a :kind vector?) string?)])",
         "(t/all [a] [a :-> (s/map-of a (s/coll-of a :kind vector?))])",
         "(t/all [a] [a :-> {:nested {:row a}}])",
+        "(t/all [a b] [{:first (s/fspec :args (s/cat :x a) :ret b)
+                        :second (s/fspec :args (s/cat :x a) :ret b) :value a} :-> b])",
     ] {
         let report = check(&format!("(defn unsupported {{:t/sig '{signature}}} [x] x)"));
         let [diag] = report.diagnostics.as_slice() else {

@@ -97,7 +97,12 @@ pub struct Suggestion {
 
 impl From<reader::ReadError> for Diagnostic {
     fn from(error: reader::ReadError) -> Self {
-        Self::new("PNX9000", error.span, error.message)
+        match error.kind {
+            reader::ReadErrorKind::Invalid => Self::new("PNX9000", error.span, error.message),
+            reader::ReadErrorKind::Unchecked => {
+                Self::analysis_gap("PNX9001", error.span, error.message)
+            }
+        }
     }
 }
 

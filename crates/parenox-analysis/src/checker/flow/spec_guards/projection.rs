@@ -80,7 +80,7 @@ fn has_no_keyword_lookup(input: &Type) -> bool {
             | Type::Sym(_)
             | Type::Integer(_)
             | Type::Integral(IntegerType {
-                class: IntegerClass::Fixed,
+                class: IntegerClass::Fixed | IntegerClass::IntOrLong,
                 ..
             })
             | Type::Pattern

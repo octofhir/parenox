@@ -1,22 +1,76 @@
 //! Literal values declared as source vars.
 mod initializers;
+mod sets;
 mod strings;
 
-pub(super) use initializers::adjacent_literal_def;
-pub(super) use strings::LiteralStrScope;
+use std::sync::Arc;
 
-use super::super::{Checker, Env};
+pub(super) use initializers::{adjacent_literal_def, inert, prior_initializer};
+pub(super) use strings::LiteralInitializerScope;
+
+use super::super::{Checker, Env, LiteralContainer, Value};
 use super::{Declarations, Globals, Model};
 use crate::reader::{Form, Kind, Span};
-use crate::types::Type;
+use crate::types::{IntegerClass, Type};
+
+#[derive(Clone)]
+pub(super) enum CapturedInitializer {
+    Form(Arc<Form>),
+    PlatformLong(i64),
+}
+
+impl CapturedInitializer {
+    pub(super) fn from_form(form: Form) -> Self {
+        Self::Form(Arc::new(form))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct LiteralVar {
+pub(in crate::checker) struct LiteralVar {
     pub ty: Type,
     pub private: bool,
+    pub(in crate::checker) container: Option<LiteralContainer>,
+    pub(in crate::checker) pattern_captures: Option<u16>,
+}
+
+impl LiteralVar {
+    pub(super) fn unknown(private: bool) -> Self {
+        Self {
+            ty: Type::Unknown,
+            private,
+            container: None,
+            pattern_captures: None,
+        }
+    }
 }
 
 impl Model {
+    pub(super) fn withhold_literals_before_last_tag(
+        &mut self,
+        declarations: &Declarations,
+        forms: &[Form],
+    ) {
+        let end = declarations.completed_before_last_tag();
+        for &index in declarations
+            .literal_vars
+            .iter()
+            .take_while(|&&index| index < end)
+        {
+            let Kind::List(items) = &forms[index].without_metadata().kind else {
+                unreachable!("literal definitions are lists");
+            };
+            if let Some(name) = items.get(1).and_then(Form::symbol)
+                && let Some(value) = self
+                    .literals
+                    .get_mut(&format!("{}/{name}", self.namespace()))
+            {
+                value.ty = Type::Unknown;
+                value.container = None;
+                value.pattern_captures = None;
+            }
+        }
+    }
+
     pub(crate) fn literal_root_type(&self, name: &str) -> Option<&Type> {
         let ty = &self.literals.get(name)?.ty;
         (!ty.contains_unknown()).then_some(ty)
@@ -29,21 +83,31 @@ impl Model {
         source: &str,
         index: usize,
         initializer: &Form,
-    ) -> Option<Form> {
+    ) -> Option<CapturedInitializer> {
         if !matches!(
             initializer.kind,
             Kind::Symbol(_) | Kind::Vector(_) | Kind::Map(_)
         ) {
             return None;
         }
-        let (name, root) = initializers::adjacent_root(declarations, forms, source, index)?;
+        let (previous, name, root) = initializers::adjacent_root(
+            declarations,
+            forms,
+            source,
+            index,
+            &self.captured_initializers,
+        )?;
         let literal = self
             .literals
             .get(&format!("{}/{name}", self.names.namespace))?;
         if literal.ty.contains_unknown() {
             return None;
         }
-        initializers::substitute(initializer, name, root)
+        if let Some(captured) = self.captured_initializers.get(&previous) {
+            return matches!(&initializer.kind, Kind::Symbol(symbol) if symbol == name)
+                .then(|| captured.clone());
+        }
+        initializers::substitute(initializer, name, root).map(CapturedInitializer::from_form)
     }
 
     pub(super) fn definition_name(&mut self, symbol: &str, span: Span, op: &str) -> Option<String> {
@@ -81,7 +145,7 @@ impl Model {
         xs: &[Form],
         span: Span,
         source: &str,
-        expanded: Option<&Form>,
+        captured: Option<&CapturedInitializer>,
         globals: &Globals,
     ) {
         let Some(name_form) = xs.get(1) else {
@@ -117,13 +181,20 @@ impl Model {
         let private = name_form.metadata(":private").is_some_and(|value| {
             !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
         });
-        let ty = if dynamic {
+        let expanded = match captured {
+            Some(CapturedInitializer::Form(form)) => Some(form.as_ref()),
+            _ => initializer,
+        };
+        let value = if dynamic {
             self.unsupported_var(name_form.span, "Dynamic vars are not supported yet");
-            Type::Unknown
-        } else if let Some(value) = expanded.or(initializer) {
+            Value::new(Type::Unknown)
+        } else if let Some(CapturedInitializer::PlatformLong(value)) = captured {
+            // Both fields exceed int range and have the type of their decimal literals.
+            Value::new(Type::exact_long(*value, IntegerClass::IntOrLong))
+        } else if let Some(value) = expanded {
             if literal(value) {
                 let mut checker = Checker::new(self, globals, source);
-                let result = checker.infer(value, &Env::new()).known;
+                let result = checker.infer(value, &Env::new());
                 self.diagnostics.extend(checker.diagnostics);
                 result
             } else {
@@ -131,28 +202,30 @@ impl Model {
                     value.span,
                     "def analysis currently requires a literal initializer",
                 );
-                Type::Unknown
+                Value::new(Type::Unknown)
             }
         } else {
-            Type::Unknown
+            Value::new(Type::Unknown)
         };
-        self.insert_literal(symbol, name, ty, private, name_form.span);
+        let literal = LiteralVar {
+            ty: value.known,
+            private,
+            container: value.literal_container,
+            pattern_captures: value.pattern_captures,
+        };
+        self.insert_literal(symbol, name, literal, name_form.span);
     }
 
     pub(super) fn read_unchecked_var(&mut self, name_form: &Form, op: &str, private: bool) {
         let symbol = name_form.symbol().unwrap();
         if let Some(name) = self.definition_name(symbol, name_form.span, op) {
-            self.insert_literal(symbol, name, Type::Unknown, private, name_form.span);
+            self.insert_literal(symbol, name, LiteralVar::unknown(private), name_form.span);
         }
     }
 
-    fn insert_literal(&mut self, symbol: &str, name: String, ty: Type, private: bool, span: Span) {
+    fn insert_literal(&mut self, symbol: &str, name: String, literal: LiteralVar, span: Span) {
         self.names.refers.remove(symbol);
-        if self
-            .literals
-            .insert(name.clone(), LiteralVar { ty, private })
-            .is_some()
-        {
+        if self.literals.insert(name.clone(), literal).is_some() {
             self.error("PNX2790", span, format!("Duplicate var {name}"));
         }
     }
@@ -181,6 +254,7 @@ pub(super) fn literal(form: &Form) -> bool {
         | Kind::Utf16String(_)
         | Kind::Character(_)
         | Kind::Keyword(_)
+        | Kind::Regex { .. }
         | Kind::Quote(_) => true,
         Kind::Vector(forms) | Kind::Map(forms) | Kind::Set(forms) => forms.iter().all(literal),
         Kind::List(forms) => match forms.as_slice() {

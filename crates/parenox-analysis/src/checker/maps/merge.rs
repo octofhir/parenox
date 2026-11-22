@@ -1,5 +1,8 @@
 //! Right-biased and callback-based merging of map entries.
-use super::{Checker, Env, MAX_MAP_CALLBACK_CHECKS, Value};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use super::{Checker, Env, LiteralContainer, MAX_MAP_CALLBACK_CHECKS, Value};
 use crate::checker::calls::{PreparedCallable, call_returns};
 use crate::reader::{Form, Span};
 use crate::types::{ExtraFields, MapSlot, MapType, Type};
@@ -60,7 +63,11 @@ impl Checker<'_> {
                 break;
             }
         }
-        Value::new(result)
+        let mut result = Value::new(result);
+        if let Type::Map(map) = &result.known {
+            result.literal_container = literal_merge_proof(map, args);
+        }
+        result
     }
 
     pub(in crate::checker) fn merge_with(
@@ -288,4 +295,51 @@ fn alternatives(ty: &Type) -> &[Type] {
         Type::Union(parts) => parts,
         ty => std::slice::from_ref(ty),
     }
+}
+
+fn literal_merge_proof(map: &MapType, args: &[(Value, Span)]) -> Option<LiteralContainer> {
+    let ordinary = args.iter().all(|(value, _)| match &value.known {
+        Type::Nil => true,
+        Type::Map(map) => map.extra == ExtraFields::Closed && value.is_literal_map(),
+        _ => false,
+    });
+    if !ordinary {
+        return None;
+    }
+    let has_children = args.iter().any(|(value, _)| {
+        matches!(
+            value.literal_container,
+            Some(LiteralContainer::Map(Some(_)))
+        )
+    });
+    if !has_children {
+        return Some(LiteralContainer::Map(None));
+    }
+    let children: BTreeMap<_, _> = map
+        .fields
+        .iter()
+        .filter_map(|(key, field)| {
+            let proof = merged_child(args, key)?;
+            proof
+                .matches_type(&field.ty)
+                .then(|| (key.clone(), proof.clone()))
+        })
+        .collect();
+    Some(LiteralContainer::Map(
+        (!children.is_empty()).then(|| Arc::new(children)),
+    ))
+}
+
+fn merged_child<'a>(args: &'a [(Value, Span)], key: &Type) -> Option<&'a LiteralContainer> {
+    for (value, _) in args.iter().rev() {
+        if let Type::Map(map) = &value.known {
+            match map.slot(key) {
+                MapSlot::Present(_) => return value.literal_container.as_ref()?.map_field(key),
+                MapSlot::Absent => {}
+                // A right operand might overwrite the child with a different object.
+                MapSlot::Optional(_) | MapSlot::Undeclared => return None,
+            }
+        }
+    }
+    None
 }

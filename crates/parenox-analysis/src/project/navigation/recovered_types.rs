@@ -204,6 +204,8 @@ impl CheckedPrefix {
             };
             span.end.offset <= end
         });
+        read.inactive_namespace_forms
+            .retain(|form| form.span.end.offset <= end);
         Self::from_read(
             read,
             source,

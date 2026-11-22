@@ -1,21 +1,33 @@
 //! Detect reader-level duplicates whose equality is known from inert syntax.
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use super::numbers::integer_key;
-use super::{Form, Kind, ReadError, SymbolicNumber};
+use super::numbers::{NumberKey, double_key, number_key};
+use super::{Form, ImmediateSyntaxQuote, Kind, Position, ReadError, Reader, SymbolicNumber};
+
+type ResolveKeyword<'a> = dyn Fn(&str, Position) -> Option<String> + 'a;
+
+#[derive(Clone, Copy)]
+struct Context<'a, 'r> {
+    source: &'a str,
+    resolve_keyword: Option<&'r ResolveKeyword<'r>>,
+    compare_raw_auto_keywords: bool,
+}
+
+const DUPLICATE_KEY: &str = "Duplicate key in map literal";
+const DUPLICATE_ELEMENT: &str = "Duplicate element in set literal";
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Atom<'a> {
     Nil,
     Bool(bool),
     Character(char),
-    Integer(bool, u128),
-    Number(&'a str),
-    SymbolicNumber(SymbolicNumber),
+    Number(NumberKey<'a>),
+    NaN,
     String(&'a str),
     Utf16String(&'a [u16]),
     Symbol(&'a str),
-    Keyword(&'a str),
+    Keyword(Cow<'a, str>),
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -26,43 +38,121 @@ enum Literal<'a> {
     Set(Box<[Literal<'a>]>),
 }
 
-pub(super) fn check_set(values: &[Form], source: &str) -> Result<(), ReadError> {
+pub(super) fn check_set(
+    values: &[Form],
+    source: &str,
+    compare_raw_auto_keywords: bool,
+) -> Result<(), ReadError> {
     if values.len() >= 2 {
-        check(values.iter(), source, "Duplicate element in set literal")?;
+        check(
+            values.iter(),
+            Context {
+                source,
+                resolve_keyword: None,
+                compare_raw_auto_keywords,
+            },
+            DUPLICATE_ELEMENT,
+        )?;
     }
     Ok(())
 }
 
-pub(super) fn check_map(entries: &[Form], source: &str) -> Result<(), ReadError> {
+pub(super) fn check_map(
+    entries: &[Form],
+    source: &str,
+    compare_raw_auto_keywords: bool,
+) -> Result<(), ReadError> {
     if entries.len() >= 4 {
-        let keys = entries.as_chunks::<2>().0.iter().map(|[key, _]| key);
-        check(keys, source, "Duplicate key in map literal")?;
+        check(
+            map_keys(entries),
+            Context {
+                source,
+                resolve_keyword: None,
+                compare_raw_auto_keywords,
+            },
+            DUPLICATE_KEY,
+        )?;
     }
     Ok(())
+}
+
+/// Recheck a literal after a source consumer has established its namespace context.
+/// The supplied resolver is called only for auto-resolved keywords.
+pub fn check_resolved_collection(
+    form: &Form,
+    source: &str,
+    resolve_keyword: &ResolveKeyword<'_>,
+) -> Result<(), ReadError> {
+    let context = Context {
+        source,
+        resolve_keyword: Some(resolve_keyword),
+        compare_raw_auto_keywords: false,
+    };
+    match &form.kind {
+        Kind::Map(entries)
+            if entries.len() >= 4
+                && map_keys(entries).any(|key| may_need_resolution(key, source)) =>
+        {
+            check(map_keys(entries), context, DUPLICATE_KEY)
+        }
+        Kind::Set(values)
+            if values.len() >= 2 && values.iter().any(|key| may_need_resolution(key, source)) =>
+        {
+            check(values.iter(), context, DUPLICATE_ELEMENT)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn map_keys(entries: &[Form]) -> impl Iterator<Item = &Form> {
+    entries.as_chunks::<2>().0.iter().map(|[key, _]| key)
+}
+
+fn may_need_resolution(value: &Form, source: &str) -> bool {
+    let value = value.without_metadata();
+    match &value.kind {
+        Kind::Keyword(_) => {
+            source[value.span.start.offset..value.span.end.offset].starts_with("::")
+        }
+        Kind::List(_)
+        | Kind::Vector(_)
+        | Kind::Map(_)
+        | Kind::Set(_)
+        | Kind::Quote(_)
+        | Kind::Unquote { .. } => {
+            source[value.span.start.offset..value.span.end.offset].contains("::")
+        }
+        _ => false,
+    }
 }
 
 fn check<'a>(
     mut values: impl Iterator<Item = &'a Form>,
-    source: &'a str,
+    context: Context<'a, '_>,
     message: &'static str,
 ) -> Result<(), ReadError> {
     let mut atoms = BTreeSet::new();
     let mut first_composite = None;
     for value in values.by_ref() {
         let value = value.without_metadata();
-        if let Some(atom) = atom(value, source) {
+        if let Some(atom) = atom(value, context) {
             if !atoms.insert(atom) {
                 return Err(duplicate(value, message));
             }
         } else if matches!(
             value.kind,
-            Kind::List(_) | Kind::Vector(_) | Kind::Map(_) | Kind::Set(_) | Kind::Quote(_)
+            Kind::List(_)
+                | Kind::Vector(_)
+                | Kind::Map(_)
+                | Kind::Set(_)
+                | Kind::Quote(_)
+                | Kind::Unquote { .. }
         ) {
             if let Some(first) = first_composite {
                 return check_composites(
                     [first, value].into_iter().chain(values),
                     atoms,
-                    source,
+                    context,
                     message,
                 );
             }
@@ -76,15 +166,15 @@ fn check<'a>(
 fn check_composites<'a>(
     values: impl Iterator<Item = &'a Form>,
     mut atoms: BTreeSet<Atom<'a>>,
-    source: &'a str,
+    context: Context<'a, '_>,
     message: &'static str,
 ) -> Result<(), ReadError> {
     let mut composites = BTreeSet::new();
     for value in values {
         let value = value.without_metadata();
-        let inserted = if let Some(atom) = atom(value, source) {
+        let inserted = if let Some(atom) = atom(value, context) {
             atoms.insert(atom)
-        } else if let Some(key) = composite(value, source) {
+        } else if let Some(key) = composite(value, context) {
             composites.insert(key)
         } else {
             continue;
@@ -97,52 +187,68 @@ fn check_composites<'a>(
 }
 
 fn duplicate(value: &Form, message: &'static str) -> ReadError {
-    ReadError {
-        span: value.span,
-        message: message.into(),
-    }
+    ReadError::invalid(value.span, message)
 }
 
 #[inline(always)]
-fn atom<'a>(value: &'a Form, source: &'a str) -> Option<Atom<'a>> {
+fn atom<'a>(value: &'a Form, context: Context<'a, '_>) -> Option<Atom<'a>> {
     Some(match &value.kind {
         Kind::Nil => Atom::Nil,
         Kind::Bool(value) => Atom::Bool(*value),
         Kind::Character(value) => Atom::Character(*value),
         Kind::Number => {
-            let spelling = &source[value.span.start.offset..value.span.end.offset];
-            integer_key(spelling).map_or(Atom::Number(spelling), |(negative, magnitude)| {
-                Atom::Integer(negative, magnitude)
-            })
+            let spelling = &context.source[value.span.start.offset..value.span.end.offset];
+            Atom::Number(number_key(spelling))
         }
-        Kind::SymbolicNumber(value) => Atom::SymbolicNumber(*value),
+        Kind::SymbolicNumber(SymbolicNumber::PositiveInfinity) => {
+            Atom::Number(double_key(f64::INFINITY))
+        }
+        Kind::SymbolicNumber(SymbolicNumber::NegativeInfinity) => {
+            Atom::Number(double_key(f64::NEG_INFINITY))
+        }
+        Kind::SymbolicNumber(SymbolicNumber::NaN) => Atom::NaN,
         Kind::String(value) => Atom::String(value),
         Kind::Utf16String(value) => Atom::Utf16String(value),
         Kind::Symbol(value) | Kind::AnonymousArgument(value) => Atom::Symbol(value),
-        Kind::Keyword(value) => Atom::Keyword(value),
+        Kind::Keyword(name) if name.starts_with("::") => {
+            let spelling = match context.resolve_keyword {
+                Some(resolve) => Cow::Owned(resolve(name, value.span.start)?),
+                // A data reader can change what the same source spelling means.
+                None if context.compare_raw_auto_keywords => Cow::Borrowed(name.as_str()),
+                None => return None,
+            };
+            Atom::Keyword(spelling)
+        }
+        Kind::Keyword(name) => Atom::Keyword(Cow::Borrowed(name)),
+        Kind::SyntaxQuote(_) => match Reader::immediate_syntax_quote_value(value)? {
+            ImmediateSyntaxQuote::Nil => Atom::Nil,
+            ImmediateSyntaxQuote::Form(form) => {
+                // Names in a quoted result can still be qualified by a
+                // namespaced map. This comparison only handles other atoms.
+                return atom(form.without_metadata(), context)
+                    .filter(|atom| !matches!(atom, Atom::Symbol(_) | Atom::Keyword(_)));
+            }
+        },
         _ => return None,
     })
 }
 
-fn literal<'a>(value: &'a Form, source: &'a str) -> Option<Literal<'a>> {
+fn literal<'a>(value: &'a Form, context: Context<'a, '_>) -> Option<Literal<'a>> {
     let value = value.without_metadata();
     match &value.kind {
-        // NaN equality depends on the enclosing collection's lookup and equality rules.
-        Kind::SymbolicNumber(SymbolicNumber::NaN) => None,
-        Kind::AnonymousArgument(_) => None,
-        Kind::Keyword(name) if name.starts_with("::") => None,
-        _ => match atom(value, source) {
+        Kind::Keyword(name) if context.resolve_keyword.is_none() && name.starts_with("::") => None,
+        _ => match atom(value, context) {
             Some(atom) => Some(Literal::Atom(atom)),
-            None => composite(value, source),
+            None => composite(value, context),
         },
     }
 }
 
-fn composite<'a>(value: &'a Form, source: &'a str) -> Option<Literal<'a>> {
+fn composite<'a>(value: &'a Form, context: Context<'a, '_>) -> Option<Literal<'a>> {
     let children = |forms: &'a [Form]| {
         forms
             .iter()
-            .map(|form| literal(form, source))
+            .map(|form| literal(form, context))
             .collect::<Option<Vec<_>>>()
     };
     Some(match &value.kind {
@@ -154,7 +260,18 @@ fn composite<'a>(value: &'a Form, source: &'a str) -> Option<Literal<'a>> {
             }
             let mut entries = pairs
                 .iter()
-                .map(|[key, value]| Some((literal(key, source)?, literal(value, source)?)))
+                .map(|[key, value]| {
+                    // The reader reuses one boxed NaN, which compares equal
+                    // in sequences and sets. Map equality looks up its keys,
+                    // and array-map numeric key lookup does not match NaN.
+                    if matches!(
+                        key.without_metadata().kind,
+                        Kind::SymbolicNumber(SymbolicNumber::NaN)
+                    ) {
+                        return None;
+                    }
+                    Some((literal(key, context)?, literal(value, context)?))
+                })
                 .collect::<Option<Vec<_>>>()?;
             entries.sort_unstable();
             Literal::Map(entries.into())
@@ -164,10 +281,13 @@ fn composite<'a>(value: &'a Form, source: &'a str) -> Option<Literal<'a>> {
             items.sort_unstable();
             Literal::Set(items.into())
         }
-        Kind::Quote(item) => Literal::Sequence(Box::new([
-            Literal::Atom(Atom::Symbol("quote")),
-            literal(item, source)?,
-        ])),
+        Kind::Quote(_) | Kind::Unquote { .. } => {
+            let (symbol, item) = value.prefixed_list()?;
+            Literal::Sequence(Box::new([
+                Literal::Atom(Atom::Symbol(symbol)),
+                literal(item, context)?,
+            ]))
+        }
         _ => return None,
     })
 }

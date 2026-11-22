@@ -126,21 +126,25 @@ fn markup_contents_preserve_map_entries_and_check_registered_fields() {
 }
 
 #[test]
-fn mixed_sets_keep_their_custom_conformance_gap() {
+fn mixed_sets_conform_only_their_truthy_members() {
     let body = r#"
 (s/def ::mixed #{"markdown" nil false ::s/invalid})
-(defn unchecked {:t/sig '[:-> any?]} [] (s/conform ::mixed "markdown"))
+(defn checked {:t/sig '[:-> (s/tuple #{"markdown"} #{::s/invalid})]} []
+  [(s/conform ::mixed "markdown") (s/conform ::mixed false)])
 "#;
     let source = format!("{}{body}", specs());
     let report = Session::default().check("markup_content.clj", &source);
-    let [finding] = report.diagnostics.as_slice() else {
-        panic!("{report:#?}");
-    };
-    assert_eq!(finding.code, "PNX9001", "{finding:#?}");
-    assert!(finding.message.contains("supported conversion"));
-    assert_eq!(
-        &source[finding.span.start.offset..finding.span.end.offset],
-        "::mixed"
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let unsupported = source.replace("nil false ::s/invalid", "[:markdown]");
+    let report = Session::default().check("markup_content.clj", &unsupported);
+    assert!(!report.complete, "{report:#?}");
+    assert!(
+        report.diagnostics.iter().any(|finding| {
+            finding.code == "PNX9001"
+                && &unsupported[finding.span.start.offset..finding.span.end.offset] == "[:markdown]"
+        }),
+        "{report:#?}"
     );
 }
 

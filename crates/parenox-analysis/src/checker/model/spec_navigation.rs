@@ -74,10 +74,7 @@ impl Declarations {
 }
 
 fn signature_type_at(form: &Form, offset: usize) -> Option<&Form> {
-    let Kind::Quote(quoted) = &form.without_metadata().kind else {
-        return None;
-    };
-    let form = quoted.without_metadata();
+    let form = form.quote_operand()?.without_metadata();
     let (Kind::Vector(items) | Kind::List(items)) = &form.kind else {
         return None;
     };

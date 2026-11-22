@@ -90,6 +90,38 @@ impl Type {
         })))
     }
 
+    /// Possible stored values matching a lookup in an ordinary hash set.
+    pub fn hash_set_member_type(&self, query: &Type) -> Type {
+        if matches!(self, Type::Never) || matches!(query, Type::Never) {
+            return Type::Never;
+        }
+        let (Some(stored), Some(queries)) = (scalar_members(self), scalar_members(query)) else {
+            // Equality can cross different collection representations, e.g.
+            // persistent lists and vectors. Keep the stored element bound.
+            return self.clone();
+        };
+        if stored.len().saturating_mul(queries.len()) > 256 {
+            return self.clone();
+        }
+        let numeric = |ty: &Type| {
+            matches!(
+                ty,
+                Type::Number | Type::Integral(_) | Type::Integer(_) | Type::NonIntegral
+            )
+        };
+        Type::union(stored.iter().flat_map(|element| {
+            queries.iter().filter_map(move |key| {
+                if numeric(element) && numeric(key) {
+                    // Equality can cross JVM integer classes. Returning the
+                    // searched key would lose the stored representation.
+                    element.key_overlaps(key).then(|| element.clone())
+                } else {
+                    element.known_intersection(key)
+                }
+            })
+        }))
+    }
+
     pub fn compatibility(&self, expected: &Type) -> Compatibility {
         use Compatibility::{Mismatch, Proven, Unproven};
         match (self, expected) {

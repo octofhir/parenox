@@ -2,17 +2,20 @@
 use crate::checker::Checker;
 use crate::types::{IntegerClass, IntegerType, Type};
 
+pub(in crate::checker) fn identifier_name(spelling: &str) -> &str {
+    let spelling = spelling.strip_prefix(':').unwrap_or(spelling);
+    spelling
+        .split_once('/')
+        .filter(|(namespace, _)| !namespace.is_empty())
+        .map_or(spelling, |(_, name)| name)
+}
+
 impl Checker<'_> {
     pub(in crate::checker) fn name_result(&mut self, input: &Type) -> Type {
         match input {
             Type::Never | Type::Str(_) | Type::String => input.clone(),
             Type::Key(identifier) | Type::Sym(identifier) => {
-                let spelling = identifier.strip_prefix(':').unwrap_or(identifier);
-                let name = spelling
-                    .split_once('/')
-                    .filter(|(namespace, _)| !namespace.is_empty())
-                    .map_or(spelling, |(_, name)| name);
-                Type::Str(name.to_owned())
+                Type::Str(identifier_name(identifier).to_owned())
             }
             Type::Keyword | Type::SpecKeyword => Type::String,
             Type::Symbol | Type::SimpleSymbol | Type::QualifiedSymbol => Type::String.nilable(),
@@ -26,7 +29,7 @@ impl Checker<'_> {
             | Type::Char(_)
             | Type::Integer(_)
             | Type::Integral(IntegerType {
-                class: IntegerClass::Fixed,
+                class: IntegerClass::Fixed | IntegerClass::IntOrLong,
                 ..
             }) => {
                 self.class_cast();

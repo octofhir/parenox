@@ -96,3 +96,18 @@ fn open_apply_does_not_assume_an_override_is_present() {
     assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
     assert_eq!(report.diagnostics[0].code, "PNX9001");
 }
+
+#[test]
+fn the_right_operand_can_replace_a_proven_child_with_an_abstract_map() {
+    let source = r#"
+        (defn merged {:t/sig '[{1 #{:hit}} :-> #{:hit}]} [row]
+          (get (:nested (merge {:nested {1 :hit}} {:nested row})) 1N :missing))
+    "#;
+    let report = Session::default().check("unknown_child.clj", source);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.ok && report.complete);
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.actual.as_deref(), Some(":hit | :missing"));
+}

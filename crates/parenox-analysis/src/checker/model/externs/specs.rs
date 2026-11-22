@@ -265,7 +265,7 @@ impl SnapshotWriter {
     fn integer_enum_table(&mut self, entries: &[(Type, Type)]) -> Result<(), super::EncodeError> {
         self.nested(1, "{", "}", |out| {
             for (index, (key, value)) in entries.iter().enumerate() {
-                let Type::Integer(code) = key else {
+                let Some(code) = key.exact_integer_value() else {
                     return Err(super::EncodeError::Unsupported(
                         "Expected a fixed integer key",
                     ));

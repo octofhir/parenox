@@ -1,6 +1,40 @@
 use parenox::{Session, Source};
 
 #[test]
+fn known_core_vars_without_a_model_report_a_coverage_gap() {
+    let source = r#"
+        (ns demo (:refer-clojure :exclude [keyword] :rename {map-indexed indexed}))
+        (defn use-core {:t/sig '[:-> any?]} []
+          [clojure.core/keyword (indexed :x [{:x 1}])])
+        (defn excluded {:t/sig '[:-> any?]} [] (keyword "a"))
+        (defn shadowed {:t/sig '[:-> number?]} []
+          (let [indexed (fn [x] (inc x))] (indexed 10)))
+    "#;
+    let report = Session::default().check("core.clj", source);
+    assert!(!report.complete);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let span = diagnostic.span;
+            (
+                diagnostic.code.as_str(),
+                &source[span.start.offset..span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX9001", "clojure.core/keyword"),
+            ("PNX9001", "indexed"),
+            ("PNX2304", "keyword"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn clojure_core_referrals_respect_exclusions_renames_and_local_vars() {
     let good = include_str!("../examples/core_imports.clj");
     let report = Session::default().check("core_imports.clj", good);

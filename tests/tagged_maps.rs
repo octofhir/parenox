@@ -72,7 +72,7 @@ fn partial_case_reports_the_unhandled_known_tag() {
 #[test]
 fn missing_nil_and_false_have_different_guard_behavior() {
     let report = check(
-        "(s/def :legacy/kind #{nil false})
+        "(s/def :legacy/kind (s/nilable false?))
          (s/def :legacy/value number?)
          (s/def ::legacy (s/keys :opt-un [:legacy/kind] :req-un [:legacy/value]))
          (s/def ::with-legacy (s/or :note ::note :legacy ::legacy))
@@ -137,7 +137,7 @@ fn copied_owners_and_projections_keep_the_original_binding_through_shadowing() {
 fn presence_and_truthiness_refine_captured_fields_independently() {
     let report = check(
         "(s/def :clean/path string?)
-         (s/def :flag/path (s/nilable (s/or :value string? :disabled #{false})))
+         (s/def :flag/path (s/nilable (s/or :value string? :disabled false?)))
          (s/def ::clean (s/keys :opt-un [:clean/path]))
          (s/def ::flag (s/keys :opt-un [:flag/path]))
          (defn nil-title {:t/sig '[nil? :-> string?]} [_] \"untitled\")
@@ -185,7 +185,7 @@ fn destructured_fields_share_the_saved_map_even_without_an_as_binding() {
 }
 
 #[test]
-fn defaults_and_sequence_conversion_do_not_supply_a_map_selector() {
+fn defaults_do_not_refine_the_saved_map() {
     let fallback = check(
         "(s/def ::path (s/nilable string?))
          (s/def ::ref (s/keys :opt-un [::path]))
@@ -199,17 +199,17 @@ fn defaults_and_sequence_conversion_do_not_supply_a_map_selector() {
     assert!(fallback.complete);
     assert_eq!(diagnostic.code, "PNX2322");
     assert_eq!(diagnostic.actual.as_deref(), Some("Nil | String"));
+}
 
+#[test]
+fn sequence_conversion_uses_a_separate_saved_value() {
     let converted = check(
-        "(defn from-pairs {:t/sig '[:-> map?]} []
-           (let [{:as saved} (list :path \"ok\")] saved))",
+        "(defn from-pairs {:t/sig '[:-> (s/tuple #{:path} string?)]} []
+           (let [input (list :path \"ok\")
+                 {:as saved} input]
+             [(first input) (subs (:path saved) 0)]))",
     );
-    let [diagnostic] = converted.diagnostics.as_slice() else {
-        panic!("{converted:#?}");
-    };
-    assert!(!converted.complete);
-    assert_eq!(diagnostic.code, "PNX9001");
-    assert!(diagnostic.message.contains("sequence inputs"));
+    assert!(converted.ok && converted.complete, "{converted:#?}");
 }
 
 #[test]

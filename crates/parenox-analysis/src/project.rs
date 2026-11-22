@@ -233,23 +233,31 @@ impl FileCache {
                 conditionals,
                 source.contains(MARKER).then_some(MARKER),
             ),
-            FileKind::Externs => reader::read_for_check(source, conditionals, None),
+            FileKind::Externs => reader::read_externs_for_check(source),
         };
-        let reader_failed = read_error.is_some();
-        let parsed = match read_error {
+        let earlier_error = read_error
+            .as_ref()
+            .filter(|_| kind == FileKind::Source)
+            .and_then(|first| {
+                Declarations::earlier_reader_error(source, &mut read).filter(|error| error != first)
+            });
+        let reader_failed = read_error.is_some() && earlier_error.is_none();
+        let parsed = match earlier_error.or(read_error) {
             Some(error) => Err(error),
             None if kind == FileKind::Source => {
                 Declarations::read_source(source, &mut read).map(Some)
             }
             None => match read.namespace_tokens.first() {
-                Some(reader::NamespaceToken::Keyword(span)) => Err(reader::ReadError {
-                    span: *span,
-                    message: "Auto-resolved keywords are invalid in EDN externs".into(),
-                }),
-                Some(reader::NamespaceToken::Map { marker, .. }) => Err(reader::ReadError {
-                    span: *marker,
-                    message: "Auto-resolved maps are invalid in EDN externs".into(),
-                }),
+                Some(reader::NamespaceToken::Keyword(span)) => Err(reader::ReadError::invalid(
+                    *span,
+                    "Auto-resolved keywords are invalid in EDN externs",
+                )),
+                Some(reader::NamespaceToken::Map { marker, .. }) => {
+                    Err(reader::ReadError::invalid(
+                        *marker,
+                        "Auto-resolved maps are invalid in EDN externs",
+                    ))
+                }
                 None => Ok(None),
             },
         };
@@ -271,11 +279,11 @@ impl FileCache {
                     if !reader_failed {
                         // Preserve the valid prefix when namespace validation fails.
                         read.forms
-                            .retain(|form| form.span.end.offset <= error.span.start.offset);
+                            .truncate(read.completed_before(error.span.start.offset).len());
                     }
                     if !read.forms.is_empty() {
                         self.navigation_fallback = Some(Box::new(NavigationFallback {
-                            declarations: Declarations::read(&read.forms),
+                            declarations: Declarations::read_source_declarations(&read),
                             forms: read.forms,
                             checked_prefix: OnceLock::new(),
                             recovered_keywords: OnceLock::new(),

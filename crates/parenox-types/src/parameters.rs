@@ -52,11 +52,23 @@ pub struct InputWitness<'a> {
 
 pub struct CallbackWitness<'a> {
     pub index: usize,
+    pub map_key: Option<&'a Type>,
     pub signature: &'a Signature,
     slot: ParameterSlot<'a>,
 }
 
 impl CallbackWitness<'_> {
+    pub fn callback_type<'a>(&self, argument: &'a Type) -> Option<&'a Type> {
+        let Some(key) = self.map_key else {
+            return Some(argument);
+        };
+        let Type::Map(map) = argument else {
+            return None;
+        };
+        let field = map.fields.get(key)?;
+        field.value_constraint().filter(|_| field.required)
+    }
+
     pub fn evidence<'a>(&self, result: &'a Type) -> Option<Cow<'a, Type>> {
         self.slot.evidence(result)
     }
@@ -197,7 +209,7 @@ impl Type {
     }
 
     pub fn has_parameter_slot(&self, parameter: &Parameter) -> bool {
-        self.parameter_slot(parameter).is_some()
+        self.parameter_slot(parameter, false).is_some()
     }
 
     pub fn has_nullable_parameter(&self, parameter: &Parameter) -> bool {
@@ -215,7 +227,11 @@ impl Type {
         }
     }
 
-    fn parameter_slot(&self, parameter: &Parameter) -> Option<ParameterSlot<'_>> {
+    fn parameter_slot(
+        &self,
+        parameter: &Parameter,
+        allow_callback_fields: bool,
+    ) -> Option<ParameterSlot<'_>> {
         match self {
             Self::Parameter(found) if found.as_ref() == parameter => Some(ParameterSlot::Direct),
             Self::Vector(element) if element.is_parameter(parameter) => {
@@ -242,6 +258,7 @@ impl Type {
                     if map.fields.values().all(|field| {
                         field.required
                             && (matches!(field.ty, Self::Parameter(_))
+                                || (allow_callback_fields && matches!(field.ty, Self::Function(_)))
                                 || !field.ty.contains_parameter())
                     }) =>
                 {
@@ -285,7 +302,7 @@ impl Type {
                     }
                 }
                 for field in map.fields.values_mut() {
-                    if matches!(field.ty, Self::Parameter(_)) {
+                    if matches!(field.ty, Self::Parameter(_) | Self::Function(_)) {
                         field.ty = field.ty.substitute(replacements);
                     }
                 }
@@ -360,8 +377,9 @@ impl Signature {
                 .ok_or(Compatibility::Unproven)?;
             // A fixed, monomorphic callback argument can witness the output.
             // Do not recursively infer a generic callback inside another.
-            let nested = expected.args[output_source.index]
-                .signature_at(output_source.signature.arity())
+            let nested = output_source
+                .callback_type(&expected.args[output_source.index])
+                .and_then(|ty| ty.signature_at(output_source.signature.arity()))
                 .filter(|sig| sig.parameters.is_none());
             if let Some(evidence) = nested.and_then(|sig| output_source.evidence(&sig.ret)) {
                 result = result.min(output_parameter.check_bound(&evidence));
@@ -403,7 +421,7 @@ impl Signature {
             })
             .or_else(|| {
                 self.args.iter().enumerate().find_map(|(index, ty)| {
-                    ty.parameter_slot(parameter)
+                    ty.parameter_slot(parameter, true)
                         .map(|slot| InputWitness { index, slot })
                 })
             })
@@ -411,7 +429,21 @@ impl Signature {
 
     pub fn output_callback(&self, output: &Parameter) -> Option<CallbackWitness<'_>> {
         self.args.iter().enumerate().find_map(|(index, ty)| {
-            let Type::Function(signatures) = ty else {
+            let (callback, map_key) = match ty {
+                Type::Map(map) if matches!(map.extra, ExtraFields::Closed) => {
+                    let mut fields = map
+                        .fields
+                        .iter()
+                        .filter(|(_, field)| field.ty.mentions_parameter(output));
+                    let (key, field) = fields.next()?;
+                    if !field.required || fields.next().is_some() {
+                        return None;
+                    }
+                    (field.value_constraint()?, Some(key))
+                }
+                _ => (ty, None),
+            };
+            let Type::Function(signatures) = callback else {
                 return None;
             };
             let [callback] = signatures.as_ref() else {
@@ -420,9 +452,10 @@ impl Signature {
             if callback.rest.is_some() {
                 return None;
             }
-            let slot = callback.ret.parameter_slot(output)?;
+            let slot = callback.ret.parameter_slot(output, false)?;
             Some(CallbackWitness {
                 index,
+                map_key,
                 signature: callback,
                 slot,
             })

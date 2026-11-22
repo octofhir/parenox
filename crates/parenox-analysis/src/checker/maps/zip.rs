@@ -1,11 +1,17 @@
 //! Ordered map construction from two sequence views.
 use std::collections::BTreeMap;
 
-use super::super::{Checker, Value, calls::iteration_may_throw};
+use super::super::{Checker, LiteralContainer, Value, calls::iteration_may_throw};
+use super::{equivalent_integer_map_key, unresolved_integer_key_class};
 use crate::reader::Span;
-use crate::types::{ExtraFields, Field, MapType, Type};
+use crate::types::{ExtraFields, Field, MapSlot, MapType, Type};
 
 const MAX_ZIP_ALTERNATIVES: usize = 64;
+
+enum ZipError {
+    UnsupportedKey,
+    UnknownKeyClass,
+}
 
 enum ZipInput<'a> {
     Fixed(&'a [Type]),
@@ -71,16 +77,28 @@ impl Checker<'_> {
                 else {
                     return Value::new(Type::Unknown);
                 };
-                let Some(map) = zipped_map(keys, values) else {
-                    return self.unsupported(
-                        *keys_span,
-                        "zipmap currently supports keyword or string keys",
-                    );
+                let map = match zipped_map(keys, values) {
+                    Ok(map) => map,
+                    Err(error) => {
+                        let message = match error {
+                            ZipError::UnsupportedKey => {
+                                "zipmap analysis requires supported scalar map keys"
+                            }
+                            ZipError::UnknownKeyClass => {
+                                "zipmap cannot determine the stored class of an equivalent integer key"
+                            }
+                        };
+                        return self.unsupported(*keys_span, message);
+                    }
                 };
                 results.push(Type::Map(map));
             }
         }
-        Value::new(Type::union(results))
+        let mut result = Value::new(Type::union(results));
+        if matches!(&result.known, Type::Map(map) if map.extra == ExtraFields::Closed) {
+            result.literal_container = Some(LiteralContainer::Map(None));
+        }
+        result
     }
 }
 
@@ -91,7 +109,7 @@ fn alternatives(ty: &Type) -> &[Type] {
     }
 }
 
-fn zipped_map(keys: ZipInput<'_>, values: ZipInput<'_>) -> Option<MapType> {
+fn zipped_map(keys: ZipInput<'_>, values: ZipInput<'_>) -> Result<MapType, ZipError> {
     let lengths = (keys.len(), values.len());
     let pairs = match lengths {
         (Some(keys), Some(values)) => keys.min(values),
@@ -107,8 +125,14 @@ fn zipped_map(keys: ZipInput<'_>, values: ZipInput<'_>) -> Option<MapType> {
     for index in 0..pairs {
         let key = keys.at(index);
         let value = values.at(index);
-        if !supported_key(key) {
-            return None;
+        if !key.is_lookup_key(true) || key.contains_unknown() {
+            return Err(ZipError::UnsupportedKey);
+        }
+        let address = equivalent_integer_map_key(key)
+            .filter(|address| matches!(map.slot(address), MapSlot::Present(_)));
+        let key = address.as_ref().unwrap_or(key);
+        if unresolved_integer_key_class(&map, key) {
+            return Err(ZipError::UnknownKeyClass);
         }
         let required = index == 0 || matches!(lengths, (Some(_), Some(_)));
         if required || !key.is_literal_map_key() {
@@ -122,13 +146,5 @@ fn zipped_map(keys: ZipInput<'_>, values: ZipInput<'_>) -> Option<MapType> {
             map = map.merge(&optional);
         }
     }
-    Some(map)
-}
-
-fn supported_key(key: &Type) -> bool {
-    match key {
-        Type::Union(parts) => parts.iter().all(supported_key),
-        Type::Key(_) | Type::Str(_) | Type::Keyword | Type::SpecKeyword | Type::String => true,
-        _ => false,
-    }
+    Ok(map)
 }

@@ -82,7 +82,7 @@ fn prove(
     local_vars: &BTreeSet<&str>,
 ) -> Result<VerifiedGuard, Box<Diagnostic>> {
     let invalid = |message| error(claim.span, message);
-    let Kind::Quote(data) = &claim.without_metadata().kind else {
+    let Some(data) = claim.quote_operand() else {
         return Err(invalid(":t/guard must be quoted data"));
     };
     let Some([mode, param, predicate]) = data.vector() else {

@@ -18,6 +18,7 @@ mod strings;
 mod vectors;
 pub(super) use vectors::{narrow_vector_predicate, vector_predicate};
 
+pub(super) use identifiers::identifier_name;
 pub(super) use sequences::{iteration_may_throw, narrow_emptiness, narrow_seq_emptiness};
 pub(super) use strings::concatenate_literal_strings;
 
@@ -124,6 +125,51 @@ impl<'a> CallArguments<'a> {
 struct EvaluatedArguments {
     values: Vec<(Value, Span)>,
     output_gap_explained: bool,
+}
+
+struct ContextualArgument<'a> {
+    callback: &'a Form,
+    expected: &'a Type,
+    map_key: Option<&'a Type>,
+    map_ancestors: Box<[&'a Type]>,
+}
+
+impl ContextualArgument<'_> {
+    fn expected_in<'a>(&self, mut instantiated: &'a Type) -> Option<&'a Type> {
+        for key in self.map_ancestors.iter().copied().chain(self.map_key) {
+            let Type::Map(map) = instantiated else {
+                return None;
+            };
+            instantiated = map.fields.get(key)?.value_constraint()?;
+        }
+        Some(instantiated)
+    }
+
+    fn apply(self, argument: &mut Value, callback: Value) {
+        let Some(key) = self.map_key else {
+            *argument = callback;
+            return;
+        };
+        'shape: for (mut shape, ty) in [
+            (&mut argument.known, callback.known),
+            (&mut argument.ty, callback.ty),
+        ] {
+            for ancestor in self.map_ancestors.iter().copied() {
+                let Type::Map(map) = shape else {
+                    continue 'shape;
+                };
+                let Some(field) = map.fields.get_mut(ancestor) else {
+                    continue 'shape;
+                };
+                shape = &mut field.ty;
+            }
+            if let Type::Map(map) = shape
+                && let Some(field) = map.fields.get_mut(key)
+            {
+                field.replace_type(ty);
+            }
+        }
+    }
 }
 
 impl From<Vec<(Value, Span)>> for EvaluatedArguments {
@@ -415,6 +461,20 @@ impl<'model> Checker<'model> {
                         let args = self.typed_args(&xs[1..], env);
                         return self.builtin(&resolved, &args, span);
                     }
+                    if self
+                        .model
+                        .known_standard_core_function(name, &resolved, self.globals)
+                    {
+                        return if self
+                            .eval_args(&xs[1..], env, true)
+                            .last()
+                            .is_some_and(|(argument, _)| argument.stops_evaluation())
+                        {
+                            Value::new(Type::Never)
+                        } else {
+                            self.unchecked_core_function(&resolved, xs[0].span)
+                        };
+                    }
                 }
                 _ => {}
             }
@@ -484,6 +544,13 @@ impl<'model> Checker<'model> {
         Value::new(Type::Unknown)
     }
 
+    pub(super) fn unchecked_core_function(&mut self, resolved: &str, span: Span) -> Value {
+        self.unchecked_form(
+            span,
+            &format!("Type analysis for {resolved} is unavailable"),
+        )
+    }
+
     fn deref_call(&mut self, args: &[Form], span: Span, env: &Env, stock: bool) -> Value {
         let returns = self
             .eval_args(args, env, true)
@@ -533,12 +600,30 @@ impl<'model> Checker<'model> {
                 .iter()
                 .chain(&sig.rest)
                 .any(|ty| matches!(ty, Type::Function(_)))
+                || forms.iter().enumerate().any(|(index, form)| {
+                    sig.args
+                        .get(index)
+                        .or(sig.rest.as_ref())
+                        .is_some_and(|expected| self.contextual_map(form, expected, env).is_some())
+                })
         }) else {
             return self
                 .eval_args(forms, env, !function.stops_evaluation())
                 .collect::<Vec<_>>()
                 .into();
         };
+        self.call_contextual_arguments(function, signature, forms, call, env)
+    }
+
+    #[inline(never)]
+    fn call_contextual_arguments(
+        &mut self,
+        function: &Value,
+        signature: &Signature,
+        forms: &[Form],
+        call: Span,
+        env: &Env,
+    ) -> EvaluatedArguments {
         let infer_argument = |checker: &mut Self, form: &Form, expected: &Type, reachable| {
             checker.check_path(reachable, |checker| {
                 checker
@@ -569,21 +654,33 @@ impl<'model> Checker<'model> {
                 // Reading or creating an ordinary closure does not run its body.
                 let argument = self.contextual_callback_argument(form, env, reachable);
                 reachable = !argument.stops_evaluation();
-                deferred.push((index, expected));
+                deferred.push((
+                    index,
+                    ContextualArgument {
+                        callback: form,
+                        expected,
+                        map_key: None,
+                        map_ancestors: Box::new([]),
+                    },
+                ));
                 values.push((argument, form.span));
                 continue;
             }
-            let mut value = infer_argument(self, form, expected, reachable);
+            let mut value = self
+                .contextual_map_argument(form, expected, env, reachable, |callback, _| {
+                    deferred.push((index, callback))
+                })
+                .unwrap_or_else(|| infer_argument(self, form, expected, reachable));
             reachable = !value.stops_evaluation();
             if !reachable {
                 value.narrow(Type::Never);
             }
             values.push((value, form.span));
         }
-        for (index, expected) in deferred {
-            let value = infer_argument(self, &forms[index], expected, reachable);
+        for (index, contextual) in deferred {
+            let value = infer_argument(self, contextual.callback, contextual.expected, reachable);
             if reachable {
-                values[index].0 = value;
+                contextual.apply(&mut values[index].0, value);
             }
         }
         values.into()
@@ -712,7 +809,7 @@ impl<'model> Checker<'model> {
             Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => {
                 self.vector_call(function, head, args, span)
             }
-            Type::Set(_) => {
+            Type::Set(element) => {
                 if args.len() != 1 {
                     self.error(
                         "PNX2554",
@@ -724,7 +821,7 @@ impl<'model> Checker<'model> {
                     );
                     Value::new(Type::Unknown)
                 } else {
-                    Value::with_notes(args[0].0.known.clone().nilable(), vec![
+                    Value::with_notes(function.set_lookup_type(element, &args[0].0.known, Type::Nil), vec![
                         "A set used as a function returns the matching value or Nil, not a Boolean.".into(),
                     ])
                 }
@@ -1036,12 +1133,14 @@ impl<'model> Checker<'model> {
                     | "clojure.core/map?"
                     | "clojure.core/vector?"
                     | "clojure.core/any?"
+                    | "clojure.core/disj"
                     | "clojure.core/dissoc"
                     | "clojure.core/find"
                     | "clojure.core/list"
                     | "clojure.core/cons"
                     | "clojure.core/conj"
                     | "clojure.core/peek"
+                    | "clojure.core/set"
                     | "clojure.core/seq"
                     | "clojure.core/subvec"
                     | "clojure.core/first"
@@ -1058,6 +1157,7 @@ impl<'model> Checker<'model> {
                     | "clojure.core/some?"
                     | "clojure.core/true?"
                     | "clojure.core/false?"
+                    | "clojure.core/boolean"
                     | "clojure.core/not"
             )
             && predicate_type(name).is_none()
@@ -1082,6 +1182,8 @@ impl<'model> Checker<'model> {
             "clojure.core/conj" => return self.conj(args),
             "clojure.core/peek" => return self.peek(&args[0]),
             "clojure.core/merge" => return self.merge(args, span),
+            "clojure.core/set" => return self.set_from_collection(&args[0]),
+            "clojure.core/disj" => return self.disj(args),
             "clojure.core/dissoc" => return self.dissoc(args),
             "clojure.core/find" => return self.find_entry(&args[0], &args[1]),
             "clojure.core/select-keys" => return self.select_keys(&args[0], &args[1]),
@@ -1152,6 +1254,9 @@ impl<'model> Checker<'model> {
                     args[0].1,
                     name,
                 );
+                if args[0].0.known == Type::Pattern {
+                    return args[0].0.clone();
+                }
                 Type::Pattern
             }
             "clojure.string/split" => {
@@ -1230,6 +1335,7 @@ impl<'model> Checker<'model> {
             }
             // These predicates test JVM object identity with the canonical Booleans.
             "clojure.core/true?" | "clojure.core/false?" => Type::Boolean,
+            "clojure.core/boolean" => boolean_cast_result(&args[0].0.known),
             "clojure.core/not" => {
                 if args[0].0.ty.truthy() == Type::Never {
                     Type::Bool(true)
@@ -1253,6 +1359,7 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         | "clojure.core/list" | "clojure.core/merge" => &[Arity::Variadic(0)],
         "clojure.core/-"
         | "clojure.core/="
+        | "clojure.core/disj"
         | "clojure.core/dissoc"
         | "clojure.core/min"
         | "clojure.core/max" => &[Arity::Variadic(1)],
@@ -1339,6 +1446,23 @@ pub(super) fn literal_equality(left: &Type, right: &Type) -> Option<bool> {
     known
 }
 
+fn boolean_cast_result(actual: &Type) -> Type {
+    match actual {
+        Type::Nil | Type::Bool(false) => Type::Bool(false),
+        Type::Never => Type::Never,
+        // A separately boxed false is truthy in if, but boolean unboxes it.
+        Type::Unknown | Type::Any | Type::SpecValue | Type::SpecTruthy | Type::Boolean => {
+            Type::Boolean
+        }
+        Type::Parameter(parameter) => parameter
+            .upper
+            .as_ref()
+            .map_or(Type::Boolean, boolean_cast_result),
+        Type::Union(parts) => Type::union(parts.iter().map(boolean_cast_result)),
+        _ => Type::Bool(true),
+    }
+}
+
 fn predicate_result(actual: &Type, expected: &Type) -> Type {
     match actual {
         Type::Unknown => Type::Boolean,
@@ -1387,6 +1511,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/some?"
             | "clojure.core/true?"
             | "clojure.core/false?"
+            | "clojure.core/boolean"
             | "clojure.core/not"
             | "clojure.core/="
             | "clojure.core/key"
@@ -1404,7 +1529,9 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/vals"
             | "clojure.core/conj"
             | "clojure.core/peek"
+            | "clojure.core/set"
             | "clojure.core/merge"
+            | "clojure.core/disj"
             | "clojure.core/dissoc"
             | "clojure.core/find"
             | "clojure.core/select-keys"

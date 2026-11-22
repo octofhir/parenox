@@ -3,7 +3,7 @@ use super::{
     Checker, Compatibility, Env, Span, Type, Value, arithmetic::excludes_number, call_returns,
 };
 use crate::Diagnostic;
-use crate::reader::{Form, Kind};
+use crate::reader::Form;
 use crate::types::MAX_TUPLE_ITEMS;
 
 const MAX_CONCATENATED_STRING_BYTES: usize = 1024;
@@ -105,7 +105,7 @@ impl Checker<'_> {
         let length = text.map(|text| text.encode_utf16().count());
         let mut invalid = false;
         for (value, span) in &args[1..] {
-            if let Type::Integer(index) = value.known
+            if let Some(index) = value.known.exact_integer_value()
                 && (index < 0 || length.is_some_and(|len| index as usize > len))
             {
                 self.error(
@@ -182,10 +182,7 @@ impl Checker<'_> {
         );
         self.note_builtin_contract(start, name);
 
-        let literal = forms[0].without_metadata();
-        let captures = matches!(literal.kind, Kind::Regex)
-            .then(|| &self.source[literal.span.start.offset..literal.span.end.offset])
-            .and_then(literal_capture_count);
+        let captures = pattern.pattern_captures.map(usize::from);
         let groups = || Type::Vector(Box::new(Type::String.nilable()));
         let result = match captures {
             Some(0) => Type::String,
@@ -342,30 +339,5 @@ fn non_nil_compatibility(ty: &Type) -> Compatibility {
 }
 
 fn known_index(value: &Value) -> Option<usize> {
-    match value.known {
-        Type::Integer(index) => usize::try_from(index).ok(),
-        _ => None,
-    }
-}
-
-fn literal_capture_count(pattern: &str) -> Option<usize> {
-    if !pattern.contains('(') {
-        return Some(0);
-    }
-    // Classes, quoted regex segments, and inline group syntax need the JVM dialect.
-    if pattern.contains('[') || pattern.contains("\\Q") || pattern.contains("(?") {
-        return None;
-    }
-    let mut chars = pattern.chars();
-    let mut count = 0;
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' => {
-                chars.next();
-            }
-            '(' => count += 1,
-            _ => {}
-        }
-    }
-    Some(count)
+    usize::try_from(value.known.exact_integer_value()?).ok()
 }

@@ -4,8 +4,8 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use super::{ExternalDeclaration, Globals, Model, Names};
-use crate::checker::model::{type_forms::inverted_literal, vars::def_initializer};
-use crate::checker::{Checker, Declarations};
+use crate::checker::model::vars::{CapturedInitializer, def_initializer};
+use crate::checker::{Checker, Declarations, LiteralContainer};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 use crate::{ContractKind, ContractOrigin};
@@ -19,6 +19,7 @@ pub(crate) struct LiteralExtern {
     pub ty: Type,
     pub edn: String,
     pub origin: ContractOrigin,
+    pub(in crate::checker) container: Option<LiteralContainer>,
 }
 
 impl Model {
@@ -38,13 +39,14 @@ impl Model {
             }
         };
         let mut checker = Checker::new(self, globals, source);
-        let ty = checker.quoted_data(value).known;
+        let literal = checker.quoted_data(value);
         if !checker.diagnostics.is_empty() {
             self.diagnostics.extend(checker.diagnostics);
             return None;
         }
         Some(ExternalDeclaration::Literal(Arc::new(LiteralExtern {
-            ty,
+            container: literal.literal_container,
+            ty: literal.known,
             edn,
             origin: ContractOrigin {
                 name: name.into(),
@@ -69,23 +71,18 @@ impl Model {
             let qualified = format!("{}/{symbol}", self.names.namespace);
             let (name, _) = self.exports.literals.get_key_value(&qualified)?;
             let initializer = def_initializer(&parts[2..])?;
-            let encoded = if super::is_modeled_call(name) {
+            let encoded = if index < declarations.completed_before_last_tag() {
+                Err("A later data reader can change this var's value")
+            } else if super::is_modeled_call(name) {
                 Err("externs cannot replace a built-in checking rule")
             } else {
-                let expanded = if self.map_invert_in_project == Some(false) {
-                    inverted_literal(declarations, forms, source, initializer)
-                } else {
-                    None
-                };
-                encode(
-                    expanded
-                        .as_ref()
-                        .or_else(|| self.captured_initializers.get(&index))
-                        .unwrap_or(initializer),
-                    source,
-                    &self.names,
-                    Context::Initializer,
-                )
+                match self.captured_initializers.get(&index) {
+                    Some(CapturedInitializer::PlatformLong(value)) => Ok(value.to_string()),
+                    Some(CapturedInitializer::Form(form)) => {
+                        encode(form, source, &self.names, Context::Initializer)
+                    }
+                    None => encode(initializer, source, &self.names, Context::Initializer),
+                }
             };
             Some((name.as_str(), name_form.span, encoded))
         })
@@ -127,7 +124,10 @@ fn encode(form: &Form, source: &str, names: &Names, context: Context) -> Encoded
         Kind::Keyword(value) => names.key(value),
         Kind::Symbol(value) if !matches!(context, Context::Initializer) => value.clone(),
         Kind::Quote(value) if matches!(context, Context::Initializer) => quoted(value)?,
-        Kind::Quote(value) => format!("(quote {})", quoted(value)?),
+        Kind::Quote(_) | Kind::Unquote { .. } if matches!(context, Context::Quoted) => {
+            let (head, value) = form.prefixed_list().unwrap();
+            format!("({head} {})", quoted(value)?)
+        }
         Kind::List(items) if matches!(context, Context::Initializer) => match items.as_slice() {
             [] => "()".into(),
             [head, value] if head.symbol() == Some("quote") => quoted(value)?,

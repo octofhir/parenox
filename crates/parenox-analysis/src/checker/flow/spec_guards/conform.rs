@@ -182,10 +182,9 @@ impl Checker<'_> {
         };
         // The spec argument is a literal keyword. Evaluate the members once,
         // retaining each member's type before ordinary set inference joins them.
-        let inputs = self.infer_set_members(items, env);
-        if inputs.contains(&Type::Never) {
+        let Some(inputs) = self.infer_set_members(items, env) else {
             return Some(Value::new(Type::Never));
-        }
+        };
         // Evaluating a set literal checks duplicates before calling spec.
         // Distinct source forms can evaluate to equal values.
         if inputs.iter().enumerate().any(|(index, current)| {
@@ -785,7 +784,7 @@ fn definitely_not_collection(ty: &Type) -> bool {
         | Type::Character
         | Type::Integer(_)
         | Type::Integral(IntegerType {
-            class: IntegerClass::Fixed,
+            class: IntegerClass::Fixed | IntegerClass::IntOrLong,
             ..
         }) => true,
         Type::Union(members) => members.iter().all(definitely_not_collection),

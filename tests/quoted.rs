@@ -8,6 +8,8 @@ fn checks_quoted_data_as_values_without_resolving_or_calling_their_symbols() {
         ("(first '(missing definitely-missing))", "symbol?"),
         ("(nth '(missing \"literal\") 1)", "#{\"literal\"}"),
         ("(first ''command)", "symbol?"),
+        ("(name (first '~@items))", "#{\"unquote-splicing\"}"),
+        ("(nth '~:value 1)", "#{:value}"),
         ("(first (quote (other.ns/unresolved)))", "symbol?"),
         (
             "(= 'other.ns/unresolved '^:tag other.ns/unresolved)",
@@ -71,12 +73,17 @@ fn exact_symbols_export_and_check_a_consumer_without_the_provider_source() {
 (s/fdef accept :args (s/cat :operator #{'get-in}) :ret #{'get-in})
 (defn accept [operator] operator)
 (def get-op 'get-in)
+(def splice-form '~@items)
 "#,
     };
     let mut session = Session::default();
     let exported = session.export_externs(&[provider], &[]);
     let edn = exported.edn.expect("expected verified symbol contracts");
     assert!(edn.contains("#{(quote get-in)}"), "{edn}");
+    assert!(
+        edn.contains("(clojure.core/unquote-splicing items)"),
+        "{edn}"
+    );
     let externs = Source {
         path: "symbols.edn",
         source: &edn,
@@ -84,6 +91,7 @@ fn exact_symbols_export_and_check_a_consumer_without_the_provider_source() {
     let consumer = r#"
 (ns consumer (:require [symbols :as ops]))
 (defn read-op {:t/sig '[:-> #{get-in}]} [] (ops/accept ops/get-op))
+(defn splice-head {:t/sig '[:-> #{clojure.core/unquote-splicing}]} [] (first ops/splice-form))
 "#;
     let good = session.check_project(
         &[Source {

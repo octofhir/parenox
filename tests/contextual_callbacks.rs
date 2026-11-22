@@ -1,6 +1,11 @@
-use parenox::{Session, Source};
+use parenox::{DocumentHover, Session, Source};
 
 const EXAMPLE: &str = include_str!("../examples/contextual_callbacks.clj");
+const CALLBACK_MAP: &str = r#"
+    (s/def ::run ::text-transform)
+    (s/def ::options (s/keys :req-un [::run]))
+    (defn transform-options {:t/sig '[::options string? :-> string?]} [options text]
+      ((:run options) text))"#;
 
 #[test]
 fn expected_signature_types_fn_parameters_and_anonymous_arguments() {
@@ -118,6 +123,237 @@ fn checking_a_callback_does_not_execute_it_during_argument_evaluation() {
     );
     let report = Session::default().check("callbacks.clj", &source);
     assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn contextual_map_fields_type_callbacks_at_their_written_uses() {
+    let source = format!(
+        "{EXAMPLE}{CALLBACK_MAP}
+         (defn exact {{:t/sig '[:-> string?]}} []
+           (transform-options {{:run #(str % \"!\")}} \"label\"))
+         (defn invalid {{:t/sig '[:-> string?]}} []
+           (transform-options {{:run (fn [text] (do (inc text) \"ok\"))}} \"label\"))"
+    );
+    let mut session = Session::default();
+    let report = session.check("callback_map.clj", &source);
+    assert!(report.complete, "{report:#?}");
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.actual.as_deref(), Some("String"));
+    assert_eq!(
+        error.callback_contract.as_ref().unwrap().name,
+        "demo.contextual-callbacks/transform-options"
+    );
+    assert_eq!(
+        &source[error.span.start.offset..error.span.end.offset],
+        "text"
+    );
+    let Some(DocumentHover::Local(local)) =
+        session.document_hover_at("callback_map.clj", error.span.start.offset)
+    else {
+        panic!("Expected a type at the callback operand");
+    };
+    assert_eq!(local.inferred_type, "String");
+}
+
+#[test]
+fn exact_computed_map_keys_select_callback_contracts() {
+    let source = format!(
+        r#"{EXAMPLE}{CALLBACK_MAP}
+         (defn with-call-key {{:t/sig '[:-> string?]}} []
+           (transform-options {{(identity :run) (fn [text] (subs text 1))}} "input"))
+         (defn with-local-key {{:t/sig '[:-> string?]}} []
+           (let [key :run]
+             (transform-options {{key (fn [text] (subs text 1))}} "input")))"#
+    );
+    let path = "computed_callback.clj";
+    let mut session = Session::default();
+    let report = session.check(path, &source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let broken = source.replacen("(subs text 1)", r#"(do (inc text) "ok")"#, 1);
+    let report = session.check(path, &broken);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &broken[finding.span.start.offset..finding.span.end.offset],
+        "text"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "demo.contextual-callbacks/transform-options"
+    );
+    let cold = Session::default().check(path, &broken);
+    assert_eq!(
+        serde_json::to_value(&report.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let rolled_back = session.check(path, &source);
+    assert!(rolled_back.ok && rolled_back.complete, "{rolled_back:#?}");
+}
+
+#[test]
+fn later_runtime_failure_keeps_map_callback_body_in_compiler_checks() {
+    let source = format!(
+        "{EXAMPLE}{CALLBACK_MAP}
+         (defn caught {{:t/sig '[:-> #{{:argument}}]}} []
+           (try
+             (transform-options {{:run (fn [text] (inc text))}}
+                                (throw (ex-info \"eager\" {{:stage :argument}})))
+             (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))"
+    );
+    let mut session = Session::default();
+    let report = session.check("callback_map.clj", &source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let unbound = source.replace("(inc text)", "(inc unresolved)");
+    let report = session.check("callback_map.clj", &unbound);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2304");
+    assert_eq!(
+        &unbound[error.span.start.offset..error.span.end.offset],
+        "unresolved"
+    );
+}
+
+#[test]
+fn maps_with_multiple_callbacks_preserve_each_fields_context() {
+    let source = format!(
+        r#"{EXAMPLE}
+        (s/def ::run ::text-transform)
+        (s/def ::audit (s/fspec :args (s/cat :amount int?) :ret string?))
+        (s/def ::label string?)
+        (s/def ::options (s/keys :req-un [::run ::audit ::label]))
+        (defn transform-options {{:t/sig '[::options :-> string?]}} [options]
+          ((:run options) ((:audit options) 1)))
+        (defn valid {{:t/sig '[:-> string?]}} []
+          (transform-options ^:tracked {{:label "ordinary"
+                                         :run #(str/upper-case %)
+                                         :audit #(str (inc %))}}))
+        (defn invalid {{:t/sig '[:-> string?]}} []
+          (transform-options ^:tracked {{:run (fn [text] (do (inc text) "ok"))
+                                         :label "ordinary"
+                                         :audit (fn [amount] (do (subs amount 1) "ok"))}}))"#
+    );
+    let mut session = Session::default();
+    let report = session.check("options.clj", &source);
+    assert!(report.complete, "{report:#?}");
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|error| {
+            let span = error.span;
+            assert_eq!(
+                error.callback_contract.as_ref().unwrap().name,
+                "demo.contextual-callbacks/transform-options"
+            );
+            (
+                error.code.as_str(),
+                &source[span.start.offset..span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(findings, [("PNX2322", "text"), ("PNX2322", "amount")]);
+}
+
+#[test]
+fn map_fields_and_map_metadata_are_eager_but_callback_bodies_are_not() {
+    let source = format!(
+        r#"{EXAMPLE}{CALLBACK_MAP}
+        (defn stops-in-field {{:t/sig '[:-> #{{:field}}]}} []
+          (try
+            (transform-options
+              ^{{:marker (throw (ex-info "meta" {{:stage :meta}}))}}
+              {{:run (fn [text] (inc text))
+                :tag (throw (ex-info "field" {{:stage :field}}))}}
+              (throw (ex-info "argument" {{:stage :argument}})))
+            (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))
+        (defn stops-in-metadata {{:t/sig '[:-> #{{:meta}}]}} []
+          (try
+            (transform-options
+              ^{{:marker (throw (ex-info "meta" {{:stage :meta}}))}}
+              {{:tag :ordinary :run #(inc %)}}
+              (throw (ex-info "argument" {{:stage :argument}})))
+            (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))
+        (defn ordinary-map {{:t/sig '[:-> #{{:first}}]}} []
+          (try
+            ^{{:marker (throw (ex-info "meta" {{:stage :meta}}))}}
+            {{:first (throw (ex-info "first" {{:stage :first}}))
+              :second (throw (ex-info "second" {{:stage :second}}))}}
+            (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))"#
+    );
+    let mut session = Session::default();
+    let report = session.check("options.clj", &source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let broken = source.replace("(inc text)", "(inc unresolved)");
+    let report = session.check("options.clj", &broken);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2304");
+    assert_eq!(
+        &broken[error.span.start.offset..error.span.end.offset],
+        "unresolved"
+    );
+}
+
+#[test]
+fn contract_edits_refresh_multi_field_callback_types_and_rollback() {
+    let provider = r#"
+        (ns api (:require [clojure.spec.alpha :as s]))
+        (s/def ::run (s/fspec :args (s/cat :value string?) :ret string?))
+        (s/def ::tag keyword?)
+        (s/def ::options (s/keys :req-un [::run ::tag]))
+        (defn use-options {:t/sig '[::options :-> string?]} [options]
+          ((:run options) "label"))"#;
+    let client = Source {
+        path: "client.clj",
+        source: r#"(ns client (:require [api :as api]))
+         (defn run {:t/sig '[:-> string?]} []
+           (api/use-options {:tag :example :run (fn [value] (do (inc value) "ok"))}))"#,
+    };
+    let check = |session: &mut Session, source| {
+        session.check_project(
+            &[
+                client,
+                Source {
+                    path: "api.clj",
+                    source,
+                },
+            ],
+            None,
+        )
+    };
+    let mut session = Session::default();
+    let before = check(&mut session, provider);
+    let edited = provider
+        .replace(":value string?", ":value int?")
+        .replace("\"label\"", "1");
+    let changed = check(&mut session, &edited);
+    assert!(changed.ok && changed.complete, "{changed:#?}");
+    let after = check(&mut session, provider);
+    let diagnostics = |report: &parenox::ProjectReport| {
+        serde_json::to_value(
+            report
+                .files
+                .iter()
+                .flat_map(|file| &file.diagnostics)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    };
+    assert!(!before.ok && before.complete, "{before:#?}");
+    assert_eq!(diagnostics(&before), diagnostics(&after));
+    assert_eq!(
+        diagnostics(&after),
+        diagnostics(&check(&mut Session::default(), provider))
+    );
 }
 
 #[test]

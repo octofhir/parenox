@@ -86,12 +86,24 @@ fn iteration_and_updates_respect_dictionary_contracts() {
 }
 
 #[test]
-fn knows_which_keys_can_be_present_and_preserves_explicit_nil() {
+fn dictionary_lookups_allow_custom_comparators_and_preserve_explicit_nil() {
     for (spec, ret, expression, expected) in [
         (
             "(s/map-of string? number?)",
             "boolean?",
             "(get m :open false)",
+            Some("PNX2322"),
+        ),
+        (
+            "(s/map-of string? number?)",
+            "#{false}",
+            "(contains? m :open)",
+            Some("PNX2322"),
+        ),
+        (
+            "(s/map-of string? number?)",
+            "number?",
+            "(req! m :open)",
             None,
         ),
         (
@@ -116,6 +128,12 @@ fn knows_which_keys_can_be_present_and_preserves_explicit_nil() {
             "(s/map-of #{:closed} number?)",
             "number?",
             "(req! m :open)",
+            None,
+        ),
+        (
+            "(s/map-of #{:closed} number?)",
+            "number?",
+            "(req! {:closed 1} :open)",
             Some("PNX2741"),
         ),
         (

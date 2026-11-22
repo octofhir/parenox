@@ -10,13 +10,14 @@ use super::super::{
         MAX_FIXED_PARAMETERS, fn_star_clauses, function_clauses, letfn_definition, local_fn_name,
         pack_arguments,
     },
+    maps::{MapLiteral, literal_map_in_source_order},
     metadata::MetadataTarget,
     nil_part,
     queries::InferredCall,
 };
-use super::{Callable, PreparedCallable, call_returns, combinators::Combiner};
+use super::{Callable, ContextualArgument, PreparedCallable, call_returns, combinators::Combiner};
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
-use crate::types::{Arity, Signature, Type};
+use crate::types::{Arity, MapType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 
 const MAX_CALLBACK_DEPTH: usize = 16;
@@ -472,6 +473,133 @@ impl<'model> Checker<'model> {
             .and_then(|name| env.inline_function(name))
             .is_some()
             || self.inline_callback_literal(form, env)
+    }
+
+    pub(super) fn contextual_map<'a>(
+        &self,
+        form: &'a Form,
+        expected: &'a Type,
+        env: &Env,
+    ) -> Option<(&'a [Form], &'a MapType)> {
+        self.contextual_map_at_depth(form, expected, env, MAX_CALLBACK_DEPTH)
+    }
+
+    fn contextual_map_at_depth<'a>(
+        &self,
+        form: &'a Form,
+        expected: &'a Type,
+        env: &Env,
+        remaining: usize,
+    ) -> Option<(&'a [Form], &'a MapType)> {
+        let Type::Map(expected) = expected else {
+            return None;
+        };
+        let entries = form.map()?;
+        let direct_callbacks = expected.fields.values().any(|field| {
+            matches!(field.value_constraint(), Some(Type::Function(signatures)) if signatures.len() == 1)
+        });
+        if !direct_callbacks
+            && (remaining == 0
+                || !expected
+                    .fields
+                    .values()
+                    .any(|field| matches!(field.value_constraint(), Some(Type::Map(_)))))
+        {
+            return None;
+        }
+        let pairs = entries.as_chunks::<2>().0;
+        let ordered = literal_map_in_source_order(pairs);
+        pairs
+            .iter()
+            .any(|[key, value]| match self.written_map_key(key) {
+                Some(key) => expected
+                    .fields
+                    .get(&key)
+                    .and_then(|field| field.value_constraint())
+                    .is_some_and(|expected| {
+                        self.contextual_callback_field(value, expected, env)
+                            || (remaining != 0
+                                && self
+                                    .contextual_map_at_depth(value, expected, env, remaining - 1)
+                                    .is_some())
+                    }),
+                None => direct_callbacks && ordered && self.contextual_callback_form(value, env),
+            })
+            .then_some((entries, expected))
+    }
+
+    fn contextual_callback_field(&self, callback: &Form, expected: &Type, env: &Env) -> bool {
+        matches!(expected, Type::Function(signatures) if signatures.len() == 1)
+            && self.contextual_callback_form(callback, env)
+    }
+
+    pub(super) fn contextual_map_argument<'a>(
+        &mut self,
+        form: &'a Form,
+        expected: &'a Type,
+        env: &Env,
+        reachable: bool,
+        mut defer: impl FnMut(ContextualArgument<'a>, bool),
+    ) -> Option<Value> {
+        self.contextual_map_argument_at(form, expected, env, reachable, &mut Vec::new(), &mut defer)
+    }
+
+    fn contextual_map_argument_at<'a>(
+        &mut self,
+        form: &'a Form,
+        expected: &'a Type,
+        env: &Env,
+        reachable: bool,
+        ancestors: &mut Vec<&'a Type>,
+        defer: &mut dyn FnMut(ContextualArgument<'a>, bool),
+    ) -> Option<Value> {
+        let remaining = MAX_CALLBACK_DEPTH - ancestors.len();
+        let (entries, expected) = self.contextual_map_at_depth(form, expected, env, remaining)?;
+        Some(self.check_path(reachable, |checker| {
+            let map = checker.map_literal_with(
+                entries,
+                MapLiteral::Expression(env),
+                |checker, key, field, fields_return| {
+                    let reachable = reachable && fields_return;
+                    if let Some((key, constraint)) =
+                        key.and_then(|key| expected.fields.get_key_value(key))
+                        && let Some(expected) = constraint.value_constraint()
+                    {
+                        if checker.contextual_callback_field(field, expected, env) {
+                            defer(
+                                ContextualArgument {
+                                    callback: field,
+                                    expected,
+                                    map_key: Some(key),
+                                    map_ancestors: ancestors.clone().into_boxed_slice(),
+                                },
+                                reachable,
+                            );
+                            return checker.contextual_callback_argument(field, env, reachable);
+                        }
+                        if remaining != 0 && matches!(expected, Type::Map(_)) {
+                            ancestors.push(key);
+                            let value = checker.contextual_map_argument_at(
+                                field, expected, env, reachable, ancestors, defer,
+                            );
+                            ancestors.pop();
+                            if let Some(value) = value {
+                                return value;
+                            }
+                        }
+                    }
+                    checker.infer_path(field, env, reachable, false)
+                },
+            );
+            checker
+                .literal_metadata_outcome(
+                    form,
+                    env,
+                    reachable && !map.stops_evaluation(),
+                    MetadataTarget::Map,
+                )
+                .unwrap_or(map)
+        }))
     }
 
     pub(super) fn contextual_callback_argument(

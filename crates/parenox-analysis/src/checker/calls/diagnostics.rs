@@ -72,8 +72,7 @@ impl Checker<'_> {
                         entry
                     } else {
                         let mut fields = entries.iter().filter(|[candidate, _]| {
-                            self.literal_map_key(candidate)
-                                .or_else(|| Type::integer_literal(candidate, self.source))
+                            self.written_map_key(candidate)
                                 .is_some_and(|candidate| candidate.to_string() == *key)
                         });
                         let field = fields.next()?;

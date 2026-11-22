@@ -1,5 +1,32 @@
 use parenox::Session;
 
+#[test]
+fn numeric_selection_reports_an_unmodeled_stored_class() {
+    let unknown = r#"
+(ns demo.project)
+(defn projected {:t/sig '[{1 string?} :-> any?]} [data]
+  (select-keys data [1N]))
+"#;
+    let ordinary = r#"
+(ns demo.project)
+(defn projected {:t/sig '[:-> map?]} []
+  (select-keys {1 "value"} [1N]))
+"#;
+    for source in [unknown, ordinary] {
+        let report = Session::default().check("project.clj", source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(!report.complete);
+        assert_eq!(finding.code, "PNX9001");
+        assert!(finding.message.contains("selector's stored integer class"));
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            "[1N]"
+        );
+    }
+}
+
 const PROFILE: &str = include_str!("../examples/map_projection.clj");
 
 #[test]
@@ -115,4 +142,21 @@ fn projection_reports_invalid_selectors_and_unsupported_keys_at_the_argument() {
         invalid.contract.as_ref().unwrap().name,
         "clojure.core/select-keys"
     );
+}
+
+#[test]
+fn a_present_abstract_child_does_not_inherit_its_defaults_literal_evidence() {
+    let source = r#"
+        (defn settled {:t/sig '[{1 #{:present}} :-> #{:present}]} [child]
+          (let [{:keys [nested] :or {nested {1 :present}} :all result}
+                {:nested child}]
+            (get (:nested result) 1N :missing)))
+    "#;
+    let report = Session::default().check("unknown_child.clj", source);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.ok && report.complete);
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.actual.as_deref(), Some(":missing | :present"));
 }

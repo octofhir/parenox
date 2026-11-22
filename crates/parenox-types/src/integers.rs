@@ -8,8 +8,13 @@ use parenox_frontend::reader::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum IntegerClass {
     Any,
+    /// Byte, Short, Integer or Long.
     Fixed,
+    /// The fixed-precision classes accepted as associative indices on the JVM.
+    IntOrLong,
     Arbitrary,
+    /// The final Clojure BigInt class produced by the reader.
+    BigInt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -57,6 +62,10 @@ impl IntegerType {
     pub(super) fn intersection(self, other: Self) -> Option<Self> {
         let class = match (self.class, other.class) {
             (IntegerClass::Any, class) | (class, IntegerClass::Any) => class,
+            (IntegerClass::Fixed, IntegerClass::IntOrLong)
+            | (IntegerClass::IntOrLong, IntegerClass::Fixed) => IntegerClass::IntOrLong,
+            (IntegerClass::Arbitrary, IntegerClass::BigInt)
+            | (IntegerClass::BigInt, IntegerClass::Arbitrary) => IntegerClass::BigInt,
             (a, b) if a == b => a,
             _ => return None,
         };
@@ -113,8 +122,8 @@ impl fmt::Display for IntegerType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let class = match self.class {
             IntegerClass::Any => "Integer",
-            IntegerClass::Fixed => "JVM fixed-precision integer",
-            IntegerClass::Arbitrary => "Arbitrary-precision integer",
+            IntegerClass::Fixed | IntegerClass::IntOrLong => "JVM fixed-precision integer",
+            IntegerClass::Arbitrary | IntegerClass::BigInt => "Arbitrary-precision integer",
         };
         match self.range {
             IntegerRange::Any => f.write_str(class),
@@ -123,6 +132,9 @@ impl fmt::Display for IntegerType {
             }
             IntegerRange::Int32 | IntegerRange::IntCache => {
                 write!(f, "{class} in the JVM int range")
+            }
+            IntegerRange::Exact(value) if self.class == IntegerClass::Fixed => {
+                write!(f, "{value}")
             }
             IntegerRange::Exact(value) => write!(f, "{class} with value {value}"),
             IntegerRange::ExactLong(value) => write!(f, "{class} with value {value}"),
@@ -134,7 +146,7 @@ impl fmt::Display for IntegerType {
 
 impl Type {
     pub fn exact_integer(value: i32, class: IntegerClass) -> Self {
-        if class == IntegerClass::Fixed {
+        if class == IntegerClass::IntOrLong {
             Self::Integer(value)
         } else {
             Self::Integral(IntegerType {
@@ -181,8 +193,8 @@ impl Type {
         match classify_number_with_class(token) {
             (NumericLiteral::Integer(value), Some(class)) => {
                 let class = match class {
-                    IntegerLiteralClass::Long => IntegerClass::Fixed,
-                    IntegerLiteralClass::BigInt => IntegerClass::Arbitrary,
+                    IntegerLiteralClass::Long => IntegerClass::IntOrLong,
+                    IntegerLiteralClass::BigInt => IntegerClass::BigInt,
                 };
                 let Ok(narrow) = i32::try_from(value) else {
                     return Self::Integral(IntegerType {
@@ -192,7 +204,7 @@ impl Type {
                 };
                 let digits = token.strip_prefix(['+', '-']).unwrap_or(token);
                 // Keep the existing exact decimal index model.
-                if class == IntegerClass::Fixed
+                if class == IntegerClass::IntOrLong
                     && (digits.len() == 1 || !digits.starts_with('0'))
                     && digits.bytes().all(|byte| byte.is_ascii_digit())
                 {
@@ -213,7 +225,7 @@ impl Type {
     pub(super) fn integer_type(&self) -> Option<IntegerType> {
         match self {
             Self::Integer(value) => Some(IntegerType {
-                class: IntegerClass::Fixed,
+                class: IntegerClass::IntOrLong,
                 range: IntegerRange::Exact(*value),
             }),
             Self::Integral(ty) => Some(*ty),
@@ -255,6 +267,6 @@ impl Type {
 
     pub fn is_arbitrary_integer(&self) -> bool {
         self.integer_type()
-            .is_some_and(|ty| ty.class == IntegerClass::Arbitrary)
+            .is_some_and(|ty| matches!(ty.class, IntegerClass::Arbitrary | IntegerClass::BigInt))
     }
 }

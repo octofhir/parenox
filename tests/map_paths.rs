@@ -139,7 +139,11 @@ fn dynamic_paths_preserve_nil_and_use_the_guard_for_the_first_segment() {
         );
     }
 
-    let source = "(defn f {:t/sig '[number? :-> number?]} [sku] (get-in {} [:catalog sku] 0))";
+    let missing = "(defn f {:t/sig '[number? :-> number?]} [sku] (get-in {} [:catalog sku] 0))";
+    let report = Session::default().check("paths.clj", missing);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let source = "(defn f {:t/sig '[number? :-> number?]} [sku] (get-in {:catalog {:existing 1}} [:catalog sku] 0))";
     let report = Session::default().check("paths.clj", source);
     assert!(!report.complete, "{report:#?}");
     let [diagnostic] = &report.diagnostics[..] else {
@@ -149,4 +153,20 @@ fn dynamic_paths_preserve_nil_and_use_the_guard_for_the_first_segment() {
     assert_eq!(&source[span.start.offset..span.end.offset], "sku");
     assert_eq!(diagnostic.code, "PNX9001");
     assert!(diagnostic.message.contains("got Number"), "{report:#?}");
+}
+
+#[test]
+fn writing_a_path_clears_the_proof_of_the_replaced_child() {
+    let source = r#"
+        (defn replaced {:t/sig '[{1 #{:hit}} :-> #{:hit}]} [row]
+          (get-in (assoc-in {:outer {:table {1 :hit}}} [:outer :table] row)
+                  [:outer :table 1N] :missing))
+    "#;
+    let report = Session::default().check("path-proof.clj", source);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.ok && report.complete);
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.actual.as_deref(), Some(":hit | :missing"));
 }

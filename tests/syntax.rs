@@ -78,8 +78,143 @@ fn cst_retains_comments_commas_crlf_unicode_and_discarded_forms() {
 }
 
 #[test]
+fn symbol_keyword_and_numeric_token_grammar_matches_the_jvm() {
+    for token in [
+        ":",
+        ":::foo",
+        ":foo:",
+        "a::b",
+        "λ::x",
+        "foo/",
+        "/foo",
+        "foo/0",
+        ":foo/2",
+        "١",
+        "+١",
+        "a\u{85}b/name",
+    ] {
+        let source = format!("{token} :after");
+        let parsed = reader::parse(&source);
+        assert_lossless(&source, &parsed);
+        let [error] = parsed.errors.as_slice() else {
+            panic!("{token}: {:?}", parsed.errors)
+        };
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            token
+        );
+        assert_eq!(parsed.forms[0].keyword(), Some(":after"));
+        assert!(reader::read_edn(token).is_err(), "{token}");
+    }
+    for spelling in ["/", "foo//", "foo/bar/baz", "foo/:bar", "²", "Ⅳ", "𝟐", "+𝟐"] {
+        let forms = reader::read(spelling).unwrap();
+        assert_eq!(forms[0].symbol(), Some(spelling));
+    }
+    for spelling in [":2", "::2", ":foo//", ":/"] {
+        let forms = reader::read(spelling).unwrap();
+        assert_eq!(forms[0].keyword(), Some(spelling));
+    }
+    for spelling in ["long/1", "String/2", "java.lang.String/9", "a:/2"] {
+        let forms = reader::read(spelling).unwrap();
+        assert_eq!(forms[0].symbol(), Some(spelling));
+        assert!(reader::read_edn(spelling).is_err(), "{spelling}");
+    }
+}
+
+#[test]
+fn unfinished_names_keep_their_token_kind_without_becoming_forms() {
+    let source = "(f {: 0}) (alias/) :ok";
+    let parsed = reader::parse(source);
+    assert_lossless(source, &parsed);
+    assert_eq!(parsed.errors.len(), 2);
+    assert_eq!(parsed.forms.len(), 1);
+    assert_eq!(parsed.forms[0].keyword(), Some(":ok"));
+    let syntax = parsed.syntax();
+    let token = |spelling| {
+        syntax
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| token.text() == spelling)
+            .unwrap()
+    };
+    for (spelling, kind) in [(":", SyntaxKind::Keyword), ("alias/", SyntaxKind::Symbol)] {
+        let token = token(spelling);
+        assert_eq!(token.kind(), kind);
+        assert_eq!(token.parent().unwrap().kind(), SyntaxKind::Error);
+    }
+}
+
+#[test]
+fn whitespace_and_token_boundaries_follow_the_jvm_readers() {
+    for (separator, is_whitespace) in [
+        ('\u{001c}', true),
+        ('\u{001f}', true),
+        ('\u{1680}', true),
+        ('\u{2008}', true),
+        ('\u{3000}', true),
+        ('\u{0085}', false),
+        ('\u{00a0}', false),
+        ('\u{2007}', false),
+        ('\u{202f}', false),
+    ] {
+        let token = format!("left{separator}right");
+        let source = format!("[{token}] #:example{separator}{{:key 1}}");
+        let parsed = reader::parse(&source);
+        assert_lossless(&source, &parsed);
+        for forms in [
+            parsed.forms,
+            reader::read(&source).unwrap(),
+            reader::read_edn(&source).unwrap(),
+        ] {
+            let items = forms[0].vector().unwrap();
+            let names: Vec<_> = items.iter().map(|item| item.symbol().unwrap()).collect();
+            let prefix = if is_whitespace {
+                "example".into()
+            } else {
+                format!("example{separator}")
+            };
+            assert_eq!(
+                names,
+                if is_whitespace {
+                    vec!["left", "right"]
+                } else {
+                    vec![token.as_str()]
+                }
+            );
+            assert_eq!(
+                forms[1].map().unwrap()[0].keyword(),
+                Some(format!(":{prefix}/key").as_str())
+            );
+            assert_eq!(
+                &source[items[0].span.start.offset..items[0].span.end.offset],
+                names[0]
+            );
+        }
+
+        let character = format!("[\\a{separator}:right]");
+        let octal = format!("\"\\1{separator}x\"");
+        for read in [reader::read, reader::read_edn] {
+            if is_whitespace {
+                let forms = read(&character).unwrap();
+                assert!(matches!(
+                    forms[0].vector().unwrap()[0].kind,
+                    Kind::Character('a')
+                ));
+                let forms = read(&octal).unwrap();
+                assert!(
+                    matches!(&forms[0].kind, Kind::String(text) if text == &format!("\u{1}{separator}x"))
+                );
+            } else {
+                assert!(read(&character).is_err());
+                assert!(read(&octal).is_err());
+            }
+        }
+    }
+}
+
+#[test]
 fn mismatched_delimiters_keep_later_forms_and_all_original_tokens() {
-    let source = "(broken [1)\n(defn later {:t/sig '[:-> number?]} [] 42)\n]";
+    let source = "(broken [1)])\n(defn later {:t/sig '[:-> number?]} [] 42)\n]";
     let parsed = reader::parse(source);
     assert_eq!(parsed.errors.len(), 2, "{:?}", parsed.errors);
     assert_lossless(source, &parsed);
@@ -100,12 +235,26 @@ fn mismatched_delimiters_keep_later_forms_and_all_original_tokens() {
 }
 
 #[test]
+fn an_ambiguous_closing_delimiter_does_not_promote_a_nested_form() {
+    let source = "(broken [1)\n(defn maybe-nested [] 42)\n]";
+    let parsed = reader::parse(source);
+    assert_lossless(source, &parsed);
+    assert!(parsed.forms.is_empty());
+    assert_eq!(parsed.errors.len(), 1);
+    let error = &parsed.errors[0].span;
+    assert_eq!(&source[error.start.offset..error.end.offset], ")");
+}
+
+#[test]
 fn regex_literals_preserve_pattern_escapes_instead_of_decoding_strings() {
     let source = r##"#"\A[\d\p{L}]+\"\z" :after"##;
     let parsed = reader::parse(source);
     assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
     assert_lossless(source, &parsed);
-    assert!(matches!(parsed.forms[0].kind, Kind::Regex));
+    assert!(matches!(
+        parsed.forms[0].kind,
+        Kind::Regex { captures: Some(0) }
+    ));
     assert_eq!(parsed.forms[1].keyword(), Some(":after"));
     assert!(
         parsed
@@ -114,6 +263,26 @@ fn regex_literals_preserve_pattern_escapes_instead_of_decoding_strings() {
             .any(|element| element.kind() == SyntaxKind::Regex)
     );
     assert!(reader::read(r##"#"pattern\"##).is_err());
+
+    for (source, count) in [
+        (r##"#"(a)(b)?""##, Some(2)),
+        (r##"#"\(""##, Some(0)),
+        (r##"#"[()]""##, None),
+        (r##"#"(?i)(a)""##, Some(1)),
+        (r##"#"(?i)[a-f]+""##, Some(0)),
+        (r##"#"(?<=a)(b)""##, Some(1)),
+        (r##"#"(?x)(a)""##, None),
+        (r##"#"\c(""##, Some(0)),
+        (r##"#"\c\(a)""##, Some(1)),
+    ] {
+        let parse = reader::parse(source);
+        assert!(parse.errors.is_empty(), "{source}: {:?}", parse.errors);
+        assert_lossless(source, &parse);
+        let semantic = reader::read(source).unwrap();
+        for form in [&parse.forms[0], &semantic[0]] {
+            assert!(matches!(form.kind, Kind::Regex { captures } if captures == count));
+        }
+    }
 }
 
 #[test]
@@ -132,6 +301,94 @@ fn string_escapes_preserve_jvm_utf16_values_and_original_text() {
     assert!(reader::validate_edn(r#""\u12x4""#).is_err());
     assert!(reader::read(r#"#{"\uD800" "\ud800"}"#).is_err());
     assert!(reader::read(r#"#{"\uD83D\uDE03" "😃"}"#).is_err());
+}
+
+#[test]
+fn ascii_string_prefixes_preserve_following_values_and_positions() {
+    let prefix = "a".repeat(64);
+    let source = format!("[\"{prefix}\\uD83D\\uDE03\" \"{prefix}\r\n😃\" :after]");
+    let parsed = reader::parse(&source);
+    assert_lossless(&source, &parsed);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    for forms in [parsed.forms, reader::read(&source).unwrap()] {
+        let values = forms[0].vector().unwrap();
+        assert!(matches!(&values[0].kind, Kind::String(text) if text == &format!("{prefix}😃")));
+        assert!(matches!(&values[1].kind, Kind::String(text) if text == &format!("{prefix}\n😃")));
+        assert_eq!(values[2].keyword(), Some(":after"));
+        let start = values[2].span.start;
+        assert_eq!(start.offset, source.find(":after").unwrap());
+        assert_eq!((start.line, start.column), (2, 4));
+    }
+}
+
+#[test]
+fn source_literal_line_endings_are_normalized_without_changing_spans() {
+    let source = "[\"a\r\nb\rc\" \"a\\r\\nb\\rc\" \\\r\n \\\r :after]";
+    let parsed = reader::parse(source);
+    assert_lossless(source, &parsed);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    for forms in [parsed.forms, reader::read(source).unwrap()] {
+        let vector = forms[0].vector().unwrap();
+        let [physical, escaped, crlf, cr, after] = vector else {
+            panic!("{vector:?}");
+        };
+        assert!(matches!(&physical.kind, Kind::String(text) if text == "a\nb\nc"));
+        assert!(matches!(&escaped.kind, Kind::String(text) if text == "a\r\nb\rc"));
+        assert!(matches!(crlf.kind, Kind::Character('\n')));
+        assert!(matches!(cr.kind, Kind::Character('\n')));
+        assert_eq!(
+            &source[crlf.span.start.offset..crlf.span.end.offset],
+            "\\\r\n"
+        );
+        assert_eq!(after.span.start.offset, source.find(":after").unwrap());
+        assert_eq!((after.span.start.line, after.span.start.column), (5, 2));
+    }
+
+    let edn = reader::parse_edn(source);
+    assert_lossless(source, &edn);
+    let vector = edn.forms[0].vector().unwrap();
+    assert!(matches!(&vector[0].kind, Kind::String(text) if text == "a\r\nb\rc"));
+    assert!(matches!(vector[2].kind, Kind::Character('\r')));
+    let data = reader::read_edn(source).unwrap();
+    assert!(
+        matches!(&data[0].vector().unwrap()[0].kind, Kind::String(text) if text == "a\r\nb\rc")
+    );
+    assert!(reader::read("#{\"a\r\nb\" \"a\\nb\"}").is_err());
+    assert!(reader::read_edn("#{\"a\r\nb\" \"a\\nb\"}").is_ok());
+}
+
+#[test]
+fn unicode_digits_in_escapes_follow_java_character_digit() {
+    let source = r#"[\uＦＦＦＦ \u१२３４ \o٧٧ "\uＦＦＦＦ\u१२３４\٧٧" "\uＤ８３Ｄ\uＤＥ０３"]"#;
+    let parsed = reader::parse(source);
+    assert_lossless(source, &parsed);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    for forms in [parsed.forms, reader::read_edn(source).unwrap()] {
+        let values = forms[0].vector().unwrap();
+        assert!(matches!(values[0].kind, Kind::Character('\u{ffff}')));
+        assert!(matches!(values[1].kind, Kind::Character('\u{1234}')));
+        assert!(matches!(values[2].kind, Kind::Character('?')));
+        assert!(matches!(&values[3].kind, Kind::String(value) if value == "\u{ffff}\u{1234}?"));
+        assert!(matches!(&values[4].kind, Kind::String(value) if value == "😃"));
+    }
+
+    for token in [
+        r"\uＤ８００",
+        r"\u𝟏234",
+        r"\o٤٠٠",
+        r"\o８",
+        r#""\uＦＦＧＦ""#,
+        r#""\٧٨""#,
+    ] {
+        let source = format!("{token} :after");
+        for parse in [reader::parse, reader::parse_edn] {
+            let parsed = parse(&source);
+            assert_lossless(&source, &parsed);
+            assert_eq!(parsed.errors.len(), 1, "{token}");
+            assert_eq!(parsed.errors[0].span.start.offset, 0, "{token}");
+            assert_eq!(parsed.forms[0].keyword(), Some(":after"), "{token}");
+        }
+    }
 }
 
 #[test]
@@ -213,8 +470,35 @@ fn syntax_quote_preserves_templates_and_embedded_forms_without_expanding_them() 
         .collect();
     assert!(nodes.contains(&SyntaxKind::UnquoteSplicing));
     assert!(reader::read("`~@items").is_err());
+    assert!(reader::read("`(clojure.core/unquote-splicing items)").is_err());
+    assert!(reader::read("`(list (clojure.core/unquote-splicing items))").is_ok());
     assert!(reader::read("`(foo ~)").is_err());
     assert!(reader::validate_edn(source).is_err());
+}
+
+#[test]
+fn surrounding_syntax_quote_validates_the_result_of_inner_unquote() {
+    for template in [
+        "``~~@items",
+        "``~(clojure.core/unquote-splicing items)",
+        "``(clojure.core/unquote (clojure.core/unquote-splicing items))",
+    ] {
+        let source = format!("{template} :after");
+        let strict = reader::read(&source).unwrap_err();
+        let parsed = reader::parse(&source);
+        assert_lossless(&source, &parsed);
+        let [error] = parsed.errors.as_slice() else {
+            panic!("{parsed:#?}");
+        };
+        assert_eq!(error.span, strict.span);
+        assert!(error.message.contains("surrounding collection"));
+        assert_eq!(parsed.forms.len(), 1);
+        assert_eq!(parsed.forms[0].keyword(), Some(":after"));
+    }
+
+    for valid in ["`~(clojure.core/unquote-splicing items)", "`[`~~@items]"] {
+        assert!(reader::read(valid).is_ok(), "{valid}");
+    }
 }
 
 #[test]
@@ -308,6 +592,66 @@ fn duplicate_map_keys_report_the_second_spelling_and_preserve_recovery() {
 }
 
 #[test]
+fn literal_duplicates_compare_unquote_markers_with_their_reader_lists() {
+    for (source, duplicate) in [
+        (
+            "'#{~x (clojure.core/unquote x)} :after",
+            "(clojure.core/unquote x)",
+        ),
+        (
+            "'#{~@items [clojure.core/unquote-splicing items]} :after",
+            "[clojure.core/unquote-splicing items]",
+        ),
+        ("'{~x :first ~x :second} :after", "~x"),
+    ] {
+        let parsed = reader::parse(source);
+        assert_lossless(source, &parsed);
+        let [error] = parsed.errors.as_slice() else {
+            panic!("{parsed:#?}");
+        };
+        assert!(error.message.starts_with("Duplicate "));
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            duplicate
+        );
+        assert_eq!(reader::read(source).unwrap_err().span, error.span);
+        assert_eq!(parsed.forms.len(), 1);
+        assert_eq!(parsed.forms[0].keyword(), Some(":after"));
+    }
+    assert!(reader::read("'#{~x ~@x (unquote x)}").is_ok());
+}
+
+#[test]
+fn literal_duplicates_compare_already_read_syntax_quote_atoms() {
+    for (literal, duplicate) in [
+        ("#{3 `3}", "`3"),
+        (r##"#{"sample" `"sample"}"##, r#"`"sample""#),
+        (r"#{\A `\A}", r"`\A"),
+        (
+            "{nil :first `(clojure.core/unquote) :second}",
+            "`(clojure.core/unquote)",
+        ),
+    ] {
+        let source = format!("{literal} :after");
+        let parsed = reader::parse(&source);
+        assert_lossless(&source, &parsed);
+        let [error] = parsed.errors.as_slice() else {
+            panic!("{parsed:#?}");
+        };
+        assert!(error.message.starts_with("Duplicate "));
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            duplicate
+        );
+        assert_eq!(reader::read(&source).unwrap_err().span, error.span);
+        assert_eq!(parsed.forms[0].keyword(), Some(":after"));
+    }
+    for valid in ["#{true `true}", "#:qualified{`:label 1 :_/label 2}"] {
+        assert!(reader::read(valid).is_ok(), "{valid}");
+    }
+}
+
+#[test]
 fn literal_uniqueness_compares_integer_values_across_reader_spellings() {
     for (source, duplicate) in [
         ("#{1 01}", "01"),
@@ -333,6 +677,79 @@ fn literal_uniqueness_compares_integer_values_across_reader_spellings() {
         assert!(read("#{1 1.0 1M -1}").is_ok());
         assert!(read("[0xFF 255N 16rFF]").is_ok());
     }
+}
+
+#[test]
+fn literal_numeric_duplicates_follow_jvm_numeric_categories() {
+    for (source, repeated) in [
+        ("#{0.0 -0.0}", "-0.0"),
+        ("{1/2 :a 2/4 :b}", "2/4"),
+        ("{1 :a 2/2 :b}", "2/2"),
+        ("#{1.00M 100e-2M}", "100e-2M"),
+        ("#{-0.000M 0M}", "0M"),
+        ("#{##Inf 1e400}", "1e400"),
+        (
+            "#{340282366920938463463374607431768211456N 0x100000000000000000000000000000000}",
+            "0x100000000000000000000000000000000",
+        ),
+        (
+            "{1/2 :a 340282366920938463463374607431768211456/680564733841876926926749214863536422912 :b}",
+            "340282366920938463463374607431768211456/680564733841876926926749214863536422912",
+        ),
+        (
+            "#{340282366920938463463374607431768211456/3 680564733841876926926749214863536422912/6}",
+            "680564733841876926926749214863536422912/6",
+        ),
+    ] {
+        let parsed = reader::parse(source);
+        assert_lossless(source, &parsed);
+        for read in [reader::read, reader::read_edn] {
+            let error = read(source).unwrap_err();
+            assert!(
+                error.message.starts_with("Duplicate"),
+                "{source}: {error:?}"
+            );
+            assert_eq!(
+                &source[error.span.start.offset..error.span.end.offset],
+                repeated
+            );
+        }
+    }
+    for source in ["#{0 0.0 0M}", "#{1/2 0.5 0.5M}", "#{1M 1.0}"] {
+        assert!(reader::read(source).is_ok(), "{source}");
+        assert!(reader::read_edn(source).is_ok(), "{source}");
+    }
+}
+
+#[test]
+fn composite_literal_duplicates_use_reader_identity_for_nan_and_arguments() {
+    for (source, repeated) in [
+        ("#{[##NaN] (##NaN)}", "(##NaN)"),
+        ("#{{:x ##NaN} {:x ##NaN}}", "{:x ##NaN}"),
+        ("#{{[##NaN] :x} {[##NaN] :x}}", "{[##NaN] :x}"),
+        ("#{#{##NaN} #{##NaN}}", "#{##NaN}"),
+    ] {
+        for read in [reader::read, reader::read_edn] {
+            let error = read(source).unwrap_err();
+            assert!(error.message.starts_with("Duplicate"), "{error:?}");
+            assert_eq!(
+                &source[error.span.start.offset..error.span.end.offset],
+                repeated
+            );
+        }
+    }
+    let nan_key = "#{{##NaN :x} {##NaN :x}}";
+    assert!(reader::read(nan_key).is_ok());
+    assert!(reader::read_edn(nan_key).is_ok());
+
+    let duplicate = "#(vector #{[%] [%1]})";
+    let error = reader::read(duplicate).unwrap_err();
+    assert_eq!(
+        &duplicate[error.span.start.offset..error.span.end.offset],
+        "[%1]"
+    );
+    assert!(reader::read("#(vector #{[%1] [%2]})").is_ok());
+    assert!(reader::read("#{#(identity %) #(identity %)}").is_ok());
 }
 
 #[test]

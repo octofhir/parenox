@@ -176,7 +176,7 @@ impl Checker<'_> {
                 return self
                     .unsupported(
                         update.target,
-                        "update-keys requires a finite set of possible keyword or string keys",
+                        "update-keys requires a finite set of supported literal keys",
                     )
                     .known;
             };
@@ -211,9 +211,7 @@ impl Checker<'_> {
                 if self.diagnostics.len() == start {
                     self.unsupported(
                         update.updater,
-                        format!(
-                            "update-keys cannot determine the new keyword or string key for {key}",
-                        ),
+                        format!("update-keys cannot determine the new literal key for {key}",),
                     );
                 }
                 return Type::Unknown;

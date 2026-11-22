@@ -35,6 +35,8 @@ fn grouping_preserves_nil_false_and_maybe_empty_collections() {
           (group-by (fn [_] :items) values))
         (defn empty-input {:t/sig '[:-> {}]} []
           (group-by 42 nil))
+        (defn boolean-key {:t/sig '[:-> {false (s/tuple #{false})}]} []
+          (group-by identity [false]))
     "#;
     let report = Session::default().check("group_by.clj", source);
     assert!(report.ok && report.complete, "{report:#?}");
@@ -67,7 +69,7 @@ fn callback_and_collection_effects_precede_grouping() {
 #[test]
 fn diagnostics_distinguish_bad_collections_from_unsupported_group_keys() {
     for (source, code) in [
-        ("(group-by identity [false])", "PNX9001"),
+        ("(group-by identity [[false]])", "PNX9001"),
         ("(group-by identity 42)", "PNX2322"),
         ("(group-by identity)", "PNX2554"),
     ] {

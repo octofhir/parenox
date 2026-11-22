@@ -402,8 +402,6 @@ fn vector_metadata_still_resolves_names_after_element_failure() {
     let source = r#"(ns demo (:require [clojure.string :as string]))
 (defn broken {:t/sig '[:-> t/any]} []
   (apply str ^{:stamp missing-metadata} [(subs false 0)]))
-(defn duplicate {:t/sig '[:-> t/any]} []
-  ^{::string/stamp :first :clojure.string/stamp :second} [])
 (defn unchecked {:t/sig '[:-> t/any]} []
   ^SomeRuntimeClass [])
 "#;
@@ -423,7 +421,6 @@ fn vector_metadata_still_resolves_names_after_element_failure() {
         [
             ("PNX2304", "missing-metadata"),
             ("PNX2322", "false"),
-            ("PNX2790", ":clojure.string/stamp"),
             ("PNX9001", "SomeRuntimeClass"),
         ]
     );

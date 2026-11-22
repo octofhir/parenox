@@ -5,12 +5,14 @@ mod live_lookup;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use super::{super::declarations::SourceDeclaration, Names, generation_options, spec_field_key};
+use super::{
+    Names, generation_options, literal_union_member, spec_field_key, spec_set_accepts_member,
+};
 use crate::checker::model::Declarations;
 use crate::checker::model::specs::{
     EnumKind, MapFieldConversion, SpecConversion, StructuredConversion,
 };
-use crate::checker::model::vars::{adjacent_literal_def, def_initializer};
+use crate::checker::model::vars::{adjacent_literal_def, prior_initializer};
 use crate::reader::{Form, Kind};
 use crate::types::{IntegerClass, IntegerType, SPEC_INVALID, Type};
 
@@ -21,18 +23,15 @@ pub(in crate::checker::model) fn source_conversion(
     form: &Form,
 ) -> Option<SpecConversion> {
     if let Kind::Set(items) = &form.without_metadata().kind
-        && (1..=MAX_ENUM_ENTRIES).contains(&items.len())
+        && items.len() <= MAX_ENUM_ENTRIES
     {
-        let strings = items
+        let members = items
             .iter()
-            .map(|item| match &item.without_metadata().kind {
-                Kind::String(value) => Some(Type::Str(value.clone())),
-                _ => None,
-            })
+            .map(|item| literal_union_member(names, item, false))
             .collect::<Option<Vec<_>>>()?;
         // Spec uses the set's result as a predicate and returns the input.
         return Some(SpecConversion::IdentityDomain(Arc::new(Type::union(
-            strings,
+            members.into_iter().filter(spec_set_accepts_member),
         ))));
     }
     if resolves(names, form, "clojure.core", "identity") {
@@ -158,19 +157,13 @@ pub(in crate::checker::model) fn live_lookup_projection(
 pub(in crate::checker::model) fn live_lookup_conversion(
     declarations: &Declarations,
     forms: &[Form],
-    source: &str,
     form: &Form,
 ) -> Option<SpecConversion> {
     let conversion = live_lookup_projection(&declarations.names, declarations.namespace(), form)?;
     let SpecConversion::LiveLookupMap(projection) = &conversion else {
         return None;
     };
-    declarations.live_lookup_initializer_span(
-        forms,
-        source,
-        &projection.var,
-        form.span.start.offset,
-    )?;
+    declarations.live_lookup_initializer_span(forms, &projection.var, form.span.start.offset)?;
     Some(conversion)
 }
 
@@ -586,7 +579,7 @@ fn table_conversion(
     {
         return None;
     }
-    let registration = || enum_registration(declarations, forms, source, form);
+    let registration = || enum_registration(declarations, forms, form);
     if integer_keys
         && plain
         && let Some(entries) = matching_integer_keywords(lookup, convert, source)
@@ -605,7 +598,7 @@ fn table_conversion(
             (Kind::Symbol(_), Kind::Symbol(_))
         )
         && let Some(index) = registration()
-        && let Some((name, table)) = adjacent_literal_def(declarations, forms, source, index)
+        && let Some((name, table)) = adjacent_literal_def(declarations, forms, index)
         && name == local
         && let Some(entries) = integer_keyword_entries(table, source)
     {
@@ -634,7 +627,8 @@ fn table_conversion(
             return None;
         }
         let key = if integer_keys {
-            fixed_integer(key, source)?
+            let value = fixed_integer(key, source)?.exact_integer_value()?;
+            Type::exact_integer(value, IntegerClass::Fixed)
         } else {
             Type::Key(names.key(key.keyword()?))
         };
@@ -709,7 +703,6 @@ pub(in crate::checker::model) fn literal_integer_enum(
 fn enum_registration(
     declarations: &Declarations,
     forms: &[Form],
-    source: &str,
     spec_body: &Form,
 ) -> Option<usize> {
     let index = forms.partition_point(|form| form.span.end.offset <= spec_body.span.start.offset);
@@ -724,7 +717,7 @@ fn enum_registration(
         && matches!(name.kind, Kind::Keyword(_))
         && matches!(head.kind, Kind::Symbol(_))
         && resolves(&declarations.names, head, "clojure.spec.alpha", "def")
-        && !has_reader_discard(registration, source))
+        && !declarations.has_unchecked_dispatch(registration.span))
     .then_some(index)
 }
 
@@ -771,7 +764,13 @@ fn integer_keyword_entries(form: &Form, source: &str) -> Option<BTreeMap<Type, T
 
 fn fixed_integer_keywords(entries: BTreeMap<Type, Type>) -> SpecConversion {
     SpecConversion::Enum {
-        entries: entries.into_iter().collect(),
+        entries: entries
+            .into_iter()
+            .map(|(key, value)| {
+                let code = key.exact_integer_value().expect("fixed integer enum key");
+                (Type::exact_integer(code, IntegerClass::Fixed), value)
+            })
+            .collect(),
         kind: EnumKind::FixedIntegerKeywords,
     }
 }
@@ -831,6 +830,7 @@ fn inverted_entries<'a>(
     if !names.spec_core_scope_known
         || !names.loads_library("clojure.set")
         || !resolves(names, invert, "clojure.set", "map-invert")
+        || declarations.has_unchecked_dispatch(initializer.span)
     {
         return None;
     }
@@ -863,33 +863,10 @@ fn inverted_entries<'a>(
     Some(values)
 }
 
-fn prior_initializer<'a>(
-    declarations: &'a Declarations,
-    forms: &'a [Form],
-    local: &'a str,
-    before: usize,
-) -> Option<&'a Form> {
-    let mut definitions = declarations.source_declarations(forms, local);
-    let SourceDeclaration::Value([head, name, tail @ ..]) = definitions.next()? else {
-        return None;
-    };
-    if definitions.next().is_some()
-        || !matches!(head.symbol(), Some("def" | "clojure.core/def"))
-        || name.span.end.offset >= before
-        || name.metadata(":dynamic").is_some_and(|value| {
-            !matches!(value.without_metadata().kind, Kind::Nil | Kind::Bool(false))
-        })
-    {
-        return None;
-    }
-    def_initializer(tail)
-}
-
 impl Declarations {
     pub(crate) fn live_lookup_initializer_span(
         &self,
         forms: &[Form],
-        source: &str,
         var: &str,
         before: usize,
     ) -> Option<crate::reader::Span> {
@@ -898,7 +875,7 @@ impl Declarations {
             return None;
         }
         let index = forms.partition_point(|form| form.span.end.offset <= before);
-        let (name, value) = adjacent_literal_def(self, forms, source, index)?;
+        let (name, value) = adjacent_literal_def(self, forms, index)?;
         if name != local {
             return None;
         }

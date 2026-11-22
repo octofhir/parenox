@@ -10,5 +10,7 @@ description = "Lossless Clojure syntax and EDN reader for Parenox"
 serde = ["dep:serde"]
 
 [dependencies]
+num-bigint = "0.4"
+num-integer = "0.1"
 rowan = "=0.18.0-alpha.2"
 serde = { version = "1", features = ["derive"], optional = true }

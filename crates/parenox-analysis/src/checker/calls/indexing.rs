@@ -2,7 +2,7 @@
 use super::super::{Checker, LiteralContainer, Value, literal_vector_value};
 use crate::Diagnostic;
 use crate::reader::Span;
-use crate::types::{IndexedItem, IntegerRange, IntegerType, Type};
+use crate::types::{IndexedItem, Type};
 
 #[derive(Clone, Copy)]
 enum IndexedAccess {
@@ -17,6 +17,13 @@ impl IndexedAccess {
             Self::VectorCall => "Vector invocation",
         }
     }
+
+    fn index(self, key: &Type) -> Option<i32> {
+        match self {
+            Self::Nth => key.exact_integer_value(),
+            Self::VectorCall => key.associative_index(),
+        }
+    }
 }
 
 impl Checker<'_> {
@@ -24,7 +31,7 @@ impl Checker<'_> {
         let (collection, collection_span) = &args[0];
         let (key, key_span) = &args[1];
         let fallback = args.get(2).map(|(value, _)| value);
-        let index = exact_integer_index(&key.known);
+        let index = key.known.exact_integer_value();
         let proof = match (&collection.known, &collection.literal_container) {
             (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) => {
                 Some((items, vector))
@@ -67,14 +74,14 @@ impl Checker<'_> {
             return self.unchecked_form(*source_span, "subvec needs a proven ordinary vector");
         };
         let (start, start_span) = &args[1];
-        let Some(start) = exact_integer_index(&start.known) else {
+        let Some(start) = start.known.exact_integer_value() else {
             return self.unchecked_form(*start_span, "subvec needs a known i32 start index");
         };
         let length = items.len() as i32;
         let mut end = length;
         let mut end_span = *start_span;
         if let Some((bound, span)) = args.get(2) {
-            let Some(index) = exact_integer_index(&bound.known) else {
+            let Some(index) = bound.known.exact_integer_value() else {
                 return self.unchecked_form(*span, "subvec needs a known i32 end index");
             };
             end = index;
@@ -130,12 +137,20 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         };
-        Value::new(self.nth_value(
+        let mut result = Value::new(self.nth_value(
             (&vector.known, head),
             (&key.known, *key_span),
             None,
             IndexedAccess::VectorCall,
-        ))
+        ));
+        result.literal_container = key
+            .known
+            .associative_index()
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| vector.literal_container.as_ref()?.position_child(index))
+            .filter(|child| child.matches_type(&result.known))
+            .cloned();
+        result
     }
 
     fn nth_value(
@@ -145,6 +160,12 @@ impl Checker<'_> {
         fallback: Option<&Type>,
         access: IndexedAccess,
     ) -> Type {
+        if let Some(index) = access.index(key.0) {
+            if matches!(access, IndexedAccess::VectorCall) && key.0.may_be_byte_or_short() {
+                self.illegal_argument();
+            }
+            return self.nth_at(collection, (index, key.1), fallback, access);
+        }
         match key.0 {
             Type::Never | Type::Unknown => key.0.clone(),
             Type::Any => {
@@ -156,38 +177,10 @@ impl Checker<'_> {
                     .iter()
                     .map(|part| self.nth_value(collection, (part, key.1), fallback, access)),
             ),
-            Type::Integer(index) => self.nth_at(collection, (*index, key.1), fallback, access),
-            Type::Integral(IntegerType {
-                range: IntegerRange::Exact(index),
-                ..
-            }) if matches!(access, IndexedAccess::Nth) => {
-                self.nth_at(collection, (*index, key.1), fallback, access)
-            }
             Type::NonIntegral if matches!(access, IndexedAccess::VectorCall) => {
                 self.invalid_index(key, access)
             }
-            Type::Number
-            | Type::Integral(IntegerType {
-                range:
-                    IntegerRange::IntCache
-                    | IntegerRange::Int32
-                    | IntegerRange::Exact(_)
-                    | IntegerRange::ExactLong(_)
-                    | IntegerRange::OutsideInt32,
-                ..
-            }) if matches!(access, IndexedAccess::VectorCall) => {
-                let source = &self.source[key.1.start.offset..key.1.end.offset];
-                if let Some(index) = vector_literal_index(source) {
-                    self.nth_at(collection, (index, key.1), fallback, access)
-                } else {
-                    self.unsupported(
-                        key.1,
-                        "Vector invocation analysis needs a known integer index",
-                    )
-                    .known
-                }
-            }
-            Type::Integral(_) if matches!(access, IndexedAccess::VectorCall) => {
+            Type::Number | Type::Integral(_) if matches!(access, IndexedAccess::VectorCall) => {
                 self.unsupported(
                     key.1,
                     "Vector invocation analysis needs a known integer index",
@@ -254,6 +247,7 @@ impl Checker<'_> {
         };
         match item {
             IndexedItem::Present(item) => item.clone(),
+            IndexedItem::PresentChar(value) => Type::Char(value),
             IndexedItem::Optional(item) => fallback.map_or_else(
                 || item.clone(),
                 |default| Type::union([item.clone(), default.clone()]),
@@ -293,31 +287,4 @@ impl Checker<'_> {
             }
         }
     }
-}
-
-fn exact_integer_index(ty: &Type) -> Option<i32> {
-    match ty {
-        Type::Integer(index)
-        | Type::Integral(IntegerType {
-            range: IntegerRange::Exact(index),
-            ..
-        }) => Some(*index),
-        _ => None,
-    }
-}
-
-fn vector_literal_index(token: &str) -> Option<i32> {
-    let digits = token.strip_prefix(['+', '-']).unwrap_or(token);
-    let value = if digits.len() > 1 && digits.starts_with('0') {
-        let value = i64::from_str_radix(digits, 8).ok()?;
-        if token.starts_with('-') {
-            -value
-        } else {
-            value
-        }
-    } else {
-        token.parse::<i64>().ok()?
-    };
-    // APersistentVector uses Number.intValue() after checking the JVM type.
-    Some(value as i32)
 }

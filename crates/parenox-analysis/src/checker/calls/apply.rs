@@ -353,7 +353,10 @@ impl Checker<'_> {
             Callable::Builtin(name)
                 if !matches!(
                     name.as_str(),
-                    "clojure.core/conj" | "clojure.core/merge" | "clojure.core/dissoc"
+                    "clojure.core/conj"
+                        | "clojure.core/merge"
+                        | "clojure.core/disj"
+                        | "clojure.core/dissoc"
                 ) =>
             {
                 let arities = builtin_arities(name);
@@ -469,7 +472,7 @@ fn definitely_not_seqable_for_mapping(ty: &Type) -> bool {
         | Type::Sym(_)
         | Type::Integer(_)
         | Type::Integral(IntegerType {
-            class: IntegerClass::Fixed,
+            class: IntegerClass::Fixed | IntegerClass::IntOrLong,
             ..
         }) => true,
         // Custom Number and BigInteger subclasses may implement Seqable.
