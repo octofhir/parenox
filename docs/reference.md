@@ -928,6 +928,7 @@ numeric semantics remain explicit coverage gaps. In checked code, an
 unavailable external operator reports `PNX9003` at its name. A declaration
 is needed to establish the scope and evaluation of its operands. An
 unavailable `:refer :all` also leaves unqualified operators unresolved.
+The same applies when unmodeled source declarations can introduce public Vars.
 Explicitly qualified core calls still resolve to their known contracts. An
 untyped source call reports `PNX9002` and a comparison without enough
 type information can report `PNX9004`. An unknown field does not hide a

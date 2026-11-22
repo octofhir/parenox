@@ -1230,6 +1230,15 @@ impl Declarations {
         );
     }
 
+    pub(super) fn has_unmodeled_var_exports(&self) -> bool {
+        self.unavailable_all_refers
+            || !self.unmodeled_calls.is_empty()
+            || self
+                .unchecked_dispatches
+                .as_ref()
+                .is_some_and(|dispatches| dispatches.first_tag.is_some())
+    }
+
     fn replace_source_macro(&mut self, name: &Form, marker: Option<&Form>, span: Span) {
         let Some(previous) = name
             .symbol()

@@ -432,6 +432,14 @@ impl Declarations {
                     );
                     return;
                 };
+                if exports.incomplete_var_inventory {
+                    self.unavailable_all_refers = true;
+                    self.error(
+                        "PNX9001",
+                        refer_span,
+                        format!("Cannot determine all public vars of namespace {namespace}"),
+                    );
+                }
                 exports
                     .public_var_names()
                     .map(|name| (name, refer_span))

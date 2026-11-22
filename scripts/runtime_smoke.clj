@@ -1428,6 +1428,18 @@
       (assert (= :from-referral (eval form))))))
 (println "Clojure/JVM wildcard referral scope: 6 assertions passed")
 
+(let [provider 'parenox.smoke.dynamic-var-provider
+      consumer 'parenox.smoke.dynamic-var-consumer]
+  (binding [*ns* (create-ns provider)]
+    (clojure.core/refer 'clojure.core)
+    (eval '(eval '(defmacro with-value [[name value] body] (list 'let [name value] body)))))
+  (dosync (alter @#'clojure.core/*loaded-libs* conj provider))
+  (binding [*ns* *ns*]
+    (eval (list 'ns consumer (list :require [provider :refer :all]))))
+  (binding [*ns* (the-ns consumer)]
+    (assert (= "bc" (eval '(with-value [label "abc"] (clojure.core/subs label 1)))))))
+(println "Clojure/JVM dynamic wildcard exports: 1 assertion passed")
+
 (import '[java.io File])
 (assert (= java.io.File File))
 (assert (= java.lang.String String))

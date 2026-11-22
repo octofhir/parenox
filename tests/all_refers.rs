@@ -164,6 +164,47 @@ fn an_unavailable_wildcard_referral_leaves_unqualified_operators_opaque() {
 }
 
 #[test]
+fn a_provider_with_unmodeled_declarations_keeps_its_wildcard_scope_open() {
+    let app = r#"(ns app (:require [scope.mutations :refer :all]))
+(defn read-label {:t/sig '[:-> string?]} []
+  (with-value [label "abc"] (clojure.core/subs label 1)))"#;
+    let known = "(ns scope.mutations)";
+    let dynamic = r#"(ns scope.mutations)
+(eval '(defmacro with-value [[name value] body] (list 'let [name value] body)))"#;
+    let mut session = Session::default();
+    let original = check(&mut session, known, app);
+    assert!(original.files[0].diagnostics.iter().any(|d| {
+        d.code == "PNX2304" && &app[d.span.start.offset..d.span.end.offset] == "with-value"
+    }));
+
+    let warm = check(&mut session, dynamic, app);
+    let cold = check(&mut Session::default(), dynamic, app);
+    let findings: Vec<_> = warm.files[0]
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &app[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [("PNX9001", ":all"), ("PNX9003", "with-value")],
+        "{warm:#?}"
+    );
+    let normalize = |report: &parenox::ProjectReport| {
+        serde_json::to_value(&report.files[0].diagnostics).unwrap()
+    };
+    assert_eq!(normalize(&warm), normalize(&cold));
+    assert_eq!(
+        normalize(&check(&mut session, known, app)),
+        normalize(&original)
+    );
+}
+
+#[test]
 fn preserves_namespace_order_for_core_and_reports_unavailable_sources() {
     let mut session = Session::default();
     let core = r#"(ns app

@@ -424,7 +424,13 @@ impl Model {
         model.verify_guards(guards, declarations, forms, globals);
         model.check_data_functions(source, globals);
         model.collect_helpers();
-        model.freeze_interfaces(specs, declarations.dependencies.clone());
+        // With an otherwise known surface, absent arity proof means a possible Var mutation.
+        model.freeze_interfaces(
+            specs,
+            declarations.dependencies.clone(),
+            declarations.has_unmodeled_var_exports()
+                || (!declarations.opaque_var_surface && !source_arities_known),
+        );
         model
     }
 
@@ -547,7 +553,8 @@ impl Model {
                     match (previous.as_ref(), globals.exports.get(namespace)) {
                         (Some(old), Some(current)) if Arc::ptr_eq(old, current) => true,
                         (Some(old), Some(current))
-                            if old.public_var_names().eq(current.public_var_names()) =>
+                            if old.incomplete_var_inventory == current.incomplete_var_inventory
+                                && old.public_var_names().eq(current.public_var_names()) =>
                         {
                             *previous = Some(current.clone());
                             true

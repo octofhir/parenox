@@ -21,6 +21,7 @@ pub(super) struct Exports {
     unchecked_functions: BTreeMap<String, UncheckedFunction>,
     macros: BTreeMap<String, bool>,
     private_vars: BTreeSet<String>,
+    pub(super) incomplete_var_inventory: bool,
 }
 
 impl Exports {
@@ -353,9 +354,13 @@ impl Model {
         &mut self,
         specs: BTreeMap<String, Type>,
         dependencies: Vec<String>,
+        incomplete_var_inventory: bool,
     ) {
         let specs = Arc::new(specs);
-        let mut exports = Exports::default();
+        let mut exports = Exports {
+            incomplete_var_inventory,
+            ..Exports::default()
+        };
         let mut functions = BTreeMap::new();
         for f in self.functions.values() {
             if f.private {
@@ -420,10 +425,12 @@ impl Model {
 
     pub fn publish(&self, globals: &mut Globals, unambiguous: bool) {
         let mut exports = self.exports.clone();
-        if !unambiguous && !exports.ordinary_dotted_functions.is_empty() {
-            Arc::make_mut(&mut exports)
-                .ordinary_dotted_functions
-                .clear();
+        if !unambiguous
+            && (!exports.incomplete_var_inventory || !exports.ordinary_dotted_functions.is_empty())
+        {
+            let exports = Arc::make_mut(&mut exports);
+            exports.incomplete_var_inventory = true;
+            exports.ordinary_dotted_functions.clear();
         }
         globals
             .exports
