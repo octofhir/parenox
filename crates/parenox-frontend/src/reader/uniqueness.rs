@@ -371,16 +371,14 @@ fn composite<'a>(value: &'a Form, context: Context<'a, '_>) -> Option<Literal<'a
             let mut entries = pairs
                 .iter()
                 .map(|[key, value]| {
+                    let key = literal_key(key, context, names)?;
                     // The reader reuses one boxed NaN, which compares equal
-                    // in sequences and sets. Map equality looks up its keys,
-                    // and array-map numeric key lookup does not match NaN.
-                    if matches!(
-                        key.without_metadata().kind,
-                        Kind::SymbolicNumber(SymbolicNumber::NaN)
-                    ) {
+                    // in sequences, sets and map values. Array-map equality
+                    // uses numeric key lookup and cannot match a NaN key.
+                    if matches!(key, Literal::Atom(Atom::NaN)) {
                         return None;
                     }
-                    Some((literal_key(key, context, names)?, literal(value, context)?))
+                    Some((key, literal(value, context)?))
                 })
                 .collect::<Option<Vec<_>>>()?;
             entries.sort_unstable();

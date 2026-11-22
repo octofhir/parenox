@@ -41,6 +41,30 @@ fn reader_keeps_distinct_forms_and_skips_unsupported_composite_equality() {
 }
 
 #[test]
+fn projected_nan_keeps_distinct_maps_but_duplicate_direct_entries() {
+    for source in [
+        "{{`~##NaN :v} :one {`~##NaN :v} :two}",
+        "#{{`~##NaN :v} {`~##NaN :v}}",
+    ] {
+        assert!(read(source).is_ok(), "{source}");
+        let parsed = parse(source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+    }
+    for source in [
+        "{`~##NaN :one `~##NaN :two}",
+        "#{`~##NaN `~##NaN}",
+        "{{:score `~##NaN} :one {:score `~##NaN} :two}",
+    ] {
+        let error = read(source).unwrap_err();
+        assert!(
+            error.message.starts_with("Duplicate"),
+            "{source}: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn duplicate_composite_span_and_trivia_remain_available_in_the_cst() {
     let source = "#{[1] :atom ; same composite\n  (1) :atom}\n:next";
     let parsed = parse(source);
