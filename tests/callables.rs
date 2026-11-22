@@ -24,6 +24,52 @@ fn maps_and_keywords_are_functions_in_direct_calls_and_callbacks() {
 }
 
 #[test]
+fn symbols_invoke_lookup_with_their_own_key_and_default() {
+    for (body, expected) in [
+        (
+            r#"(let [lookup 'account/id]
+                 (lookup {'account/id "label"} "missing"))"#,
+            r#"#{"label"}"#,
+        ),
+        ("('local {'local nil} :missing)", "nil?"),
+        ("('account/id {} :missing)", "#{:missing}"),
+        ("(apply 'account/id [{'account/id :ready}])", "#{:ready}"),
+        (
+            "(first (mapv 'account/id [{'account/id :ready}]))",
+            "#{:ready}",
+        ),
+        ("(first (mapv 'field [{}] [:missing]))", "#{:missing}"),
+        ("(key {})", "nil?"),
+    ] {
+        let source = format!("(defn lookup {{:t/sig '[symbol? :-> {expected}]}} [key] {body})");
+        let report = Session::default().check("callables.clj", &source);
+        assert!(report.ok && report.complete, "{body}: {report:#?}");
+    }
+}
+
+#[test]
+fn a_symbol_call_rejects_wrong_arity_at_the_invocation() {
+    for invocation in ["('field)", "('field {} :missing :extra)"] {
+        let source = format!(
+            r#"(defn lookup {{:t/sig '[:-> #{{:arity}}]}} []
+                 (try {invocation}
+                   (catch ClassCastException _ (inc "unreachable"))
+                   (catch clojure.lang.ArityException _ :arity)))"#
+        );
+        let report = Session::default().check("callables.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{invocation}: {report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, "PNX2554");
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            invocation
+        );
+    }
+}
+
+#[test]
 fn set_lookup_returns_the_stored_value_and_respects_custom_comparators() {
     for (body, contract) in [
         ("(#{:present} :missing)", "nil?"),

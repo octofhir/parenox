@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 use super::super::{LiteralContainer, metadata::MetadataTarget};
 use super::{
     ArgumentForms, CallOperands, Callable, Checker, Env, OperandTail, PreparedCallable, Value,
-    arity_counts, builtin_arities, call_returns, vectors::CollectionError, vectors::element_type,
+    arity_counts, builtin_arities, call_returns, key_callable_name, vectors::CollectionError,
+    vectors::element_type,
 };
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, IntegerClass, IntegerType, Signature, Type};
@@ -368,7 +369,7 @@ impl Checker<'_> {
                     }
                     value
                 }
-                Type::Map(_) | Type::Key(_) | Type::Keyword | Type::SpecKeyword => {
+                key if matches!(key, Type::Map(_)) || key_callable_name(key).is_some() => {
                     self.check_spread_arities(
                         &[Arity::Fixed(1), Arity::Fixed(2)],
                         minimum,

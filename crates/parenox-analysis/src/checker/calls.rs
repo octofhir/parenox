@@ -922,16 +922,15 @@ impl<'model> Checker<'model> {
         if function.known == Type::Nil || definitely_noncallable(&function.known) {
             return self.reject_call_target(&function.known, head);
         }
-        if matches!(
-            function.known,
-            Type::Key(_) | Type::Keyword | Type::SpecKeyword
-        ) && !(1..=2).contains(&args.len())
+        let key_callable = key_callable_name(&function.known);
+        if let Some(name) = key_callable
+            && !(1..=2).contains(&args.len())
         {
             self.error(
                 "PNX2554",
                 span,
                 format!(
-                    "Keyword invocation expects 1 or 2 arguments, got {}",
+                    "{name} invocation expects 1 or 2 arguments, got {}",
                     args.len()
                 ),
             );
@@ -999,9 +998,8 @@ impl<'model> Checker<'model> {
                 }
                 Value::new(active.ret.clone())
             }
-            kind @ (Type::Key(_) | Type::Keyword | Type::SpecKeyword | Type::Map(_)) => {
-                let is_map = matches!(kind, Type::Map(_));
-                if is_map && !(1..=2).contains(&args.len()) {
+            Type::Map(_) => {
+                if !(1..=2).contains(&args.len()) {
                     self.error(
                         "PNX2554",
                         span,
@@ -1013,11 +1011,11 @@ impl<'model> Checker<'model> {
                     return Value::new(Type::Unknown);
                 }
                 let default = args.get(1).map(|(value, _)| value);
-                if is_map {
-                    self.lookup_default(function, &args[0].0.known, default, args[0].1)
-                } else {
-                    self.lookup_default(&args[0].0, kind, default, head)
-                }
+                self.lookup_default(function, &args[0].0.known, default, args[0].1)
+            }
+            key if key_callable.is_some() => {
+                let default = args.get(1).map(|(value, _)| value);
+                self.lookup_default(&args[0].0, key, default, head)
             }
             Type::Union(parts) => parts.iter().fold(Value::new(Type::Never), |result, part| {
                 let alternative = Value {
@@ -1706,6 +1704,14 @@ pub(super) fn predicate_type(name: &str) -> Option<Type> {
 
 pub(super) fn call_returns(args: &[(Value, Span)]) -> bool {
     args.iter().all(|(value, _)| value.known != Type::Never)
+}
+
+fn key_callable_name(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Key(_) | Type::Keyword | Type::SpecKeyword => Some("Keyword"),
+        Type::Sym(_) | Type::Symbol | Type::SimpleSymbol | Type::QualifiedSymbol => Some("Symbol"),
+        _ => None,
+    }
 }
 
 pub(super) fn definitely_noncallable(ty: &Type) -> bool {

@@ -757,6 +757,9 @@ class, including when the operands exceed 128 bits.
 [JVM fixture](../tests/fixtures/numeric-map-key-classes.clj)
 A proven lookup miss retains the evidence for a supplied default collection.
 Lookup arguments still evaluate before the lookup selects that default.
+Symbols use themselves as lookup keys when called. Direct calls, fixed
+spreads through `apply` and collection callbacks preserve the selected
+value and the optional missing-key default.
 The `number?` predicate can accept a JVM object with a custom `ILookup`.
 Parenox reports a coverage gap when the receiver's type leaves this behavior
 open.
