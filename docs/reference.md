@@ -246,6 +246,7 @@ Exporting the regex object as an EDN literal value is unsupported.
   A callback field in a literal map can use type arguments inferred from other
   arguments of the call or from required ordinary fields in the outer map.
   The callback can be nested through declared fields of closed maps.
+  Nilable callbacks can use type parameters established by ordinary arguments.
   Optional fields are checked when present. A single required callback field
   can supply the result type parameter through a path of required fields
   when the other fields have independent types.

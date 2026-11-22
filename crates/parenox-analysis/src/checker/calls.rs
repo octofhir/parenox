@@ -38,7 +38,7 @@ use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use combinators::CombinedCallable;
 use forms::CoreForm;
-use inline::{CallbackReturn, Fnil, InlineFunction, Partial, contextual_signature};
+use inline::{CallbackReturn, Fnil, InlineFunction, Partial};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
@@ -653,18 +653,18 @@ impl<'model> Checker<'model> {
         if let Some(signature) = signature.filter(|sig| sig.parameters.is_some()) {
             return self.generic_arguments(function, signature, forms, call, env);
         }
-        let Some(signature) = signature.filter(|sig| {
-            sig.args
-                .iter()
-                .chain(&sig.rest)
-                .any(|ty| matches!(ty, Type::Function(_)) || contextual_signature(ty).is_some())
-                || forms.iter().enumerate().any(|(index, form)| {
+        let Some(signature) =
+            signature.filter(|sig| {
+                sig.args.iter().chain(&sig.rest).any(|ty| {
+                    matches!(ty, Type::Function(_)) || ty.contextual_signature().is_some()
+                }) || forms.iter().enumerate().any(|(index, form)| {
                     sig.args
                         .get(index)
                         .or(sig.rest.as_ref())
                         .is_some_and(|expected| self.contextual_map(form, expected, env).is_some())
                 })
-        }) else {
+            })
+        else {
             return self
                 .eval_args(forms, env, !function.stops_evaluation())
                 .collect::<Vec<_>>()
@@ -706,7 +706,7 @@ impl<'model> Checker<'model> {
                 .get(index)
                 .or(signature.rest.as_ref())
                 .unwrap();
-            if contextual_signature(expected).is_some() && self.contextual_callback_form(form, env)
+            if expected.contextual_signature().is_some() && self.contextual_callback_form(form, env)
             {
                 // Reading or creating an ordinary closure does not run its body.
                 let argument = self.contextual_callback_argument(form, env, reachable);

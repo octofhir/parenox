@@ -479,10 +479,12 @@ impl Model {
         let result_slot =
             |ty: &Type| value_slot(ty) || parameters.iter().any(|p| ty.has_nullable_parameter(p));
         let callback_slot = |ty: &Type| {
-            matches!(ty, Type::Function(signatures)
-                if matches!(signatures.as_ref(), [callback] if callback.rest.is_none()
+            ty.contextual_signature().is_some_and(|(_, callback)| {
+                callback.rest.is_none()
                     && callback.parameters.is_none()
-                    && callback.args.iter().all(value_slot) && result_slot(&callback.ret)))
+                    && callback.args.iter().all(value_slot)
+                    && result_slot(&callback.ret)
+            })
         };
         if !result_slot(&signature.ret)
             || !signature.args.iter().all(|ty| {

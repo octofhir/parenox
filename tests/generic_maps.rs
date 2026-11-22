@@ -422,6 +422,67 @@ fn optional_callbacks_receive_context_from_required_fields() {
 }
 
 #[test]
+fn inferred_types_reach_nilable_callbacks_in_exported_contracts() {
+    let provider = Source {
+        path: "reports.clj",
+        source: r#"(ns reports (:require [clojure.spec.alpha :as s]))
+          (defn message
+            {:t/sig '(t/all [value]
+              [value (s/nilable (s/fspec :args (s/cat :text value) :ret value)) :-> value])}
+            [fallback render]
+            (if-let [callback render] (callback fallback) fallback))
+          (defn from-map
+            {:t/sig '(t/all [value]
+              [(t/map {:req {:fallback value}
+                       :opt {:message-fn (s/nilable (s/fspec :args (s/cat :text value) :ret value))}})
+               :-> value])}
+            [report]
+            (message (:fallback report) (:message-fn report)))"#,
+    };
+    let export = Session::default().export_externs(&[provider], &[]);
+    let edn = export.edn.unwrap_or_else(|| panic!("{:?}", export.report));
+    let declarations = Source {
+        path: "reports.edn",
+        source: &edn,
+    };
+    let path = "app.clj";
+    let source = r#"(ns app (:require [reports :as r]))
+        (defn absent {:t/sig '[string? :-> string?]} [text]
+          (str (r/message text nil)
+               (r/from-map {:fallback text})
+               (r/from-map {:fallback text :message-fn nil})))
+        (defn direct {:t/sig '[string? :-> string?]} [text]
+          (r/message text (fn [value] (subs value 1))))
+        (defn mapped {:t/sig '[string? :-> string?]} [text]
+          (r/from-map {:fallback text :message-fn (fn [value] (subs value 1))}))"#;
+    let mut session = Session::default();
+    let check = |session: &mut Session, source| {
+        session.check_project(&[Source { path, source }], Some(declarations))
+    };
+    let good = check(&mut session, source);
+    assert!(good.ok && good.complete, "{good:#?}");
+    let broken = source.replace("(subs value 1)", r#"(do (inc value) "bad")"#);
+    let report = check(&mut session, &broken);
+    let [direct, mapped] = report.files[0].diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    for (finding, name) in [(direct, "reports/message"), (mapped, "reports/from-map")] {
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(finding.actual.as_deref(), Some("String"));
+        assert_eq!(
+            &broken[finding.span.start.offset..finding.span.end.offset],
+            "value"
+        );
+        let contract = finding.callback_contract.as_ref().unwrap();
+        assert_eq!(contract.name, name);
+        assert_eq!(contract.path.as_deref(), Some(declarations.path));
+    }
+    let restored = check(&mut session, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
+#[test]
 fn later_required_fields_can_supply_the_callback_input_type() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (defn render
@@ -882,6 +943,7 @@ fn nested_parameters_and_extra_record_fields_are_rejected() {
         "(t/all [a] [a :-> {:nested {:row a}}])",
         "(t/all [a] [(t/map {:opt {:value a}}) :-> a])",
         "(t/all [a] [(t/map {:opt {:run (s/fspec :args (s/cat) :ret a)}}) :-> a])",
+        "(t/all [a] [(s/nilable (s/fspec :args (s/cat) :ret a)) :-> a])",
         "(t/all [a b] [{:first (s/fspec :args (s/cat :x a) :ret b)
                         :second (s/fspec :args (s/cat :x a) :ret b) :value a} :-> b])",
     ] {

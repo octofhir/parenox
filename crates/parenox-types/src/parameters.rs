@@ -208,6 +208,17 @@ impl Type {
         signatures.iter().find(|sig| sig.arity() == arity)
     }
 
+    pub fn contextual_signature(&self) -> Option<(&Type, &Signature)> {
+        let function = self.nilable_member().unwrap_or(self);
+        let Self::Function(signatures) = function else {
+            return None;
+        };
+        let [signature] = signatures.as_ref() else {
+            return None;
+        };
+        Some((function, signature))
+    }
+
     pub(crate) fn is_generic_evidence(&self) -> bool {
         self != &Self::Never
             && !self.contains_unknown()
@@ -236,11 +247,16 @@ impl Type {
     }
 
     fn nullable_parameter(&self) -> Option<&Type> {
+        self.nilable_member()
+            .filter(|ty| matches!(ty, Self::Parameter(_)))
+    }
+
+    fn nilable_member(&self) -> Option<&Type> {
         let Self::Union(parts) = self else {
             return None;
         };
         match parts.as_slice() {
-            [ty @ Self::Parameter(_), Self::Nil] | [Self::Nil, ty @ Self::Parameter(_)] => Some(ty),
+            [ty, Self::Nil] | [Self::Nil, ty] => Some(ty),
             _ => None,
         }
     }
@@ -279,7 +295,8 @@ impl Type {
                     if map.fields.values().all(|field| {
                         matches!(field.ty, Self::Parameter(_))
                             || (allow_callback_fields
-                                && matches!(field.ty, Self::Function(_) | Self::Map(_)))
+                                && (matches!(field.ty, Self::Function(_) | Self::Map(_))
+                                    || field.ty.contextual_signature().is_some()))
                             || !field.ty.contains_parameter()
                     }) =>
                 {
@@ -316,6 +333,9 @@ impl Type {
             Self::Union(_) if let Some(parameter) = self.nullable_parameter() => {
                 parameter.substitute(replacements).nilable()
             }
+            Self::Union(_) if let Some((function, _)) = self.contextual_signature() => {
+                function.substitute(replacements).nilable()
+            }
             Self::Map(map) if self.contains_parameter() => {
                 let mut map = map.clone();
                 if let ExtraFields::Typed(types) = &mut map.extra {
@@ -330,7 +350,8 @@ impl Type {
                     if matches!(
                         field.ty,
                         Self::Parameter(_) | Self::Function(_) | Self::Map(_)
-                    ) {
+                    ) || field.ty.contextual_signature().is_some()
+                    {
                         field.ty = field.ty.substitute(replacements);
                     }
                 }

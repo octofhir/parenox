@@ -1,10 +1,7 @@
 //! Infer input from an argument or a supported projection, then output from one callback.
 use std::borrow::Cow;
 
-use super::{
-    CallArguments, ContextualArgument, EvaluatedArguments,
-    inline::{CallbackReturn, contextual_signature},
-};
+use super::{CallArguments, ContextualArgument, EvaluatedArguments, inline::CallbackReturn};
 use crate::Diagnostic;
 use crate::checker::{Checker, Env, Value};
 use crate::reader::{Form, Span};
@@ -57,7 +54,7 @@ impl Checker<'_> {
         let mut callbacks = Vec::new();
         let mut reachable = env.reachable();
         for (index, (form, expected)) in forms.iter().zip(&signature.args).enumerate() {
-            if (matches!(expected, Type::Function(_)) || contextual_signature(expected).is_some())
+            if (matches!(expected, Type::Function(_)) || expected.contextual_signature().is_some())
                 && self.contextual_callback_form(form, env)
             {
                 // A literal fn creates a closure; a saved local only reads one.
