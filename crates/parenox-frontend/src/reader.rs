@@ -911,7 +911,7 @@ impl<'a> Reader<'a> {
             }
         };
         self.depth -= 1;
-        self.finish_item(&result);
+        self.tree.finish_item(result.is_ok(), self.pos.offset);
         result
     }
 
@@ -930,40 +930,6 @@ impl<'a> Reader<'a> {
         )
     }
 
-    fn finish_item(&mut self, result: &Result<Item, ReadError>) {
-        let kind = match result {
-            Err(_) => SyntaxKind::Error,
-            Ok(Item::Form(form)) => match form.kind {
-                Kind::List(_) => SyntaxKind::List,
-                Kind::AnonymousFunction(_) => SyntaxKind::AnonymousFunction,
-                Kind::Vector(_) => SyntaxKind::Vector,
-                Kind::Map(_) => SyntaxKind::Map,
-                Kind::AutoNamespacedMap { .. } => SyntaxKind::NamespacedMap,
-                Kind::Set(_) => SyntaxKind::Set,
-                Kind::Quote(_) => SyntaxKind::Quote,
-                Kind::SyntaxQuote(_) => SyntaxKind::SyntaxQuote,
-                Kind::Unquote {
-                    splicing: false, ..
-                } => SyntaxKind::Unquote,
-                Kind::Unquote { splicing: true, .. } => SyntaxKind::UnquoteSplicing,
-                Kind::Symbol(_) | Kind::AnonymousArgument(_) => SyntaxKind::Symbol,
-                Kind::Keyword(_) => SyntaxKind::Keyword,
-                Kind::String(_) | Kind::Utf16String(_) => SyntaxKind::String,
-                Kind::Regex { .. } => SyntaxKind::Regex,
-                Kind::Character(_) => SyntaxKind::Character,
-                Kind::Metadata(_, _) => SyntaxKind::Metadata,
-                Kind::Tagged(_, _) => SyntaxKind::Tagged,
-                Kind::Conditional { .. } => SyntaxKind::Conditional,
-                Kind::Number => SyntaxKind::Number,
-                Kind::SymbolicNumber(_) => SyntaxKind::SymbolicNumber,
-                Kind::Bool(_) => SyntaxKind::Boolean,
-                Kind::Nil => SyntaxKind::Nil,
-            },
-            Ok(Item::Omit | Item::Splice { .. }) => SyntaxKind::Conditional,
-        };
-        self.finish_node(kind);
-    }
-
     fn form_inner(&mut self, start: Position, first: Option<char>) -> Result<Item, ReadError> {
         let kind = match first {
             Some('(') => {
@@ -976,7 +942,10 @@ impl<'a> Reader<'a> {
             }
             Some('{') => Kind::Map(self.map(start)?),
             Some('"') => match self.string(start) {
-                Ok(string) => string,
+                Ok(string) => {
+                    self.token(SyntaxKind::String, start);
+                    string
+                }
                 Err(error) => {
                     if self.recover {
                         self.record_read_failure();
@@ -985,7 +954,11 @@ impl<'a> Reader<'a> {
                     return Err(error);
                 }
             },
-            Some('\\') => Kind::Character(self.character(start)?),
+            Some('\\') => {
+                let character = self.character(start)?;
+                self.token(SyntaxKind::Character, start);
+                Kind::Character(character)
+            }
             Some('^') => {
                 self.token(SyntaxKind::MetadataMark, start);
                 self.metadata_form(start)?
@@ -1011,7 +984,11 @@ impl<'a> Reader<'a> {
             Some('#') if self.peek() == Some('#') => self.symbolic_number(start)?,
             Some('#') if self.peek() == Some(':') => self.namespaced_map(start)?,
             Some('#') if self.peek() == Some('(') => self.anonymous_function(start)?,
-            Some('#') if self.peek() == Some('"') => self.regex(start)?,
+            Some('#') if self.peek() == Some('"') => {
+                let regex = self.regex(start)?;
+                self.token(SyntaxKind::Regex, start);
+                regex
+            }
             Some('#') if self.peek() == Some('{') => {
                 return self.set(start);
             }
@@ -1047,6 +1024,7 @@ impl<'a> Reader<'a> {
     }
 
     fn tagged(&mut self, start: Position) -> Result<Kind, ReadError> {
+        self.tree.mark_dispatch(SyntaxKind::Tagged);
         self.token(SyntaxKind::DispatchMark, start);
         let tag = self
             .without_comments(Self::form)
@@ -1178,6 +1156,7 @@ impl<'a> Reader<'a> {
 
     fn symbolic_number(&mut self, start: Position) -> Result<Kind, ReadError> {
         self.bump(); // #
+        self.tree.mark_dispatch(SyntaxKind::SymbolicNumber);
         self.token(SyntaxKind::DispatchMark, start);
         let value = self.without_comments(Self::form)?;
         if let Some(span) = self.data_reader_result_span(&value) {
@@ -1205,13 +1184,13 @@ impl<'a> Reader<'a> {
             self.bump();
         }
         let token = &self.source[start.offset..self.pos.offset];
-        let kind = match token {
+        let (kind, syntax) = match token {
             arg if self.arguments.is_some() && arg.starts_with('%') => {
-                self.anonymous_argument(arg, start)?
+                (self.anonymous_argument(arg, start)?, SyntaxKind::Symbol)
             }
-            "nil" => Kind::Nil,
-            "true" => Kind::Bool(true),
-            "false" => Kind::Bool(false),
+            "nil" => (Kind::Nil, SyntaxKind::Nil),
+            "true" => (Kind::Bool(true), SyntaxKind::Boolean),
+            "false" => (Kind::Bool(false), SyntaxKind::Boolean),
             s if s.starts_with(':') => {
                 if !names::valid_name(s, self.edn) {
                     self.token(SyntaxKind::Keyword, start);
@@ -1228,20 +1207,23 @@ impl<'a> Reader<'a> {
                         end: self.pos,
                     }));
                 }
-                Kind::Keyword(s.to_string())
+                (Kind::Keyword(s.to_string()), SyntaxKind::Keyword)
             }
             s if numeric => {
                 if !numbers::valid_number(s) {
                     return Err(self.error(start, "Invalid numeric literal"));
                 }
-                Kind::Number
+                (Kind::Number, SyntaxKind::Number)
             }
-            s if names::valid_name(s, self.edn) => Kind::Symbol(s.to_string()),
+            s if names::valid_name(s, self.edn) => {
+                (Kind::Symbol(s.to_string()), SyntaxKind::Symbol)
+            }
             _ => {
                 self.token(SyntaxKind::Symbol, start);
                 return Err(self.error(start, "Invalid symbol literal"));
             }
         };
+        self.token(syntax, start);
         Ok(self.form_item(start, kind))
     }
 

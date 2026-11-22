@@ -87,6 +87,34 @@ impl SyntaxKind {
     pub fn is_trivia(self) -> bool {
         matches!(self, Self::Whitespace | Self::Comma | Self::Comment)
     }
+
+    fn item_kind(self) -> Option<Self> {
+        Some(match self {
+            Self::OpenParen => Self::List,
+            Self::OpenBracket => Self::Vector,
+            Self::OpenBrace => Self::Map,
+            Self::OpenSet => Self::Set,
+            Self::OpenAnonymousFunction => Self::AnonymousFunction,
+            Self::QuoteMark => Self::Quote,
+            Self::SyntaxQuoteMark => Self::SyntaxQuote,
+            Self::UnquoteMark => Self::Unquote,
+            Self::UnquoteSplicingMark => Self::UnquoteSplicing,
+            Self::MetadataMark => Self::Metadata,
+            Self::ConditionalMark => Self::Conditional,
+            Self::DerefMark => Self::Deref,
+            Self::VarQuoteMark => Self::VarQuote,
+            Self::NamespacedMapMark => Self::NamespacedMap,
+            Self::Symbol
+            | Self::Keyword
+            | Self::String
+            | Self::Character
+            | Self::Number
+            | Self::Boolean
+            | Self::Nil
+            | Self::Regex => self,
+            _ => return None,
+        })
+    }
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {
@@ -116,7 +144,7 @@ pub type SyntaxNode = rowan::SyntaxNode<ClojureLanguage>;
 pub type SyntaxToken = rowan::SyntaxToken<ClojureLanguage>;
 pub type SyntaxElement = rowan::SyntaxElement<ClojureLanguage>;
 
-/// Delays choosing each node's kind until the reader has recognized its semantic form.
+/// Builds a lossless tree from the reader's tokens and delimiter boundaries.
 pub(crate) struct Builder<'a> {
     source: &'a str,
     green: GreenNodeBuilder<'static>,
@@ -127,7 +155,7 @@ pub(crate) struct Builder<'a> {
 struct OpenNode {
     checkpoint: Checkpoint,
     offset: usize,
-    prefix_kind: Option<SyntaxKind>,
+    kind: Option<SyntaxKind>,
 }
 
 impl<'a> Builder<'a> {
@@ -147,48 +175,55 @@ impl<'a> Builder<'a> {
         self.stack.push(OpenNode {
             checkpoint: self.green.checkpoint(),
             offset,
-            prefix_kind: None,
+            kind: None,
         });
     }
 
     pub fn token(&mut self, kind: SyntaxKind, range: Range<usize>) {
         debug_assert!(kind.is_token());
         debug_assert_eq!(self.covered, range.start);
-        // These prefixes can produce a different semantic form. The token
-        // emitted by the reader retains the original syntax classification.
-        let prefix_kind = match kind {
-            SyntaxKind::ConditionalMark => Some(SyntaxKind::Conditional),
-            SyntaxKind::DerefMark => Some(SyntaxKind::Deref),
-            SyntaxKind::VarQuoteMark => Some(SyntaxKind::VarQuote),
-            SyntaxKind::NamespacedMapMark => Some(SyntaxKind::NamespacedMap),
-            _ => None,
-        };
-        if let Some(prefix_kind) = prefix_kind {
-            let node = self.stack.last_mut().unwrap();
-            debug_assert_eq!(node.offset, range.start);
-            node.prefix_kind = Some(prefix_kind);
+        if let Some(kind) = kind.item_kind()
+            && let Some(node) = self.stack.last_mut()
+            && node.offset == range.start
+        {
+            node.kind = Some(kind);
         }
         self.covered = range.end;
         self.green.token(kind.into(), &self.source[range]);
     }
 
-    pub fn finish(&mut self, kind: SyntaxKind, offset: usize) {
+    /// A dispatch token can start different kinds of forms.
+    pub fn mark_dispatch(&mut self, kind: SyntaxKind) {
+        self.stack.last_mut().unwrap().kind = Some(kind);
+    }
+
+    pub fn finish_item(&mut self, valid: bool, offset: usize) {
         let node = self.stack.pop().unwrap();
-        let kind = if kind == SyntaxKind::Error {
-            kind
+        let kind = if valid {
+            node.kind.expect("a successful form has a syntax kind")
         } else {
-            node.prefix_kind.unwrap_or(kind)
+            SyntaxKind::Error
         };
         if kind.is_token() {
-            self.token(kind, node.offset..offset);
+            debug_assert_eq!(self.covered, offset);
         } else {
-            if self.covered < offset {
-                // Retain a partially consumed token when reading fails.
-                self.token(SyntaxKind::ErrorToken, self.covered..offset);
-            }
-            self.green.start_node_at(node.checkpoint, kind.into());
-            self.green.finish_node();
+            self.close_node(node, kind, offset);
         }
+    }
+
+    pub fn finish(&mut self, kind: SyntaxKind, offset: usize) {
+        let node = self.stack.pop().unwrap();
+        self.close_node(node, kind, offset);
+    }
+
+    fn close_node(&mut self, node: OpenNode, kind: SyntaxKind, offset: usize) {
+        debug_assert!(!kind.is_token());
+        if self.covered < offset {
+            // Retain a partially consumed token when reading fails.
+            self.token(SyntaxKind::ErrorToken, self.covered..offset);
+        }
+        self.green.start_node_at(node.checkpoint, kind.into());
+        self.green.finish_node();
     }
 
     pub fn build(mut self) -> rowan::GreenNode {
