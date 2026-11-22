@@ -424,6 +424,7 @@ impl Declarations {
                     return;
                 };
                 let Some(exports) = globals.exports.get(namespace) else {
+                    self.unavailable_all_refers = true;
                     self.error(
                         "PNX9001",
                         refer_span,

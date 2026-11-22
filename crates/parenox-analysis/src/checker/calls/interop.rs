@@ -76,10 +76,12 @@ impl Checker<'_> {
                         | DeclaredValue::PrivateMacro
                 )
             ) || (declared.is_none()
-                && self
-                    .model
-                    .standard_core_binding(head, &self.model.resolve(head), self.globals)
-                    == Some(CoreBinding::Macro))
+                && (self.model.has_unavailable_wildcard_scope(head)
+                    || self.model.standard_core_binding(
+                        head,
+                        &self.model.resolve(head),
+                        self.globals,
+                    ) == Some(CoreBinding::Macro)))
             {
                 return None;
             }

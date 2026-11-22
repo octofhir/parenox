@@ -451,6 +451,7 @@ impl<'model> Checker<'model> {
             }));
         }
         if env.contains_key(name)
+            || self.model.has_unavailable_wildcard_scope(name)
             || self.model.local_function(name).is_some()
             || self
                 .model

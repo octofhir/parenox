@@ -212,6 +212,7 @@ pub(crate) struct Model {
     local_interface: Arc<LocalInterface>,
     external_specs: BTreeMap<String, (Option<Type>, bool)>,
     external_refers: BTreeMap<String, Option<Arc<Exports>>>,
+    unavailable_all_refers: bool,
     core_in_project: Option<bool>,
     set_namespace_in_project: Option<bool>,
     pub functions: BTreeMap<String, Function>,
@@ -280,6 +281,7 @@ impl Model {
                 .iter()
                 .map(|namespace| (namespace.clone(), globals.exports.get(namespace).cloned()))
                 .collect(),
+            unavailable_all_refers: declarations.unavailable_all_refers,
             ..Self::default()
         };
         if !declarations.reflection_flags.is_empty() && model.check_project_core(globals) {
@@ -437,7 +439,8 @@ impl Model {
     pub(super) fn can_use_standard_core(&self, name: &str, globals: &Globals) -> bool {
         !globals.project_namespaces.contains("clojure.core")
             // Loaded referrals have already been applied in namespace order.
-            && (name.contains('/') || self.external_refers.values().all(Option::is_some))
+            && (name != "/" && name.contains('/')
+                || self.external_refers.values().all(Option::is_some))
     }
 
     pub(super) fn known_standard_core_function(
@@ -496,7 +499,14 @@ impl Model {
         }
     }
 
-    pub(super) fn is_external_value_reference(&self, name: &str, globals: &Globals) -> bool {
+    pub(super) fn has_unavailable_wildcard_scope(&self, name: &str) -> bool {
+        self.unavailable_all_refers && (name == "/" || !name.contains('/'))
+    }
+
+    pub(super) fn has_unavailable_value_scope(&self, name: &str, globals: &Globals) -> bool {
+        if self.has_unavailable_wildcard_scope(name) {
+            return true;
+        }
         if !(name != "/" && name.contains('/') || self.names.refers.contains_key(name)) {
             return false;
         }

@@ -1395,6 +1395,27 @@
                (= "Unable to resolve symbol: local in this context" (ex-message (ex-cause e))))))
 (println "Clojure/JVM unknown external operand scope: 2 assertions passed")
 
+(let [provider 'parenox.smoke.wildcard-provider
+      consumer 'parenox.smoke.wildcard-consumer]
+  (binding [*ns* (create-ns provider)]
+    (clojure.core/refer 'clojure.core :exclude '[subs /])
+    (eval '(defmacro with-value [[name value] body _] `(let [~name ~value] ~body)))
+    (eval '(defmacro .length [_] :from-referral))
+    (eval '(defn subs [s n] :from-referral))
+    (eval '(defn / [a b] :from-referral)))
+  (dosync (alter @#'clojure.core/*loaded-libs* conj provider))
+  (binding [*ns* *ns* *err* (java.io.StringWriter.)]
+    (eval (list 'ns consumer (list :require [provider :refer :all]))))
+  (binding [*ns* (the-ns consumer)]
+    (assert (= "bc" (eval '(with-value [local "abc"]
+                            (clojure.core/subs local 1)
+                            (clojure.core/subs false 0)))))
+    (assert (= "bc" (eval '(clojure.core/subs "abc" 1))))
+    (doseq [form '[(subs "abc" 0) (/ 6 2)
+                   (clojure.core/apply subs ["abc" 0]) (.length "abc")]]
+      (assert (= :from-referral (eval form))))))
+(println "Clojure/JVM wildcard referral scope: 6 assertions passed")
+
 (import '[java.io File])
 (assert (= java.io.File File))
 (assert (= java.lang.String String))

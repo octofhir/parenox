@@ -161,6 +161,7 @@ pub(crate) struct InterfaceKey {
     local: Arc<LocalInterface>,
     dependencies: Vec<Dependency>,
     core_in_project: bool,
+    unavailable_all_refers: bool,
     has_declaration_findings: bool,
     specs: Arc<BTreeMap<String, Type>>,
     spec_conversions: Arc<BTreeMap<String, SpecConversion>>,
@@ -215,6 +216,7 @@ impl InterfaceKey {
     pub fn changes<'a>(&'a self, before: &'a Self) -> InterfaceChanges<'a> {
         let same_local = self.local == before.local;
         let compatible_scope = self.core_in_project == before.core_in_project
+            && self.unavailable_all_refers == before.unavailable_all_refers
             && (same_local
                 || (self.local.names == before.local.names
                     && self.local.dependencies == before.local.dependencies
@@ -455,6 +457,7 @@ impl Model {
             local: self.local_interface.clone(),
             dependencies,
             core_in_project: globals.project_namespaces.contains("clojure.core"),
+            unavailable_all_refers: self.unavailable_all_refers,
             has_declaration_findings,
             specs: globals.specs.clone(),
             spec_conversions: globals.spec_conversions.clone(),

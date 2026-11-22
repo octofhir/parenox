@@ -96,6 +96,74 @@ fn refreshes_referrals_when_exported_names_change_or_are_restored() {
 }
 
 #[test]
+fn an_unavailable_wildcard_referral_leaves_unqualified_operators_opaque() {
+    let app = r#"(ns app (:require [scope.macros :refer :all]))
+(defn from-macro {:t/sig '[:-> string?]} []
+  (with-value [local "abc"] (clojure.core/subs local 1) (clojure.core/subs false 0)))
+(defn from-substring {:t/sig '[:-> #{:from-referral}]} [] (subs "abc" 0))
+(defn from-division {:t/sig '[:-> #{:from-referral}]} [] (/ 6 2))
+(defn from-callback {:t/sig '[:-> #{:from-referral}]} []
+  (clojure.core/apply subs ["abc" 0]))
+(defn from-member {:t/sig '[:-> #{:from-referral}]} [] (.length "abc"))
+(defn qualified-core {:t/sig '[:-> string?]} [] (clojure.core/subs "abc" 1))"#;
+    let library = r#"(ns scope.macros (:refer-clojure :exclude [subs /]))
+(defmacro with-value [[name value] body _] `(let [~name ~value] ~body))
+(defmacro .length [_] :from-referral)
+(defn subs {:t/sig '[string? number? :-> #{:from-referral}]} [s n] :from-referral)
+(defn / {:t/sig '[number? number? :-> #{:from-referral}]} [a b] :from-referral)"#;
+    let consumer = Source {
+        path: "app.clj",
+        source: app,
+    };
+    let findings = |report: &parenox::ProjectReport| {
+        report.files[0]
+            .diagnostics
+            .iter()
+            .map(|d| (d.code.clone(), &app[d.span.start.offset..d.span.end.offset]))
+            .collect::<Vec<_>>()
+    };
+    let normalize = |report: &parenox::ProjectReport| {
+        serde_json::to_value(&report.files[0].diagnostics).unwrap()
+    };
+    let mut session = Session::default();
+    let before = session.check_project(&[consumer], None);
+    assert_eq!(
+        findings(&before),
+        [
+            ("PNX9001".into(), ":all"),
+            ("PNX9003".into(), "with-value"),
+            ("PNX9003".into(), "subs"),
+            ("PNX9003".into(), "/"),
+            ("PNX9003".into(), "subs"),
+            ("PNX9003".into(), ".length"),
+        ],
+        "{before:#?}"
+    );
+
+    let empty = "(ns scope.macros)";
+    let warm = check(&mut session, empty, app);
+    let cold = check(&mut Session::default(), empty, app);
+    assert_eq!(normalize(&warm), normalize(&cold));
+    assert!(findings(&warm).contains(&("PNX2304".into(), "with-value")));
+
+    let warm = check(&mut session, library, app);
+    let cold = check(&mut Session::default(), library, app);
+    assert_eq!(normalize(&warm), normalize(&cold));
+    assert_eq!(
+        findings(&warm),
+        [
+            ("PNX9001".into(), "with-value"),
+            ("PNX9001".into(), ".length")
+        ],
+        "{warm:#?}"
+    );
+    assert_eq!(
+        normalize(&session.check_project(&[consumer], None)),
+        normalize(&before)
+    );
+}
+
+#[test]
 fn preserves_namespace_order_for_core_and_reports_unavailable_sources() {
     let mut session = Session::default();
     let core = r#"(ns app

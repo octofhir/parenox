@@ -1092,7 +1092,7 @@ impl Checker<'_> {
             if self.model.known_java_member(name, self.globals) {
                 return self.unchecked_form(span, "JVM member values are not checked");
             }
-            let external = self.model.is_external_value_reference(name, self.globals);
+            let external = self.model.has_unavailable_value_scope(name, self.globals);
             self.error(
                 if external { "PNX9003" } else { "PNX2304" },
                 span,

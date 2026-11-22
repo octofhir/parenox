@@ -413,6 +413,9 @@ impl<'model> Checker<'model> {
                     return self.unchecked_function(name, xs[0].span);
                 }
                 None => {
+                    if self.model.has_unavailable_wildcard_scope(name) {
+                        return self.unchecked_external_operator(&xs[0], env);
+                    }
                     let resolved = self.model.resolve(name);
                     if let Some(value) = self.spec_operation_call(&resolved, &xs[1..], span, env) {
                         return value;
@@ -460,14 +463,8 @@ impl<'model> Checker<'model> {
                     if self.model.known_java_member(name, self.globals) {
                         return self.unmodeled_jvm_call(None, &xs[1..], span, env);
                     }
-                    if self.model.is_external_value_reference(name, self.globals) {
-                        // Without a declaration, the call could introduce bindings
-                        // or treat its operands as syntax.
-                        let value = self.infer(&xs[0], env);
-                        self.withhold_captured_facts(env.inline_functions());
-                        self.withhold_literals_after_opaque_form();
-                        self.may_throw();
-                        return value;
+                    if self.model.has_unavailable_value_scope(name, self.globals) {
+                        return self.unchecked_external_operator(&xs[0], env);
                     }
                 }
                 _ => {}
@@ -567,6 +564,15 @@ impl<'model> Checker<'model> {
         self.withhold_captured_facts(env.inline_functions());
         self.withhold_literals_after_opaque_form();
         self.unchecked_form(span, &format!("Macro {name} has no checked scope"))
+    }
+
+    fn unchecked_external_operator(&mut self, head: &Form, env: &Env) -> Value {
+        // Without a declaration, the call may introduce bindings or treat its operands as syntax.
+        let value = self.infer(head, env);
+        self.withhold_captured_facts(env.inline_functions());
+        self.withhold_literals_after_opaque_form();
+        self.may_throw();
+        value
     }
 
     pub(super) fn unchecked_function(&mut self, name: &str, span: Span) -> Value {
@@ -973,6 +979,7 @@ impl<'model> Checker<'model> {
 
     fn is_available_builtin(&self, spelling: &str, resolved: &str) -> bool {
         is_builtin(resolved)
+            && !self.model.has_unavailable_wildcard_scope(spelling)
             && (!matches!(
                 resolved,
                 "clojure.core/count"
