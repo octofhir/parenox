@@ -369,7 +369,7 @@ impl Checker<'_> {
                         minimum.max(prefix.len() + 1).max(*required),
                         (element, spread.span),
                     );
-                    self.builtin(name, &actual, span)
+                    self.builtin(name, &actual, span, None)
                 } else {
                     self.may_throw();
                     Value::new(Type::Unknown)

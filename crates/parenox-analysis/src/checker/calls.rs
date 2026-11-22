@@ -459,7 +459,7 @@ impl<'model> Checker<'model> {
                             return self.direct_extremum(&resolved, &xs[1..], span, env);
                         }
                         let args = self.typed_args(&xs[1..], env);
-                        return self.builtin(&resolved, &args, span);
+                        return self.builtin(&resolved, &args, span, Some(name));
                     }
                     if self
                         .model
@@ -698,7 +698,7 @@ impl<'model> Checker<'model> {
         span: Span,
     ) -> Value {
         let args = arguments.values;
-        if function.stops_evaluation() || !call_returns(args) {
+        if !self.path_reachable || function.stops_evaluation() || !call_returns(args) {
             return Value::new(Type::Never);
         }
         if matches!(
@@ -1038,7 +1038,7 @@ impl<'model> Checker<'model> {
                 self.may_throw();
                 Value::new(Type::String)
             }
-            Callable::Builtin(name) => self.builtin(name, &args, span),
+            Callable::Builtin(name) => self.builtin(name, &args, span, None),
             Callable::Value(function) => {
                 let result = self.call_value(
                     function,
@@ -1058,9 +1058,15 @@ impl<'model> Checker<'model> {
         }
     }
 
-    fn builtin(&mut self, name: &str, args: &[(Value, Span)], span: Span) -> Value {
+    fn builtin(
+        &mut self,
+        name: &str,
+        args: &[(Value, Span)],
+        span: Span,
+        written_operator: Option<&str>,
+    ) -> Value {
         let start = self.diagnostics.len();
-        let value = self.check_builtin(name, args, span);
+        let value = self.check_builtin(name, args, span, written_operator);
         self.note_builtin_contract(start, name);
         value
     }
@@ -1078,15 +1084,24 @@ impl<'model> Checker<'model> {
         }
     }
 
-    fn check_builtin(&mut self, name: &str, args: &[(Value, Span)], span: Span) -> Value {
+    fn check_builtin(
+        &mut self,
+        name: &str,
+        args: &[(Value, Span)],
+        span: Span,
+        written_operator: Option<&str>,
+    ) -> Value {
         let arity_ok = builtin_arities(name)
             .iter()
             .any(|arity| arity.accepts(args.len()));
         let returns = call_returns(args);
         if !arity_ok {
-            // The modeled clojure.string Vars are ordinary JVM function calls.
-            // Core inliners and static interop can reject arity during compilation.
-            if name.starts_with("clojure.string/") && (!returns || !self.path_reachable) {
+            let rejected_at_compile_time = written_operator.is_some_and(|operator| {
+                name == "clojure.lang.MapEntry/create"
+                    || (unconditional_core_inliner(name)
+                        && self.model.can_use_standard_core(operator, self.globals))
+            });
+            if !rejected_at_compile_time && (!returns || !self.path_reachable) {
                 return Value::new(Type::Never);
             }
             self.error(
@@ -1094,7 +1109,7 @@ impl<'model> Checker<'model> {
                 span,
                 format!("Invalid arity for {name}: {}", args.len()),
             );
-            if !returns {
+            if rejected_at_compile_time {
                 return Value::new(Type::Never);
             }
             if name.starts_with("clojure.core/") || name.starts_with("clojure.string/") {
@@ -1356,6 +1371,19 @@ impl<'model> Checker<'model> {
         };
         Value::new(ty)
     }
+}
+
+fn unconditional_core_inliner(name: &str) -> bool {
+    // The pinned JVM Vars have :inline and no :inline-arities predicate.
+    matches!(
+        name,
+        "clojure.core/inc"
+            | "clojure.core/dec"
+            | "clojure.core/long"
+            | "clojure.core/nil?"
+            | "clojure.core/boolean"
+            | "clojure.core/count"
+    )
 }
 
 fn builtin_arities(name: &str) -> &'static [Arity] {

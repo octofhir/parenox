@@ -80,7 +80,7 @@ impl Checker<'_> {
         env: &Env,
     ) -> Value {
         let Some((first, rest)) = forms.split_first() else {
-            return self.builtin(name, &[], span);
+            return self.builtin(name, &[], span, None);
         };
         let mut result = (self.infer(first, env), first.span);
         for form in rest {

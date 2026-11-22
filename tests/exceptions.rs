@@ -66,6 +66,10 @@ fn nonreturning_arguments_keep_compiler_checks_in_later_forms() {
     for expression in [
         "(throw nil)",
         "(+ 1 (throw nil) (inc \"dead\"))",
+        "(do (throw nil) (name))",
+        "(name (throw nil) :extra)",
+        "(do (throw nil) (apply count []))",
+        "(do (throw nil) (:label))",
         "(:id (throw nil) (inc \"dead\"))",
         "((throw nil) (inc \"dead\"))",
         "((fn [x y] (inc \"dead\")) (throw nil) 1)",
@@ -81,6 +85,12 @@ fn nonreturning_arguments_keep_compiler_checks_in_later_forms() {
     for (expression, code) in [
         ("(throw)", "PNX2554"),
         ("(ex-info \"missing\")", "PNX2554"),
+        ("(do (throw nil) (count))", "PNX2554"),
+        (
+            "(do (throw nil) (clojure.lang.MapEntry/create :key))",
+            "PNX2554",
+        ),
+        ("(apply count [])", "PNX2554"),
         ("(+ (throw nil) unresolved)", "PNX2304"),
         ("[(throw nil) unresolved]", "PNX2304"),
         ("(loop [x 0] (throw (recur x)))", "PNX1001"),
@@ -97,4 +107,24 @@ fn nonreturning_arguments_keep_compiler_checks_in_later_forms() {
         let report = check(expression, "nil?");
         assert!(report.ok && report.complete, "{expression}: {report:#?}");
     }
+}
+
+#[test]
+fn a_known_function_reports_wrong_arity_only_when_invoked() {
+    let source = r#"(ns demo)
+(defn typed {:t/sig '[number? :-> number?]} [n] n)
+(defn dead {:t/sig '[:-> number?]} [] (do (throw nil) (typed)))
+(defn reached {:t/sig '[:-> number?]} [] (typed))
+"#;
+    let report = Session::default().check("exceptions.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2554");
+    assert_eq!(finding.span.start.line, 4);
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "(typed)"
+    );
 }
