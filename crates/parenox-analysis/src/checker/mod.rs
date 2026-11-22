@@ -936,105 +936,7 @@ impl Checker<'_> {
                 "Tagged literal #{} has no declared reader semantics; its reader function was not executed",
                 tag.symbol().unwrap())),
             Kind::Keyword(k) => Value::new(Type::Key(self.model.key(k))),
-            Kind::Symbol(s) | Kind::AnonymousArgument(s) => {
-                self.observe_completion(form.span, env);
-                if let Some(value) = env.get(s) {
-                    if self.path_reachable && let Some(function) = env.inline_function(s) {
-                        self.withhold_captured_facts(Some(function));
-                        self.diagnostics.push(Diagnostic::analysis_gap(
-                            "PNX9001", form.span,
-                            "The type of a local fn is unchecked outside supported calls",
-                        ));
-                    }
-                    self.observe_local(s, form.span, value);
-                    value.clone()
-                } else if self.partial_method_body {
-                    Value::new(Type::Unknown)
-                } else if s.contains('.') && let Some(value) = self.dotted_function_class_use(s, form.span, false) {
-                    value
-                } else if self.model.local_function_at(s, form.span.start.offset).is_some_and(Function::inferred) {
-                    if !self.path_reachable {
-                        return Value::new(Type::Never);
-                    }
-                    self.error(
-                        "PNX9002",
-                        form.span,
-                        format!(
-                            "Private function {s} needs a :t/sig annotation when used as a value"
-                        ),
-                    );
-                    Value::new(Type::Unknown)
-                } else if let Some(value) = self.unchecked_alias_value(s, form.span, env) {
-                    value
-                } else if let Some(value) = self.model.declared_value(s, self.globals, form.span.start.offset) {
-                    match value {
-                        DeclaredValue::Literal(literal) => Value {
-                            literal_container: literal.container.clone(),
-                            pattern_captures: literal.pattern_captures,
-                            ..Value::new(literal.ty.clone())
-                        },
-                        DeclaredValue::ExternLiteral(literal) if self.partial_contract_visible(&literal.origin) => Value {
-                            literal_container: literal.container.clone(),
-                            ..Value::with_notes(
-                                literal.ty.clone(),
-                                literal.origin.path.iter().map(|path| {
-                                    format!("Literal {} is declared in {path}.", literal.origin.name)
-                                }).collect(),
-                            )
-                        },
-                        DeclaredValue::ExternLiteral(_) => Value::new(Type::Unknown),
-                        DeclaredValue::Function(contract) if self.partial_contract_visible(&contract.origin) => Value::from_contract(contract),
-                        DeclaredValue::Function(_) => Value::new(Type::Unknown),
-                        DeclaredValue::UncheckedFunction(_) => self.unchecked_function(s, form.span),
-                        DeclaredValue::Macro(scope) => self.macro_gap(
-                            scope, form.span, format!("Macro {} is not a function value", scope.origin().name)
-                        ),
-                        DeclaredValue::OpaqueMacro => self.unchecked_form(
-                            form.span, &format!("Macro {s} has no function value"),
-                        ),
-                        DeclaredValue::PrivateMacro => {
-                            self.error("PNX2304", form.span, format!("Unresolved or private value {s}"));
-                            Value::new(Type::Unknown)
-                        }
-                    }
-                } else if self.partial_scope.is_some() {
-                    Value::new(Type::Unknown)
-                } else {
-                    let resolved = self.model.resolve(s);
-                    match self.model.standard_core_binding(s, &resolved, self.globals) {
-                        Some(crate::core_names::CoreBinding::Var) => {
-                            return self.unchecked_core_function(&resolved, form.span);
-                        }
-                        Some(crate::core_names::CoreBinding::Macro) => {
-                            self.error("PNX2304", form.span, format!("Macro {resolved} has no function value"));
-                            return Value::new(Type::Unknown);
-                        }
-                        None => {}
-                    }
-                    if self.model.known_java_class(s) {
-                        self.diagnostics.push(Diagnostic::analysis_gap(
-                            "PNX9001",
-                            form.span,
-                            "Type analysis for JVM class values is unavailable",
-                        ));
-                        return Value::new(Type::Unknown);
-                    }
-                    if self.model.known_java_member(s, self.globals) {
-                        return self.unchecked_form(form.span, "JVM member values are not checked");
-                    }
-                    let external = self.model.is_external_value_reference(s, self.globals);
-                    self.error(
-                        if external { "PNX9003" } else { "PNX2304" },
-                        form.span,
-                        if external {
-                            format!("No declaration for external value {s}")
-                        } else {
-                            format!("Unresolved or private value {s}")
-                        },
-                    );
-                    Value::new(Type::Unknown)
-                }
-            }
+            Kind::Symbol(name) | Kind::AnonymousArgument(name) => self.symbol_value(name, form.span, env),
             Kind::Vector(xs) => {
                 let prove_origin = xs.len() <= MAX_TUPLE_ITEMS
                     && !xs.iter().any(has_evaluated_metadata);
@@ -1061,6 +963,146 @@ impl Checker<'_> {
                 self.withhold_literals_after_opaque_form();
                 self.unchecked_form(form.span, "Syntax quote and unquote expansion is not supported")
             }
+        }
+    }
+
+    // Keep symbol resolution's temporaries out of the recursive expression frame.
+    fn symbol_value(&mut self, name: &str, span: Span, env: &Env) -> Value {
+        self.observe_completion(span, env);
+        if let Some(value) = env.get(name) {
+            if self.path_reachable
+                && let Some(function) = env.inline_function(name)
+            {
+                self.withhold_captured_facts(Some(function));
+                self.diagnostics.push(Diagnostic::analysis_gap(
+                    "PNX9001",
+                    span,
+                    "The type of a local fn is unchecked outside supported calls",
+                ));
+            }
+            self.observe_local(name, span, value);
+            value.clone()
+        } else if self.partial_method_body {
+            Value::new(Type::Unknown)
+        } else if name.contains('.')
+            && let Some(value) = self.dotted_function_class_use(name, span, false)
+        {
+            value
+        } else if self
+            .model
+            .local_function_at(name, span.start.offset)
+            .is_some_and(Function::inferred)
+        {
+            if !self.path_reachable {
+                return Value::new(Type::Never);
+            }
+            self.error(
+                "PNX9002",
+                span,
+                format!("Private function {name} needs a :t/sig annotation when used as a value"),
+            );
+            Value::new(Type::Unknown)
+        } else if let Some(value) = self.unchecked_alias_value(name, span, env) {
+            value
+        } else if let Some(value) = self
+            .model
+            .declared_value(name, self.globals, span.start.offset)
+        {
+            match value {
+                DeclaredValue::Literal(literal) => Value {
+                    literal_container: literal.container.clone(),
+                    pattern_captures: literal.pattern_captures,
+                    ..Value::new(literal.ty.clone())
+                },
+                DeclaredValue::ExternLiteral(literal)
+                    if self.partial_contract_visible(&literal.origin) =>
+                {
+                    Value {
+                        literal_container: literal.container.clone(),
+                        ..Value::with_notes(
+                            literal.ty.clone(),
+                            literal
+                                .origin
+                                .path
+                                .iter()
+                                .map(|path| {
+                                    format!(
+                                        "Literal {} is declared in {path}.",
+                                        literal.origin.name
+                                    )
+                                })
+                                .collect(),
+                        )
+                    }
+                }
+                DeclaredValue::ExternLiteral(_) => Value::new(Type::Unknown),
+                DeclaredValue::Function(contract)
+                    if self.partial_contract_visible(&contract.origin) =>
+                {
+                    Value::from_contract(contract)
+                }
+                DeclaredValue::Function(_) => Value::new(Type::Unknown),
+                DeclaredValue::UncheckedFunction(_) => self.unchecked_function(name, span),
+                DeclaredValue::Macro(scope) => self.macro_gap(
+                    scope,
+                    span,
+                    format!("Macro {} is not a function value", scope.origin().name),
+                ),
+                DeclaredValue::OpaqueMacro => {
+                    self.unchecked_form(span, &format!("Macro {name} has no function value"))
+                }
+                DeclaredValue::PrivateMacro => {
+                    self.error(
+                        "PNX2304",
+                        span,
+                        format!("Unresolved or private value {name}"),
+                    );
+                    Value::new(Type::Unknown)
+                }
+            }
+        } else if self.partial_scope.is_some() {
+            Value::new(Type::Unknown)
+        } else {
+            let resolved = self.model.resolve(name);
+            match self
+                .model
+                .standard_core_binding(name, &resolved, self.globals)
+            {
+                Some(crate::core_names::CoreBinding::Var) => {
+                    return self.unchecked_core_function(&resolved, span);
+                }
+                Some(crate::core_names::CoreBinding::Macro) => {
+                    self.error(
+                        "PNX2304",
+                        span,
+                        format!("Macro {resolved} has no function value"),
+                    );
+                    return Value::new(Type::Unknown);
+                }
+                None => {}
+            }
+            if self.model.known_java_class(name) {
+                self.diagnostics.push(Diagnostic::analysis_gap(
+                    "PNX9001",
+                    span,
+                    "Type analysis for JVM class values is unavailable",
+                ));
+                return Value::new(Type::Unknown);
+            }
+            if self.model.known_java_member(name, self.globals) {
+                return self.unchecked_form(span, "JVM member values are not checked");
+            }
+            let external = self.model.is_external_value_reference(name, self.globals);
+            self.error(
+                if external { "PNX9003" } else { "PNX2304" },
+                span,
+                if external {
+                    format!("No declaration for external value {name}")
+                } else {
+                    format!("Unresolved or private value {name}")
+                },
+            );
+            Value::new(Type::Unknown)
         }
     }
 }

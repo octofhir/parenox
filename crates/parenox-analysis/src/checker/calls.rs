@@ -336,6 +336,10 @@ impl<'model> Checker<'model> {
             }
             _ => {}
         }
+        self.resolve_call(xs, span, env, tail)
+    }
+
+    fn resolve_call(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
         if let Some(name) = xs[0].symbol()
             && name.contains('.')
             && !env.contains_key(name)
@@ -352,27 +356,7 @@ impl<'model> Checker<'model> {
                 .local_function_at(name, xs[0].span.start.offset)
                 .filter(|f| f.inferred())
         {
-            let start = self.diagnostics.len();
-            let args: Vec<_> = self
-                .eval_args(&xs[1..], env, true)
-                .map(|(value, _)| value)
-                .collect();
-            let observe = self.observes_inferred_call_at(span)
-                && args.iter().all(|arg| arg.known != Type::Never);
-            let inferred = (observe
-                && function.arities.contains_key(&Arity::Fixed(args.len()))
-                && args.iter().all(|arg| !arg.known.contains_unknown()))
-            .then(|| InferredCall {
-                definition: function.span,
-                labels: None,
-                args: args.iter().map(|arg| arg.known.clone()).collect(),
-            });
-            let result = self.inferred_call(function, args, span);
-            if observe {
-                let inferred = inferred.filter(|_| start == self.diagnostics.len());
-                self.observe_inferred_call(span, &xs[1..], inferred, &result);
-            }
-            return result;
+            return self.call_inferred_function(function, &xs[1..], span, env);
         }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
@@ -486,6 +470,40 @@ impl<'model> Checker<'model> {
                 _ => {}
             }
         }
+        self.call_inferred_operator(xs, span, env)
+    }
+
+    fn call_inferred_function(
+        &mut self,
+        function: &Function,
+        operands: &[Form],
+        span: Span,
+        env: &Env,
+    ) -> Value {
+        let start = self.diagnostics.len();
+        let args: Vec<_> = self
+            .eval_args(operands, env, true)
+            .map(|(value, _)| value)
+            .collect();
+        let observe =
+            self.observes_inferred_call_at(span) && args.iter().all(|arg| arg.known != Type::Never);
+        let inferred = (observe
+            && function.arities.contains_key(&Arity::Fixed(args.len()))
+            && args.iter().all(|arg| !arg.known.contains_unknown()))
+        .then(|| InferredCall {
+            definition: function.span,
+            labels: None,
+            args: args.iter().map(|arg| arg.known.clone()).collect(),
+        });
+        let result = self.inferred_call(function, args, span);
+        if observe {
+            let inferred = inferred.filter(|_| start == self.diagnostics.len());
+            self.observe_inferred_call(span, operands, inferred, &result);
+        }
+        result
+    }
+
+    fn call_inferred_operator(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
         let start = self.diagnostics.len();
         if let Some(callable) = self.prepare_inline(&xs[0], env) {
             let args: Vec<_> = self.eval_args(&xs[1..], env, callable.returns()).collect();

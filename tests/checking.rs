@@ -15,6 +15,24 @@ fn assert_ok(body: &str) {
 }
 
 #[test]
+fn deeply_nested_conditionals_and_bindings_fit_on_a_worker_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            for (open, leaf, close) in [
+                ("(if true ", "\"text\"", " nil)"),
+                ("(let [text \"text\"] ", "text", ")"),
+            ] {
+                let body = format!("{}{leaf}{}", open.repeat(125), close.repeat(125));
+                assert_ok(&format!("(defn deep {{:t/sig '[:-> string?]}} [] {body})"));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn optional_field_requires_nil_handling() {
     let report = Session::default().check(
         "test.clj",
