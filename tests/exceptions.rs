@@ -134,6 +134,42 @@ fn a_known_function_reports_wrong_arity_only_when_invoked() {
 }
 
 #[test]
+fn inferred_helpers_reject_arity_only_when_reached_and_raise_only_arity_errors() {
+    let source = r#"(ns demo)
+(defn- helper [n] n)
+(defn inferred {:t/sig '[:-> number?]} [] (helper 7))
+(defn dead {:t/sig '[:-> number?]} [] (do (throw nil) (helper)))
+(defn eager {:t/sig '[:-> number?]} [] (helper (throw nil) unresolved))
+(defn caught {:t/sig '[:-> #{:arity}]} []
+  (try (helper)
+       (catch NullPointerException _ :wrong)
+       (catch clojure.lang.ArityException _ :arity)))
+(defn stops {:t/sig '[:-> number?]} [] (do (helper) (inc "unreached")))
+"#;
+    let report = Session::default().check("exceptions.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &source[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(
+        findings,
+        [
+            ("PNX2304", "unresolved"),
+            ("PNX2554", "(helper)"),
+            ("PNX2554", "(helper)"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn unreached_function_literals_keep_their_lexical_compiler_checks() {
     for expression in [
         "(do (throw nil) {:run (fn again [x] (again x))})",

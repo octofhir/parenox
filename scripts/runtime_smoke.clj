@@ -1284,7 +1284,17 @@
 (assert (try (apply count [])
              false
              (catch clojure.lang.ArityException _ true)))
-(println "Clojure/JVM call arity phases: 7 assertions passed")
+(defn- arity-smoke-helper [x] x)
+(assert (try (do (throw nil) (arity-smoke-helper))
+             false
+             (catch NullPointerException _ true)))
+(assert (try (arity-smoke-helper (throw nil) :extra)
+             false
+             (catch NullPointerException _ true)))
+(assert (= :arity (try (arity-smoke-helper)
+                      (catch NullPointerException _ :wrong)
+                      (catch clojure.lang.ArityException _ :arity))))
+(println "Clojure/JVM call arity phases: 10 assertions passed")
 
 (doseq [call '[(get) (req!) (get-in) (contains?)]]
   (let [reached (eval (list 'fn [] call))

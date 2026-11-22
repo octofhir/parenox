@@ -207,19 +207,18 @@ impl<'model> Checker<'model> {
             .iter()
             .find(|(arity, _)| arity.accepts(args.len()))
         else {
-            self.error(
-                "PNX2554",
-                span,
-                format!(
-                    "{} expects {} arguments, got {}",
-                    function.name,
-                    arity_counts(function.arities.keys().copied()),
-                    args.len()
-                ),
-            );
-            if returns {
-                self.may_throw();
-                return Value::new(Type::Unknown);
+            if self.path_reachable && returns {
+                self.error(
+                    "PNX2554",
+                    span,
+                    format!(
+                        "{} expects {} arguments, got {}",
+                        function.name,
+                        arity_counts(function.arities.keys().copied()),
+                        args.len()
+                    ),
+                );
+                self.arity_error();
             }
             return Value::new(Type::Never);
         };
