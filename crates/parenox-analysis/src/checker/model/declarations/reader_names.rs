@@ -5,8 +5,8 @@ use super::super::vars::{def_initializer, inert};
 use super::{Declarations, Names};
 use crate::checker::quote::quoted_symbol;
 use crate::reader::{
-    CheckRead, Form, Kind, NamespaceToken, Position, ReadError, Span, check_resolved_collection,
-    qualify_namespaced_entries,
+    CheckRead, Form, Kind, NamespaceToken, Position, ReadError, Span,
+    check_resolved_collection_with_namespaces, qualify_namespaced_entries,
 };
 
 struct LiteralError {
@@ -16,6 +16,7 @@ struct LiteralError {
 
 struct ReaderNamespaces<'a> {
     declarations: &'a Declarations,
+    projected_key_namespaces: &'a BTreeMap<usize, String>,
     scopes: Vec<ReaderNamespace>,
     namespaces: Vec<NamespaceAliases>,
     prelude: ReaderPrelude,
@@ -102,7 +103,7 @@ impl Declarations {
         if read.namespace_tokens.is_empty() {
             return Ok(());
         }
-        let namespaces = ReaderNamespaces::new(self, read, count);
+        let namespaces = ReaderNamespaces::new(self, read, count, &read.projected_key_namespaces);
         let alias = namespaces
             .validate_reader_aliases(source, &read.namespace_tokens, read_end)
             .err();
@@ -142,7 +143,12 @@ impl Declarations {
 }
 
 impl<'a> ReaderNamespaces<'a> {
-    fn new(declarations: &'a Declarations, read: &CheckRead, count: usize) -> Self {
+    fn new(
+        declarations: &'a Declarations,
+        read: &CheckRead,
+        count: usize,
+        projected_key_namespaces: &'a BTreeMap<usize, String>,
+    ) -> Self {
         let namespaces = read.forms[..count].iter().filter_map(|form| {
             let Kind::List(items) = &form.without_metadata().kind else {
                 return None;
@@ -185,6 +191,7 @@ impl<'a> ReaderNamespaces<'a> {
         }
         Self {
             declarations,
+            projected_key_namespaces,
             scopes,
             namespaces: namespace_aliases,
             prelude,
@@ -507,9 +514,12 @@ impl<'a> ReaderNamespaces<'a> {
                 _ => {}
             }
             if read_end <= before {
-                check_resolved_collection(form, source, &|keyword, position| {
-                    self.resolve_reader_keyword(keyword, position)
-                })
+                check_resolved_collection_with_namespaces(
+                    form,
+                    source,
+                    &|keyword, position| self.resolve_reader_keyword(keyword, position),
+                    self.projected_key_namespaces,
+                )
                 .map_err(located)?;
             }
         }

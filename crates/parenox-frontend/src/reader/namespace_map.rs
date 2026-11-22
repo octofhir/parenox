@@ -2,7 +2,8 @@
 use std::borrow::Cow;
 
 use super::{
-    Form, Kind, MAX_NESTING_DEPTH, NamespaceToken, Position, ReadError, Reader, Span, uniqueness,
+    Form, ImmediateSyntaxQuote, Kind, MAX_NESTING_DEPTH, NamespaceToken, Position, ReadError,
+    Reader, Span, uniqueness,
 };
 use crate::syntax::SyntaxKind;
 
@@ -95,6 +96,17 @@ impl Reader<'_> {
         }
         if !self.preserves_map_entries(&entries) {
             let namespace = prefix.as_ref().and_then(Form::symbol).unwrap();
+            if self.namespace_tokens.is_some()
+                && entries.as_chunks::<2>().0.iter().any(|[key, _]| {
+                    matches!(Self::immediate_syntax_quote_value(key),
+                        Some(ImmediateSyntaxQuote::Form(value))
+                        if matches!(value.without_metadata().kind,
+                            Kind::Symbol(_) | Kind::AnonymousArgument(_) | Kind::Keyword(_)))
+                })
+            {
+                self.projected_key_namespaces
+                    .insert(start.offset, namespace.to_owned());
+            }
             if let Err(error) = qualify_namespaced_entries(&mut entries, namespace, self.source) {
                 self.retain_rejected_literal(start, Kind::Map(entries));
                 return Err(error);

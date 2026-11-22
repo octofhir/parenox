@@ -136,6 +136,51 @@ fn alias_resolution_can_prove_a_projected_key_duplicate_after_qualification() {
 }
 
 #[test]
+fn deferred_duplicate_checks_keep_the_namespace_read_for_a_projected_key() {
+    for (literal, duplicate) in [
+        ("#:demo {::d/a 1 `~:a 2}", "`~:a"),
+        ("#:^:marker demo {::d/a 1 `~:a 2}", "`~:a"),
+        ("{#:demo {`~:a 1} :first {::d/a 1} :second}", "{::d/a 1}"),
+    ] {
+        let source = format!("(ns reports (:require [demo :as-alias d]))\n(def data '{literal})");
+        let path = "reports.clj";
+        let parsed = reader::parse(&source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        let mut session = Session::default();
+        let original = session.check(path, &source);
+        let [finding] = original.diagnostics.as_slice() else {
+            panic!("{source}: {original:#?}");
+        };
+        assert_eq!(finding.code, "PNX9000");
+        assert!(finding.message.contains("Duplicate key"));
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            duplicate
+        );
+
+        let edited = source.replace("[demo :as-alias", "[other :as-alias");
+        let warm = session.check(path, &edited);
+        assert!(
+            warm.diagnostics
+                .iter()
+                .all(|d| !d.message.contains("Duplicate")),
+            "{warm:#?}"
+        );
+        let cold = Session::default().check(path, &edited);
+        assert_eq!(
+            serde_json::to_value(&warm.diagnostics).unwrap(),
+            serde_json::to_value(&cold.diagnostics).unwrap()
+        );
+        let reverted = session.check(path, &source);
+        assert_eq!(
+            serde_json::to_value(&reverted.diagnostics).unwrap(),
+            serde_json::to_value(&original.diagnostics).unwrap()
+        );
+    }
+}
+
+#[test]
 fn malformed_tags_and_metadata_keep_their_operands_out_of_recovered_forms() {
     for prefix in ["#nil", "#wrong/", "^nil", "^:"] {
         for source in [

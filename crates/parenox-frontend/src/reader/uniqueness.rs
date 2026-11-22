@@ -1,6 +1,6 @@
 //! Detect reader-level duplicates whose equality is known from inert syntax.
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::namespace_map::{qualify_keyword, qualify_symbol};
 use super::numbers::{NumberKey, double_key, number_key};
@@ -12,6 +12,7 @@ type ResolveKeyword<'a> = dyn Fn(&str, Position) -> Option<String> + 'a;
 struct Context<'a, 'r> {
     source: &'a str,
     resolve_keyword: Option<&'r ResolveKeyword<'r>>,
+    projected_key_namespaces: Option<&'r BTreeMap<usize, String>>,
     compare_raw_auto_keywords: bool,
 }
 
@@ -22,12 +23,18 @@ enum KeyNames<'a> {
     AlreadyQualified,
 }
 
-impl KeyNames<'_> {
-    fn resolved_map(form: &Form, source: &str) -> Self {
-        if source[form.span.start.offset..].starts_with("#:") {
-            Self::AlreadyQualified
+impl<'r> Context<'_, 'r> {
+    fn map_key_names(self, form: &Form) -> KeyNames<'r> {
+        let offset = form.span.start.offset;
+        if let Some(namespace) = self
+            .projected_key_namespaces
+            .and_then(|maps| maps.get(&offset))
+        {
+            KeyNames::ProjectIn(namespace)
+        } else if self.source[offset..].starts_with("#:") {
+            KeyNames::AlreadyQualified
         } else {
-            Self::Plain
+            KeyNames::Plain
         }
     }
 }
@@ -67,6 +74,7 @@ pub(super) fn check_set(
             Context {
                 source,
                 resolve_keyword: None,
+                projected_key_namespaces: None,
                 compare_raw_auto_keywords,
             },
             KeyNames::Plain,
@@ -87,6 +95,7 @@ pub(super) fn check_map(
             Context {
                 source,
                 resolve_keyword: None,
+                projected_key_namespaces: None,
                 compare_raw_auto_keywords,
             },
             KeyNames::Plain,
@@ -107,6 +116,7 @@ pub(super) fn check_qualified_map(
             Context {
                 source,
                 resolve_keyword: None,
+                projected_key_namespaces: None,
                 compare_raw_auto_keywords: false,
             },
             KeyNames::ProjectIn(namespace),
@@ -123,9 +133,20 @@ pub fn check_resolved_collection(
     source: &str,
     resolve_keyword: &ResolveKeyword<'_>,
 ) -> Result<(), ReadError> {
+    check_resolved_collection_with_namespaces(form, source, resolve_keyword, &BTreeMap::new())
+}
+
+pub fn check_resolved_collection_with_namespaces(
+    form: &Form,
+    source: &str,
+    resolve_keyword: &ResolveKeyword<'_>,
+    projected_key_namespaces: &BTreeMap<usize, String>,
+) -> Result<(), ReadError> {
     let context = Context {
         source,
         resolve_keyword: Some(resolve_keyword),
+        projected_key_namespaces: (!projected_key_namespaces.is_empty())
+            .then_some(projected_key_namespaces),
         compare_raw_auto_keywords: false,
     };
     match &form.kind {
@@ -136,7 +157,7 @@ pub fn check_resolved_collection(
             check(
                 map_keys(entries),
                 context,
-                KeyNames::resolved_map(form, source),
+                context.map_key_names(form),
                 DUPLICATE_KEY,
             )
         }
@@ -338,7 +359,7 @@ fn composite<'a>(value: &'a Form, context: Context<'a, '_>) -> Option<Literal<'a
     Some(match &value.kind {
         Kind::List(items) | Kind::Vector(items) => Literal::Sequence(children(items)?.into()),
         Kind::Map(entries) => {
-            let names = KeyNames::resolved_map(value, context.source);
+            let names = context.map_key_names(value);
             let (pairs, trailing) = entries.as_chunks::<2>();
             if !trailing.is_empty() {
                 return None;

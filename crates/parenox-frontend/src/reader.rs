@@ -13,10 +13,10 @@ pub use numbers::{
     IntegerLiteralClass, NumericLiteral, classify_number, classify_number_with_class,
 };
 #[doc(hidden)]
-pub use uniqueness::check_resolved_collection;
+pub use uniqueness::{check_resolved_collection, check_resolved_collection_with_namespaces};
 
 use crate::syntax::{Builder, SyntaxKind, SyntaxNode};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 #[doc(hidden)]
 pub const MAX_NESTING_DEPTH: usize = 128;
@@ -265,6 +265,8 @@ pub struct CheckRead {
     /// Reader data omitted from evaluation that may still need namespace validation.
     pub inactive_namespace_forms: Vec<Form>,
     pub namespace_tokens: Vec<NamespaceToken>,
+    /// Explicit map namespaces needed to compare projected keys after alias resolution.
+    pub projected_key_namespaces: BTreeMap<usize, String>,
     pub unchecked_dispatches: Option<UncheckedDispatches>,
     pub comments: Vec<LineComment>,
     pub first_error_read_end: Option<usize>,
@@ -410,6 +412,7 @@ fn read_for_check_inner(
         forms,
         inactive_namespace_forms: reader.inactive_namespace_forms,
         namespace_tokens: reader.namespace_tokens.unwrap(),
+        projected_key_namespaces: reader.projected_key_namespaces,
         unchecked_dispatches: reader
             .unchecked_dispatches
             .filter(|dispatches| dispatches.first_tag.is_some() || !dispatches.regexes.is_empty()),
@@ -483,6 +486,7 @@ struct Reader<'a> {
     arguments: Option<AnonymousFunction>,
     pending: VecDeque<Form>,
     namespace_tokens: Option<Vec<NamespaceToken>>,
+    projected_key_namespaces: BTreeMap<usize, String>,
     unchecked_dispatches: Option<UncheckedDispatches>,
     // None outside a descriptor, Some(None) until a descriptor reads a dispatch.
     metadata_dispatch: Option<Option<OmittedDispatch>>,
@@ -541,6 +545,7 @@ impl<'a> Reader<'a> {
             arguments: None,
             pending: VecDeque::new(),
             namespace_tokens: None,
+            projected_key_namespaces: BTreeMap::new(),
             unchecked_dispatches: None,
             metadata_dispatch: None,
             inactive_branch: false,
