@@ -612,9 +612,14 @@ fn qualified_var_references_distinguish_proven_absence_from_private_vars() {
         path: "app.clj",
         source: r#"(ns app (:require [dep :as d]))
 (defn missing {:t/sig '[:-> t/any]} [] #'d/absent)
-(defn private-source {:t/sig '[:-> t/any]} [] (var d/secret))
+(defn private-source {:t/sig '[:-> t/any]} [] (var d/secret ignored-symbol))
 (defn unsupported-signature {:t/sig '[:-> t/any]} [] #'d/present)
-(defn builtin-private {:t/sig '[:-> t/any]} [] #'clojure.core/*loaded-libs*)"#,
+(defn builtin-private {:t/sig '[:-> t/any]} [] #'clojure.core/*loaded-libs*)
+(defn untyped-dead-branch [] (if false #'d/absent 1))
+(defn untyped-private [] (var d/secret (d/absent)))
+(defn quoted-var-data [] (quote (var d/absent)))
+(defn opaque-macro-argument [] (unknown-macro #'d/absent))
+(defn untyped-explicit-var [] (var d/absent (d/ignored)))"#,
     };
     let provider = Source {
         path: "dep.clj",
@@ -648,9 +653,31 @@ fn qualified_var_references_distinguish_proven_absence_from_private_vars() {
         findings(&initial),
         [
             ("PNX2304".into(), "d/absent"),
-            ("PNX9001".into(), "(var d/secret)"),
+            ("PNX9001".into(), "(var d/secret ignored-symbol)"),
             ("PNX9001".into(), "#'d/present"),
             ("PNX9001".into(), "#'clojure.core/*loaded-libs*"),
+            (
+                "PNX9002".into(),
+                "(defn untyped-dead-branch [] (if false #'d/absent 1))",
+            ),
+            ("PNX2304".into(), "d/absent"),
+            (
+                "PNX9002".into(),
+                "(defn untyped-private [] (var d/secret (d/absent)))",
+            ),
+            (
+                "PNX9002".into(),
+                "(defn quoted-var-data [] (quote (var d/absent)))",
+            ),
+            (
+                "PNX9002".into(),
+                "(defn opaque-macro-argument [] (unknown-macro #'d/absent))",
+            ),
+            (
+                "PNX9002".into(),
+                "(defn untyped-explicit-var [] (var d/absent (d/ignored)))",
+            ),
+            ("PNX2304".into(), "d/absent"),
         ],
         "{initial:#?}"
     );
@@ -658,6 +685,12 @@ fn qualified_var_references_distinguish_proven_absence_from_private_vars() {
     let warm = session.check_project(&[app, updated], None);
     let cold = Session::default().check_project(&[app, updated], None);
     assert_eq!(findings(&warm)[0], ("PNX9001".into(), "#'d/absent"));
+    assert!(
+        warm.files[0]
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "PNX2304")
+    );
     assert_eq!(warm.files[0].stats.checked_functions, 1);
     assert_eq!(warm.files[0].stats.reused_functions, 3);
     assert_eq!(normalize(&warm), normalize(&cold));

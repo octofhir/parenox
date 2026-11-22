@@ -936,6 +936,10 @@ definite mismatch elsewhere in the value.
 
 For `#'alias/name` and `(var alias/name)`, a complete source inventory can
 prove that the target Var is absent and report `PNX2304` at its name.
+This reference check also runs in untyped function bodies and visits
+branches that the JVM compiles even when they cannot run.
+The JVM checks the first operand of `var` and ignores any trailing forms
+after reading them.
 Private Vars in source can be referenced this way. Var object types remain
 outside the checked subset.
 

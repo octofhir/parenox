@@ -748,17 +748,20 @@ impl Model {
         self.names.runtime_alias_gap(symbol)
     }
 
-    pub(super) fn proves_missing_qualified_var(&self, name: &str, globals: &Globals) -> bool {
+    pub(super) fn missing_qualified_var(
+        &self,
+        name: &str,
+        span: Span,
+        globals: &Globals,
+    ) -> Option<Diagnostic> {
         if name == "/" || !name.contains('/') || self.runtime_alias_gap(name).is_some() {
-            return false;
+            return None;
         }
         let (namespace, local) = self.names.resolve_parts(name);
         if namespace == self.namespace() {
-            return false;
+            return None;
         }
-        let Some(source) = globals.exports.get(namespace) else {
-            return false;
-        };
+        let source = globals.exports.get(namespace)?;
         let externs = globals
             .externs
             .as_ref()
@@ -768,6 +771,7 @@ impl Model {
             externs.map(Arc::as_ref),
             &format!("{namespace}/{local}"),
         )
+        .then(|| Diagnostic::new("PNX2304", span, format!("Could not resolve Var {name}")))
     }
 
     pub(super) fn declared_value<'a>(

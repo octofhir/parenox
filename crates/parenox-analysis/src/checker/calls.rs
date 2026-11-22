@@ -335,20 +335,24 @@ impl<'model> Checker<'model> {
     }
 
     fn var_form(&mut self, forms: &[Form], span: Span) -> Value {
-        if let [target] = forms
+        // The JVM compiler looks up the first operand and ignores the rest.
+        if let [target, ..] = forms
             && let Some(name) = target.symbol()
         {
-            if self.model.proves_missing_qualified_var(name, self.globals) {
-                self.error(
-                    "PNX2304",
-                    target.without_metadata().span,
-                    format!("Could not resolve Var {name}"),
-                );
+            if let Some(diagnostic) =
+                self.model
+                    .missing_qualified_var(name, target.without_metadata().span, self.globals)
+            {
+                self.diagnostics.push(diagnostic);
                 return Value::new(Type::Unknown);
             }
             return self.unchecked_form(span, "Var object types are not supported");
         }
-        self.error("PNX1001", span, "var requires one symbol");
+        self.error(
+            "PNX1001",
+            span,
+            "var requires a symbol as its first operand",
+        );
         Value::new(Type::Unknown)
     }
 

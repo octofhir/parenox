@@ -174,6 +174,7 @@ impl Declarations {
         &self,
         forms: &[Form],
         model: &Model,
+        globals: &Globals,
         standard_test: bool,
         mut resolve: impl FnMut(&str, &str, usize) -> ProjectCall,
     ) -> Vec<Diagnostic> {
@@ -194,7 +195,11 @@ impl Declarations {
             standard_test,
             template_scope: None,
             resolve: &mut resolve,
-            purpose: Purpose::Check(&mut diagnostics),
+            purpose: Purpose::Check {
+                diagnostics: &mut diagnostics,
+                model,
+                globals,
+            },
         };
         for form in unchecked {
             visit.definition(form);
@@ -372,7 +377,7 @@ impl Declarations {
         }
         match visit.purpose {
             Purpose::Navigate { target, .. } => Some(target),
-            Purpose::Check(_) | Purpose::Collect(_) | Purpose::ProtocolMethods { .. } => {
+            Purpose::Check { .. } | Purpose::Collect(_) | Purpose::ProtocolMethods { .. } => {
                 unreachable!()
             }
         }
@@ -556,7 +561,11 @@ enum LexicalQuery<'a> {
 }
 
 enum Purpose<'source, 'query> {
-    Check(&'query mut Vec<Diagnostic>),
+    Check {
+        diagnostics: &'query mut Vec<Diagnostic>,
+        model: &'query Model,
+        globals: &'query Globals,
+    },
     Collect(&'query mut DocumentReferences<'source>),
     ProtocolMethods {
         method: &'query str,
@@ -632,11 +641,11 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         }
         // These forms can be elided by the compiler. Typed checking reports
         // their findings with the activation condition.
-        if !matches!(self.purpose, Purpose::Check(_)) {
+        if !matches!(self.purpose, Purpose::Check { .. }) {
             self.forms(clause.conditions.pre);
         }
         self.forms(clause.body);
-        if !matches!(self.purpose, Purpose::Check(_))
+        if !matches!(self.purpose, Purpose::Check { .. })
             && let Some(post) = clause.conditions.post
         {
             let previous = self.post_result_scope.replace(self.locals.len());
@@ -660,7 +669,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
     fn bind_pattern(&mut self, pattern: &'a Form) {
         let first = self.locals.len();
         binding_names(pattern, &mut self.locals);
-        if let Purpose::Check(diagnostics) = &mut self.purpose {
+        if let Purpose::Check { diagnostics, .. } = &mut self.purpose {
             diagnostics.extend(
                 self.locals[first..]
                     .iter()
@@ -692,7 +701,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
     }
 
     fn bind_runtime_name(&mut self, name: &'a str, span: Span) {
-        if let Purpose::Check(diagnostics) = &mut self.purpose {
+        if let Purpose::Check { diagnostics, .. } = &mut self.purpose {
             diagnostics.extend(dotted_binding_error(name, span));
         }
         self.bind(name, span);
@@ -796,25 +805,33 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         }
         match symbol {
             "quote" => return,
-            "." if matches!(self.purpose, Purpose::Check(_)) => {
+            "." if matches!(self.purpose, Purpose::Check { .. }) => {
                 if let Some((receiver, _, arguments)) = dot_form(args) {
                     self.forms(std::slice::from_ref(receiver));
                     self.forms(arguments);
                 }
                 return;
             }
-            "new" if matches!(self.purpose, Purpose::Check(_)) => {
+            "new" if matches!(self.purpose, Purpose::Check { .. }) => {
                 if let Some(arguments) = new_arguments(args) {
                     self.forms(arguments);
                 }
                 return;
             }
             "var" => {
-                if let [form] = args
+                if let [form, ..] = args
                     && let Some(var) = form.symbol()
                 {
                     let span = form.without_metadata().span;
                     if !self.check_runtime_alias(var, span, false) {
+                        if let Purpose::Check {
+                            diagnostics,
+                            model,
+                            globals,
+                        } = &mut self.purpose
+                        {
+                            diagnostics.extend(model.missing_qualified_var(var, span, globals));
+                        }
                         self.record_reference(var, span, false);
                     }
                 }
@@ -937,7 +954,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
         match (self.resolve)(namespace, local, actual) {
             // Missing explicit imports already have a finding on the declaration.
             ProjectCall::Missing if qualified.is_some() => {
-                if let Purpose::Check(diagnostics) = &mut self.purpose {
+                if let Purpose::Check { diagnostics, .. } = &mut self.purpose {
                     diagnostics.push(Diagnostic::new(
                         "PNX2304",
                         span,
@@ -965,7 +982,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                     calls.push((span, target));
                 }
                 if let Some(expected) = expected_arity
-                    && let Purpose::Check(diagnostics) = &mut self.purpose
+                    && let Purpose::Check { diagnostics, .. } = &mut self.purpose
                 {
                     diagnostics.push(Diagnostic::new(
                         "PNX2554",
@@ -985,10 +1002,10 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
     }
 
     fn check_runtime_alias(&mut self, symbol: &str, span: Span, allow_local: bool) -> bool {
-        if matches!(self.purpose, Purpose::Check(_))
+        if matches!(self.purpose, Purpose::Check { .. })
             && let Some(namespace) = self.names.runtime_alias_gap(symbol)
             && !(allow_local && self.is_local(symbol))
-            && let Purpose::Check(diagnostics) = &mut self.purpose
+            && let Purpose::Check { diagnostics, .. } = &mut self.purpose
         {
             diagnostics.push(Diagnostic::runtime_alias_gap(symbol, namespace, span));
             return true;
@@ -1014,7 +1031,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
 
     fn record_reference(&mut self, symbol: &'a str, span: Span, allow_local: bool) {
         match self.purpose {
-            Purpose::Check(_) | Purpose::ProtocolMethods { .. } => return,
+            Purpose::Check { .. } | Purpose::ProtocolMethods { .. } => return,
             Purpose::Collect(ref occurrences) if occurrences.calls.is_some() => return,
             Purpose::Navigate { offset, .. }
                 if !(span.start.offset..span.end.offset).contains(&offset) =>
@@ -1073,7 +1090,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                 }
                 found.uses.push((span, hit));
             }
-            Purpose::Check(_) | Purpose::ProtocolMethods { .. } => unreachable!(),
+            Purpose::Check { .. } | Purpose::ProtocolMethods { .. } => unreachable!(),
         }
     }
 

@@ -1445,13 +1445,17 @@
   (intern target (with-meta 'secret {:private true}) 1)
   (alias 'var-provider provider)
   (assert (var? (eval '(var var-provider/secret))))
+  (assert (var? (eval '(var var-provider/secret (var-provider/absent)))))
   (assert (var? #'clojure.core/*loaded-libs*))
-  (assert (try (eval '(var var-provider/absent))
-               false
-               (catch clojure.lang.Compiler$CompilerException e
-                 (= "Unable to resolve var: var-provider/absent in this context"
-                    (ex-message (ex-cause e)))))))
-(println "Clojure/JVM qualified Var references: 3 assertions passed")
+  (assert (= '(var var-provider/absent) (eval ''(var var-provider/absent))))
+  (doseq [form '[(var var-provider/absent (var-provider/ignored))
+                 (fn [] (if false #'var-provider/absent 1))]]
+    (assert (try (eval form)
+                 false
+                 (catch clojure.lang.Compiler$CompilerException e
+                   (= "Unable to resolve var: var-provider/absent in this context"
+                      (ex-message (ex-cause e))))))))
+(println "Clojure/JVM qualified Var references: 6 assertions passed")
 
 (import '[java.io File])
 (assert (= java.io.File File))

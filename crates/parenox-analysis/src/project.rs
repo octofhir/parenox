@@ -809,6 +809,7 @@ impl Session {
                         .extend(declarations.check_untyped_references(
                             &file.forms,
                             model,
+                            &globals,
                             standard_test,
                             |namespace, local, actual| {
                                 known_provider(namespace).map_or(
