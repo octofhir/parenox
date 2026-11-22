@@ -1449,6 +1449,23 @@
   (finally (remove-ns 'String)))
 (println "Clojure/JVM class-qualified members: 6 assertions passed")
 
+(assert (= "[Ljava.lang.String;" (.getName String/1)))
+(assert (= "[[Ljava.io.File;" (.getName java.io.File/2)))
+(doseq [[name component] [['boolean Boolean/TYPE] ['byte Byte/TYPE]
+                         ['char Character/TYPE] ['short Short/TYPE]
+                         ['int Integer/TYPE] ['long Long/TYPE]
+                         ['float Float/TYPE] ['double Double/TYPE]]]
+  (let [array (eval (symbol (str name) "2"))]
+    (assert (= component (.getComponentType (.getComponentType array))))))
+(create-ns 'String)
+(try
+  (assert (try (eval 'String/1)
+               false
+               (catch clojure.lang.Compiler$CompilerException e
+                 (= "No such var: String/1" (ex-message (ex-cause e))))))
+  (finally (remove-ns 'String)))
+(println "Clojure/JVM array class values: 11 assertions passed")
+
 (assert (= \a (. "😀a" (charAt 2))))
 (assert (Character/isHighSurrogate (.charAt "😀" 0)))
 (assert (try (.charAt "😀" 2) false (catch StringIndexOutOfBoundsException _ true)))

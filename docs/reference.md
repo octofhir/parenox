@@ -897,6 +897,8 @@ Explicit imports and the pinned Clojure/JVM default imports resolve as class
 values, which report a type analysis coverage gap.
 [JVM default import table](https://github.com/clojure/clojure/blob/cbf52795e0b8767c93980e73c437212cf8a29a36/src/jvm/clojure/lang/RT.java#L40-L147)
 
+Array class spellings such as `String/1` and `int/2` resolve as class values
+when the component is known. A loaded namespace or alias takes precedence.
 Class-qualified members such as
 `String/valueOf` and `File/new` have a dispatch coverage gap. A loaded
 namespace or alias with that name takes precedence.

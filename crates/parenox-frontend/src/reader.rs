@@ -6,6 +6,7 @@ mod regex;
 mod uniqueness;
 
 pub use edn::{read_edn, validate_edn};
+pub use names::array_class_component;
 #[doc(hidden)]
 pub use namespace_map::qualify_namespaced_entries;
 pub use numbers::{

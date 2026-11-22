@@ -8,14 +8,16 @@ pub(super) fn valid_name(token: &str, edn: bool) -> bool {
     if let Some(body) = token.strip_prefix(':') {
         return valid_symbol_pattern(body) && !token[1..].contains("::");
     }
-    // Clojure 1.12 added qualified primitive and reference array class names.
-    !edn && token
-        .rsplit_once('/')
-        .is_some_and(|(namespace, dimension)| {
-            !namespace.starts_with(':')
-                && namespace_matches(namespace)
-                && matches!(dimension.as_bytes(), [b'1'..=b'9'])
-        })
+    !edn && array_class_component(token).is_some()
+}
+
+/// Returns the component spelling in a JVM array class symbol.
+pub fn array_class_component(token: &str) -> Option<&str> {
+    let (component, dimensions) = token.rsplit_once('/')?;
+    (matches!(dimensions.as_bytes(), [b'1'..=b'9'])
+        && !component.starts_with(':')
+        && namespace_matches(component))
+    .then_some(component)
 }
 
 fn valid_symbol_pattern(token: &str) -> bool {

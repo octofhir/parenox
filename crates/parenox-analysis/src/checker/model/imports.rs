@@ -2,7 +2,7 @@
 use std::{collections::HashMap, sync::LazyLock};
 
 use super::{Declarations, Globals, Model};
-use crate::reader::{Form, Kind, read_edn};
+use crate::reader::{Form, Kind, array_class_component, read_edn};
 
 /// The source token of the effective symbolic type hint.
 pub(crate) fn java_type_tag_at(form: &Form, offset: usize) -> Option<&Form> {
@@ -147,13 +147,27 @@ fn implicit_java_class(name: &str) -> Option<&'static str> {
 
 impl Model {
     pub(in crate::checker) fn known_java_member(&self, symbol: &str, globals: &Globals) -> bool {
-        let Some((qualifier, member)) = symbol.split_once('/') else {
+        let Some((qualifier, _)) = symbol.split_once('/') else {
             return false;
         };
-        // A single digit is an array class literal, such as String/1.
-        !matches!(member.as_bytes(), [b'1'..=b'9'])
-            && self.known_java_class(qualifier)
-            && !self.names.aliases.contains_key(qualifier)
+        self.known_java_class(qualifier)
+            && array_class_component(symbol).is_none()
+            && self.unshadowed_java_qualifier(qualifier, globals)
+    }
+
+    pub(in crate::checker) fn known_java_array_class(&self, name: &str, globals: &Globals) -> bool {
+        array_class_component(name).is_some_and(|component| {
+            (self.known_java_class(component)
+                || matches!(
+                    component,
+                    "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double"
+                ))
+                && self.unshadowed_java_qualifier(component, globals)
+        })
+    }
+
+    fn unshadowed_java_qualifier(&self, qualifier: &str, globals: &Globals) -> bool {
+        !self.names.aliases.contains_key(qualifier)
             && !globals.has_competing_class_namespace(qualifier)
     }
 

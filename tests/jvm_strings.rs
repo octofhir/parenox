@@ -120,6 +120,60 @@ fn imported_class_values_follow_lexical_resolution_and_import_edits() {
 }
 
 #[test]
+fn jvm_array_class_values_follow_their_component_namespace() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:import [java.io File]))
+(defn strings {:t/sig '[:-> t/any]} [] String/1)
+(defn ints {:t/sig '[:-> t/any]} [] int/2)
+(defn files {:t/sig '[:-> t/any]} [] java.io.File/2)
+(defn unknown {:t/sig '[:-> t/any]} [] void/1)"#,
+    };
+    let shadow = Source {
+        path: "shadow.clj",
+        source: "(ns String)",
+    };
+    let findings = |report: &parenox::ProjectReport| {
+        report.files[0]
+            .diagnostics
+            .iter()
+            .map(|d| {
+                (
+                    d.code.clone(),
+                    &app.source[d.span.start.offset..d.span.end.offset],
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let normalize = |report: &parenox::ProjectReport| {
+        serde_json::to_value(&report.files[0].diagnostics).unwrap()
+    };
+    let mut session = Session::default();
+    let original = session.check_project(&[app], None);
+    assert_eq!(
+        findings(&original),
+        [
+            ("PNX9001".into(), "String/1"),
+            ("PNX9001".into(), "int/2"),
+            ("PNX9001".into(), "java.io.File/2"),
+            ("PNX9003".into(), "void/1"),
+        ],
+        "{original:#?}"
+    );
+
+    let warm = session.check_project(&[app, shadow], None);
+    let cold = Session::default().check_project(&[app, shadow], None);
+    assert_eq!(findings(&warm)[0], ("PNX2304".into(), "String/1"));
+    assert_eq!(warm.files[0].stats.checked_functions, 1);
+    assert_eq!(warm.files[0].stats.reused_functions, 3);
+    assert_eq!(normalize(&warm), normalize(&cold));
+    assert_eq!(
+        normalize(&session.check_project(&[app], None)),
+        normalize(&original)
+    );
+}
+
+#[test]
 fn qualified_jvm_members_yield_to_loaded_namespaces_and_keep_operand_spans() {
     let app = Source {
         path: "app.clj",

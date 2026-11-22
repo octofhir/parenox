@@ -1081,7 +1081,9 @@ impl Checker<'_> {
                 }
                 None => {}
             }
-            if self.model.known_java_class(name) {
+            if self.model.known_java_class(name)
+                || self.model.known_java_array_class(name, self.globals)
+            {
                 self.diagnostics.push(Diagnostic::analysis_gap(
                     "PNX9001",
                     span,
