@@ -75,7 +75,19 @@ fn vector_operations_keep_one_callback_choice_for_the_whole_collection() {
           {:t/sig '[boolean? :-> (s/or :numbers (s/tuple int? int?)
                                      :strings (s/tuple string? string?))]} [numeric?]
           (into [] (map (if numeric? #(inc %) #(subs % 1)))
-                (if numeric? [1 2] ["cat" "dog"])))"#;
+                (if numeric? [1 2] ["cat" "dog"])))
+        (defn named
+          {:t/sig '[boolean? :-> (s/or :numbers (s/tuple int? int?)
+                                     :strings (s/tuple string? string?))]} [numeric?]
+          (mapv (if numeric? inc str) [1 2]))
+        (defn mixed
+          {:t/sig '[boolean? :-> (s/or :numbers (s/tuple int? int?)
+                                     :strings (s/tuple string? string?))]} [numeric?]
+          (mapv (if numeric? #(inc %) str) [1 2]))
+        (defn filtered
+          {:t/sig '[boolean? :-> (s/or :number (s/tuple int?) :string (s/tuple string?))]}
+          [numeric?]
+          (filterv (if numeric? number? string?) [nil 1 "cat"]))"#;
     let mut session = Session::default();
     let path = "vectors.clj";
     let report = session.check(path, source);
@@ -92,6 +104,20 @@ fn vector_operations_keep_one_callback_choice_for_the_whole_collection() {
         &edited[finding.span.start.offset..finding.span.end.offset],
         "%"
     );
+}
+
+#[test]
+fn an_ordinary_callback_choice_is_evaluated_before_the_collection() {
+    let report = check(
+        r#"(defn choose {:t/sig '[boolean? :-> #{:callback :collection}]} [stop?]
+             (try
+               (mapv (if stop?
+                       (throw (ex-info "callback" {:stage :callback}))
+                       inc)
+                     (throw (ex-info "collection" {:stage :collection})))
+               (catch clojure.lang.ExceptionInfo error (:stage (ex-data error)))))"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
 }
 
 #[test]

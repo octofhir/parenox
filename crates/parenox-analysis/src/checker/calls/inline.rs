@@ -669,8 +669,6 @@ impl<'model> Checker<'model> {
                 first_truth,
             } = arms.test
             && let [[first], [other]] = arms.branches
-            && self.inline_callback_literal(first, env)
-            && self.inline_callback_literal(other, env)
         {
             let start = self.diagnostics.len();
             // Choose the callback before evaluating later arguments, and
