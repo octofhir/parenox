@@ -701,7 +701,7 @@ fn qualified_var_references_distinguish_proven_absence_from_private_vars() {
 }
 
 #[test]
-fn opaque_def_initializers_make_a_provider_var_inventory_incomplete() {
+fn load_time_code_can_make_a_provider_var_inventory_incomplete() {
     let consumer = Source {
         path: "app.clj",
         source: r#"(ns app (:require [dep :as d]))
@@ -712,17 +712,13 @@ fn opaque_def_initializers_make_a_provider_var_inventory_incomplete() {
     let provider = Source {
         path: "dep.clj",
         source: r#"(ns dep (:require [setup :as s]))
-(def marker :ready)"#,
+(def marker :ready)
+(defn annotated {:doc "ready" :example '(s/setup! 'dep)} [] 1)"#,
     };
     let setup = Source {
         path: "setup.clj",
         source: r#"(ns setup)
 (defn setup! [ns-name] (intern ns-name 'injected 42))"#,
-    };
-    let dynamic = Source {
-        source: r#"(ns dep (:require [setup :as s]))
-(def marker (s/setup! 'dep))"#,
-        ..provider
     };
     let findings = |report: &parenox::ProjectReport| {
         report.files[0]
@@ -749,25 +745,37 @@ fn opaque_def_initializers_make_a_provider_var_inventory_incomplete() {
         ],
         "{before:#?}"
     );
-    let after = session.check_project(&[consumer, dynamic, setup], None);
-    assert_eq!(
-        findings(&after),
-        [
-            ("PNX9001".into(), "#'d/injected"),
-            ("PNX9003".into(), "d/injected"),
-        ],
-        "{after:#?}"
-    );
-    assert_eq!(after.files[0].stats.checked_functions, 2);
-    assert_eq!(after.files[0].stats.reused_functions, 1);
-    assert_eq!(
-        normalize(&after),
-        normalize(&Session::default().check_project(&[consumer, dynamic, setup], None))
-    );
-    assert_eq!(
-        normalize(&before),
-        normalize(&session.check_project(&[consumer, provider, setup], None))
-    );
+    for dynamic in [
+        provider.source.replace(":ready", "(s/setup! 'dep)"),
+        provider
+            .source
+            .replace("def marker", "def ^{:doc (s/setup! 'dep)} marker"),
+        provider.source.replace("\"ready\"", "(s/setup! 'dep)"),
+    ] {
+        let dynamic = Source {
+            source: &dynamic,
+            ..provider
+        };
+        let after = session.check_project(&[consumer, dynamic, setup], None);
+        assert_eq!(
+            findings(&after),
+            [
+                ("PNX9001".into(), "#'d/injected"),
+                ("PNX9003".into(), "d/injected"),
+            ],
+            "{after:#?}"
+        );
+        assert_eq!(after.files[0].stats.checked_functions, 2);
+        assert_eq!(after.files[0].stats.reused_functions, 1);
+        assert_eq!(
+            normalize(&after),
+            normalize(&Session::default().check_project(&[consumer, dynamic, setup], None))
+        );
+        assert_eq!(
+            normalize(&before),
+            normalize(&session.check_project(&[consumer, provider, setup], None))
+        );
+    }
 }
 
 #[test]

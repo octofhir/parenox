@@ -1239,6 +1239,40 @@ impl Declarations {
                 .is_some_and(|dispatches| dispatches.first_tag.is_some())
     }
 
+    pub(super) fn has_opaque_var_metadata(&self, forms: &[Form]) -> bool {
+        let inert = |form: &Form| {
+            super::vars::literal(form) && !crate::checker::has_evaluated_metadata(form)
+        };
+        let definitions = self
+            .literal_vars
+            .iter()
+            .map(|&index| (index, false))
+            .chain(self.functions.iter().map(|&index| (index, true)));
+        definitions
+            .filter_map(|(index, function)| {
+                let Kind::List(items) = &forms[index].without_metadata().kind else {
+                    return None;
+                };
+                let [_, name, tail @ ..] = items.as_slice() else {
+                    return None;
+                };
+                Some((name, tail, function))
+            })
+            .any(|(mut name, tail, function)| {
+                // A definition's metadata map is evaluated at load time.
+                while let Kind::Metadata(metadata, target) = &name.kind {
+                    if !inert(metadata) {
+                        return true;
+                    }
+                    name = target;
+                }
+                function
+                    && function_parts(tail)
+                        .1
+                        .any(|[key, value]| !inert(key) || !inert(value))
+            })
+    }
+
     fn replace_source_macro(&mut self, name: &Form, marker: Option<&Form>, span: Span) {
         let Some(previous) = name
             .symbol()

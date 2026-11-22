@@ -364,7 +364,8 @@ impl Model {
         }
         let mut fdefs = model.collect_fdefs(&declarations.fdefs, forms);
         let mut guards = BTreeMap::new();
-        let source_arities_known = !opaque_initializer && declarations.has_known_var_surface(forms);
+        let opaque_definition = opaque_initializer || declarations.has_opaque_var_metadata(forms);
+        let source_arities_known = !opaque_definition && declarations.has_known_var_surface(forms);
         for &index in &declarations.functions {
             model.read_function(
                 &forms[index],
@@ -434,7 +435,7 @@ impl Model {
         model.check_data_functions(source, globals);
         model.collect_helpers();
         // With an otherwise known surface, absent arity proof means a possible Var mutation.
-        let var_inventory = if opaque_initializer
+        let var_inventory = if opaque_definition
             || declarations.has_unmodeled_var_exports()
             || (!declarations.opaque_var_surface && !source_arities_known)
         {

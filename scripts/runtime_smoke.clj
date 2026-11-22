@@ -1464,12 +1464,19 @@
     (eval '(defn setup! [ns-name] (intern ns-name 'injected 42))))
   (binding [*ns* provider]
     (clojure.core/refer 'clojure.core)
-    (alias 'setup 'parenox.smoke.var-setup)
-    (eval '(def marker (setup/setup! 'parenox.smoke.var-initializer))))
+    (alias 'setup 'parenox.smoke.var-setup))
   (alias 'var-initializer 'parenox.smoke.var-initializer)
-  (assert (= 42 (deref (eval '(var var-initializer/injected)))))
-  (assert (= 42 (eval 'var-initializer/injected))))
-(println "Clojure/JVM initializer-created Vars: 2 assertions passed")
+  (binding [*ns* provider]
+    (eval '(defn annotated {:example '(setup/setup! 'parenox.smoke.var-initializer)} [] 1))
+    (assert (nil? (ns-resolve provider 'injected))))
+  (doseq [form '[(def marker (setup/setup! 'parenox.smoke.var-initializer))
+                 (def ^{:doc (setup/setup! 'parenox.smoke.var-initializer)} marker :ready)
+                 (defn annotated {:doc (setup/setup! 'parenox.smoke.var-initializer)} [] 1)]]
+    (ns-unmap provider 'injected)
+    (binding [*ns* provider] (eval form))
+    (assert (= 42 (deref (eval '(var var-initializer/injected)))))
+    (assert (= 42 (eval 'var-initializer/injected)))))
+(println "Clojure/JVM Vars created during declaration load: 7 assertions passed")
 
 (import '[java.io File])
 (assert (= java.io.File File))
