@@ -17,6 +17,23 @@ fn output_evidence<'a>(
     parameters: &Parameters,
     evidence: &TypeArguments<'_>,
 ) -> Result<Cow<'a, Type>, Compatibility> {
+    if let Type::Union(alternatives) = callback {
+        let mut candidates = Vec::with_capacity(alternatives.len());
+        let status =
+            Compatibility::all(alternatives.iter().map(|alternative| {
+                match output_evidence(witness, alternative, parameters, evidence) {
+                    Ok(candidate) => {
+                        candidates.push(candidate.into_owned());
+                        Compatibility::Proven
+                    }
+                    Err(status) => status,
+                }
+            }));
+        if status != Compatibility::Proven {
+            return Err(status);
+        }
+        return Ok(Cow::Owned(Type::union(candidates)));
+    }
     let expected = witness.signature;
     let selected = callback
         .signature_at(expected.arity())

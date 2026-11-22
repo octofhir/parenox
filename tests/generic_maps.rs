@@ -156,6 +156,50 @@ fn conditional_map_callback_can_use_inferred_parameters_with_a_declared_result()
 }
 
 #[test]
+fn checked_callback_alternatives_contribute_their_result_fields() {
+    let source = r#"(ns demo.report (:require [clojure.spec.alpha :as s]))
+        (defn render
+          {:t/sig '(t/all [input result]
+            [input {:report {:message-fn (s/fspec :args (s/cat :text input)
+                                                   :ret {:message result})}}
+             :-> result])}
+          [input options] (:message ((get-in options [:report :message-fn]) input)))
+        (defn count-text {:t/sig '[string? :-> {:message int?}]} [text]
+          {:message (count text)})
+        (defn shorten {:t/sig '[string? :-> {:message string?}]} [text]
+          {:message (subs text 1)})
+        (defn selected {:t/sig '[boolean? :-> (s/or :n int? :s string?)]} [short?]
+          (render "label" {:report {:message-fn (if short? count-text shorten)}}))"#;
+    let path = "report.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+    let edited = source.replace("(s/or :n int? :s string?)", "string?");
+    let warm = session.check(path, &edited);
+    let [finding] = warm.diagnostics.as_slice() else {
+        panic!("{warm:#?}");
+    };
+    assert!(warm.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.expected.as_deref(), Some("String"));
+    assert_eq!(
+        finding.actual.as_deref(),
+        Some("JVM fixed-precision integer | String")
+    );
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        r#"(render "label" {:report {:message-fn (if short? count-text shorten)}})"#
+    );
+    let cold = Session::default().check(path, &edited);
+    assert_eq!(
+        serde_json::to_value(&warm.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
+#[test]
 fn a_computed_parent_key_supplies_context_only_when_it_reaches_the_declared_field() {
     let source = r#"(ns demo.computed-stage (:require [clojure.spec.alpha :as s]))
         (defn render
