@@ -893,8 +893,9 @@ also produce a contextual callback in its final form.
 A `let` or `let*` expression used as the argument can produce the callback
 after evaluating its bindings. Its final form can also return a local
 callback created by one of those bindings.
-Nested branches and sequences can each return a written closure. Each
-reachable closure receives the argument contract in its own scope.
+Nested branches and sequences can return a written closure or a callback
+from an enclosing `let`. Each reachable closure receives the argument
+contract in its own scope.
 The same rule applies to a declared callback field in a literal map. With a
 generic contract, each reachable alternative can use inferred input types and
 contribute evidence for the result parameter.

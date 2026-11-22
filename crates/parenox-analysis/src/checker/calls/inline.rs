@@ -42,36 +42,37 @@ enum CallbackPaths<'a> {
     Conditional(ConditionalArms<'a>),
     Let {
         forms: &'a [Form],
+        bindings: &'a [Form],
         span: Span,
         raw: bool,
     },
 }
 
+enum CallbackTail<'a> {
+    Form(&'a Form),
+    LeaveLet,
+}
+
 impl<'a> CallbackPaths<'a> {
-    fn enqueue_tails(&self, pending: &mut Vec<&'a Form>) -> bool {
+    fn enqueue_tails(&self, pending: &mut Vec<CallbackTail<'a>>, scopes: &mut Vec<&'a [Form]>) {
         match self {
-            Self::Sequence(body) => pending.extend(do_tail(body)),
-            Self::Conditional(arms) => {
-                pending.extend(arms.branches.iter().rev().filter_map(|body| do_tail(body)));
-            }
-            Self::Let { forms, .. } => {
-                let tail = do_tail(&forms[2..]);
-                // The let can give this symbol a callable meaning in its body.
-                if tail.and_then(Form::symbol).is_some_and(|name| {
-                    forms[1]
-                        .vector()
-                        .unwrap()
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .any(|[pattern, _]| pattern.symbol() == Some(name))
-                }) {
-                    return true;
+            Self::Sequence(body) => pending.extend(do_tail(body).map(CallbackTail::Form)),
+            Self::Conditional(arms) => pending.extend(
+                arms.branches
+                    .iter()
+                    .rev()
+                    .filter_map(|body| do_tail(body).map(CallbackTail::Form)),
+            ),
+            Self::Let {
+                forms, bindings, ..
+            } => {
+                if let Some(tail) = do_tail(&forms[2..]) {
+                    scopes.push(bindings);
+                    pending.push(CallbackTail::LeaveLet);
+                    pending.push(CallbackTail::Form(tail));
                 }
-                pending.extend(tail);
             }
         }
-        false
     }
 }
 
@@ -689,7 +690,7 @@ impl<'model> Checker<'model> {
         let [head, bindings, body @ ..] = forms.as_slice() else {
             return None;
         };
-        bindings.vector()?;
+        let bindings = bindings.vector()?;
         body.last()?;
         let raw = head.symbol() == Some("let*");
         let resolved = raw
@@ -698,6 +699,7 @@ impl<'model> Checker<'model> {
                 .is_some_and(|name| matches!(CoreForm::resolve(&name), Some(CoreForm::Let)));
         resolved.then_some(CallbackPaths::Let {
             forms,
+            bindings,
             span: bare.span,
             raw,
         })
@@ -706,16 +708,32 @@ impl<'model> Checker<'model> {
     fn contextual_choice<'a>(&self, form: &'a Form, env: &Env) -> Option<CallbackPaths<'a>> {
         let paths = self.callback_paths(form, env)?;
         let mut pending = Vec::new();
-        if paths.enqueue_tails(&mut pending) {
-            return Some(paths);
-        }
-        while let Some(tail) = pending.pop() {
-            if self.contextual_callback_form(tail, env)
-                || self
-                    .callback_paths(tail, env)
-                    .is_some_and(|path| path.enqueue_tails(&mut pending))
-            {
+        let mut let_bindings = Vec::new();
+        paths.enqueue_tails(&mut pending, &mut let_bindings);
+        while let Some(item) = pending.pop() {
+            let tail = match item {
+                CallbackTail::Form(form) => form,
+                CallbackTail::LeaveLet => {
+                    let_bindings.pop();
+                    continue;
+                }
+            };
+            // Look for a possible local callback. The evaluated scope decides
+            // whether this binding actually stores a closure.
+            let reads_binding = tail.symbol().is_some_and(|name| {
+                let_bindings.iter().rev().any(|bindings| {
+                    bindings
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .any(|[pattern, _]| pattern.symbol() == Some(name))
+                })
+            });
+            if reads_binding || self.contextual_callback_form(tail, env) {
                 return Some(paths);
+            }
+            if let Some(path) = self.callback_paths(tail, env) {
+                path.enqueue_tails(&mut pending, &mut let_bindings);
             }
         }
         None
@@ -801,7 +819,9 @@ impl<'model> Checker<'model> {
         };
         let branches = match paths {
             CallbackPaths::Sequence(body) => [visit(self, env, body, 0), Value::new(Type::Never)],
-            CallbackPaths::Let { forms, span, raw } => [
+            CallbackPaths::Let {
+                forms, span, raw, ..
+            } => [
                 self.check_let_body(forms, span, env, raw, |checker, body, scope| {
                     visit(checker, scope, body, 0)
                 }),

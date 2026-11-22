@@ -626,6 +626,47 @@ fn nested_callback_choices_keep_their_binding_and_nil_paths() {
 }
 
 #[test]
+fn nested_callback_tails_can_select_let_bound_closures() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::message-fn (s/fspec :args (s/cat :text string?) :ret string?))
+        (defn render {:t/sig '[::message-fn :-> string?]} [callback]
+          (callback "label"))
+        (defn choose {:t/sig '[boolean? :-> string?]} [long?]
+          (render (do
+                    (let [prefix "outer"
+                          long (fn [message] (str (subs prefix 1) message))
+                          short (fn [message] (str (subs message 1)))]
+                      (if long?
+                        (let [selected long prefix 7] (do (inc prefix) selected))
+                        short)))))"#;
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replace("(subs message 1)", "(inc message)");
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "message"
+    );
+
+    let shadowed = source.replace("selected long prefix 7", "selected nil prefix 7");
+    let report = session.check(path, &shadowed);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert!(finding.actual.as_deref().unwrap().contains("Nil"));
+}
+
+#[test]
 fn nilable_callback_contracts_contextualize_written_closures() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))
