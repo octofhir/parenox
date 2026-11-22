@@ -882,6 +882,9 @@ provide an inline or local callback with parameters typed by the contract. Each
 closure retains the branch's narrowed types for captured locals. Other branch
 expressions are checked at argument evaluation, and their resulting values
 must satisfy the same contract.
+The same rule applies in a literal map field when its callback's result type
+does not depend on a type parameter. The field can use input types inferred
+from other arguments.
 Sequential bodies apply the same rule to later forms and to function
 postconditions. A proven failure in `finally` also prevents a normal result
 from the enclosing `try`.

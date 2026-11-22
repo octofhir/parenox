@@ -39,7 +39,7 @@ use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use combinators::CombinedCallable;
 use forms::CoreForm;
-use inline::{CallbackReturn, Fnil, InlineFunction, Partial, PreparedChoice};
+use inline::{Fnil, InlineFunction, Partial, PreparedChoice};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
@@ -200,16 +200,9 @@ impl EvaluatedArguments {
 struct ContextualArgument<'a> {
     callback: &'a Form,
     expected: &'a Type,
+    choice: Option<Box<PreparedChoice<'a>>>,
     map_key: Option<&'a Type>,
     map_ancestors: Box<[&'a Type]>,
-}
-
-enum DeferredCallback<'a> {
-    Argument(ContextualArgument<'a>),
-    Choice {
-        choice: Box<PreparedChoice<'a>>,
-        expected: &'a Type,
-    },
 }
 
 impl ContextualArgument<'_> {
@@ -762,22 +755,6 @@ impl<'model> Checker<'model> {
         call: Span,
         env: &Env,
     ) -> EvaluatedArguments {
-        let infer_argument =
-            |checker: &mut Self, form: &Form, expected: &Type, reachable, env: &Env| {
-                checker.check_path(reachable, |checker| {
-                    checker
-                        .contextual_callback(
-                            form,
-                            expected,
-                            call,
-                            function.contract.as_deref(),
-                            env,
-                            CallbackReturn::Check,
-                        )
-                        .map(|callback| callback.value)
-                        .unwrap_or_else(|| checker.infer(form, env))
-                })
-            };
         let mut values = Vec::with_capacity(forms.len());
         let mut deferred = Vec::new();
         let mut reachable = env.reachable();
@@ -787,36 +764,19 @@ impl<'model> Checker<'model> {
                 .get(index)
                 .or(signature.rest.as_ref())
                 .unwrap();
-            let expects_callback = expected.contextual_signature().is_some();
-            if expects_callback && self.contextual_callback_form(form, env) {
-                // Reading or creating an ordinary closure does not run its body.
-                let argument = self.contextual_callback_argument(form, env, reachable);
-                reachable = !argument.stops_evaluation();
-                deferred.push((
-                    index,
-                    DeferredCallback::Argument(ContextualArgument {
-                        callback: form,
-                        expected,
-                        map_key: None,
-                        map_ancestors: Box::new([]),
-                    }),
-                ));
-                values.push((argument, form.span));
-                continue;
-            }
-            if expects_callback
-                && let Some((choice, argument)) = self.prepare_callback_choice(form, env, reachable)
+            if let Some((context, argument)) =
+                self.prepare_contextual_argument(form, expected, env, reachable, None)
             {
                 reachable = !argument.stops_evaluation();
-                deferred.push((index, DeferredCallback::Choice { choice, expected }));
+                deferred.push((index, context));
                 values.push((argument, form.span));
                 continue;
             }
             let mut value = self
                 .contextual_map_argument(form, expected, env, reachable, |callback, _| {
-                    deferred.push((index, DeferredCallback::Argument(callback)))
+                    deferred.push((index, callback))
                 })
-                .unwrap_or_else(|| infer_argument(self, form, expected, reachable, env));
+                .unwrap_or_else(|| self.infer_path(form, env, reachable, false));
             reachable = !value.stops_evaluation();
             if !reachable {
                 value.narrow(Type::Never);
@@ -825,37 +785,23 @@ impl<'model> Checker<'model> {
         }
         let tail_outcome = forms.metadata_outcome(self, env, reachable);
         reachable &= tail_outcome.is_none();
-        for (index, callback) in deferred {
-            match callback {
-                DeferredCallback::Argument(contextual) => {
-                    let value = infer_argument(
-                        self,
-                        contextual.callback,
-                        contextual.expected,
-                        reachable,
+        for (index, mut pending) in deferred {
+            let origin = function.contract.as_deref();
+            let value = if let Some(choice) = pending.choice.take() {
+                self.check_callback_choice(*choice, pending.expected, call, origin, reachable)
+            } else {
+                self.check_path(reachable, |checker| {
+                    checker.check_callback_value(
+                        pending.callback,
+                        pending.expected,
+                        call,
+                        origin,
                         env,
-                    );
-                    if reachable {
-                        contextual.apply(&mut values[index].0, value);
-                    }
-                }
-                DeferredCallback::Choice { choice, expected } => {
-                    let start = self.diagnostics.len();
-                    let callbacks = choice.callbacks.into_iter().map(|branch| {
-                        infer_argument(
-                            self,
-                            branch.form,
-                            expected,
-                            reachable && branch.returns,
-                            &branch.scope,
-                        )
-                    });
-                    let value = Value::union_branches(choice.eager.into_iter().chain(callbacks));
-                    self.dedup_diagnostics(start);
-                    if reachable {
-                        values[index].0 = value;
-                    }
-                }
+                    )
+                })
+            };
+            if reachable {
+                pending.apply(&mut values[index].0, value);
             }
         }
         EvaluatedArguments {

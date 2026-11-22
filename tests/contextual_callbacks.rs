@@ -271,6 +271,52 @@ fn nilable_maps_keep_context_for_their_callback_fields() {
 }
 
 #[test]
+fn conditional_callbacks_keep_context_inside_nested_map_fields() {
+    let source = format!(
+        r#"{EXAMPLE}
+        (s/def ::message-fn ::text-transform)
+        (s/def ::report (s/keys :req-un [::message-fn]))
+        (defn render {{:t/sig '[{{:report ::report}} :-> string?]}} [options]
+          ((:message-fn (:report options)) "label"))
+        (defn choose {{:t/sig '[(s/nilable string?) :-> string?]}} [prefix]
+          (render {{:report {{(if true :message-fn :other)
+                            (if (some? prefix)
+                              (fn [text] (str (subs prefix 1) text))
+                              #(subs % 1))}}}}))"#
+    );
+    let path = "conditional_fields.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, &source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+    let edited = source.replace(
+        "(str (subs prefix 1) text)",
+        "(do (inc text) (subs prefix 1))",
+    );
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "text"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "demo.contextual-callbacks/render"
+    );
+    let cold = Session::default().check(path, &edited);
+    assert_eq!(
+        serde_json::to_value(&report.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let reverted = session.check(path, &source);
+    assert!(reverted.ok && reverted.complete, "{reverted:#?}");
+}
+
+#[test]
 fn callback_argument_use_and_return_errors_point_inside_the_body() {
     let source = format!(
         "{EXAMPLE}

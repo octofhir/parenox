@@ -66,6 +66,7 @@ impl Checker<'_> {
                     ContextualArgument {
                         callback: form,
                         expected,
+                        choice: None,
                         map_key: None,
                         map_ancestors: Box::new([]),
                     },
@@ -103,7 +104,7 @@ impl Checker<'_> {
                     signature.with_type_arguments(binders, &inputs, Some(&Type::Unknown));
                 (missing, instantiated)
             };
-            for (index, contextual, reachable_at_argument) in callbacks {
+            for (index, mut contextual, reachable_at_argument) in callbacks {
                 let form = contextual.callback;
                 let template = contextual.expected;
                 let expected = contextual
@@ -125,6 +126,21 @@ impl Checker<'_> {
                 } else {
                     CallbackReturn::Check
                 };
+                if let Some(choice) = contextual.choice.take() {
+                    // A choice can check a declared return, but it is not an inference witness.
+                    debug_assert!(output.is_none());
+                    let value = self.check_callback_choice(
+                        *choice,
+                        expected,
+                        call,
+                        function.contract.as_deref(),
+                        check_body,
+                    );
+                    if check_body {
+                        contextual.apply(&mut values[index].0, value);
+                    }
+                    continue;
+                }
                 let body_checked = self.check_path(check_body, |checker| {
                     checker
                         .contextual_callback(

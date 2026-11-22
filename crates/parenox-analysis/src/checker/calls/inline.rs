@@ -133,15 +133,15 @@ pub(super) enum CallbackReturn {
     Infer,
 }
 
-pub(super) struct CallbackBranch<'a> {
-    pub(super) form: &'a Form,
-    pub(super) scope: Env,
-    pub(super) returns: bool,
+struct CallbackBranch<'a> {
+    form: &'a Form,
+    scope: Env,
+    returns: bool,
 }
 
 pub(super) struct PreparedChoice<'a> {
-    pub(super) callbacks: Vec<CallbackBranch<'a>>,
-    pub(super) eager: Option<Value>,
+    callbacks: Vec<CallbackBranch<'a>>,
+    eager: Option<Value>,
 }
 
 pub(super) struct ContextualCallback {
@@ -537,27 +537,30 @@ impl<'model> Checker<'model> {
         }
     }
 
+    fn contextual_choice<'a>(
+        &self,
+        form: &'a Form,
+        env: &Env,
+    ) -> Option<(&'a Form, [(&'a Form, bool); 2])> {
+        let (test, yes, no) = conditional_arms(form)?;
+        let yes_is_callback = self.contextual_callback_form(yes, env);
+        let no_is_callback = self.contextual_callback_form(no, env);
+        (yes_is_callback || no_is_callback)
+            .then_some((test, [(yes, yes_is_callback), (no, no_is_callback)]))
+    }
+
     #[inline(never)]
-    pub(super) fn prepare_callback_choice<'a>(
+    fn prepare_callback_choice<'a>(
         &mut self,
         form: &'a Form,
         env: &Env,
         reachable: bool,
     ) -> Option<(Box<PreparedChoice<'a>>, Value)> {
-        let (test, yes, no) = conditional_arms(form)?;
-        let yes_is_callback = self.contextual_callback_form(yes, env);
-        let no_is_callback = self.contextual_callback_form(no, env);
-        if !yes_is_callback && !no_is_callback {
-            return None;
-        }
+        let (test, choices) = self.contextual_choice(form, env)?;
         let mut callbacks = Vec::with_capacity(2);
         let branches = self.inspect_path(reachable, |checker| {
             checker.check_if_paths(test, env, true, |checker, scope, truth| {
-                let (form, is_callback) = if truth {
-                    (yes, yes_is_callback)
-                } else {
-                    (no, no_is_callback)
-                };
+                let (form, is_callback) = choices[usize::from(!truth)];
                 if !is_callback {
                     return checker.infer(form, scope);
                 }
@@ -574,10 +577,76 @@ impl<'model> Checker<'model> {
         let returns = reachable && branches.iter().any(|branch| !branch.stops_evaluation());
         let eager = branches
             .into_iter()
-            .zip([yes_is_callback, no_is_callback])
-            .find_map(|(branch, is_callback)| (!is_callback).then_some(branch));
+            .zip(choices)
+            .find_map(|(branch, (_, is_callback))| (!is_callback).then_some(branch));
         let value = Value::new(if returns { Type::Unknown } else { Type::Never });
         Some((Box::new(PreparedChoice { callbacks, eager }), value))
+    }
+
+    pub(super) fn prepare_contextual_argument<'a>(
+        &mut self,
+        form: &'a Form,
+        expected: &'a Type,
+        env: &Env,
+        reachable: bool,
+        map_key: Option<&'a Type>,
+    ) -> Option<(ContextualArgument<'a>, Value)> {
+        let (_, signature) = expected.contextual_signature()?;
+        let (choice, value) = if self.contextual_callback_form(form, env) {
+            // Creating or reading a closure does not execute its body.
+            (
+                None,
+                self.contextual_callback_argument(form, env, reachable),
+            )
+        } else if map_key.is_none() || !signature.ret.contains_parameter() {
+            let (choice, value) = self.prepare_callback_choice(form, env, reachable)?;
+            (Some(choice), value)
+        } else {
+            // Inferring a return parameter requires a result witness.
+            return None;
+        };
+        Some((
+            ContextualArgument {
+                callback: form,
+                expected,
+                choice,
+                map_key,
+                map_ancestors: Box::new([]),
+            },
+            value,
+        ))
+    }
+
+    pub(super) fn check_callback_choice(
+        &mut self,
+        choice: PreparedChoice<'_>,
+        expected: &Type,
+        call: Span,
+        origin: Option<&ContractOrigin>,
+        reachable: bool,
+    ) -> Value {
+        let start = self.diagnostics.len();
+        let callbacks = choice.callbacks.into_iter().map(|branch| {
+            self.check_path(reachable && branch.returns, |checker| {
+                checker.check_callback_value(branch.form, expected, call, origin, &branch.scope)
+            })
+        });
+        let value = Value::union_branches(choice.eager.into_iter().chain(callbacks));
+        self.dedup_diagnostics(start);
+        value
+    }
+
+    pub(super) fn check_callback_value(
+        &mut self,
+        form: &Form,
+        expected: &Type,
+        call: Span,
+        origin: Option<&ContractOrigin>,
+        env: &Env,
+    ) -> Value {
+        self.contextual_callback(form, expected, call, origin, env, CallbackReturn::Check)
+            .map(|callback| callback.value)
+            .unwrap_or_else(|| self.infer(form, env))
     }
 
     pub(super) fn contextual_callback_form(&self, form: &Form, env: &Env) -> bool {
@@ -641,7 +710,9 @@ impl<'model> Checker<'model> {
                     }),
                 None if ordered => {
                     // The map evaluator can prove the key before choosing the field contract.
-                    (direct_callbacks && self.contextual_callback_form(value, env))
+                    (direct_callbacks
+                        && (self.contextual_callback_form(value, env)
+                            || self.contextual_choice(value, env).is_some()))
                         || (value.map().is_some() && nested_maps())
                 }
                 None => false,
@@ -650,7 +721,13 @@ impl<'model> Checker<'model> {
     }
 
     fn contextual_callback_field(&self, callback: &Form, expected: &Type, env: &Env) -> bool {
-        expected.contextual_signature().is_some() && self.contextual_callback_form(callback, env)
+        expected
+            .contextual_signature()
+            .is_some_and(|(_, signature)| {
+                self.contextual_callback_form(callback, env)
+                    || (!signature.ret.contains_parameter()
+                        && self.contextual_choice(callback, env).is_some())
+            })
     }
 
     pub(super) fn contextual_map_argument<'a>(
@@ -685,17 +762,16 @@ impl<'model> Checker<'model> {
                         key.and_then(|key| expected.fields.get_key_value(key))
                         && let Some(expected) = constraint.value_constraint()
                     {
-                        if checker.contextual_callback_field(field, expected, env) {
-                            defer(
-                                ContextualArgument {
-                                    callback: field,
-                                    expected,
-                                    map_key: Some(key),
-                                    map_ancestors: ancestors.clone().into_boxed_slice(),
-                                },
-                                reachable,
-                            );
-                            return checker.contextual_callback_argument(field, env, reachable);
+                        if let Some((mut callback, value)) = checker.prepare_contextual_argument(
+                            field,
+                            expected,
+                            env,
+                            reachable,
+                            Some(key),
+                        ) {
+                            callback.map_ancestors = ancestors.clone().into_boxed_slice();
+                            defer(callback, reachable);
+                            return value;
                         }
                         if remaining != 0 && contextual_map_type(expected).is_some() {
                             ancestors.push(key);

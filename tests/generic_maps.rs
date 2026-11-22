@@ -123,6 +123,39 @@ fn a_nested_fixed_callback_has_a_distinct_path_from_a_generic_result_callback() 
 }
 
 #[test]
+fn conditional_map_callback_can_use_inferred_parameters_with_a_declared_result() {
+    let source = r#"(ns demo.report (:require [clojure.spec.alpha :as s]))
+        (defn format-with
+          {:t/sig '(t/all [a]
+            [{:report {:message-fn (s/fspec :args (s/cat :text a) :ret string?)}}
+             a :-> string?])}
+          [options input] ((get-in options [:report :message-fn]) input))
+        (defn text {:t/sig '[boolean? :-> string?]} [short?]
+          (format-with {:report {:message-fn (if short? #(subs % 1) (fn [label] label))}}
+                       "label"))"#;
+    let path = "report.clj";
+    let mut session = Session::default();
+    let original = session.check(path, source);
+    assert!(original.ok && original.complete, "{original:#?}");
+    let edited = source.replace("(fn [label] label)", "(fn [label] (do (inc label) label))");
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "label"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "demo.report/format-with"
+    );
+}
+
+#[test]
 fn a_computed_parent_key_supplies_context_only_when_it_reaches_the_declared_field() {
     let source = r#"(ns demo.computed-stage (:require [clojure.spec.alpha :as s]))
         (defn render
