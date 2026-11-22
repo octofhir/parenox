@@ -891,7 +891,8 @@ by the conditional. Earlier forms evaluate in branch scope before the closure
 is created. A `do` sequence in the argument or at the end of the branch can
 also produce a contextual callback in its final form.
 A `let` or `let*` expression used as the argument can produce the callback
-after evaluating its bindings. The callback keeps those lexical bindings.
+after evaluating its bindings. Its final form can also return a local
+callback created by one of those bindings.
 The same rule applies to a declared callback field in a literal map. With a
 generic contract, each reachable alternative can use inferred input types and
 contribute evidence for the result parameter.

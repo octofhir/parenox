@@ -541,6 +541,50 @@ fn let_tail_callbacks_capture_evaluated_bindings() {
 }
 
 #[test]
+fn returning_a_let_bound_callback_keeps_its_definition_scope() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::message-fn (s/fspec :args (s/cat :text string?) :ret string?))
+        (defn render {:t/sig '[::message-fn :-> string?]} [callback]
+          (callback "label"))
+        (defn select {:t/sig '[string? :-> string?]} [prefix]
+          (render (let [suffix (subs prefix 1)
+                        callback (fn [message] (str (subs suffix 1) (subs message 1)))
+                        forwarded callback
+                        suffix 7]
+                    (do (inc suffix) forwarded))))"#;
+    let mut session = Session::default();
+    let path = "reports.clj";
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (body, code, operand) in [
+        ("(inc message)", "PNX2322", "message"),
+        ("(subs missing 1)", "PNX2304", "missing"),
+    ] {
+        let edited = source.replace("(subs message 1)", body);
+        let report = session.check(path, &edited);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(finding.code, code);
+        assert_eq!(
+            &edited[finding.span.start.offset..finding.span.end.offset],
+            operand
+        );
+    }
+
+    let shadowed = source.replace("forwarded callback", "forwarded callback forwarded 7");
+    let report = session.check(path, &shadowed);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert!(shadowed[finding.span.start.offset..finding.span.end.offset].starts_with("(let ["));
+    assert!(finding.callback_contract.is_none());
+}
+
+#[test]
 fn nilable_callback_contracts_contextualize_written_closures() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))

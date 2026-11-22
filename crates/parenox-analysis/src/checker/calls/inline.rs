@@ -56,6 +56,14 @@ fn do_body(form: &Form) -> Option<&[Form]> {
     (head.symbol() == Some("do")).then_some(body)
 }
 
+fn do_tail(body: &[Form]) -> Option<&Form> {
+    let mut form = body.last()?;
+    while let Some(nested) = do_body(form) {
+        form = nested.last()?;
+    }
+    Some(form)
+}
+
 enum ConditionalTest<'a> {
     Predicate {
         form: &'a Form,
@@ -632,15 +640,8 @@ impl<'model> Checker<'model> {
         }
     }
 
-    fn contextual_callback_at_tail(&self, mut body: &[Form], env: &Env) -> bool {
-        while let Some(form) = body.last() {
-            if let Some(forms) = do_body(form) {
-                body = forms;
-            } else {
-                return self.contextual_callback_form(form, env);
-            }
-        }
-        false
+    fn contextual_callback_at_tail(&self, body: &[Form], env: &Env) -> bool {
+        do_tail(body).is_some_and(|form| self.contextual_callback_form(form, env))
     }
 
     fn contextual_choice<'a>(&self, form: &'a Form, env: &Env) -> Option<CallbackPaths<'a>> {
@@ -663,8 +664,18 @@ impl<'model> Checker<'model> {
         let [head, bindings, body @ ..] = forms.as_slice() else {
             return None;
         };
-        bindings.vector()?;
-        if !self.contextual_callback_at_tail(body, env) {
+        let bindings = bindings.vector()?;
+        let tail = do_tail(body)?;
+        // A binding in this let can introduce the callback even when the
+        // same symbol has no callable meaning in the surrounding scope.
+        let reads_binding = tail.symbol().is_some_and(|name| {
+            bindings
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .any(|[pattern, _]| pattern.symbol() == Some(name))
+        });
+        if !reads_binding && !self.contextual_callback_form(tail, env) {
             return None;
         }
         let raw = head.symbol() == Some("let*");
