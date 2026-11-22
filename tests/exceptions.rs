@@ -62,6 +62,78 @@ fn calling_a_value_known_to_be_nil_throws_only_when_invoked() {
 }
 
 #[test]
+fn direct_calls_cast_known_scalar_targets_before_evaluating_arguments() {
+    let operand = r#"(throw (ex-info "argument" {}))"#;
+    for operator in [
+        "123",
+        "123N",
+        r#"#"tag""#,
+        "(if true 123 inc)",
+        "(let [local 123] local)",
+    ] {
+        let expression = format!(
+            "(try ({operator} {operand})
+               (catch clojure.lang.ExceptionInfo _ :argument)
+               (catch ClassCastException _ :target))",
+        );
+        let report = check(&expression, "#{:target}");
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{operator}: {report:#?}");
+        };
+        assert!(report.complete);
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(finding.expected.as_deref(), Some("Callable"));
+    }
+
+    let still_compiles_arguments = check("(123 missing-name)", "t/any");
+    assert!(
+        still_compiles_arguments.diagnostics.iter().any(|finding| {
+            finding.code == "PNX2304" && finding.message.contains("missing-name")
+        })
+    );
+
+    let broad_number = "(ns demo) (defn f {:t/sig '[number? :-> t/any]} [target] (target 1))";
+    let report = Session::default().check("exceptions.clj", broad_number);
+    let [gap] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(gap.code, "PNX9001");
+}
+
+#[test]
+fn collection_calls_evaluate_arguments_before_casting_the_callback() {
+    let blocked = r#"(throw (ex-info "argument" {}))"#;
+    for expression in [
+        format!("(apply 123 [{blocked}])"),
+        format!("(mapv 123 [{blocked}])"),
+    ] {
+        let report = check(
+            &format!(
+                "(try {expression}
+                   (catch clojure.lang.ExceptionInfo _ :argument)
+                   (catch ClassCastException _ :target))",
+            ),
+            "#{:argument}",
+        );
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    for expression in ["(apply 123 [1])", "(mapv 123 [1])"] {
+        let report = check(
+            &format!("(try {expression} (catch ClassCastException _ :target))"),
+            "#{:target}",
+        );
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{expression}: {report:#?}");
+        };
+        assert!(report.complete);
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(finding.expected.as_deref(), Some("Callable"));
+    }
+    let empty = check("(empty? (mapv 123 []))", "#{true}");
+    assert!(empty.ok && empty.complete, "{empty:#?}");
+}
+
+#[test]
 fn explicit_exceptions_preserve_data_and_terminate_the_path() {
     let good = include_str!("../examples/exceptions.clj");
     let report = Session::default().check("exceptions.clj", good);

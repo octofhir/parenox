@@ -179,11 +179,22 @@ fn lexical_bindings_shadow_project_functions() {
 
 #[test]
 fn local_predicate_name_is_not_used_for_narrowing() {
-    let report = Session::default().check("test.clj", &source(
-        "(defn f {:t/sig '[(s/nilable string?) boolean? :-> string?]} [x some?] (if (some? x) (str/upper-case x) \"fallback\"))",
-    ));
-    assert!(!report.ok);
-    assert!(!report.complete);
+    let report = Session::default().check(
+        "test.clj",
+        &source(
+            r#"(defn f
+                  {:t/sig '[(s/nilable string?)
+                            (s/fspec :args (s/cat :value (s/nilable string?)) :ret boolean?)
+                            :-> string?]} [x some?]
+                  (if (some? x) (str/upper-case x) "fallback"))"#,
+        ),
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("Nil | String"));
 }
 
 #[test]

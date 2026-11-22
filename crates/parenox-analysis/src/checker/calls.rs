@@ -35,7 +35,7 @@ use super::{
     queries::InferredCall,
 };
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
+use crate::types::{Arity, Compatibility, IntegerClass, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use combinators::CombinedCallable;
 use forms::CoreForm;
@@ -606,6 +606,9 @@ impl<'model> Checker<'model> {
         }
         let start = self.diagnostics.len();
         if let Some(callable) = self.prepare_inline(head, env) {
+            if let Callable::Value(function) = &callable.kind {
+                return self.call_written_operator_value(function, head, operands, span, env);
+            }
             let args: Vec<_> = self.eval_args(operands, env, callable.returns()).collect();
             let invoked = call_returns(&args);
             // Prepared callbacks elsewhere use synthetic arguments. Only
@@ -676,6 +679,17 @@ impl<'model> Checker<'model> {
         span: Span,
         env: &Env,
     ) -> Value {
+        if self.path_reachable
+            && env.reachable()
+            && !function.stops_evaluation()
+            && definitely_noncallable(&function.known)
+        {
+            // A direct invocation casts the evaluated operator to IFn before
+            // evaluating the operands. Its operands still have to compile.
+            let rejected = self.reject_call_target(&function.known, head.span);
+            self.eval_args(written, env, false).for_each(drop);
+            return rejected;
+        }
         let operands = CallOperands {
             prefix: written,
             tail: OperandTail::Items(&[]),
@@ -904,15 +918,8 @@ impl<'model> Checker<'model> {
         if !self.path_reachable || function.stops_evaluation() || !call_returns(args) {
             return Value::new(Type::Never);
         }
-        if function.known == Type::Nil {
-            self.diagnostics.push(Diagnostic::type_mismatch(
-                head,
-                "Call target",
-                "Callable".into(),
-                "Nil".into(),
-            ));
-            self.null_pointer();
-            return Value::new(Type::Never);
+        if function.known == Type::Nil || definitely_noncallable(&function.known) {
+            return self.reject_call_target(&function.known, head);
         }
         if matches!(
             function.known,
@@ -1042,6 +1049,21 @@ impl<'model> Checker<'model> {
             Type::Unknown | Type::Never => Value::new(function.known.clone()),
             _ => self.unsupported(head, format!("Calling {} is not supported", function.ty)),
         }
+    }
+
+    fn reject_call_target(&mut self, target: &Type, span: Span) -> Value {
+        self.diagnostics.push(Diagnostic::type_mismatch(
+            span,
+            "Call target",
+            "Callable".into(),
+            target.inferred().to_string(),
+        ));
+        if *target == Type::Nil {
+            self.null_pointer();
+        } else {
+            self.class_cast();
+        }
+        Value::new(Type::Never)
     }
 
     fn check_call_arguments(
@@ -1660,6 +1682,21 @@ pub(super) fn predicate_type(name: &str) -> Option<Type> {
 
 pub(super) fn call_returns(args: &[(Value, Span)]) -> bool {
     args.iter().all(|(value, _)| value.known != Type::Never)
+}
+
+fn definitely_noncallable(ty: &Type) -> bool {
+    // A general Number can implement IFn. Restrict this test to known
+    // classes whose values cannot implement that interface.
+    match ty {
+        Type::Pattern
+        | Type::Integer(_)
+        | Type::Integral(IntegerType {
+            class: IntegerClass::Fixed | IntegerClass::IntOrLong | IntegerClass::BigInt,
+            ..
+        }) => true,
+        Type::Union(parts) => !parts.is_empty() && parts.iter().all(definitely_noncallable),
+        _ => false,
+    }
 }
 
 fn equality(args: &[(Value, Span)]) -> Type {

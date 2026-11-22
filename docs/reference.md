@@ -909,6 +909,10 @@ checks written arguments against the selected function in each branch.
 A literal `nil` in the operator position is a compiler error. A computed
 target known to be `nil` raises `NullPointerException` when invoked, after
 its arguments have evaluated.
+A direct call casts the evaluated operator to `IFn` before evaluating its
+arguments. Parenox reports that cast failure for known JVM integer classes
+and regular expressions. Higher-order calls evaluate their eager operands
+before reaching a corresponding cast inside the operation.
 The same rule applies to a declared callback field in a literal map. With a
 generic contract, each reachable alternative can use inferred input types and
 contribute evidence for the result parameter.
