@@ -382,8 +382,7 @@ fn contextual_callbacks_can_end_a_sequence_of_branch_forms() {
                   (inc 0)))
         (defn select-if-ready {:t/sig '[(s/nilable string?) :-> string?]} [prefix]
           (render {:message-fn (when-not (nil? prefix)
-                                 (subs prefix 1)
-                                 #(str prefix %))}
+                                 (do (subs prefix 1) #(str prefix %)))}
                   0))"#;
     let mut session = Session::default();
     let path = "reports.clj";
@@ -419,6 +418,54 @@ fn contextual_callbacks_can_end_a_sequence_of_branch_forms() {
     assert_eq!(
         &unresolved[finding.span.start.offset..finding.span.end.offset],
         "missing"
+    );
+}
+
+#[test]
+fn do_sequences_return_contextual_callbacks_after_their_eager_forms() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::message-fn (s/fspec :args (s/cat :text string?) :ret string?))
+        (defn render {:t/sig '[::message-fn number? :-> string?]} [callback _]
+          (callback "label"))
+        (defn produce {:t/sig '[string? :-> string?]} [prefix]
+          (let [do (fn [_] "local")]
+            (render (do (subs prefix 1)
+                        (do (inc 1)
+                            (fn [message] (str prefix (subs message 1)))))
+                    (inc 2))))"#;
+    let mut session = Session::default();
+    let path = "reports.clj";
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replace("(subs message 1)", "(inc message)");
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "message"
+    );
+
+    let throwing = source
+        .replace("(subs prefix 1)", "(throw (ex-info \"entered\" {}))")
+        .replace("(inc 1)", "(inc \"inner\")")
+        .replace("(inc 2)", "(inc \"later\")");
+    let report = session.check(path, &throwing);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let unresolved = throwing.replace("(inc \"inner\")", "(inc unresolved)");
+    let report = session.check(path, &unresolved);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2304");
+    assert_eq!(
+        &unresolved[finding.span.start.offset..finding.span.end.offset],
+        "unresolved"
     );
 }
 

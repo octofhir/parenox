@@ -37,6 +37,20 @@ struct ConditionalArms<'a> {
     branches: [&'a [Form]; 2],
 }
 
+enum CallbackPaths<'a> {
+    Sequence(&'a [Form]),
+    Conditional(ConditionalArms<'a>),
+}
+
+fn do_body(form: &Form) -> Option<&[Form]> {
+    let Kind::List(forms) = &form.without_metadata().kind else {
+        return None;
+    };
+    let (head, body) = forms.split_first()?;
+    // An unqualified do is a compiler special form even when a local shares its name.
+    (head.symbol() == Some("do")).then_some(body)
+}
+
 enum ConditionalTest<'a> {
     Predicate {
         form: &'a Form,
@@ -612,13 +626,28 @@ impl<'model> Checker<'model> {
         }
     }
 
-    fn contextual_choice<'a>(&self, form: &'a Form, env: &Env) -> Option<ConditionalArms<'a>> {
+    fn contextual_callback_at_tail(&self, mut body: &[Form], env: &Env) -> bool {
+        while let Some(form) = body.last() {
+            if let Some(forms) = do_body(form) {
+                body = forms;
+            } else {
+                return self.contextual_callback_form(form, env);
+            }
+        }
+        false
+    }
+
+    fn contextual_choice<'a>(&self, form: &'a Form, env: &Env) -> Option<CallbackPaths<'a>> {
+        if let Some(body) = do_body(form) {
+            return self
+                .contextual_callback_at_tail(body, env)
+                .then_some(CallbackPaths::Sequence(body));
+        }
         let arms = self.conditional_arms(form, env)?;
         arms.branches
             .iter()
-            .filter_map(|body| body.last())
-            .any(|form| self.contextual_callback_form(form, env))
-            .then_some(arms)
+            .any(|body| self.contextual_callback_at_tail(body, env))
+            .then_some(CallbackPaths::Conditional(arms))
     }
 
     #[inline(never)]
@@ -628,24 +657,30 @@ impl<'model> Checker<'model> {
         env: &Env,
         reachable: bool,
     ) -> Option<(Box<PreparedChoice<'a>>, Value)> {
-        let arms = self.contextual_choice(form, env)?;
+        let paths = self.contextual_choice(form, env)?;
         let mut callbacks = Vec::with_capacity(2);
         let mut deferred = [false; 2];
-        let mut visit = |checker: &mut Self, scope: &Env, body: &'a [Form], index: usize| {
-            let Some((form, prefix)) = body.split_last() else {
-                return Value::new(Type::Nil);
-            };
-            let reachable = checker.body_prefix_returns(prefix, scope);
+        let mut visit = |checker: &mut Self, scope: &Env, mut body: &'a [Form], index: usize| {
+            let mut reachable = checker.path_reachable && scope.reachable();
             // Binding forms can introduce a local that shadows a callback constructor.
+            if !checker.contextual_callback_at_tail(body, scope) {
+                return checker.check_path(reachable, |checker| checker.body(body, scope, false));
+            }
+            let form = loop {
+                let Some((form, prefix)) = body.split_last() else {
+                    return Value::new(if reachable { Type::Nil } else { Type::Never });
+                };
+                reachable = checker.body_prefix_returns(prefix, scope, reachable);
+                match do_body(form) {
+                    Some(forms) => body = forms,
+                    None => break form,
+                }
+            };
             if !checker.contextual_callback_form(form, scope) {
                 return checker.infer_path(form, scope, reachable, false);
             }
             deferred[index] = true;
-            let value = checker.contextual_callback_argument(
-                form,
-                scope,
-                reachable && checker.path_reachable,
-            );
+            let value = checker.contextual_callback_argument(form, scope, reachable);
             callbacks.push(CallbackBranch {
                 form,
                 scope: scope.clone(),
@@ -653,21 +688,28 @@ impl<'model> Checker<'model> {
             });
             value
         };
-        let branches = self.inspect_path(reachable, |checker| match &arms.test {
-            ConditionalTest::Predicate { form, first_truth } => {
-                checker.check_if_paths(form, env, *first_truth, |checker, scope, truth| {
-                    let index = usize::from(truth != *first_truth);
-                    visit(checker, scope, arms.branches[index], index)
-                })
+        let branches = self.inspect_path(reachable, |checker| match paths {
+            CallbackPaths::Sequence(body) => {
+                [visit(checker, env, body, 0), Value::new(Type::Never)]
             }
-            ConditionalTest::Binding { forms, span, name } => checker
-                .check_binding_conditional_paths(
-                    forms,
-                    *span,
-                    env,
-                    name,
-                    |checker, scope, body, taken| visit(checker, scope, body, usize::from(!taken)),
-                ),
+            CallbackPaths::Conditional(arms) => match &arms.test {
+                ConditionalTest::Predicate { form, first_truth } => {
+                    checker.check_if_paths(form, env, *first_truth, |checker, scope, truth| {
+                        let index = usize::from(truth != *first_truth);
+                        visit(checker, scope, arms.branches[index], index)
+                    })
+                }
+                ConditionalTest::Binding { forms, span, name } => checker
+                    .check_binding_conditional_paths(
+                        forms,
+                        *span,
+                        env,
+                        name,
+                        |checker, scope, body, taken| {
+                            visit(checker, scope, body, usize::from(!taken))
+                        },
+                    ),
+            },
         });
         let returns = reachable && branches.iter().any(|branch| !branch.stops_evaluation());
         let mut eager = branches

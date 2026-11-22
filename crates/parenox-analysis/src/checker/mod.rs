@@ -800,7 +800,7 @@ impl Checker<'_> {
                 Type::Never
             });
         };
-        let reachable = self.body_prefix_returns(prefix, env);
+        let reachable = self.body_prefix_returns(prefix, env, true);
         let mut value = self.infer_path(last, env, reachable, tail);
         if value.known != Type::Never && value.stops_evaluation() {
             value.narrow(Type::Never);
@@ -808,8 +808,8 @@ impl Checker<'_> {
         value
     }
 
-    fn body_prefix_returns(&mut self, prefix: &[Form], env: &Env) -> bool {
-        let mut reachable = env.reachable();
+    fn body_prefix_returns(&mut self, prefix: &[Form], env: &Env, reachable: bool) -> bool {
+        let mut reachable = reachable && env.reachable();
         for form in prefix {
             reachable = !self
                 .infer_path(form, env, reachable, false)

@@ -888,7 +888,8 @@ An omitted alternative supplies `nil`. The same inference applies to standard
 `if-not`, `when`, `when-not`, `if-let`, `when-let`, `if-some`, `when-some`,
 and `when-first`. A callback in the final position retains the locals bound
 by the conditional. Earlier forms evaluate in branch scope before the closure
-is created.
+is created. A `do` sequence in the argument or at the end of the branch can
+also produce a contextual callback in its final form.
 The same rule applies to a declared callback field in a literal map. With a
 generic contract, each reachable alternative can use inferred input types and
 contribute evidence for the result parameter.
