@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 pub(super) use selectors::{narrow_literal, refine_owner};
 
 use super::bindings::{dotted_binding_error, raw_local_symbol};
-use super::calls::{is_builtin, narrow_emptiness, narrow_vector_predicate, predicate_type};
+use super::calls::{
+    definitely_noncallable, is_builtin, narrow_emptiness, narrow_vector_predicate, predicate_type,
+};
 use super::maps::narrow_map_predicate;
 use super::model::DeclaredValue;
 use super::recur::bounded_state;
@@ -37,6 +39,13 @@ fn known_nonnumeric_scalar(ty: &Type) -> bool {
         | Type::QualifiedSymbol
         | Type::Sym(_) => true,
         _ => false,
+    }
+}
+
+pub(super) fn has_closed_scalar_class(ty: &Type) -> bool {
+    match ty {
+        Type::Union(parts) => parts.iter().all(has_closed_scalar_class),
+        _ => known_nonnumeric_scalar(ty) || definitely_noncallable(ty),
     }
 }
 

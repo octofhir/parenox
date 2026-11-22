@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 use std::slice;
 
-use super::flow::{narrow_literal, refine_owner};
+use super::flow::{has_closed_scalar_class, narrow_literal, refine_owner};
 use super::{Checker, Env, Value};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{IntegerClass, Type};
@@ -68,6 +68,14 @@ impl Checker<'_> {
         } else {
             subject.known
         };
+        // JVM dispatch can call hashCode, equiv or Number.intValue. When
+        // there is no default it can also print the unmatched subject.
+        if self.throws.is_some()
+            && (!tests.is_empty() || fallback.is_empty())
+            && !has_closed_scalar_class(&remaining)
+        {
+            self.may_throw();
+        }
         let mut outcomes = Vec::new();
         let mut matched = false;
         for (keys, result) in branches {

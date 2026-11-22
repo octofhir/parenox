@@ -23,7 +23,7 @@ pub(super) use identifiers::identifier_name;
 pub(super) use sequences::{iteration_may_throw, narrow_emptiness, narrow_seq_emptiness};
 pub(super) use strings::concatenate_literal_strings;
 
-use super::flow::Conditional;
+use super::flow::{Conditional, has_closed_scalar_class};
 use super::{
     Checker, Env, LiteralContainer, Value,
     env::CapturedInline,
@@ -1401,6 +1401,7 @@ impl<'model> Checker<'model> {
                     | "clojure.lang.MapEntry/create"
                     | "clojure.core/ex-data"
                     | "clojure.core/identity"
+                    | "clojure.core/="
                     | "clojure.core/str"
                     | "clojure.core/name"
                     | "clojure.core/map?"
@@ -1444,7 +1445,7 @@ impl<'model> Checker<'model> {
             | "clojure.core/ensure-reduced" => {
                 return reduction::reduced_operation(name, &args[0].0);
             }
-            "clojure.core/=" => equality(args),
+            "clojure.core/=" => self.equality(args),
             "clojure.core/empty?" | "clojure.core/not-empty" => {
                 return self.emptiness_call(name, &args[0]);
             }
@@ -1624,6 +1625,28 @@ impl<'model> Checker<'model> {
         };
         Value::new(ty)
     }
+
+    fn equality(&mut self, args: &[(Value, Span)]) -> Type {
+        let mut result = Type::Bool(true);
+        for pair in args.windows(2) {
+            let left = &pair[0].0.known;
+            let right = &pair[1].0.known;
+            // Util.equiv checks nil on the left before calling equals or
+            // delegating to equiv on either collection operand.
+            if self.throws.is_some()
+                && *left != Type::Nil
+                && (!has_closed_scalar_class(left) || !has_closed_scalar_class(right))
+            {
+                self.may_throw();
+            }
+            match literal_equality(left, right) {
+                Some(false) => return Type::Bool(false),
+                Some(true) => {}
+                None => result = Type::Boolean,
+            }
+        }
+        result
+    }
 }
 
 fn unconditional_core_inliner(name: &str) -> bool {
@@ -1697,18 +1720,6 @@ pub(super) fn definitely_noncallable(ty: &Type) -> bool {
         Type::Union(parts) => !parts.is_empty() && parts.iter().all(definitely_noncallable),
         _ => false,
     }
-}
-
-fn equality(args: &[(Value, Span)]) -> Type {
-    let mut result = Type::Bool(true);
-    for pair in args.windows(2) {
-        match literal_equality(&pair[0].0.known, &pair[1].0.known) {
-            Some(false) => return Type::Bool(false),
-            Some(true) => {}
-            None => result = Type::Boolean,
-        }
-    }
-    result
 }
 
 pub(super) fn literal_equality(left: &Type, right: &Type) -> Option<bool> {

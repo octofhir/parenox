@@ -1,8 +1,8 @@
 //! Narrow immutable map reads back to their lexical owner.
-use super::{known_nonnumeric_scalar, narrow_by_type};
+use super::{has_closed_scalar_class, narrow_by_type};
 use crate::checker::{
     Checker, Env, LiteralContainer,
-    calls::{definitely_noncallable, narrow_emptiness, narrow_seq_emptiness},
+    calls::{narrow_emptiness, narrow_seq_emptiness},
     env::{MAX_SELECTOR_KEYS, Selector},
     quote::quoted_symbol,
 };
@@ -193,8 +193,7 @@ pub(in crate::checker) fn narrow_literal(actual: &Type, literal: &Type, truth: b
         ),
         _ if literal.exact_long_value().is_some()
             || (!truth && *literal == Type::Nil)
-            || known_nonnumeric_scalar(actual)
-            || definitely_noncallable(actual) =>
+            || has_closed_scalar_class(actual) =>
         {
             narrow_by_type(actual, literal, truth)
         }

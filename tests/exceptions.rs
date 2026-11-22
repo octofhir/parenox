@@ -6,6 +6,43 @@ fn check(expression: &str, expected: &str) -> Report {
 }
 
 #[test]
+fn equality_and_case_check_handlers_when_jvm_dispatch_can_throw() {
+    for (input, expression, reaches_handler) in [
+        ("t/any", r#"(= value "tag")"#, true),
+        ("t/any", r#"(= "tag" value)"#, true),
+        ("t/any", "(= nil value)", false),
+        ("t/any", "(= value)", false),
+        ("t/any", "(= 1 2 value)", false),
+        ("string?", r#"(= value "tag")"#, false),
+        ("t/any", r#"(case value "tag" :hit :miss)"#, true),
+        ("number?", "(case value 42 :hit :miss)", true),
+        ("t/any", "(case value :fallback)", false),
+        ("string?", r#"(case value "tag" :hit :miss)"#, false),
+    ] {
+        let source = format!(
+            r#"(ns demo)
+               (defn f {{:t/sig '[{input} :-> t/any]}} [value]
+                 (try {expression}
+                   (catch clojure.lang.ExceptionInfo _ (inc "wrong"))))"#
+        );
+        let report = Session::default().check("exceptions.clj", &source);
+        assert!(report.complete, "{expression}: {report:#?}");
+        if reaches_handler {
+            let [finding] = report.diagnostics.as_slice() else {
+                panic!("{expression}: {report:#?}");
+            };
+            assert_eq!(finding.code, "PNX2322");
+            assert_eq!(
+                &source[finding.span.start.offset..finding.span.end.offset],
+                "\"wrong\""
+            );
+        } else {
+            assert!(report.ok && report.diagnostics.is_empty(), "{report:#?}");
+        }
+    }
+}
+
+#[test]
 fn a_literal_nil_call_operator_is_rejected_before_its_operands() {
     let source = "(ns demo) (defn bad {:t/sig '[:-> t/any]} [] (nil missing-name))";
     let report = Session::default().check("exceptions.clj", source);
