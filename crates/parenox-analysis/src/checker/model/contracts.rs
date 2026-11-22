@@ -53,11 +53,10 @@ fn callback_map_argument(ty: &Type, callback_slot: &impl Fn(&Type) -> bool, dept
     matches!(map.extra, ExtraFields::Closed)
         && map.fields.values().all(|field| {
             !field.ty.contains_parameter()
-                || (field.required
-                    && ((depth == 0 && matches!(field.ty, Type::Parameter(_)))
-                        || callback_slot(&field.ty)
-                        || (depth < MAX_CALLBACK_MAP_DEPTH
-                            && callback_map_argument(&field.ty, callback_slot, depth + 1))))
+                || (depth == 0 && matches!(field.ty, Type::Parameter(_)))
+                || callback_slot(&field.ty)
+                || (depth < MAX_CALLBACK_MAP_DEPTH
+                    && callback_map_argument(&field.ty, callback_slot, depth + 1))
         })
 }
 

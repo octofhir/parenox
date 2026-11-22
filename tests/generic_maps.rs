@@ -370,6 +370,58 @@ fn optional_sibling_fields_keep_the_required_callback_result() {
 }
 
 #[test]
+fn optional_callbacks_receive_context_from_required_fields() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (defn message
+          {:t/sig '(t/all [result]
+                     [(t/map {:req {:fallback result}
+                              :opt {:message-fn (s/fspec :args (s/cat :value result) :ret result)}})
+                      :-> result])}
+          [report]
+          (let [fallback (:fallback report)]
+            (if-let [message-fn (:message-fn report)]
+              (message-fn fallback)
+              fallback)))
+        (defn no-callback {:t/sig '[string? :-> string?]} [text]
+          (message {:fallback text}))
+        (defn with-callback {:t/sig '[string? :-> string?]} [text]
+          (message {:fallback text :message-fn (fn [value] (subs value 1))}))"#;
+    let broken = source.replace("(subs value 1)", r#"(do (inc value) "bad")"#);
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let good = session.check(path, source);
+    assert!(good.ok && good.complete, "{good:#?}");
+    let bad = session.check(path, &broken);
+    let [finding] = bad.diagnostics.as_slice() else {
+        panic!("{bad:#?}");
+    };
+    assert!(bad.complete, "{bad:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &broken[finding.span.start.offset..finding.span.end.offset],
+        "value"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "reports/message"
+    );
+    let Some(DocumentHover::Local(hover)) =
+        session.document_hover_at(path, finding.span.start.offset)
+    else {
+        panic!("Expected a local type at the callback operand");
+    };
+    assert_eq!(hover.inferred_type, "String");
+    let cold = Session::default().check(path, &broken);
+    assert_eq!(
+        serde_json::to_value(&bad.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
+#[test]
 fn a_required_map_callback_can_supply_the_calls_result_type() {
     let source = r#"(ns demo.result-options (:require [clojure.spec.alpha :as s]))
         (defn render
@@ -728,6 +780,8 @@ fn nested_parameters_and_extra_record_fields_are_rejected() {
         "(t/all [a] [a :-> (s/map-of (s/coll-of a :kind vector?) string?)])",
         "(t/all [a] [a :-> (s/map-of a (s/coll-of a :kind vector?))])",
         "(t/all [a] [a :-> {:nested {:row a}}])",
+        "(t/all [a] [(t/map {:opt {:value a}}) :-> a])",
+        "(t/all [a] [(t/map {:opt {:run (s/fspec :args (s/cat) :ret a)}}) :-> a])",
         "(t/all [a b] [{:first (s/fspec :args (s/cat :x a) :ret b)
                         :second (s/fspec :args (s/cat :x a) :ret b) :value a} :-> b])",
     ] {

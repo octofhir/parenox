@@ -271,17 +271,14 @@ impl Type {
                 }
                 ExtraFields::Closed
                     if map.fields.values().all(|field| {
-                        field.required
-                            && (matches!(field.ty, Self::Parameter(_))
-                                || (allow_callback_fields
-                                    && matches!(field.ty, Self::Function(_) | Self::Map(_)))
-                                || !field.ty.contains_parameter())
+                        matches!(field.ty, Self::Parameter(_))
+                            || (allow_callback_fields
+                                && matches!(field.ty, Self::Function(_) | Self::Map(_)))
+                            || !field.ty.contains_parameter()
                     }) =>
                 {
                     map.fields.iter().find_map(|(key, field)| {
-                        field
-                            .ty
-                            .is_parameter(parameter)
+                        (field.required && field.ty.is_parameter(parameter))
                             .then_some(ParameterSlot::RequiredField(key))
                     })
                 }

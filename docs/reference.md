@@ -240,12 +240,12 @@ Exporting the regex object as an EDN literal value is unsupported.
   A type parameter can be inferred solely from a callback result.
   A dictionary can supply independent key and value types through
   `(s/map-of k v)`, including for the parameters of an inline callback.
-  A required callback field in a literal map can also use type arguments
-  inferred from other arguments of the call or from ordinary fields in the
-  outer map. The callback can be nested through required fields of closed maps.
-  A single callback field can supply the result type parameter when the other
-  fields have independent types. Optional fields can carry independent types
-  and are checked when present.
+  A callback field in a literal map can use type arguments inferred from other
+  arguments of the call or from required ordinary fields in the outer map.
+  The callback can be nested through declared fields of closed maps.
+  Optional fields are checked when present. A single required callback field
+  can supply the result type parameter through a path of required fields
+  when the other fields have independent types.
   See [generic callbacks](../examples/generic_callbacks.clj),
   [two-input inference](../examples/generic_zip.clj), and
   [typed map boundaries](../examples/map_boundary).
