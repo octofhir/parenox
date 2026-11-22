@@ -1457,6 +1457,20 @@
                       (ex-message (ex-cause e))))))))
 (println "Clojure/JVM qualified Var references: 6 assertions passed")
 
+(let [setup (create-ns 'parenox.smoke.var-setup)
+      provider (create-ns 'parenox.smoke.var-initializer)]
+  (binding [*ns* setup]
+    (clojure.core/refer 'clojure.core)
+    (eval '(defn setup! [ns-name] (intern ns-name 'injected 42))))
+  (binding [*ns* provider]
+    (clojure.core/refer 'clojure.core)
+    (alias 'setup 'parenox.smoke.var-setup)
+    (eval '(def marker (setup/setup! 'parenox.smoke.var-initializer))))
+  (alias 'var-initializer 'parenox.smoke.var-initializer)
+  (assert (= 42 (deref (eval '(var var-initializer/injected)))))
+  (assert (= 42 (eval 'var-initializer/injected))))
+(println "Clojure/JVM initializer-created Vars: 2 assertions passed")
+
 (import '[java.io File])
 (assert (= java.io.File File))
 (assert (= java.lang.String String))

@@ -302,6 +302,7 @@ impl Model {
         }
         let project_set_namespace = globals.project_namespaces.contains("clojure.set");
         let mut initializer_scope = vars::LiteralInitializerScope::new(source);
+        let mut opaque_initializer = false;
         for &index in &declarations.literal_vars {
             let form = &forms[index];
             let Kind::List(xs) = &form.without_metadata().kind else {
@@ -335,6 +336,12 @@ impl Model {
                     })
                 });
             model.read_def(xs, form.span, source, captured.as_ref(), globals);
+            // Load-time initialization can call code that interns additional Vars.
+            opaque_initializer = opaque_initializer
+                || initializer.is_some_and(|form| {
+                    super::has_evaluated_metadata(form)
+                        || (captured.is_none() && !vars::literal(form))
+                });
             if let Some(captured) = captured {
                 model.captured_initializers.insert(index, captured);
             }
@@ -357,7 +364,7 @@ impl Model {
         }
         let mut fdefs = model.collect_fdefs(&declarations.fdefs, forms);
         let mut guards = BTreeMap::new();
-        let source_arities_known = declarations.has_known_var_surface(forms);
+        let source_arities_known = !opaque_initializer && declarations.has_known_var_surface(forms);
         for &index in &declarations.functions {
             model.read_function(
                 &forms[index],
@@ -427,7 +434,8 @@ impl Model {
         model.check_data_functions(source, globals);
         model.collect_helpers();
         // With an otherwise known surface, absent arity proof means a possible Var mutation.
-        let var_inventory = if declarations.has_unmodeled_var_exports()
+        let var_inventory = if opaque_initializer
+            || declarations.has_unmodeled_var_exports()
             || (!declarations.opaque_var_surface && !source_arities_known)
         {
             VarInventory::Incomplete
@@ -529,7 +537,9 @@ impl Model {
             return false;
         }
         let (namespace, _) = self.names.resolve_parts(name);
-        namespace != self.namespace() && !globals.project_namespaces.contains(namespace)
+        namespace != self.namespace()
+            && (!globals.project_namespaces.contains(namespace)
+                || globals.has_incomplete_var_inventory(namespace))
     }
 
     fn check_project_core(&mut self, globals: &Globals) -> bool {

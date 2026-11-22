@@ -93,6 +93,12 @@ pub(super) fn proves_missing_var(
 }
 
 impl Globals {
+    pub(crate) fn has_incomplete_var_inventory(&self, namespace: &str) -> bool {
+        self.exports
+            .get(namespace)
+            .is_some_and(|source| source.var_inventory.is_incomplete())
+    }
+
     pub(super) fn may_expand_initializer_macro(&self, qualified: &str) -> bool {
         let Some((namespace, _)) = qualified.split_once('/') else {
             return false;
@@ -213,6 +219,12 @@ struct Dependency {
 }
 
 impl Dependency {
+    fn has_incomplete_var_inventory(&self) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|source| source.var_inventory.is_incomplete())
+    }
+
     fn proves_ordinary_dotted_function(&self, name: &str) -> bool {
         self.source
             .as_ref()
@@ -347,7 +359,12 @@ impl InterfaceChanges<'_> {
                 && current.unchecked_functions.get(&qualified)
                     == old.unchecked_functions.get(&qualified)
         }) && external.is_none_or(|(current, old)| {
+            let value = current.value(&qualified);
+            let old_value = old.value(&qualified);
             current.in_project == old.in_project
+                && (value.is_some()
+                    || old_value.is_some()
+                    || current.has_incomplete_var_inventory() == old.has_incomplete_var_inventory())
                 && current.proves_ordinary_dotted_function(&qualified)
                     == old.proves_ordinary_dotted_function(&qualified)
                 && proves_missing_var(
@@ -359,11 +376,7 @@ impl InterfaceChanges<'_> {
                     old.externs.as_deref(),
                     &qualified,
                 )
-                && same_visible_value(
-                    current.value(&qualified),
-                    old.value(&qualified),
-                    allow_binder_renames,
-                )
+                && same_visible_value(value, old_value, allow_binder_renames)
         })
     }
 }

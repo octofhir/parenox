@@ -756,9 +756,10 @@ impl Session {
             };
             let known_provider = |namespace: &str| {
                 provider(namespace).filter(|(file, declarations)| {
-                    *file
-                        .known_var_surface
-                        .get_or_init(|| declarations.has_known_var_surface(&file.forms))
+                    !globals.has_incomplete_var_inventory(namespace)
+                        && *file
+                            .known_var_surface
+                            .get_or_init(|| declarations.has_known_var_surface(&file.forms))
                 })
             };
             for (index, (source, file)) in entries[..count].iter().enumerate() {

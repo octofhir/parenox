@@ -701,6 +701,76 @@ fn qualified_var_references_distinguish_proven_absence_from_private_vars() {
 }
 
 #[test]
+fn opaque_def_initializers_make_a_provider_var_inventory_incomplete() {
+    let consumer = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [dep :as d]))
+(defn quoted {:t/sig '[:-> t/any]} [] #'d/injected)
+(defn value {:t/sig '[:-> t/any]} [] d/injected)
+(defn stable {:t/sig '[:-> number?]} [] 1)"#,
+    };
+    let provider = Source {
+        path: "dep.clj",
+        source: r#"(ns dep (:require [setup :as s]))
+(def marker :ready)"#,
+    };
+    let setup = Source {
+        path: "setup.clj",
+        source: r#"(ns setup)
+(defn setup! [ns-name] (intern ns-name 'injected 42))"#,
+    };
+    let dynamic = Source {
+        source: r#"(ns dep (:require [setup :as s]))
+(def marker (s/setup! 'dep))"#,
+        ..provider
+    };
+    let findings = |report: &parenox::ProjectReport| {
+        report.files[0]
+            .diagnostics
+            .iter()
+            .map(|d| {
+                (
+                    d.code.clone(),
+                    &consumer.source[d.span.start.offset..d.span.end.offset],
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let normalize = |report: &parenox::ProjectReport| {
+        serde_json::to_value(&report.files[0].diagnostics).unwrap()
+    };
+    let mut session = Session::default();
+    let before = session.check_project(&[consumer, provider, setup], None);
+    assert_eq!(
+        findings(&before),
+        [
+            ("PNX2304".into(), "d/injected"),
+            ("PNX2304".into(), "d/injected"),
+        ],
+        "{before:#?}"
+    );
+    let after = session.check_project(&[consumer, dynamic, setup], None);
+    assert_eq!(
+        findings(&after),
+        [
+            ("PNX9001".into(), "#'d/injected"),
+            ("PNX9003".into(), "d/injected"),
+        ],
+        "{after:#?}"
+    );
+    assert_eq!(after.files[0].stats.checked_functions, 2);
+    assert_eq!(after.files[0].stats.reused_functions, 1);
+    assert_eq!(
+        normalize(&after),
+        normalize(&Session::default().check_project(&[consumer, dynamic, setup], None))
+    );
+    assert_eq!(
+        normalize(&before),
+        normalize(&session.check_project(&[consumer, provider, setup], None))
+    );
+}
+
+#[test]
 fn checks_project_calls_in_explicit_jvm_operands_of_untyped_bodies() {
     let app = Source {
         path: "app.clj",
