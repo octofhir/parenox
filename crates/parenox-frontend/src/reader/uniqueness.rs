@@ -246,18 +246,23 @@ fn key_atom<'a>(
     }
     // Direct keys already carry their qualified spelling. A syntax quote
     // keeps its template, so qualify only the observed name for comparison.
-    match (names, atom) {
-        (KeyNames::ProjectIn(namespace), Atom::Symbol(name)) => Some(Atom::Symbol(
-            qualify_symbol(&name, namespace).map_or(name, Cow::Owned),
-        )),
-        (KeyNames::ProjectIn(namespace), Atom::Keyword(name)) => Some(Atom::Keyword(
-            qualify_keyword(&name, namespace).map_or(name, Cow::Owned),
-        )),
-        // A later recheck has the normalized keys and no namespace value
-        // for the source prefix. The qualification pass checked this projection.
-        (KeyNames::AlreadyQualified, Atom::Symbol(_) | Atom::Keyword(_)) => None,
-        (_, atom) => Some(atom),
-    }
+    let namespace = match names {
+        KeyNames::Plain => return Some(atom),
+        KeyNames::ProjectIn(namespace) => Some(namespace),
+        // Later comparisons can still use names with an explicit namespace.
+        KeyNames::AlreadyQualified => None,
+    };
+    Some(match atom {
+        Atom::Symbol(name) => Atom::Symbol(match qualify_symbol(&name, namespace)? {
+            Cow::Borrowed(_) => name,
+            Cow::Owned(qualified) => Cow::Owned(qualified),
+        }),
+        Atom::Keyword(name) => Atom::Keyword(match qualify_keyword(&name, namespace)? {
+            Cow::Borrowed(_) => name,
+            Cow::Owned(qualified) => Cow::Owned(qualified),
+        }),
+        atom => atom,
+    })
 }
 
 fn duplicate(value: &Form, message: &'static str) -> ReadError {

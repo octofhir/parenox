@@ -28,6 +28,10 @@ fn immediate_unquotes_can_duplicate_collection_keys_without_losing_syntax() {
         ("#:demo {a 1 `~demo/a 2} :after", "`~demo/a"),
         ("#:demo {:a 1 `~:demo/a 2} :after", "`~:demo/a"),
         (
+            "{#:demo {`~demo/a 1} :first {demo/a 1} :second} :after",
+            "{demo/a 1}",
+        ),
+        (
             "{a 1 `(clojure.core/unquote a ignored) 2} :after",
             "`(clojure.core/unquote a ignored)",
         ),
@@ -86,6 +90,49 @@ fn projected_names_keep_their_namespace_when_checking_duplicates() {
             .all(|d| !d.message.contains("Duplicate")),
         "{report:#?}"
     );
+}
+
+#[test]
+fn alias_resolution_can_prove_a_projected_key_duplicate_after_qualification() {
+    let path = "reports.clj";
+    for (namespace, explicit) in [("demo", ":demo/a"), ("_", ":_/a")] {
+        let source = format!(
+            "(ns reports (:require [{namespace} :as-alias d]))\n(def data '#:outer {{{explicit} 1 `~::d/a 2}})"
+        );
+        let parsed = reader::parse(&source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        let mut session = Session::default();
+        let original = session.check(path, &source);
+        let [finding] = original.diagnostics.as_slice() else {
+            panic!("{source}: {original:#?}");
+        };
+        assert_eq!(finding.code, "PNX9000");
+        assert!(finding.message.contains("Duplicate key"));
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            "`~::d/a"
+        );
+
+        let edited = source.replace(&format!("[{namespace} :as-alias"), "[other :as-alias");
+        let warm = session.check(path, &edited);
+        assert!(
+            warm.diagnostics
+                .iter()
+                .all(|d| !d.message.contains("Duplicate")),
+            "{warm:#?}"
+        );
+        let cold = Session::default().check(path, &edited);
+        assert_eq!(
+            serde_json::to_value(&warm.diagnostics).unwrap(),
+            serde_json::to_value(&cold.diagnostics).unwrap()
+        );
+        let reverted = session.check(path, &source);
+        assert_eq!(
+            serde_json::to_value(&reverted.diagnostics).unwrap(),
+            serde_json::to_value(&original.diagnostics).unwrap()
+        );
+    }
 }
 
 #[test]

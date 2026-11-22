@@ -1,4 +1,6 @@
 //! Namespaced map keys. An explicit prefix is part of the reader syntax.
+use std::borrow::Cow;
+
 use super::{
     Form, Kind, MAX_NESTING_DEPTH, NamespaceToken, Position, ReadError, Reader, Span, uniqueness,
 };
@@ -117,12 +119,12 @@ fn qualify_key(key: &mut Form, namespace: &str) {
     match &mut key.kind {
         Kind::Metadata(_, target) => qualify_key(target, namespace),
         Kind::Keyword(name) => {
-            if let Some(qualified) = qualify_keyword(name, namespace) {
+            if let Some(Cow::Owned(qualified)) = qualify_keyword(name, Some(namespace)) {
                 *name = qualified;
             }
         }
         Kind::Symbol(name) => {
-            if let Some(qualified) = qualify_symbol(name, namespace) {
+            if let Some(Cow::Owned(qualified)) = qualify_symbol(name, Some(namespace)) {
                 *name = qualified;
             }
         }
@@ -133,24 +135,29 @@ fn qualify_key(key: &mut Form, namespace: &str) {
     }
 }
 
-pub(super) fn qualify_keyword(name: &str, namespace: &str) -> Option<String> {
+pub(super) fn qualify_keyword<'a>(name: &'a str, namespace: Option<&str>) -> Option<Cow<'a, str>> {
     if name.starts_with("::") {
         return None;
     }
-    let local = name.trim_start_matches(':');
-    qualify_name(local, namespace, ":")
+    qualify_name(name, name.trim_start_matches(':'), namespace, ":")
 }
 
-pub(super) fn qualify_symbol(name: &str, namespace: &str) -> Option<String> {
-    qualify_name(name, namespace, "")
+pub(super) fn qualify_symbol<'a>(name: &'a str, namespace: Option<&str>) -> Option<Cow<'a, str>> {
+    qualify_name(name, name, namespace, "")
 }
 
-fn qualify_name(name: &str, namespace: &str, prefix: &str) -> Option<String> {
-    if let Some(local) = name.strip_prefix("_/") {
-        Some(format!("{prefix}{local}"))
+fn qualify_name<'a>(
+    spelling: &'a str,
+    name: &str,
+    namespace: Option<&str>,
+    prefix: &str,
+) -> Option<Cow<'a, str>> {
+    Some(if let Some(local) = name.strip_prefix("_/") {
+        Cow::Owned(format!("{prefix}{local}"))
     } else if name == "/" || !name.contains('/') {
-        Some(format!("{prefix}{namespace}/{name}"))
+        let namespace = namespace?;
+        Cow::Owned(format!("{prefix}{namespace}/{name}"))
     } else {
-        None
-    }
+        Cow::Borrowed(spelling)
+    })
 }
