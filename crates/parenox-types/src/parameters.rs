@@ -18,6 +18,7 @@ pub struct Parameters {
 }
 
 pub const MAX_TYPE_PARAMETERS: usize = 3;
+pub const MAX_CALLBACK_MAP_DEPTH: usize = 16;
 
 #[derive(Default)]
 pub struct TypeArguments<'a>([Option<Cow<'a, Type>>; MAX_TYPE_PARAMETERS]);
@@ -54,19 +55,24 @@ pub struct CallbackWitness<'a> {
     pub index: usize,
     pub map_key: Option<&'a Type>,
     pub signature: &'a Signature,
+    map_ancestors: Box<[&'a Type]>,
     slot: ParameterSlot<'a>,
 }
 
 impl CallbackWitness<'_> {
-    pub fn callback_type<'a>(&self, argument: &'a Type) -> Option<&'a Type> {
-        let Some(key) = self.map_key else {
-            return Some(argument);
-        };
-        let Type::Map(map) = argument else {
-            return None;
-        };
-        let field = map.fields.get(key)?;
-        field.value_constraint().filter(|_| field.required)
+    pub fn matches_path(&self, ancestors: &[&Type], leaf: Option<&Type>) -> bool {
+        self.map_ancestors.as_ref() == ancestors && self.map_key == leaf
+    }
+
+    pub fn callback_type<'a>(&self, mut argument: &'a Type) -> Option<&'a Type> {
+        for key in self.map_ancestors.iter().copied().chain(self.map_key) {
+            let Type::Map(map) = argument else {
+                return None;
+            };
+            let field = map.fields.get(key)?;
+            argument = field.value_constraint().filter(|_| field.required)?;
+        }
+        Some(argument)
     }
 
     pub fn evidence<'a>(&self, result: &'a Type) -> Option<Cow<'a, Type>> {
@@ -258,7 +264,8 @@ impl Type {
                     if map.fields.values().all(|field| {
                         field.required
                             && (matches!(field.ty, Self::Parameter(_))
-                                || (allow_callback_fields && matches!(field.ty, Self::Function(_)))
+                                || (allow_callback_fields
+                                    && matches!(field.ty, Self::Function(_) | Self::Map(_)))
                                 || !field.ty.contains_parameter())
                     }) =>
                 {
@@ -302,7 +309,10 @@ impl Type {
                     }
                 }
                 for field in map.fields.values_mut() {
-                    if matches!(field.ty, Self::Parameter(_) | Self::Function(_)) {
+                    if matches!(
+                        field.ty,
+                        Self::Parameter(_) | Self::Function(_) | Self::Map(_)
+                    ) {
                         field.ty = field.ty.substitute(replacements);
                     }
                 }
@@ -321,7 +331,7 @@ impl Type {
                     .collect::<Vec<_>>()
                     .into(),
             ),
-            // The parser rejects deeper occurrences, unions and other containers.
+            // The signature parser restricts parameter positions.
             ty => ty.clone(),
         }
     }
@@ -428,9 +438,16 @@ impl Signature {
     }
 
     pub fn output_callback(&self, output: &Parameter) -> Option<CallbackWitness<'_>> {
-        self.args.iter().enumerate().find_map(|(index, ty)| {
-            let (callback, map_key) = match ty {
-                Type::Map(map) if matches!(map.extra, ExtraFields::Closed) => {
+        self.args
+            .iter()
+            .enumerate()
+            .find_map(|(index, mut callback)| {
+                let mut map_key = None;
+                let mut map_ancestors = Vec::new();
+                while let Type::Map(map) = callback {
+                    if !matches!(map.extra, ExtraFields::Closed) {
+                        return None;
+                    }
                     let mut fields = map
                         .fields
                         .iter()
@@ -439,27 +456,32 @@ impl Signature {
                     if !field.required || fields.next().is_some() {
                         return None;
                     }
-                    (field.value_constraint()?, Some(key))
+                    if let Some(parent) = map_key.replace(key) {
+                        if map_ancestors.len() == MAX_CALLBACK_MAP_DEPTH {
+                            return None;
+                        }
+                        map_ancestors.push(parent);
+                    }
+                    callback = field.value_constraint()?;
                 }
-                _ => (ty, None),
-            };
-            let Type::Function(signatures) = callback else {
-                return None;
-            };
-            let [callback] = signatures.as_ref() else {
-                return None;
-            };
-            if callback.rest.is_some() {
-                return None;
-            }
-            let slot = callback.ret.parameter_slot(output, false)?;
-            Some(CallbackWitness {
-                index,
-                map_key,
-                signature: callback,
-                slot,
+                let Type::Function(signatures) = callback else {
+                    return None;
+                };
+                let [callback] = signatures.as_ref() else {
+                    return None;
+                };
+                if callback.rest.is_some() {
+                    return None;
+                }
+                let slot = callback.ret.parameter_slot(output, false)?;
+                Some(CallbackWitness {
+                    index,
+                    map_key,
+                    signature: callback,
+                    map_ancestors: map_ancestors.into_boxed_slice(),
+                    slot,
+                })
             })
-        })
     }
 
     pub fn with_type_arguments(

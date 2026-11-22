@@ -12,7 +12,8 @@ pub use integers::{IntegerClass, IntegerRange, IntegerType};
 pub use maps::{ExtraFields, Field, MapSlot, MapType};
 pub use mismatch::{ExternMismatch, ExternMismatchReason, ExternPathStep};
 pub use parameters::{
-    CallbackWitness, InputWitness, MAX_TYPE_PARAMETERS, Parameter, Parameters, TypeArguments,
+    CallbackWitness, InputWitness, MAX_CALLBACK_MAP_DEPTH, MAX_TYPE_PARAMETERS, Parameter,
+    Parameters, TypeArguments,
 };
 use std::collections::BTreeSet;
 use std::fmt;

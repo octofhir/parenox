@@ -41,8 +41,25 @@ use super::{
 };
 use crate::checker::function_forms::{function_clauses, split_rest};
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, ExtraFields, MAX_TYPE_PARAMETERS, Parameter, Parameters, Type};
+use crate::types::{
+    Arity, ExtraFields, MAX_CALLBACK_MAP_DEPTH, MAX_TYPE_PARAMETERS, Parameter, Parameters, Type,
+};
 use crate::{ContractKind, ContractOrigin};
+
+fn callback_map_argument(ty: &Type, callback_slot: &impl Fn(&Type) -> bool, depth: usize) -> bool {
+    let Type::Map(map) = ty else {
+        return false;
+    };
+    matches!(map.extra, ExtraFields::Closed)
+        && map.fields.values().all(|field| {
+            field.required
+                && (!field.ty.contains_parameter()
+                    || (depth == 0 && matches!(field.ty, Type::Parameter(_)))
+                    || callback_slot(&field.ty)
+                    || (depth < MAX_CALLBACK_MAP_DEPTH
+                        && callback_map_argument(&field.ty, callback_slot, depth + 1)))
+        })
+}
 
 impl Model {
     pub(crate) fn source_contract_span(&self, origin: &ContractOrigin) -> Option<Span> {
@@ -470,12 +487,7 @@ impl Model {
         };
         if !result_slot(&signature.ret)
             || !signature.args.iter().all(|ty| {
-                value_slot(ty)
-                    || callback_slot(ty)
-                    || matches!(ty, Type::Map(map)
-                        if matches!(map.extra, ExtraFields::Closed)
-                            && map.fields.values().all(|field| field.required
-                                && (leaf(&field.ty) || callback_slot(&field.ty))))
+                value_slot(ty) || callback_slot(ty) || callback_map_argument(ty, &callback_slot, 0)
             })
         {
             self.error("PNX9001", span,

@@ -17,7 +17,7 @@ use super::super::{
 };
 use super::{Callable, ContextualArgument, PreparedCallable, call_returns, combinators::Combiner};
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
-use crate::types::{Arity, MapType, Signature, Type};
+use crate::types::{Arity, MAX_CALLBACK_MAP_DEPTH, MapType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 
 const MAX_CALLBACK_DEPTH: usize = 16;
@@ -481,7 +481,7 @@ impl<'model> Checker<'model> {
         expected: &'a Type,
         env: &Env,
     ) -> Option<(&'a [Form], &'a MapType)> {
-        self.contextual_map_at_depth(form, expected, env, MAX_CALLBACK_DEPTH)
+        self.contextual_map_at_depth(form, expected, env, MAX_CALLBACK_MAP_DEPTH)
     }
 
     fn contextual_map_at_depth<'a>(
@@ -553,7 +553,7 @@ impl<'model> Checker<'model> {
         ancestors: &mut Vec<&'a Type>,
         defer: &mut dyn FnMut(ContextualArgument<'a>, bool),
     ) -> Option<Value> {
-        let remaining = MAX_CALLBACK_DEPTH - ancestors.len();
+        let remaining = MAX_CALLBACK_MAP_DEPTH - ancestors.len();
         let (entries, expected) = self.contextual_map_at_depth(form, expected, env, remaining)?;
         Some(self.check_path(reachable, |checker| {
             let map = checker.map_literal_with(

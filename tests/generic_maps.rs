@@ -220,6 +220,76 @@ fn a_required_map_callback_can_supply_the_calls_result_type() {
 }
 
 #[test]
+fn exported_nested_callback_uses_a_sibling_input_and_its_own_result() {
+    let provider = Source {
+        path: "catalog.clj",
+        source: r#"(ns catalog (:require [clojure.spec.alpha :as s]))
+            (defn render
+              {:t/sig '(t/all [a b]
+                [{:stage {:run (s/fspec :args (s/cat :value a) :ret b)}
+                  :value a} :-> b])}
+              [options] ((get-in options [:stage :run]) (:value options)))"#,
+    };
+    let export = Session::default().export_externs(&[provider], &[]);
+    let edn = export.edn.unwrap_or_else(|| panic!("{:?}", export.report));
+    let good = r#"(ns app (:require [catalog :as c]))
+        (defn label-count {:t/sig '[string? :-> number?]} [label] (count label))
+        (defn via-inline {:t/sig '[:-> number?]} []
+          (c/render {:stage {:run (fn [label] (count label))} :value "text"}))
+        (defn via-named {:t/sig '[:-> number?]} []
+          (c/render {:stage {:run label-count} :value "text"}))"#;
+    let check = |source| {
+        Session::default().check_project(
+            &[Source {
+                path: "app.clj",
+                source,
+            }],
+            Some(Source {
+                path: "catalog.edn",
+                source: &edn,
+            }),
+        )
+    };
+    let report = check(good);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let bad = good.replace("(fn [label] (count label))", "(fn [label] (inc label))");
+    let report = check(&bad);
+    let [finding] = report.files[0].diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &bad[finding.span.start.offset..finding.span.end.offset],
+        "label"
+    );
+    assert_eq!(
+        finding
+            .callback_contract
+            .as_ref()
+            .and_then(|c| c.path.as_deref()),
+        Some("catalog.edn")
+    );
+}
+
+#[test]
+fn two_nested_callbacks_cannot_supply_the_same_result_parameter() {
+    let report = check(
+        "(defn ambiguous
+          {:t/sig '(t/all [a b]
+            [{:stage {:first (s/fspec :args (s/cat :x a) :ret b)
+                      :second (s/fspec :args (s/cat :x a) :ret b)}} a :-> b])}
+          [options value] ((get-in options [:stage :first]) value))",
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX9001");
+}
+
+#[test]
 fn map_callback_context_refreshes_after_an_input_contract_edit() {
     let consumer = Source {
         path: "consumer.clj",

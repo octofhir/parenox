@@ -111,8 +111,7 @@ impl Checker<'_> {
                 let check_body = reachable && reachable_at_argument && has_context;
                 let output = output_callback.as_ref().filter(|(_, witness)| {
                     witness.index == index
-                        && contextual.map_ancestors.is_empty()
-                        && witness.map_key == contextual.map_key
+                        && witness.matches_path(&contextual.map_ancestors, contextual.map_key)
                 });
                 let mode = if output.is_some() {
                     CallbackReturn::Infer
