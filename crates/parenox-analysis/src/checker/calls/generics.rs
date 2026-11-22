@@ -87,6 +87,8 @@ impl Checker<'_> {
                 values.push((value, form.span));
             }
         }
+        let tail_outcome = forms.metadata_outcome(self, env, reachable);
+        reachable &= tail_outcome.is_none();
         let mut output_gap_explained = false;
         let mut output_callback_span = None;
         if !callbacks.is_empty() {
@@ -158,6 +160,7 @@ impl Checker<'_> {
         }
         EvaluatedArguments {
             values,
+            tail_outcome,
             output_gap_explained,
             output_callback_span,
         }

@@ -30,16 +30,19 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let callable = self.prepare_callable(callee, env);
-        if let Kind::Vector(items) = &spread.kind
+        if let Some(items) = spread.vector()
             && let Callable::Value(function) = &callable.kind
             && matches!(function.known, Type::Function(_))
         {
-            // A vector without metadata has no eager step after its elements.
             let operands = CallOperands {
                 prefix,
                 tail: items,
+                vector_metadata: matches!(spread.kind, Kind::Metadata(..)).then_some(spread),
             };
-            let args = self.call_args(function, operands, span, env);
+            let mut args = self.call_args(function, operands, span, env);
+            if let Some(outcome) = args.tail_outcome.take() {
+                return *outcome;
+            }
             let written: Vec<_> = operands.iter().map(Some).collect();
             return self.call_value(
                 function,

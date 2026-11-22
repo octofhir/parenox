@@ -29,6 +29,7 @@ use super::{
     env::CapturedInline,
     exceptions::Throws,
     function_forms::pack_arguments,
+    metadata::MetadataTarget,
     model::{DeclaredValue, Function},
     nil_part,
     queries::InferredCall,
@@ -111,6 +112,7 @@ enum ArgumentForms<'a> {
 struct CallOperands<'a> {
     prefix: &'a [Form],
     tail: &'a [Form],
+    vector_metadata: Option<&'a Form>,
 }
 
 impl<'a> CallOperands<'a> {
@@ -120,6 +122,22 @@ impl<'a> CallOperands<'a> {
 
     fn len(self) -> usize {
         self.prefix.len() + self.tail.len()
+    }
+
+    fn metadata_outcome(
+        self,
+        checker: &mut Checker<'_>,
+        env: &Env,
+        reachable: bool,
+    ) -> Option<Box<Value>> {
+        checker
+            .literal_metadata_outcome(
+                self.vector_metadata?,
+                env,
+                reachable,
+                MetadataTarget::Vector,
+            )
+            .map(Box::new)
     }
 }
 
@@ -142,6 +160,7 @@ impl<'a> CallArguments<'a> {
 
 struct EvaluatedArguments {
     values: Vec<(Value, Span)>,
+    tail_outcome: Option<Box<Value>>,
     output_gap_explained: bool,
     output_callback_span: Option<Span>,
 }
@@ -204,6 +223,7 @@ impl From<Vec<(Value, Span)>> for EvaluatedArguments {
     fn from(values: Vec<(Value, Span)>) -> Self {
         Self {
             values,
+            tail_outcome: None,
             output_gap_explained: false,
             output_callback_span: None,
         }
@@ -584,6 +604,7 @@ impl<'model> Checker<'model> {
         let operands = CallOperands {
             prefix: &xs[1..],
             tail: &[],
+            vector_metadata: None,
         };
         let args = self.call_args(&function, operands, span, env);
         let value = self.call_value(
@@ -689,10 +710,16 @@ impl<'model> Checker<'model> {
                 })
             })
         else {
-            return self
-                .eval_argument_forms(forms.iter(), env, !function.stops_evaluation())
-                .collect::<Vec<_>>()
-                .into();
+            let reachable = !function.stops_evaluation();
+            let values: Vec<_> = self
+                .eval_argument_forms(forms.iter(), env, reachable)
+                .collect();
+            let mut evaluated = EvaluatedArguments::from(values);
+            if forms.vector_metadata.is_some() {
+                evaluated.tail_outcome =
+                    forms.metadata_outcome(self, env, reachable && call_returns(&evaluated.values));
+            }
+            return evaluated;
         };
         self.call_contextual_arguments(function, signature, forms, call, env)
     }
@@ -758,13 +785,18 @@ impl<'model> Checker<'model> {
             }
             values.push((value, form.span));
         }
+        let tail_outcome = forms.metadata_outcome(self, env, reachable);
+        reachable &= tail_outcome.is_none();
         for (index, contextual) in deferred {
             let value = infer_argument(self, contextual.callback, contextual.expected, reachable);
             if reachable {
                 contextual.apply(&mut values[index].0, value);
             }
         }
-        values.into()
+        EvaluatedArguments {
+            tail_outcome,
+            ..values.into()
+        }
     }
 
     fn typed_args(&mut self, args: &[Form], env: &Env) -> Vec<(Value, Span)> {

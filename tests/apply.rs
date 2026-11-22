@@ -65,6 +65,59 @@ fn literal_apply_vectors_keep_callback_context_and_compiler_checks() {
 }
 
 #[test]
+fn apply_checks_vector_metadata_before_invoking_contextual_callbacks() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::render (s/fspec :args (s/cat :text string?) :ret string?))
+        (defn fixed {:t/sig '[::render string? :-> string?]} [render text] (render text))
+        (defn generic
+          {:t/sig '(t/all [value]
+            [value (s/fspec :args (s/cat :text value) :ret value) :-> value])}
+          [text render] (render text))
+        (defn tracked {:t/sig '[:-> string?]} []
+          (apply generic "label" ^:trace [(fn [text] (subs text 1))]))
+        (defn metadata-blocks {:t/sig '[:-> #{:metadata}]} []
+          (try
+            (apply fixed ^{:trace (throw (ex-info "metadata" {:site :metadata}))}
+              [(fn [text] (do (inc text) "skipped")) "label"])
+            (catch clojure.lang.ExceptionInfo error (:site (ex-data error)))))
+        (defn element-first {:t/sig '[:-> #{:element}]} []
+          (try
+            (apply fixed ^{:trace (throw (ex-info "metadata" {:site :metadata}))}
+              [(fn [text] text) (throw (ex-info "element" {:site :element}))])
+            (catch clojure.lang.ExceptionInfo error (:site (ex-data error)))))"#;
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let good = session.check(path, source);
+    assert!(good.ok && good.complete, "{good:#?}");
+    let broken = source
+        .replace("(subs text 1)", r#"(do (inc text) "bad")"#)
+        .replace(r#"(do (inc text) "skipped")"#, "missing-callback-name");
+    let report = session.check(path, &broken);
+    assert!(report.complete, "{report:#?}");
+    let [live, skipped] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(live.code, "PNX2322");
+    assert_eq!(live.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &broken[live.span.start.offset..live.span.end.offset],
+        "text"
+    );
+    assert_eq!(skipped.code, "PNX2304");
+    assert_eq!(
+        &broken[skipped.span.start.offset..skipped.span.end.offset],
+        "missing-callback-name"
+    );
+    let cold = Session::default().check(path, &broken);
+    assert_eq!(
+        serde_json::to_value(&report.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
+#[test]
 fn applies_str_to_realized_bounded_string_mappings() {
     let source = r#"(ns demo (:refer-clojure :rename {map each partial prefix}))
 (defn suffix {:t/sig '[:-> #{" hey  end"}]} []

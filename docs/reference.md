@@ -862,7 +862,7 @@ standard `partial` are evaluated in source order. After a proven runtime failure
 later expressions still get compiler checks such as name resolution. Their
 runtime types and diagnostics are withheld, including when a vector literal
 supplies `apply` arguments.
-With a literal final vector without metadata, `apply` supplies context to
+With a literal final vector, `apply` supplies context to
 callbacks in the vector and among the preceding arguments of a checked call.
 Modeled ordinary built-ins, checked function values, and inferred private
 helpers report wrong arity once the call can run and its operands can return.
@@ -881,7 +881,8 @@ from the enclosing `try`.
 Conditional expressions combine the types and collection facts of branches
 that can return a value. A proven runtime failure in the condition or dispatch
 expression leaves the results unavailable and still allows compiler checks.
-Vector metadata is checked after the elements, including on `apply` spreads.
+Vector metadata is checked after the elements and before the contextual
+callback invocation when the vector supplies `apply` arguments.
 The checker supports up to eight literal keyword keys in both vector and
 callback metadata. Wrappers merge before their values are evaluated, with the
 outer value taking precedence for a shared key. Hover shows flow-narrowed
