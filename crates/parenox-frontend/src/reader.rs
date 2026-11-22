@@ -468,10 +468,7 @@ pub fn parse_edn(source: &str) -> Parse {
 
 fn parse_tree(mut reader: Reader<'_>) -> Parse {
     let mut errors = Vec::new();
-    let forms = reader.read_forms(|error| {
-        errors.push(error);
-        true
-    });
+    let forms = reader.read_forms(true, |error| errors.push(error));
     Parse {
         green: reader.tree.unwrap().build(),
         forms,
@@ -559,7 +556,7 @@ impl<'a> Reader<'a> {
             conditionals,
             edn: false,
             preserve_literal_newlines: false,
-            recover: capture,
+            recover: false,
             recovery_abandoned: false,
         }
     }
@@ -570,16 +567,15 @@ impl<'a> Reader<'a> {
     }
 
     fn read_with_first_error(&mut self, recover: bool) -> (Vec<Form>, Option<ReadError>) {
-        self.recover = recover;
         let mut first_error = None;
-        let forms = self.read_forms(|error| {
+        let forms = self.read_forms(recover, |error| {
             first_error.get_or_insert(error);
-            recover
         });
         (forms, first_error)
     }
 
-    fn read_forms(&mut self, mut recover: impl FnMut(ReadError) -> bool) -> Vec<Form> {
+    fn read_forms(&mut self, recover: bool, mut record_error: impl FnMut(ReadError)) -> Vec<Form> {
+        self.recover = recover;
         let mut forms = Vec::new();
         loop {
             let start = self.pos;
@@ -605,7 +601,8 @@ impl<'a> Reader<'a> {
                 Ok(None) => break,
                 Err(error) => {
                     self.record_read_failure();
-                    if !recover(error) {
+                    record_error(error);
+                    if !recover {
                         break;
                     }
                     if self.recovery_abandoned {
@@ -908,7 +905,7 @@ impl<'a> Reader<'a> {
             }
         };
         self.depth -= 1;
-        self.finish_item(start, &result);
+        self.finish_item(&result);
         result
     }
 
@@ -927,48 +924,38 @@ impl<'a> Reader<'a> {
         )
     }
 
-    fn finish_item(&mut self, start: Position, result: &Result<Item, ReadError>) {
+    fn finish_item(&mut self, result: &Result<Item, ReadError>) {
         if let Some(tree) = &mut self.tree {
-            let spelling = &self.source[start.offset..self.pos.offset];
-            let conditional = spelling.starts_with("#?");
-            let kind = result.as_ref().map_or(SyntaxKind::Error, |item| {
-                if conditional {
-                    SyntaxKind::Conditional
-                } else {
-                    match item {
-                        Item::Form(form) => match form.kind {
-                            Kind::List(_) if spelling.starts_with('@') => SyntaxKind::Deref,
-                            Kind::List(_) if spelling.starts_with("#'") => SyntaxKind::VarQuote,
-                            Kind::List(_) => SyntaxKind::List,
-                            Kind::AnonymousFunction(_) => SyntaxKind::AnonymousFunction,
-                            Kind::Vector(_) => SyntaxKind::Vector,
-                            Kind::Map(_) if spelling.starts_with("#:") => SyntaxKind::NamespacedMap,
-                            Kind::Map(_) => SyntaxKind::Map,
-                            Kind::AutoNamespacedMap { .. } => SyntaxKind::NamespacedMap,
-                            Kind::Set(_) => SyntaxKind::Set,
-                            Kind::Quote(_) => SyntaxKind::Quote,
-                            Kind::SyntaxQuote(_) => SyntaxKind::SyntaxQuote,
-                            Kind::Unquote {
-                                splicing: false, ..
-                            } => SyntaxKind::Unquote,
-                            Kind::Unquote { splicing: true, .. } => SyntaxKind::UnquoteSplicing,
-                            Kind::Symbol(_) | Kind::AnonymousArgument(_) => SyntaxKind::Symbol,
-                            Kind::Keyword(_) => SyntaxKind::Keyword,
-                            Kind::String(_) | Kind::Utf16String(_) => SyntaxKind::String,
-                            Kind::Regex { .. } => SyntaxKind::Regex,
-                            Kind::Character(_) => SyntaxKind::Character,
-                            Kind::Metadata(_, _) => SyntaxKind::Metadata,
-                            Kind::Tagged(_, _) => SyntaxKind::Tagged,
-                            Kind::Conditional { .. } => SyntaxKind::Conditional,
-                            Kind::Number => SyntaxKind::Number,
-                            Kind::SymbolicNumber(_) => SyntaxKind::SymbolicNumber,
-                            Kind::Bool(_) => SyntaxKind::Boolean,
-                            Kind::Nil => SyntaxKind::Nil,
-                        },
-                        Item::Omit | Item::Splice { .. } => SyntaxKind::Conditional,
-                    }
-                }
-            });
+            let kind = match result {
+                Err(_) => SyntaxKind::Error,
+                Ok(Item::Form(form)) => match form.kind {
+                    Kind::List(_) => SyntaxKind::List,
+                    Kind::AnonymousFunction(_) => SyntaxKind::AnonymousFunction,
+                    Kind::Vector(_) => SyntaxKind::Vector,
+                    Kind::Map(_) => SyntaxKind::Map,
+                    Kind::AutoNamespacedMap { .. } => SyntaxKind::NamespacedMap,
+                    Kind::Set(_) => SyntaxKind::Set,
+                    Kind::Quote(_) => SyntaxKind::Quote,
+                    Kind::SyntaxQuote(_) => SyntaxKind::SyntaxQuote,
+                    Kind::Unquote {
+                        splicing: false, ..
+                    } => SyntaxKind::Unquote,
+                    Kind::Unquote { splicing: true, .. } => SyntaxKind::UnquoteSplicing,
+                    Kind::Symbol(_) | Kind::AnonymousArgument(_) => SyntaxKind::Symbol,
+                    Kind::Keyword(_) => SyntaxKind::Keyword,
+                    Kind::String(_) | Kind::Utf16String(_) => SyntaxKind::String,
+                    Kind::Regex { .. } => SyntaxKind::Regex,
+                    Kind::Character(_) => SyntaxKind::Character,
+                    Kind::Metadata(_, _) => SyntaxKind::Metadata,
+                    Kind::Tagged(_, _) => SyntaxKind::Tagged,
+                    Kind::Conditional { .. } => SyntaxKind::Conditional,
+                    Kind::Number => SyntaxKind::Number,
+                    Kind::SymbolicNumber(_) => SyntaxKind::SymbolicNumber,
+                    Kind::Bool(_) => SyntaxKind::Boolean,
+                    Kind::Nil => SyntaxKind::Nil,
+                },
+                Ok(Item::Omit | Item::Splice { .. }) => SyntaxKind::Conditional,
+            };
             tree.finish(kind, self.pos.offset);
         }
     }
