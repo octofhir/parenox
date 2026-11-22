@@ -855,10 +855,19 @@ impl Checker<'_> {
         &'a mut self,
         forms: &'a [Form],
         env: &'a Env,
+        reachable: bool,
+    ) -> impl Iterator<Item = (Value, Span)> + 'a {
+        self.eval_argument_forms(forms.iter(), env, reachable)
+    }
+
+    fn eval_argument_forms<'a>(
+        &'a mut self,
+        forms: impl Iterator<Item = &'a Form> + 'a,
+        env: &'a Env,
         mut reachable: bool,
     ) -> impl Iterator<Item = (Value, Span)> + 'a {
         // Remaining expressions still need compiler checks after a proved stop.
-        forms.iter().map(move |form| {
+        forms.map(move |form| {
             let mut value = self.infer_path(form, env, reachable, false);
             reachable = !value.stops_evaluation();
             if !reachable {

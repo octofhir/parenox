@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 
 use super::super::{LiteralContainer, metadata::MetadataTarget};
 use super::{
-    ArgumentForms, Callable, Checker, Env, PreparedCallable, Value, arity_counts, builtin_arities,
-    call_returns, vectors::CollectionError, vectors::element_type,
+    ArgumentForms, CallOperands, Callable, Checker, Env, PreparedCallable, Value, arity_counts,
+    builtin_arities, call_returns, vectors::CollectionError, vectors::element_type,
 };
 use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, IntegerClass, IntegerType, Signature, Type};
@@ -30,6 +30,24 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let callable = self.prepare_callable(callee, env);
+        if let Kind::Vector(items) = &spread.kind
+            && let Callable::Value(function) = &callable.kind
+            && matches!(function.known, Type::Function(_))
+        {
+            // A vector without metadata has no eager step after its elements.
+            let operands = CallOperands {
+                prefix,
+                tail: items,
+            };
+            let args = self.call_args(function, operands, span, env);
+            let written: Vec<_> = operands.iter().map(Some).collect();
+            return self.call_value(
+                function,
+                args.arguments(ArgumentForms::Projected(&written)),
+                callable.span,
+                span,
+            );
+        }
         let mut args: Vec<_> = self.eval_args(prefix, env, callable.returns()).collect();
         let reachable = callable.returns() && call_returns(&args);
         if prefix.is_empty()
@@ -38,21 +56,6 @@ impl Checker<'_> {
             && let Some((mapper, source)) = self.string_mapping(spread, env)
         {
             return self.apply_string_mapping(mapper, source, env);
-        }
-        if prefix.is_empty()
-            && let Kind::Vector(items) = &spread.kind
-            && let Callable::Value(function) = &callable.kind
-            && matches!(function.known, Type::Function(_))
-        {
-            // A bare vector supplies every argument without an intervening metadata step.
-            let args = self.call_args(function, items, span, env);
-            let written: Vec<_> = items.iter().map(Some).collect();
-            return self.call_value(
-                function,
-                args.arguments(ArgumentForms::Projected(&written)),
-                callable.span,
-                span,
-            );
         }
         if let Some(items) = spread.vector() {
             // The literal's syntax supplies every position even for large vectors.

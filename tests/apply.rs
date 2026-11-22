@@ -13,10 +13,17 @@ fn literal_apply_vectors_keep_callback_context_and_compiler_checks() {
           (apply message [nil "label"]))
         (defn present {:t/sig '[:-> string?]} []
           (apply message [{:message-fn (fn [value] (subs value 1))} "label"]))
+        (defn prefixed {:t/sig '[:-> string?]} []
+          (apply message {:message-fn (fn [value] (subs value 1))} ["label"]))
+        (defn prefix-first {:t/sig '[:-> #{:prefix}]} []
+          (try
+            (apply message (throw (ex-info "prefix" {:site :prefix}))
+                           [(throw (ex-info "vector" {:site :vector}))])
+            (catch clojure.lang.ExceptionInfo error (:site (ex-data error)))))
         (defn skipped {:t/sig '[:-> #{:eager}]} []
           (try
-            (apply message [{:message-fn (fn [value] (do (inc value) "skipped"))}
-                            (throw (ex-info "eager" {:site :eager}))])
+            (apply message {:message-fn (fn [value] (do (inc value) "skipped"))}
+                           [(throw (ex-info "eager" {:site :eager}))])
             (catch clojure.lang.ExceptionInfo error (:site (ex-data error)))))"#;
     let path = "reports.clj";
     let mut session = Session::default();
@@ -28,19 +35,21 @@ fn literal_apply_vectors_keep_callback_context_and_compiler_checks() {
         .replace(r#"(do (inc value) "skipped")"#, "missing-callback-name");
     let report = session.check(path, &broken);
     assert!(report.complete, "{report:#?}");
-    let [live, skipped] = report.diagnostics.as_slice() else {
+    let [live, prefixed, skipped] = report.diagnostics.as_slice() else {
         panic!("{report:#?}");
     };
-    assert_eq!(live.code, "PNX2322");
-    assert_eq!(live.actual.as_deref(), Some("String"));
-    assert_eq!(
-        live.callback_contract.as_ref().unwrap().name,
-        "reports/message"
-    );
-    assert_eq!(
-        &broken[live.span.start.offset..live.span.end.offset],
-        "value"
-    );
+    for finding in [live, prefixed] {
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(finding.actual.as_deref(), Some("String"));
+        assert_eq!(
+            finding.callback_contract.as_ref().unwrap().name,
+            "reports/message"
+        );
+        assert_eq!(
+            &broken[finding.span.start.offset..finding.span.end.offset],
+            "value"
+        );
+    }
     assert_eq!(skipped.code, "PNX2304");
     assert_eq!(
         &broken[skipped.span.start.offset..skipped.span.end.offset],

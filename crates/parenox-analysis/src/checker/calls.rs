@@ -107,6 +107,22 @@ enum ArgumentForms<'a> {
     Unavailable,
 }
 
+#[derive(Clone, Copy)]
+struct CallOperands<'a> {
+    prefix: &'a [Form],
+    tail: &'a [Form],
+}
+
+impl<'a> CallOperands<'a> {
+    fn iter(self) -> impl Iterator<Item = &'a Form> {
+        self.prefix.iter().chain(self.tail)
+    }
+
+    fn len(self) -> usize {
+        self.prefix.len() + self.tail.len()
+    }
+}
+
 impl<'a> CallArguments<'a> {
     pub(super) fn written_forms(self) -> Option<&'a [Form]> {
         match self.forms {
@@ -565,7 +581,11 @@ impl<'model> Checker<'model> {
             self.may_throw();
             return Value::new(Type::Unknown);
         }
-        let args = self.call_args(&function, &xs[1..], span, env);
+        let operands = CallOperands {
+            prefix: &xs[1..],
+            tail: &[],
+        };
+        let args = self.call_args(&function, operands, span, env);
         let value = self.call_value(
             &function,
             args.arguments(ArgumentForms::Written(&xs[1..])),
@@ -644,7 +664,7 @@ impl<'model> Checker<'model> {
     fn call_args(
         &mut self,
         function: &Value,
-        forms: &[Form],
+        forms: CallOperands<'_>,
         call: Span,
         env: &Env,
     ) -> EvaluatedArguments {
@@ -670,7 +690,7 @@ impl<'model> Checker<'model> {
             })
         else {
             return self
-                .eval_args(forms, env, !function.stops_evaluation())
+                .eval_argument_forms(forms.iter(), env, !function.stops_evaluation())
                 .collect::<Vec<_>>()
                 .into();
         };
@@ -682,7 +702,7 @@ impl<'model> Checker<'model> {
         &mut self,
         function: &Value,
         signature: &Signature,
-        forms: &[Form],
+        forms: CallOperands<'_>,
         call: Span,
         env: &Env,
     ) -> EvaluatedArguments {

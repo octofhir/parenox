@@ -1,10 +1,12 @@
 //! Infer input from an argument or a supported projection, then output from one callback.
 use std::borrow::Cow;
 
-use super::{CallArguments, ContextualArgument, EvaluatedArguments, inline::CallbackReturn};
+use super::{
+    CallArguments, CallOperands, ContextualArgument, EvaluatedArguments, inline::CallbackReturn,
+};
 use crate::Diagnostic;
 use crate::checker::{Checker, Env, Value};
-use crate::reader::{Form, Span};
+use crate::reader::Span;
 use crate::types::{
     CallbackWitness, Compatibility, Parameter, Parameters, Signature, Type, TypeArguments,
 };
@@ -46,7 +48,7 @@ impl Checker<'_> {
         &mut self,
         function: &Value,
         signature: &Signature,
-        forms: &[Form],
+        forms: CallOperands<'_>,
         call: Span,
         env: &Env,
     ) -> EvaluatedArguments {
