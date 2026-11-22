@@ -329,6 +329,47 @@ fn binding_conditional_checks_a_shadowed_constructor_before_later_operands() {
 }
 
 #[test]
+fn a_throwing_callback_binding_prevents_evaluation_of_later_operands() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::message-fn (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))
+        (defn render {:t/sig '[{:message-fn ::message-fn} number? :-> string?]} [report _]
+          (if-let [callback (:message-fn report)] (callback "label") "fallback"))
+        (defn apply-report {:t/sig '[:-> string?]} []
+          (try
+            (render {:message-fn (when-let [{:keys [prefix]
+                                            :or {prefix (throw (ex-info "binding" {}))}} {}]
+                                   (fn [text] (str prefix text)))}
+                    (inc "later"))
+            (catch clojure.lang.ExceptionInfo _ "fallback")))"#;
+    let mut session = Session::default();
+    let report = session.check("reports.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replace(r#"(throw (ex-info "binding" {}))"#, r#""prefix""#);
+    let report = session.check("reports.clj", &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "\"later\""
+    );
+
+    let unbound = source.replace("(inc \"later\")", "(inc unresolved)");
+    let report = session.check("reports.clj", &unbound);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2304");
+    assert_eq!(
+        &unbound[finding.span.start.offset..finding.span.end.offset],
+        "unresolved"
+    );
+}
+
+#[test]
 fn nilable_callback_contracts_contextualize_written_closures() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))

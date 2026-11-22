@@ -22,6 +22,9 @@ fn deeply_nested_conditionals_and_bindings_fit_on_a_worker_stack() {
             for (open, leaf, close) in [
                 ("(if true ", "\"text\"", " nil)"),
                 ("(let [text \"text\"] ", "text", ")"),
+                ("(if-let [text \"text\"] ", "text", " nil)"),
+                ("(if-let [value nil] nil ", "\"text\"", ")"),
+                ("(when-let [text \"text\"] nil ", "text", ")"),
             ] {
                 let body = format!("{}{leaf}{}", open.repeat(125), close.repeat(125));
                 assert_ok(&format!("(defn deep {{:t/sig '[:-> string?]}} [] {body})"));

@@ -63,6 +63,13 @@ impl Conditional {
     }
 }
 
+struct BindingPaths<'a> {
+    body: &'a [Form],
+    bound_scope: Env,
+    alternate: Option<(&'a [Form], Env)>,
+    skips_binding: bool,
+}
+
 impl Checker<'_> {
     pub(super) fn thread_form(
         &mut self,
@@ -163,10 +170,11 @@ impl Checker<'_> {
         reachable: bool,
         check: impl FnOnce(&mut Self) -> Value,
     ) -> Value {
-        let mut value = self.inspect_path(reachable, check);
-        if !reachable {
-            value.narrow(Type::Never);
+        if reachable {
+            return check(self);
         }
+        let mut value = self.inspect_path(false, check);
+        value.narrow(Type::Never);
         value
     }
 
@@ -684,7 +692,10 @@ impl Checker<'_> {
             span,
             env,
             name,
-            |checker, scope, body, _| checker.body(body, scope, tail),
+            |checker, scope, body, _| match body {
+                [form] => checker.infer_position(form, scope, tail),
+                _ => checker.body(body, scope, tail),
+            },
         ))
     }
 
@@ -696,10 +707,36 @@ impl Checker<'_> {
         name: &str,
         mut branch: impl FnMut(&mut Self, &Env, &[Form], bool) -> Value,
     ) -> [Value; 2] {
+        let Some(paths) = self.prepare_binding_paths(xs, span, env, name) else {
+            return [Value::new(Type::Unknown), Value::new(Type::Never)];
+        };
+        let yes = self.check_path(paths.bound_scope.reachable(), |checker| {
+            branch(checker, &paths.bound_scope, paths.body, true)
+        });
+        let no = match &paths.alternate {
+            Some((body, scope)) => self
+                .check_path(paths.skips_binding && scope.reachable(), |checker| {
+                    branch(checker, scope, body, false)
+                }),
+            None if paths.skips_binding => Value::new(Type::Nil),
+            None => Value::new(Type::Never),
+        };
+        [yes, no]
+    }
+
+    // Keep temporary initializer types off the stack while checking branch bodies.
+    #[inline(never)]
+    fn prepare_binding_paths<'a>(
+        &mut self,
+        xs: &'a [Form],
+        span: Span,
+        env: &Env,
+        name: &str,
+    ) -> Option<BindingPaths<'a>> {
         let when = name.starts_with("clojure.core/when-");
         if xs.len() < 2 || (!when && !(3..=4).contains(&xs.len())) {
             self.error("PNX2554", span, format!("Invalid arity for {name}"));
-            return [Value::new(Type::Unknown), Value::new(Type::Never)];
+            return None;
         }
         let Some([pattern, init]) = xs[1].vector() else {
             self.error(
@@ -707,7 +744,7 @@ impl Checker<'_> {
                 xs[1].span,
                 format!("{name} requires a binding vector with exactly two forms"),
             );
-            return [Value::new(Type::Unknown), Value::new(Type::Never)];
+            return None;
         };
         let valid_pattern = match &pattern.without_metadata().kind {
             Kind::Symbol(symbol) | Kind::AnonymousArgument(symbol) => {
@@ -722,7 +759,7 @@ impl Checker<'_> {
                 pattern.span,
                 format!("Invalid binding form for {name}"),
             );
-            return [Value::new(Type::Unknown), Value::new(Type::Never)];
+            return None;
         }
 
         let mut input = self.infer(init, env);
@@ -738,8 +775,7 @@ impl Checker<'_> {
         } else {
             (input.known.truthy(), input.known.falsey())
         };
-        let yes_reachable = matched != Type::Never;
-        let no_reachable = skipped != Type::Never;
+        let skips_binding = skipped != Type::Never;
         let narrow = |truth: bool, scope: &mut Env| {
             if first {
                 if self
@@ -762,39 +798,33 @@ impl Checker<'_> {
         };
         let mut yes_env = env.clone();
         narrow(true, &mut yes_env);
-        let no_env = if !when && xs.len() == 4 {
+        let alternate = if !when && xs.len() == 4 {
             let mut scope = env.clone();
             narrow(false, &mut scope);
-            Some(scope)
+            Some((&xs[3..], scope))
         } else {
             None
         };
 
+        let reachable = matched != Type::Never && yes_env.reachable();
         input.narrow(matched);
-        let yes = self.check_path(yes_reachable && yes_env.reachable(), |checker| {
+        self.inspect_path(reachable, |checker| {
             if first {
                 input = checker.sequence_call("clojure.core/first", &input, init.span);
                 checker.bind(pattern, input, &mut yes_env);
             } else {
                 checker.bind_initializer(pattern, init, input, &mut yes_env);
             }
-            branch(
-                checker,
-                &yes_env,
-                if when { &xs[2..] } else { &xs[2..3] },
-                true,
-            )
         });
-        let no = if let Some(scope) = no_env {
-            self.check_path(no_reachable && scope.reachable(), |checker| {
-                branch(checker, &scope, &xs[3..], false)
-            })
-        } else if no_reachable {
-            Value::new(Type::Nil)
-        } else {
-            Value::new(Type::Never)
-        };
-        [yes, no]
+        if !reachable {
+            yes_env.mark_impossible();
+        }
+        Some(BindingPaths {
+            body: if when { &xs[2..] } else { &xs[2..3] },
+            bound_scope: yes_env,
+            alternate,
+            skips_binding,
+        })
     }
 
     pub(super) fn short_circuit(&mut self, xs: &[Form], env: &Env, or: bool, tail: bool) -> Value {

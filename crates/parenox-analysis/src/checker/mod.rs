@@ -793,19 +793,29 @@ impl Checker<'_> {
     }
 
     fn body(&mut self, body: &[Form], env: &Env, tail: bool) -> Value {
-        let mut value = Value::new(if env.reachable() {
-            Type::Nil
-        } else {
-            Type::Never
-        });
-        for (index, form) in body.iter().enumerate() {
-            let tail = tail && index + 1 == body.len();
-            value = self.infer_path(form, env, !value.stops_evaluation(), tail);
-        }
+        let Some((last, prefix)) = body.split_last() else {
+            return Value::new(if env.reachable() {
+                Type::Nil
+            } else {
+                Type::Never
+            });
+        };
+        let reachable = self.body_prefix_returns(prefix, env);
+        let mut value = self.infer_path(last, env, reachable, tail);
         if value.known != Type::Never && value.stops_evaluation() {
             value.narrow(Type::Never);
         }
         value
+    }
+
+    fn body_prefix_returns(&mut self, prefix: &[Form], env: &Env) -> bool {
+        let mut reachable = env.reachable();
+        for form in prefix {
+            reachable = !self
+                .infer_path(form, env, reachable, false)
+                .stops_evaluation();
+        }
+        reachable
     }
 
     fn infer(&mut self, form: &Form, env: &Env) -> Value {
