@@ -39,7 +39,7 @@ use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use combinators::CombinedCallable;
 use forms::CoreForm;
-use inline::{Fnil, InlineFunction, Partial, PreparedChoice};
+use inline::{CallbackReturn, Fnil, InlineFunction, Partial, PreparedChoice};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
@@ -788,7 +788,15 @@ impl<'model> Checker<'model> {
         for (index, mut pending) in deferred {
             let origin = function.contract.as_deref();
             let value = if let Some(choice) = pending.choice.take() {
-                self.check_callback_choice(*choice, pending.expected, call, origin, reachable)
+                self.check_callback_choice(
+                    *choice,
+                    pending.expected,
+                    call,
+                    origin,
+                    reachable,
+                    CallbackReturn::Check,
+                )
+                .value
             } else {
                 self.check_path(reachable, |checker| {
                     checker.check_callback_value(

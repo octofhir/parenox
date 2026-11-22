@@ -2,7 +2,8 @@
 use std::borrow::Cow;
 
 use super::{
-    CallArguments, CallOperands, ContextualArgument, EvaluatedArguments, inline::CallbackReturn,
+    CallArguments, CallOperands, ContextualArgument, EvaluatedArguments,
+    inline::{CallbackReturn, ContextualCallback},
 };
 use crate::Diagnostic;
 use crate::checker::{Checker, Env, Value};
@@ -73,11 +74,16 @@ impl Checker<'_> {
         let mut callbacks = Vec::new();
         let mut reachable = env.reachable();
         for (index, (form, expected)) in forms.iter().zip(&signature.args).enumerate() {
-            if (matches!(expected, Type::Function(_)) || expected.contextual_signature().is_some())
+            if let Some((context, argument)) =
+                self.prepare_contextual_argument(form, expected, env, reachable, None)
+            {
+                callbacks.push((index, context, reachable));
+                reachable = !argument.stops_evaluation();
+                values.push((argument, form.span));
+            } else if matches!(expected, Type::Function(_))
                 && self.contextual_callback_form(form, env)
             {
-                // A literal fn creates a closure; a saved local only reads one.
-                // The contextual body can wait for the other arguments' types.
+                // An overloaded expectation still defers the closure body.
                 callbacks.push((
                     index,
                     ContextualArgument {
@@ -143,49 +149,29 @@ impl Checker<'_> {
                 } else {
                     CallbackReturn::Check
                 };
-                if let Some(choice) = contextual.choice.take() {
-                    // A choice can check a declared return, but it is not an inference witness.
-                    debug_assert!(output.is_none());
-                    let value = self.check_callback_choice(
-                        *choice,
-                        expected,
-                        call,
-                        function.contract.as_deref(),
-                        check_body,
-                    );
-                    if check_body {
-                        contextual.apply(&mut values[index].0, value);
-                    }
-                    continue;
-                }
-                let body_checked = self.check_path(check_body, |checker| {
-                    checker
-                        .contextual_callback(
-                            form,
-                            expected,
-                            call,
-                            function.contract.as_deref(),
-                            env,
-                            mode,
-                        )
-                        .map(|callback| {
-                            if check_body && let Some((parameter, witness)) = output {
-                                output_callback_span = Some(form.without_metadata().span);
-                                output_gap_explained =
-                                    callback.rejected_return.as_ref().is_some_and(|ty| {
-                                        *ty == Type::Never
-                                            || witness.evidence(ty).is_some_and(|evidence| {
-                                                parameter.check_bound(&evidence)
-                                                    == Compatibility::Proven
-                                            })
-                                    });
-                            }
-                            callback.value
-                        })
-                        .unwrap_or_else(|| checker.infer(form, env))
-                });
+                let origin = function.contract.as_deref();
+                let checked = if let Some(choice) = contextual.choice.take() {
+                    self.check_callback_choice(*choice, expected, call, origin, check_body, mode)
+                } else {
+                    self.inspect_path(check_body, |checker| {
+                        checker
+                            .contextual_callback(form, expected, call, origin, env, mode)
+                            .unwrap_or_else(|| {
+                                ContextualCallback::from_value(checker.infer(form, env))
+                            })
+                    })
+                };
                 if check_body {
-                    contextual.apply(&mut values[index].0, body_checked);
+                    if let Some((parameter, witness)) = output {
+                        output_callback_span = Some(form.without_metadata().span);
+                        output_gap_explained = checked.rejected_return.as_ref().is_some_and(|ty| {
+                            *ty == Type::Never
+                                || witness.evidence(ty).is_some_and(|evidence| {
+                                    parameter.check_bound(&evidence) == Compatibility::Proven
+                                })
+                        });
+                    }
+                    contextual.apply(&mut values[index].0, checked.value);
                 }
                 // A skipped or unproved body does not make closure creation
                 // diverge. Keep the placeholder for the argument's reachability.

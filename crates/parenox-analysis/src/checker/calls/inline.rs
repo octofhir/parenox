@@ -150,11 +150,15 @@ pub(super) struct ContextualCallback {
 }
 
 impl ContextualCallback {
-    fn unchecked() -> Self {
+    pub(super) fn from_value(value: Value) -> Self {
         Self {
-            value: Value::new(Type::Unknown),
+            value,
             rejected_return: None,
         }
+    }
+
+    fn unchecked() -> Self {
+        Self::from_value(Value::new(Type::Unknown))
     }
 }
 
@@ -591,19 +595,16 @@ impl<'model> Checker<'model> {
         reachable: bool,
         map_key: Option<&'a Type>,
     ) -> Option<(ContextualArgument<'a>, Value)> {
-        let (_, signature) = expected.contextual_signature()?;
+        expected.contextual_signature()?;
         let (choice, value) = if self.contextual_callback_form(form, env) {
             // Creating or reading a closure does not execute its body.
             (
                 None,
                 self.contextual_callback_argument(form, env, reachable),
             )
-        } else if map_key.is_none() || !signature.ret.contains_parameter() {
+        } else {
             let (choice, value) = self.prepare_callback_choice(form, env, reachable)?;
             (Some(choice), value)
-        } else {
-            // Inferring a return parameter requires a result witness.
-            return None;
         };
         Some((
             ContextualArgument {
@@ -624,16 +625,51 @@ impl<'model> Checker<'model> {
         call: Span,
         origin: Option<&ContractOrigin>,
         reachable: bool,
-    ) -> Value {
+        mode: CallbackReturn,
+    ) -> ContextualCallback {
+        let mut returns = matches!(mode, CallbackReturn::Infer).then(Vec::new);
+        let mut rejected = false;
+        let mut observe_return = |value: &Value, rejected_return: Option<Type>| {
+            let Some(types) = &mut returns else { return };
+            rejected |= rejected_return.is_some();
+            let ty = rejected_return.or_else(|| {
+                let (_, expected) = expected.contextual_signature()?;
+                let known = value.known.signature_at(expected.arity())?;
+                (known.parameters.is_none() && !known.nil_preserving).then(|| known.ret.clone())
+            });
+            if let Some(ty) = ty {
+                types.push(ty);
+            } else {
+                returns = None;
+            }
+        };
+        if reachable && let Some(value) = choice.eager.as_ref().filter(|v| !v.stops_evaluation()) {
+            observe_return(value, None);
+        }
         let start = self.diagnostics.len();
         let callbacks = choice.callbacks.into_iter().map(|branch| {
-            self.check_path(reachable && branch.returns, |checker| {
-                checker.check_callback_value(branch.form, expected, call, origin, &branch.scope)
+            let active = reachable && branch.returns;
+            self.check_path(active, |checker| {
+                let callback = checker
+                    .contextual_callback(branch.form, expected, call, origin, &branch.scope, mode)
+                    .unwrap_or_else(|| {
+                        ContextualCallback::from_value(checker.infer(branch.form, &branch.scope))
+                    });
+                if active {
+                    observe_return(&callback.value, callback.rejected_return);
+                }
+                callback.value
             })
         });
         let value = Value::union_branches(choice.eager.into_iter().chain(callbacks));
         self.dedup_diagnostics(start);
-        value
+        // Return observations from failed bodies can explain a redundant
+        // inference gap. They never enter the callback choice's value.
+        let rejected_return = returns.filter(|_| rejected).map(Type::union);
+        ContextualCallback {
+            value,
+            rejected_return,
+        }
     }
 
     pub(super) fn check_callback_value(
@@ -721,13 +757,9 @@ impl<'model> Checker<'model> {
     }
 
     fn contextual_callback_field(&self, callback: &Form, expected: &Type, env: &Env) -> bool {
-        expected
-            .contextual_signature()
-            .is_some_and(|(_, signature)| {
-                self.contextual_callback_form(callback, env)
-                    || (!signature.ret.contains_parameter()
-                        && self.contextual_choice(callback, env).is_some())
-            })
+        expected.contextual_signature().is_some()
+            && (self.contextual_callback_form(callback, env)
+                || self.contextual_choice(callback, env).is_some())
     }
 
     pub(super) fn contextual_map_argument<'a>(

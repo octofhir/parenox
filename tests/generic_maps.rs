@@ -200,6 +200,61 @@ fn checked_callback_alternatives_contribute_their_result_fields() {
 }
 
 #[test]
+fn contextual_choice_infers_generic_result_fields_and_checks_each_body() {
+    let source = r#"(ns demo.report (:require [clojure.spec.alpha :as s]))
+        (defn render
+          {:t/sig '(t/all [input result]
+            [input {:report {:message-fn (s/fspec :args (s/cat :text input)
+                                                   :ret {:message result})}}
+             :-> result])}
+          [input options] (:message ((get-in options [:report :message-fn]) input)))
+        (defn selected {:t/sig '[(s/nilable string?) :-> (s/or :n int? :s string?)]} [prefix]
+          (render "label" {:report {:message-fn
+                                    (if (some? prefix)
+                                      (fn [text] {:message (count (str (subs prefix 1) text))})
+                                      (fn [text] {:message (subs text 1)}))}}))"#;
+    let path = "report.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+
+    let body = "(count (str (subs prefix 1) text))";
+    let edited = source.replace(body, &format!("(do (inc text) {body})"));
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "text"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "demo.report/render"
+    );
+    let cold = Session::default().check(path, &edited);
+    assert_eq!(
+        serde_json::to_value(&report.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+
+    let missing = edited.replace("{:message (subs text 1)}", "{:other (subs text 1)}");
+    let report = session.check(path, &missing);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX9010"),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn a_computed_parent_key_supplies_context_only_when_it_reaches_the_declared_field() {
     let source = r#"(ns demo.computed-stage (:require [clojure.spec.alpha :as s]))
         (defn render

@@ -7,6 +7,15 @@ fn check(extra: &str) -> Report {
 }
 
 #[test]
+fn direct_conditional_callback_can_infer_a_generic_result() {
+    let report = check(
+        r#"(defn selected {:t/sig '[boolean? :-> (s/or :n int? :s string?)]} [size?]
+             (convert (if size? #(count %) (fn [text] (subs text 1))) "label"))"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
 fn infers_one_type_for_lambdas_and_generic_forwarding() {
     let report = check(
         "(defn returns-nil {:t/sig '[:-> nil?]} []
