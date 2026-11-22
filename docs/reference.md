@@ -848,10 +848,13 @@ It keeps exact sizes for tuple shapes and map entries, and counts UTF-16
 code units in literal strings. Counting an open sequence can realize
 values and throw.
 
-Nonnumeric literal matches in `case` and guards using `=` refine values
-with a known scalar class. Open JVM values keep their original type
-because custom `equals` or `equiv` can match a literal. For `(= nil value)`,
-the left operand makes the test exact.
+Literal matches in `case` and guards using `=` refine values with a known
+scalar class. A numeric `case` match on a known integer retains its JVM
+class constraints. Open JVM values can match literals through custom
+`equals` or `equiv`. When every label fits in a signed int, a match can
+establish `number?` on a general subject. A custom JVM Number can match an
+integer label without satisfying `integer?`. For `(= nil value)`, the
+left operand makes the test exact.
 
 Standard `condp =` checks literal nil, boolean, character, string, keyword,
 and quoted symbol tests with a known subject of those types. Matching clauses

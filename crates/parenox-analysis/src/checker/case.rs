@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 use std::slice;
 
-use super::flow::{has_closed_scalar_class, narrow_literal, refine_owner};
+use super::flow::{has_closed_scalar_class, narrow_by_type, narrow_literal, refine_owner};
 use super::{Checker, Env, Value};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{IntegerClass, Type};
@@ -78,9 +78,18 @@ impl Checker<'_> {
         }
         let mut outcomes = Vec::new();
         let mut matched = false;
+        // The JVM uses Number.intValue only when every label fits an int.
+        let integer_dispatch = tests.iter().all(|test| {
+            test.exact_long_value()
+                .is_some_and(|value| i32::try_from(value).is_ok())
+        });
         for (keys, result) in branches {
-            let select =
-                |ty: &Type| Type::union(keys.iter().map(|key| narrow_literal(ty, key, true)));
+            let select = |ty: &Type| {
+                Type::union(
+                    keys.iter()
+                        .map(|key| narrow_case_match(ty, key, integer_dispatch)),
+                )
+            };
             let selected = select(&remaining);
             for key in &keys {
                 remaining = narrow_literal(&remaining, key, false);
@@ -158,6 +167,22 @@ impl Checker<'_> {
             value.narrow(ty);
         }
         self.infer_path(form, &env, reachable, tail)
+    }
+}
+
+fn narrow_case_match(actual: &Type, key: &Type, integer_dispatch: bool) -> Type {
+    if !integer_dispatch {
+        return narrow_literal(actual, key, true);
+    }
+    match actual {
+        Type::Union(parts) => {
+            Type::union(parts.iter().map(|part| narrow_case_match(part, key, true)))
+        }
+        // A custom Number can compare equal to a label and fail integer?.
+        Type::Any | Type::Unknown | Type::SpecValue | Type::SpecTruthy => {
+            narrow_by_type(actual, &Type::Number, true)
+        }
+        _ => narrow_literal(actual, key, true),
     }
 }
 

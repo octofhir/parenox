@@ -191,7 +191,7 @@ pub(in crate::checker) fn narrow_literal(actual: &Type, literal: &Type, truth: b
                 .iter()
                 .map(|part| narrow_literal(part, literal, truth)),
         ),
-        _ if literal.exact_long_value().is_some()
+        _ if (literal.exact_long_value().is_some() && matches!(actual, Type::Integral(_)))
             || (!truth && *literal == Type::Nil)
             || has_closed_scalar_class(actual) =>
         {

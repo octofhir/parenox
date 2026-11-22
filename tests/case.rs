@@ -93,6 +93,37 @@ fn numeric_branches_retain_the_subjects_class_and_refine_known_map_fields() {
 }
 
 #[test]
+fn integer_labels_do_not_prove_the_subject_passes_integer_predicate() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn int-dispatch {:t/sig '[number? :-> number?]} [value]
+  (case value 42 (if (integer? value) 1 (inc "numeric")) 1))
+(defn hash-dispatch
+  {:t/sig '[(s/fspec :args (s/cat :value number?) :ret number?) :-> number?]}
+  [f]
+  (case f 42 (f "callable") "different" 1 1))
+(defn number-proof {:t/sig '[t/any :-> number?]} [value]
+  (case value 42 value 0))
+"#;
+    let report = Session::default().check("case.clj", source);
+    assert!(report.complete, "{report:#?}");
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [("PNX2322", "\"numeric\""), ("PNX2322", "\"callable\"")]
+    );
+}
+
+#[test]
 fn equivalent_integer_labels_conflict_and_missing_labels_are_reported() {
     for (expression, code) in [
         ("(case 42 42 :first 42N :duplicate)", "PNX2790"),

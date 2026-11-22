@@ -200,7 +200,7 @@ pub enum Type {
     Integral(IntegerType),
     /// An exact fixed-precision integer in the range used by indexed reads.
     Integer(i32),
-    /// Numeric values for which Clojure's integer? predicate is false.
+    /// Built-in numeric values for which Clojure's integer? predicate is false.
     NonIntegral,
     String,
     Pattern,

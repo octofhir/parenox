@@ -45,6 +45,7 @@ fn known_nonnumeric_scalar(ty: &Type) -> bool {
 pub(super) fn has_closed_scalar_class(ty: &Type) -> bool {
     match ty {
         Type::Union(parts) => parts.iter().all(has_closed_scalar_class),
+        Type::NonIntegral => true,
         _ => known_nonnumeric_scalar(ty) || definitely_noncallable(ty),
     }
 }
