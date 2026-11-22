@@ -8,6 +8,14 @@ use std::collections::BTreeSet;
 
 const MAX_ORDERED_METADATA_KEYS: usize = 8;
 
+pub(super) fn java_type_hint(form: &Form) -> Option<&str> {
+    let tag = form.metadata(":tag")?;
+    match &tag.without_metadata().kind {
+        Kind::String(name) => Some(name),
+        _ => tag.symbol(),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum MetadataTarget {
     Vector,

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use super::env::Selector;
 use super::maps::{Lookup, literal_map_in_source_order};
+use super::metadata::java_type_hint;
 use super::{Checker, Env, Value};
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
@@ -431,7 +432,15 @@ impl Checker<'_> {
         let returns = !value.stops_evaluation();
         self.inspect_path(returns, |checker| {
             let source = checker.binding_selector(pattern, init, env);
+            // Read the initializer's class selection in the previous scope.
+            let inherited_hint = pattern
+                .symbol()
+                .filter(|_| pattern.metadata(":tag").is_none())
+                .and_then(|name| env.java_hint(init).map(|hint| (name, hint.to_owned())));
             checker.bind_selected(pattern, value, env, source, defaults);
+            if let Some((name, hint)) = inherited_hint {
+                env.set_java_hint(name, &hint);
+            }
         });
         returns && env.reachable()
     }
@@ -455,7 +464,7 @@ impl Checker<'_> {
             Kind::Symbol(name) | Kind::AnonymousArgument(name) => {
                 self.bind_local(name, target.span, value, source, env);
                 // Class selection and non-nil evidence are independent.
-                if let Some(hint) = form.metadata(":tag").and_then(Form::symbol) {
+                if let Some(hint) = java_type_hint(form) {
                     env.set_java_hint(name, hint);
                 }
             }

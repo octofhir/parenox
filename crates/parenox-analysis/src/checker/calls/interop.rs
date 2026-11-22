@@ -168,10 +168,7 @@ impl Checker<'_> {
         if !receiver_returns || !call_returns(&typed) {
             return Some(Value::new(Type::Never));
         }
-        let tag = receiver
-            .metadata(":tag")
-            .and_then(tag_name)
-            .or_else(|| receiver.symbol().and_then(|name| env.java_hint(name)));
+        let tag = env.java_hint(receiver);
         let string_receiver = match tag.map(|name| self.model.class_name(name)) {
             Some("String" | "java.lang.String") => true,
             Some(_) => false,
@@ -313,13 +310,6 @@ impl Checker<'_> {
             format!("String.charAt index {index} is out of bounds"),
         );
         Type::Never
-    }
-}
-
-fn tag_name(tag: &Form) -> Option<&str> {
-    match &tag.without_metadata().kind {
-        Kind::String(name) => Some(name),
-        _ => tag.symbol(),
     }
 }
 

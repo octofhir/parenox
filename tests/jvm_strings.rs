@@ -1232,6 +1232,41 @@ fn receiver_hints_resolve_members_without_proving_a_non_nil_string() {
 }
 
 #[test]
+fn lexical_let_preserves_explicit_and_inherited_jvm_type_hints() {
+    let source = r#"
+(defn bound {:t/sig '[number? :-> number?]} [value]
+  (let [^"java.lang.String" target value] (.length target)))
+(defn init {:t/sig '[number? :-> number?]} [value]
+  (let [target ^String value] (.length target)))
+(defn alias {:t/sig '[number? :-> number?]} [value]
+  (let [^String value value value value] (.length value)))
+(defn standalone {:t/sig '[string? :-> string?]} [value]
+  (let [^bytes target value] target))
+"#;
+    let report = Session::default().check("hints.clj", source);
+    assert!(report.complete, "{report:#?}");
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|error| {
+            (
+                error.code.as_str(),
+                error.expected.as_deref(),
+                &source[error.span.start.offset..error.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", Some("String"), "target"),
+            ("PNX2322", Some("String"), "target"),
+            ("PNX2322", Some("String"), "value"),
+        ]
+    );
+}
+
+#[test]
 fn string_search_reports_analysis_gaps_for_unknown_values_and_unmodeled_overloads() {
     let source = r#"(ns urls)
         (defn unknown-receiver {:t/sig '[map? :-> boolean?]} [m]

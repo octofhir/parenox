@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::Value;
+use super::metadata::java_type_hint;
 use crate::reader::Form;
 use crate::types::Type;
 
@@ -177,8 +178,12 @@ impl Env {
         }
     }
 
-    pub(super) fn java_hint(&self, name: &str) -> Option<&str> {
-        self.java_hints.get(name).map(String::as_str)
+    pub(super) fn java_hint<'a>(&'a self, form: &'a Form) -> Option<&'a str> {
+        java_type_hint(form).or_else(|| {
+            form.symbol()
+                .and_then(|name| self.java_hints.get(name))
+                .map(String::as_str)
+        })
     }
 
     pub(super) fn set_java_hint(&mut self, name: &str, hint: &str) {
