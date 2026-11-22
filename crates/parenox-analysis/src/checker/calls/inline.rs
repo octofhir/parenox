@@ -16,8 +16,7 @@ use super::super::{
     queries::InferredCall,
 };
 use super::{
-    Callable, Conditional, ContextualArgument, CoreForm, PreparedCallable, call_returns,
-    combinators::Combiner,
+    Callable, ContextualArgument, CoreForm, PreparedCallable, call_returns, combinators::Combiner,
 };
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
 use crate::types::{Arity, MAX_CALLBACK_MAP_DEPTH, MapType, Signature, Type};
@@ -35,7 +34,7 @@ pub(super) fn contextual_map_type(expected: &Type) -> Option<&MapType> {
 
 struct ConditionalArms<'a> {
     test: ConditionalTest<'a>,
-    branches: [Option<&'a Form>; 2],
+    branches: [&'a [Form]; 2],
 }
 
 enum ConditionalTest<'a> {
@@ -533,7 +532,7 @@ impl<'model> Checker<'model> {
         let Kind::List(parts) = &bare.kind else {
             return None;
         };
-        let [head, test, body, rest @ ..] = parts.as_slice() else {
+        let [head, test, body @ ..] = parts.as_slice() else {
             return None;
         };
         let (test, allows_alternative) = if head.symbol() == Some("if") {
@@ -552,7 +551,7 @@ impl<'model> Checker<'model> {
                         form: test,
                         first_truth: mode.runs_on_truth(),
                     },
-                    matches!(mode, Conditional::If | Conditional::IfNot),
+                    mode.takes_else(),
                 ),
                 CoreForm::BindingConditional if matches!(test.vector(), Some([_, _])) => {
                     let allows_alternative = !name.starts_with("clojure.core/when-");
@@ -568,15 +567,16 @@ impl<'model> Checker<'model> {
                 _ => return None,
             }
         };
-        let other = match rest {
-            [] => None,
-            [form] if allows_alternative => Some(form),
-            _ => return None,
+        let branches = if allows_alternative {
+            if !(1..=2).contains(&body.len()) {
+                return None;
+            }
+            let (first, other) = body.split_at(1);
+            [first, other]
+        } else {
+            [body, &[]]
         };
-        Some(ConditionalArms {
-            test,
-            branches: [Some(body), other],
-        })
+        Some(ConditionalArms { test, branches })
     }
 
     pub(super) fn with_callback_choice(
@@ -590,7 +590,7 @@ impl<'model> Checker<'model> {
                 form: test,
                 first_truth,
             } = arms.test
-            && let [Some(first), Some(other)] = arms.branches
+            && let [[first], [other]] = arms.branches
             && self.inline_callback_literal(first, env)
             && self.inline_callback_literal(other, env)
         {
@@ -616,7 +616,7 @@ impl<'model> Checker<'model> {
         let arms = self.conditional_arms(form, env)?;
         arms.branches
             .iter()
-            .flatten()
+            .filter_map(|body| body.last())
             .any(|form| self.contextual_callback_form(form, env))
             .then_some(arms)
     }
@@ -631,16 +631,21 @@ impl<'model> Checker<'model> {
         let arms = self.contextual_choice(form, env)?;
         let mut callbacks = Vec::with_capacity(2);
         let mut deferred = [false; 2];
-        let mut visit = |checker: &mut Self, scope: &Env, index: usize| {
-            let Some(form) = arms.branches[index] else {
+        let mut visit = |checker: &mut Self, scope: &Env, body: &'a [Form], index: usize| {
+            let Some((form, prefix)) = body.split_last() else {
                 return Value::new(Type::Nil);
             };
+            let reachable = checker.body_prefix_returns(prefix, scope);
             // Binding forms can introduce a local that shadows a callback constructor.
             if !checker.contextual_callback_form(form, scope) {
-                return checker.infer(form, scope);
+                return checker.infer_path(form, scope, reachable, false);
             }
             deferred[index] = true;
-            let value = checker.contextual_callback_argument(form, scope, checker.path_reachable);
+            let value = checker.contextual_callback_argument(
+                form,
+                scope,
+                reachable && checker.path_reachable,
+            );
             callbacks.push(CallbackBranch {
                 form,
                 scope: scope.clone(),
@@ -651,7 +656,8 @@ impl<'model> Checker<'model> {
         let branches = self.inspect_path(reachable, |checker| match &arms.test {
             ConditionalTest::Predicate { form, first_truth } => {
                 checker.check_if_paths(form, env, *first_truth, |checker, scope, truth| {
-                    visit(checker, scope, usize::from(truth != *first_truth))
+                    let index = usize::from(truth != *first_truth);
+                    visit(checker, scope, arms.branches[index], index)
                 })
             }
             ConditionalTest::Binding { forms, span, name } => checker
@@ -660,7 +666,7 @@ impl<'model> Checker<'model> {
                     *span,
                     env,
                     name,
-                    |checker, scope, _, taken| visit(checker, scope, usize::from(!taken)),
+                    |checker, scope, body, taken| visit(checker, scope, body, usize::from(!taken)),
                 ),
         });
         let returns = reachable && branches.iter().any(|branch| !branch.stops_evaluation());

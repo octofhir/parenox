@@ -10,7 +10,12 @@ fn check(extra: &str) -> Report {
 fn direct_conditional_callback_can_infer_a_generic_result() {
     let report = check(
         r#"(defn selected {:t/sig '[boolean? :-> (s/or :n int? :s string?)]} [size?]
-             (convert (if size? #(count %) (fn [text] (subs text 1))) "label"))"#,
+             (convert (if size? #(count %) (fn [text] (subs text 1))) "label"))
+           (defn labeled-size {:t/sig '[:-> number?]} []
+             (convert (when-let [prefix "tag"]
+                        (subs prefix 1)
+                        (fn [text] (+ (count prefix) (count text))))
+                      "label"))"#,
     );
     assert!(report.ok && report.complete, "{report:#?}");
 }

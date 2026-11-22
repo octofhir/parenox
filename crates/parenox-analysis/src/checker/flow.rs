@@ -53,6 +53,10 @@ impl Conditional {
         matches!(self, Self::If | Self::When)
     }
 
+    pub(super) fn takes_else(self) -> bool {
+        matches!(self, Self::If | Self::IfNot)
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::If => "if",
@@ -480,7 +484,7 @@ impl Checker<'_> {
         mode: Conditional,
         tail: bool,
     ) -> Value {
-        let when = matches!(mode, Conditional::When | Conditional::WhenNot);
+        let when = !mode.takes_else();
         if xs.len() < 2 || (!when && !(3..=4).contains(&xs.len())) {
             self.error(
                 "PNX2554",
@@ -699,13 +703,13 @@ impl Checker<'_> {
         ))
     }
 
-    pub(super) fn check_binding_conditional_paths(
+    pub(super) fn check_binding_conditional_paths<'a>(
         &mut self,
-        xs: &[Form],
+        xs: &'a [Form],
         span: Span,
         env: &Env,
         name: &str,
-        mut branch: impl FnMut(&mut Self, &Env, &[Form], bool) -> Value,
+        mut branch: impl FnMut(&mut Self, &Env, &'a [Form], bool) -> Value,
     ) -> [Value; 2] {
         let Some(paths) = self.prepare_binding_paths(xs, span, env, name) else {
             return [Value::new(Type::Unknown), Value::new(Type::Never)];

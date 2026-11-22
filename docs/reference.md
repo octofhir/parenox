@@ -884,10 +884,11 @@ provide an inline or local callback with parameters typed by the contract. Each
 closure retains the branch's narrowed types for captured locals. Other branch
 expressions are checked at argument evaluation, and their resulting values
 must satisfy the same contract.
-An omitted alternative supplies `nil`. Standard `if-not`, `when`, and
-`when-not` with a single form in each branch also support this inference.
-Single-form branches of standard `if-let`, `when-let`, `if-some`, `when-some`,
-and `when-first` retain their local bindings inside the callback.
+An omitted alternative supplies `nil`. The same inference applies to standard
+`if-not`, `when`, `when-not`, `if-let`, `when-let`, `if-some`, `when-some`,
+and `when-first`. A callback in the final position retains the locals bound
+by the conditional. Earlier forms evaluate in branch scope before the closure
+is created.
 The same rule applies to a declared callback field in a literal map. With a
 generic contract, each reachable alternative can use inferred input types and
 contribute evidence for the result parameter.
