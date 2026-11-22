@@ -1,7 +1,7 @@
 use parenox::{Session, Source};
 
 #[test]
-fn literal_apply_vectors_keep_callback_context_and_compiler_checks() {
+fn exact_apply_arguments_keep_callback_context_and_compiler_checks() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (defn message
           {:t/sig '(t/all [value]
@@ -15,6 +15,10 @@ fn literal_apply_vectors_keep_callback_context_and_compiler_checks() {
           (apply message [{:message-fn (fn [value] (subs value 1))} "label"]))
         (defn prefixed {:t/sig '[:-> string?]} []
           (apply message {:message-fn (fn [value] (subs value 1))} ["label"]))
+        (defn nil-spread {:t/sig '[:-> string?]} []
+          (apply message {:message-fn (fn [value] (subs value 1))} "label" nil))
+        (defn nil-argument {:t/sig '[:-> string?]} []
+          (apply message nil "label" nil))
         (defn prefix-first {:t/sig '[:-> #{:prefix}]} []
           (try
             (apply message (throw (ex-info "prefix" {:site :prefix}))
@@ -35,10 +39,10 @@ fn literal_apply_vectors_keep_callback_context_and_compiler_checks() {
         .replace(r#"(do (inc value) "skipped")"#, "missing-callback-name");
     let report = session.check(path, &broken);
     assert!(report.complete, "{report:#?}");
-    let [live, prefixed, skipped] = report.diagnostics.as_slice() else {
+    let [live, prefixed, nil_spread, skipped] = report.diagnostics.as_slice() else {
         panic!("{report:#?}");
     };
-    for finding in [live, prefixed] {
+    for finding in [live, prefixed, nil_spread] {
         assert_eq!(finding.code, "PNX2322");
         assert_eq!(finding.actual.as_deref(), Some("String"));
         assert_eq!(

@@ -862,8 +862,8 @@ standard `partial` are evaluated in source order. After a proven runtime failure
 later expressions still get compiler checks such as name resolution. Their
 runtime types and diagnostics are withheld, including when a vector literal
 supplies `apply` arguments.
-With a literal final vector, `apply` supplies context to
-callbacks in the vector and among the preceding arguments of a checked call.
+With a literal final vector or `nil`, `apply` supplies context to callbacks
+in the vector and among the preceding arguments of a checked call.
 Modeled ordinary built-ins, checked function values, and inferred private
 helpers report wrong arity once the call can run and its operands can return.
 A reached arity failure participates in `catch clojure.lang.ArityException`.

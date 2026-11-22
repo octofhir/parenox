@@ -30,7 +30,12 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let callable = self.prepare_callable(callee, env);
-        if let Some(items) = spread.vector()
+        let exact_items = if matches!(spread.kind, Kind::Nil) {
+            Some(&[][..])
+        } else {
+            spread.vector()
+        };
+        if let Some(items) = exact_items
             && let Callable::Value(function) = &callable.kind
             && matches!(function.known, Type::Function(_))
         {
