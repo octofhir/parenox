@@ -71,6 +71,48 @@ fn a_resolved_macro_takes_precedence_over_dotted_member_syntax() {
 }
 
 #[test]
+fn imported_class_values_follow_lexical_resolution_and_import_edits() {
+    let source = r#"(ns demo (:import [java.io File]))
+(defn imported {:t/sig '[:-> t/any]} [] File)
+(defn implicit {:t/sig '[:-> t/any]} [] String)
+(defn shadowed {:t/sig '[:-> number?]} [] (let [File 1] File))
+(defn typo {:t/sig '[:-> t/any]} [] Fiel)
+"#;
+    let mut session = Session::default();
+    let original = session.check("jvm.clj", source);
+    let findings: Vec<_> = original
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &source[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX9001", "File"),
+            ("PNX9001", "String"),
+            ("PNX2304", "Fiel")
+        ],
+        "{original:#?}"
+    );
+
+    let edited = source.replace(" (:import [java.io File])", "");
+    let warm = session.check("jvm.clj", &edited);
+    let cold = Session::default().check("jvm.clj", &edited);
+    let normalize = |report: &parenox::Report| serde_json::to_value(&report.diagnostics).unwrap();
+    assert_eq!(warm.diagnostics[0].code, "PNX2304", "{warm:#?}");
+    assert_eq!(normalize(&warm), normalize(&cold));
+    assert_eq!(
+        normalize(&session.check("jvm.clj", source)),
+        normalize(&original)
+    );
+}
+
+#[test]
 fn ordinary_string_calls_check_arity_only_after_eager_arguments_can_return() {
     let source = r#"(ns demo (:require [clojure.string :as str]))
 (defn dead-call {:t/sig '[:-> string?]} []

@@ -1011,6 +1011,14 @@ impl Checker<'_> {
                         }
                         None => {}
                     }
+                    if self.model.known_java_class(s) {
+                        self.diagnostics.push(Diagnostic::analysis_gap(
+                            "PNX9001",
+                            form.span,
+                            "Type analysis for JVM class values is unavailable",
+                        ));
+                        return Value::new(Type::Unknown);
+                    }
                     let qualified = self.model.function_name(s);
                     let external = qualified.split_once('/').is_some_and(|(namespace, _)| {
                         namespace != self.model.namespace()

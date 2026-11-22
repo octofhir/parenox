@@ -887,6 +887,8 @@ syntax. Dispatch outside the modeled members reports a coverage gap. In
 `(. receiver (method args...) trailing...)`, Clojure/JVM takes arguments
 from the nested method list. Known explicit throws can narrow the set of
 reachable handlers. Ordinary calls may throw.
+Imported classes and recognized implicit classes resolve as class values,
+which report a type analysis coverage gap.
 
 `clojure.string/upper-case`, `lower-case`, and `capitalize` use the
 value's JVM `toString` method. The checker accepts proven non-nil

@@ -1342,6 +1342,12 @@
 (assert (= :macro (.opaque-smoke-member ignored-member-argument)))
 (println "Clojure/JVM interop syntax: 5 assertions passed")
 
+(import '[java.io File])
+(assert (= java.io.File File))
+(assert (= java.lang.String String))
+(assert (= 1 (let [File 1] File)))
+(println "Clojure/JVM class values: 3 assertions passed")
+
 (assert (= \a (. "😀a" (charAt 2))))
 (assert (Character/isHighSurrogate (.charAt "😀" 0)))
 (assert (try (.charAt "😀" 2) false (catch StringIndexOutOfBoundsException _ true)))
