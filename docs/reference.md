@@ -899,6 +899,8 @@ contract in its own scope.
 Direct calls and supported collection operations can use a closure produced
 by a `do` or `let` expression. They evaluate that expression before the
 remaining operands and invoke the closure with its lexical bindings.
+A predicate-controlled choice between two inline closures applies to the
+whole vector transformation, including the evaluation of its collections.
 The same rule applies to a declared callback field in a literal map. With a
 generic contract, each reachable alternative can use inferred input types and
 contribute evidence for the result parameter.

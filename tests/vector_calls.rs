@@ -64,6 +64,37 @@ fn scoped_callback_expressions_use_the_actual_invocation_types() {
 }
 
 #[test]
+fn vector_operations_keep_one_callback_choice_for_the_whole_collection() {
+    let source = r#"(ns vectors (:require [clojure.spec.alpha :as s]))
+        (defn direct
+          {:t/sig '[boolean? :-> (s/or :numbers (s/tuple int? int?)
+                                     :strings (s/tuple string? string?))]} [numeric?]
+          (mapv (if numeric? #(inc %) #(subs % 1))
+                (if numeric? [1 2] ["cat" "dog"])))
+        (defn transduced
+          {:t/sig '[boolean? :-> (s/or :numbers (s/tuple int? int?)
+                                     :strings (s/tuple string? string?))]} [numeric?]
+          (into [] (map (if numeric? #(inc %) #(subs % 1)))
+                (if numeric? [1 2] ["cat" "dog"])))"#;
+    let mut session = Session::default();
+    let path = "vectors.clj";
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replacen("#(subs % 1)", "#(inc %)", 1);
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "%"
+    );
+}
+
+#[test]
 fn into_checks_transducers_with_the_actual_vector_positions() {
     let report = check(
         r#"

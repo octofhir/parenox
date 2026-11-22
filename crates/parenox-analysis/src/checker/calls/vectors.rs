@@ -240,13 +240,31 @@ impl Checker<'_> {
             "clojure.core/keep" => VectorOperation::Keep,
             _ => return None,
         };
+        Some(
+            self.with_callback_choice(callback, env, |checker, selected, scope| {
+                let operation = match operation {
+                    VectorOperation::Filter(_) => VectorOperation::Filter(selected),
+                    operation => operation,
+                };
+                checker.collect_vector_using(selected, source, operation, span, scope)
+            }),
+        )
+    }
 
+    fn collect_vector_using(
+        &mut self,
+        callback: &Form,
+        source: &Form,
+        operation: VectorOperation<'_>,
+        span: Span,
+        env: &Env,
+    ) -> Value {
         let callable = self.prepare_callable(callback, env);
         let input = self.infer_path(source, env, callable.returns(), false);
         let input = match input.known {
             Type::Never => {
                 self.call_prepared(&callable, Vec::new(), span, env, false);
-                return Some(input);
+                return input;
             }
             Type::Nil => literal_vector_value(std::iter::empty(), 0, true),
             _ => input,
@@ -263,16 +281,16 @@ impl Checker<'_> {
         ) {
             self.explain_projected_arguments(start, sources);
             self.dedup_diagnostics(start);
-            return Some(result);
+            return result;
         }
         // A custom reducer can call this callback with different values. An
         // earlier ordinary visit cannot justify precise types for its body.
         self.withhold_callback_facts(&callable, env);
         self.call_prepared(&callable, Vec::new(), span, env, false);
-        Some(self.unchecked_form(
+        self.unchecked_form(
             source.span,
             "into needs a proven ordinary vector or Nil source for this transducer",
-        ))
+        )
     }
 
     pub(super) fn vector_transform(
@@ -298,6 +316,20 @@ impl Checker<'_> {
         }
 
         let callback = &xs[1];
+        self.with_callback_choice(callback, env, |checker, selected, scope| {
+            checker.vector_transform_using(xs, selected, span, scope, name)
+        })
+    }
+
+    fn vector_transform_using(
+        &mut self,
+        xs: &[Form],
+        callback: &Form,
+        span: Span,
+        env: &Env,
+        name: &str,
+    ) -> Value {
+        let filter = name == "clojure.core/filterv";
         let collections = &xs[2..];
         let callable = self.prepare_callable(callback, env);
         let inputs: Vec<_> = self
