@@ -679,7 +679,7 @@ impl<'model> Checker<'model> {
                 form: test,
                 first_truth,
             },
-            [[first], [other]],
+            [first, other],
         ) = (arms.test, arms.branches)
         else {
             return None;
@@ -687,12 +687,18 @@ impl<'model> Checker<'model> {
         let start = self.diagnostics.len();
         // Choose the callable before evaluating later arguments and
         // keep that choice throughout the operation.
+        let omitted = Form {
+            kind: Kind::Nil,
+            span: callback.span,
+        };
         let [left, right] = self.check_if_paths(test, env, first_truth, |checker, scope, truth| {
-            check(
-                checker,
-                if truth == first_truth { first } else { other },
-                scope,
-            )
+            let branch = if truth == first_truth { first } else { other };
+            let (selected, prefix) = branch.split_last().unwrap_or((&omitted, &[]));
+            if prefix.is_empty() {
+                return check(checker, selected, scope);
+            }
+            let reachable = checker.body_prefix_returns(prefix, scope, checker.path_reachable);
+            checker.check_path(reachable, |checker| check(checker, selected, scope))
         });
         self.dedup_diagnostics(start);
         Some(left.join(right))

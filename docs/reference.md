@@ -901,6 +901,8 @@ by a `do` or `let` expression. They evaluate that expression before the
 remaining operands and invoke the closure with its lexical bindings.
 A predicate-controlled choice between two callback expressions applies to
 the whole vector transformation, including the evaluation of its collections.
+Earlier forms in the selected branch evaluate before the callback and an
+omitted alternative supplies `nil`.
 `apply` also resolves a predicate-controlled target before checking its
 fixed arguments and spread. A direct call whose operator is a conditional
 checks written arguments against the selected function in each branch.

@@ -121,6 +121,44 @@ fn an_ordinary_callback_choice_is_evaluated_before_the_collection() {
 }
 
 #[test]
+fn optional_callbacks_follow_their_branch_and_evaluate_the_prefix_first() {
+    let source = r#"(ns vectors (:require [clojure.spec.alpha :as s]))
+        (defn enabled
+          {:t/sig '[boolean? :-> (s/coll-of int? :kind vector?)]} [ready?]
+          (mapv (when ready? (inc 0) #(inc %))
+                (if ready? [1] [])))
+        (defn enabled-unless
+          {:t/sig '[boolean? :-> (s/coll-of int? :kind vector?)]} [skip?]
+          (mapv (when-not skip? (inc 0) inc)
+                (if skip? [] [1])))
+        (defn omitted
+          {:t/sig '[boolean? :-> (s/coll-of int? :kind vector?)]} [ready?]
+          (mapv (if ready? inc) (if ready? [1] [])))
+        (defn order {:t/sig '[boolean? :-> #{:callback :input}]} [ready?]
+          (try
+            (mapv (when ready?
+                    (throw (ex-info "callback" {:site :callback}))
+                    (fn [element] element))
+                  (throw (ex-info "input" {:site :input})))
+            (catch clojure.lang.ExceptionInfo error (:site (ex-data error)))))"#;
+    let path = "vectors.clj";
+    let mut session = Session::default();
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replace("(fn [element] element)", "(fn [element] missing)");
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2304");
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "missing"
+    );
+}
+
+#[test]
 fn into_checks_transducers_with_the_actual_vector_positions() {
     let report = check(
         r#"
