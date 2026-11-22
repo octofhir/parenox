@@ -534,6 +534,15 @@
                 (catch NullPointerException _ :throws))))
 (println "Clojure/JVM indexed reads: 12 assertions passed")
 
+(let [scope (create-ns 'parenox.smoke.partial-bounds)]
+  (binding [*ns* scope]
+    (clojure.core/refer 'clojure.core :rename '{nth at subvec slice})
+    (doseq [form '[(at [1] 2) (let [_ "length"] (at [1] 2))
+                   (slice [1] 2) (let [_ "subs"] (slice [1] 2))]]
+      (assert (try (eval form) false (catch IndexOutOfBoundsException _ true))))
+    (assert (= 2 (eval '(let [at (fn [values index] index)] (at [1] 2)))))))
+(println "Clojure/JVM resolved bounds operations: 5 assertions passed")
+
 (load-file "tests/fixtures/index-key-classes.clj")
 (load-file "tests/fixtures/numeric-map-key-classes.clj")
 

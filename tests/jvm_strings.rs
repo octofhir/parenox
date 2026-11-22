@@ -925,19 +925,19 @@ fn unannotated_line_slice_checks_the_first_invalid_bound() {
             .diagnostics
             .iter()
             .filter(|finding| finding.severity == "error")
-            .collect();
-        match (errors.as_slice(), expected) {
-            ([], None) => {}
-            ([finding], Some((origin, fragment))) => {
+            .map(|finding| {
                 assert_eq!(finding.code, "PNX2801");
-                assert_eq!(finding.contract.as_ref().unwrap().name, origin);
-                assert_eq!(
+                (
+                    finding.contract.as_ref().unwrap().name.as_str(),
                     &text[finding.span.start.offset..finding.span.end.offset],
-                    fragment
-                );
-            }
-            _ => panic!("{report:#?}"),
-        }
+                )
+            })
+            .collect();
+        let expected: Vec<_> = expected
+            .into_iter()
+            .chain([("clojure.core/nth", "3")])
+            .collect();
+        assert_eq!(errors, expected, "{report:#?}");
     }
 }
 

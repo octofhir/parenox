@@ -3,6 +3,7 @@ use super::contracts::function_parts;
 use super::declarations::symbols_match;
 use super::externs::ExternalDeclaration;
 use super::{Declarations, DeclaredValue, Globals, Model};
+use crate::checker::calls::is_modeled_string_member;
 use crate::checker::{
     Checker, Env, Value,
     function_forms::{Clause, function_clauses},
@@ -23,7 +24,7 @@ const STRING_OPERATORS: &[&str] = &[
     "replace",
     "split",
 ];
-const STRING_MEMBERS: &[&str] = &["charAt", "length", "startsWith", "endsWith", "indexOf"];
+const INDEX_OPERATORS: &[&str] = &["nth", "subvec"];
 
 impl Declarations {
     pub(crate) fn check_untyped_calls(
@@ -33,11 +34,9 @@ impl Declarations {
         globals: &Globals,
         source: &str,
     ) -> Vec<Diagnostic> {
-        let string_namespace = self
-            .dependencies
-            .iter()
-            .any(|name| name == "clojure.string");
-        let jvm_string = STRING_MEMBERS.iter().any(|member| source.contains(member));
+        if !self.all_refers.is_empty() || !uses_standard_partial_calls(globals) {
+            return Vec::new();
+        }
         let extern_calls = globals.externs.as_ref().is_some_and(|externs| {
             std::iter::once(model.namespace())
                 .chain(model.names.required_libraries.iter().map(String::as_str))
@@ -56,58 +55,32 @@ impl Declarations {
                     })
                 })
         });
-        if (!extern_calls && !string_namespace && !source.contains("subs") && !jvm_string)
-            || !self.all_refers.is_empty()
-            || !uses_standard_partial_calls(globals)
-        {
-            return Vec::new();
-        }
-        let methods = self.static_method_scope;
-        let mut definitions = self.unchecked_definitions(forms, model).peekable();
+        let mut definitions = self
+            .unchecked_definitions(forms, model)
+            .filter(|form| model.partial_check_candidate(form, globals, false, extern_calls))
+            .peekable();
+        let mut methods = self
+            .method_forms
+            .iter()
+            .filter(|_| self.static_method_scope)
+            .map(|&index| &forms[index])
+            .filter(|form| model.partial_check_candidate(form, globals, true, false))
+            .peekable();
         let functions = definitions.peek().is_some() && self.has_known_var_surface(forms);
-        if !methods && !functions {
+        if !functions && methods.peek().is_none() {
             return Vec::new();
         }
-        let shadowed = if methods {
+        let shadowed = if self.static_method_scope {
             self.partial_shadowed(forms)
         } else {
             self.top_level_names(forms)
         };
         let definitions = definitions.filter(|_| functions);
-        let methods = self
-            .method_forms
-            .iter()
-            .filter(|_| methods)
-            .map(|&index| &forms[index]);
-        let operators: Vec<_> = STRING_OPERATORS
-            .iter()
-            .copied()
-            .filter(|_| string_namespace)
-            .chain(STRING_MEMBERS.iter().copied().filter(|_| jvm_string))
-            .chain(["subs"])
-            .chain(model.names.refers.iter().filter_map(|(local, target)| {
-                partial_string_operator(target).then_some(local.as_str())
-            }))
-            .collect();
         let mut diagnostics = Vec::new();
         for (form, method) in definitions
             .map(|form| (form, false))
             .chain(methods.map(|form| (form, true)))
         {
-            let text = &source[form.span.start.offset..form.span.end.offset];
-            let has_string_call = operators.iter().any(|&operator| text.contains(operator));
-            let has_extern_call = extern_calls
-                && !method
-                && !has_string_call
-                && !symbols_match(form, &mut |name| {
-                    !matches!(model.declared_value(name, globals, form.span.start.offset),
-                        Some(DeclaredValue::Function(contract))
-                            if contract.origin.kind == ContractKind::Extern
-                                && model.partial_extern_available(globals, &contract.origin, false))
-                });
-            if !has_string_call && !has_extern_call {
-                continue;
-            }
             let Some(clauses) = untyped_clauses(form, method) else {
                 continue;
             };
@@ -128,10 +101,10 @@ impl Declarations {
                         && partial_string_operator(&origin.name))
                         || (diagnostic.code == "PNX2801"
                             && origin.kind == ContractKind::Builtin
-                            && matches!(
-                                origin.name.as_str(),
-                                "clojure.core/nth" | "clojure.core/subvec"
-                            ))
+                            && origin
+                                .name
+                                .strip_prefix("clojure.core/")
+                                .is_some_and(|name| INDEX_OPERATORS.contains(&name)))
                         || (diagnostic.code == "PNX2322"
                             && origin.kind == ContractKind::Extern
                             && model.partial_extern_available(globals, origin, false))
@@ -167,6 +140,34 @@ pub(super) fn untyped_clauses(form: &Form, method: bool) -> Option<BTreeMap<Arit
 }
 
 impl Model {
+    fn partial_check_candidate(
+        &self,
+        form: &Form,
+        globals: &Globals,
+        method: bool,
+        extern_calls: bool,
+    ) -> bool {
+        // This pass selects bodies to check. The checker still resolves
+        // lexical bindings and proves the operand types within each body.
+        !symbols_match(form, &mut |name| {
+            let (namespace, local) = self.names.resolve_parts(name);
+            let builtin = if method {
+                namespace == "clojure.string" && STRING_OPERATORS.contains(&local)
+            } else {
+                partial_string_operator_parts(namespace, local)
+                    || (namespace == "clojure.core" && INDEX_OPERATORS.contains(&local))
+                    // Bare member names can occur in an explicit dot form.
+                    || is_modeled_string_member(name.strip_prefix('.').unwrap_or(name))
+            };
+            !builtin
+                && !(extern_calls
+                    && matches!(self.declared_value(name, globals, form.span.start.offset),
+                        Some(DeclaredValue::Function(contract))
+                            if contract.origin.kind == ContractKind::Extern
+                                && self.partial_extern_available(globals, &contract.origin, false)))
+        })
+    }
+
     fn partial_extern_available(
         &self,
         globals: &Globals,
@@ -254,55 +255,45 @@ impl Checker<'_> {
         }
         if matches!(name, "if" | "do" | "quote" | "throw" | "let*" | "fn*")
             || (!self.partial_method_body
-                && (name == "."
-                    || name
-                        .strip_prefix('.')
-                        .is_some_and(|member| STRING_MEMBERS.contains(&member))))
+                && (name == "." || name.strip_prefix('.').is_some_and(is_modeled_string_member)))
         {
             return true;
         }
         if env.contains_key(name) {
             return !self.partial_method_body;
         }
-        let resolved = self.model.resolve(name);
-        let modeled = partial_string_operator(&resolved)
-            || (matches!(
-                resolved.as_str(),
-                "clojure.core/mapv"
-                    | "clojure.core/count"
-                    | "clojure.core/first"
-                    | "clojure.core/nth"
-                    | "clojure.core/subvec"
-                    | "clojure.core/inc"
-                    | "clojure.core/dec"
-                    | "clojure.core/min"
-                    | "clojure.core/max"
-            ) && self.model.can_use_standard_core(name, self.globals))
-            || matches!(
-                resolved.strip_prefix("clojure.core/"),
-                Some(
-                    "let"
-                        | "if-not"
-                        | "when"
-                        | "when-not"
-                        | "or"
-                        | "and"
-                        | "get"
-                        | "get-in"
-                        | "contains?"
-                        | "identity"
-                        | "nil?"
-                        | "some?"
-                        | "="
-                        | "str"
-                        | "long"
-                        | "re-pattern"
-                        | "re-find"
-                        | "re-matches"
-                        | "some->"
-                        | "some->>"
-                )
-            );
+        let (namespace, local) = self.model.names.resolve_parts(name);
+        let modeled = partial_string_operator_parts(namespace, local)
+            || (namespace == "clojure.core"
+                && ((self.model.can_use_standard_core(name, self.globals)
+                    && (INDEX_OPERATORS.contains(&local)
+                        || matches!(
+                            local,
+                            "mapv" | "count" | "first" | "inc" | "dec" | "min" | "max"
+                        )))
+                    || matches!(
+                        local,
+                        "let"
+                            | "if-not"
+                            | "when"
+                            | "when-not"
+                            | "or"
+                            | "and"
+                            | "get"
+                            | "get-in"
+                            | "contains?"
+                            | "identity"
+                            | "nil?"
+                            | "some?"
+                            | "="
+                            | "str"
+                            | "long"
+                            | "re-pattern"
+                            | "re-find"
+                            | "re-matches"
+                            | "some->"
+                            | "some->>"
+                    )));
         if modeled && !shadowed.contains(name) {
             return true;
         }
@@ -323,11 +314,15 @@ impl Checker<'_> {
 }
 
 fn partial_string_operator(name: &str) -> bool {
-    name == "clojure.core/subs"
-        || name
-            .strip_prefix("clojure.string/")
-            .is_some_and(|operator| STRING_OPERATORS.contains(&operator))
-        || name
-            .strip_prefix("java.lang.String/")
-            .is_some_and(|method| STRING_MEMBERS.contains(&method))
+    name.split_once('/')
+        .is_some_and(|(namespace, local)| partial_string_operator_parts(namespace, local))
+}
+
+fn partial_string_operator_parts(namespace: &str, local: &str) -> bool {
+    match namespace {
+        "clojure.core" => local == "subs",
+        "clojure.string" => STRING_OPERATORS.contains(&local),
+        "java.lang.String" => is_modeled_string_member(local),
+        _ => false,
+    }
 }

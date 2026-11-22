@@ -29,6 +29,43 @@ fn checks_saved_indices_and_diagnoses_out_of_bounds_at_the_index() {
 }
 
 #[test]
+fn checks_bounds_from_resolved_operations_in_unannotated_bodies() {
+    let source = r#"(ns demo (:refer-clojure :rename {nth at subvec slice}))
+(defn index [] (at [1] 2))
+(defn index-with-text [] (let [_ "length"] (at [1] 2)))
+(defn range [] (slice [1] 2))
+(defn range-with-text [] (let [_ "subs"] (slice [1] 2)))
+(defn shadowed [] (let [at (fn [values index] index)] (at [1] 2)))"#;
+    let findings = |report: &Report, source: &str| {
+        report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == "error")
+            .map(|d| {
+                assert_eq!(d.code, "PNX2801", "{report:#?}");
+                assert_eq!(&source[d.span.start.offset..d.span.end.offset], "2");
+                d.span.start.line
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut session = Session::default();
+    let original = session.check("indexed.clj", source);
+    assert!(!original.complete);
+    assert_eq!(findings(&original, source), [2, 3, 4, 5], "{original:#?}");
+
+    let edited = source.replacen("(at [1] 2)", "(at [1] 0)", 1);
+    let warm = session.check("indexed.clj", &edited);
+    let cold = Session::default().check("indexed.clj", &edited);
+    let normalize = |report: &Report| serde_json::to_value(&report.diagnostics).unwrap();
+    assert_eq!(findings(&warm, &edited), [3, 4, 5], "{warm:#?}");
+    assert_eq!(normalize(&warm), normalize(&cold));
+    assert_eq!(
+        normalize(&session.check("indexed.clj", source)),
+        normalize(&original),
+    );
+}
+
+#[test]
 fn read_fallbacks_distinguish_missing_from_present_nil() {
     for (expression, result) in [
         ("(nth nil 8)", "nil?"),

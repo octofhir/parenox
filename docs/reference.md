@@ -717,6 +717,8 @@ exact integer fits in a signed long. A vector rejects boxed `Byte` and
 in `get` and `find` and an `IllegalArgumentException` in vector invocation.
 String lookup and `nth` accept these two classes.
 [JVM fixture](../tests/fixtures/index-key-classes.clj)
+In unannotated functions, resolved `nth` and `subvec` calls can report a
+proven bounds error even when the function lacks a checked signature.
 On a known string, `get`, `nth` and `String.charAt` preserve an exact
 character at a known UTF-16 position. A surrogate code unit has type
 `Character`.

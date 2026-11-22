@@ -51,6 +51,10 @@ impl StringMethod {
     }
 }
 
+pub(in crate::checker) fn is_modeled_string_member(name: &str) -> bool {
+    StringMethod::parse(name).is_some()
+}
+
 impl Checker<'_> {
     pub(super) fn jvm_call(
         &mut self,
