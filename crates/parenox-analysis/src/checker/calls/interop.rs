@@ -1,5 +1,7 @@
 //! Narrow contracts for instance methods on a known JVM String receiver.
 use super::{Checker, Env, Form, Span, Type, Value, call_returns};
+use crate::checker::model::{DeclaredValue, Model};
+use crate::core_names::CoreBinding;
 use crate::reader::Kind;
 use crate::types::{Compatibility, IndexedItem};
 
@@ -50,7 +52,95 @@ impl StringMethod {
 }
 
 impl Checker<'_> {
-    pub(super) fn jvm_string_call(
+    pub(super) fn jvm_call(
+        &mut self,
+        head: &str,
+        operator: Span,
+        forms: &[Form],
+        span: Span,
+        env: &Env,
+    ) -> Option<Value> {
+        if head != "." && !env.contains_key(head) {
+            let declared = self
+                .model
+                .declared_value(head, self.globals, operator.start.offset);
+            if matches!(
+                declared,
+                Some(
+                    DeclaredValue::Macro(_)
+                        | DeclaredValue::OpaqueMacro
+                        | DeclaredValue::PrivateMacro
+                )
+            ) || (declared.is_none()
+                && self
+                    .model
+                    .standard_core_binding(head, &self.model.resolve(head), self.globals)
+                    == Some(CoreBinding::Macro))
+            {
+                return None;
+            }
+        }
+        if let Some(value) = self.jvm_string_call(head, forms, span, env) {
+            return Some(value);
+        }
+        let (receiver, args) = if head == "." {
+            let Some((receiver, _, args)) = dot_form(forms) else {
+                self.error(
+                    "PNX1001",
+                    span,
+                    "A JVM member form requires a receiver and member name",
+                );
+                return Some(Value::new(Type::Unknown));
+            };
+            (Some(receiver), args)
+        } else if head.starts_with('.') {
+            let Some((receiver, args)) = forms.split_first() else {
+                self.error("PNX1001", span, format!("{head} requires a receiver"));
+                return Some(Value::new(Type::Unknown));
+            };
+            (Some(receiver), args)
+        } else {
+            (None, forms)
+        };
+        Some(self.unmodeled_jvm_call(receiver, args, span, env))
+    }
+
+    pub(super) fn jvm_new_form(&mut self, forms: &[Form], span: Span, env: &Env) -> Value {
+        let Some((_, args)) = forms
+            .split_first()
+            .filter(|(class, _)| class.symbol().is_some())
+        else {
+            self.error("PNX1001", span, "new requires a JVM class name");
+            return Value::new(Type::Unknown);
+        };
+        self.unmodeled_jvm_call(None, args, span, env)
+    }
+
+    fn unmodeled_jvm_call(
+        &mut self,
+        receiver: Option<&Form>,
+        forms: &[Form],
+        span: Span,
+        env: &Env,
+    ) -> Value {
+        let receiver_returns = receiver.is_none_or(|receiver| {
+            let class_syntax = receiver.symbol().is_some_and(|name| {
+                !env.contains_key(name)
+                    && (self.model.known_java_class(name)
+                        || (name.contains('.') && Model::possible_java_class(name)))
+            });
+            class_syntax || !self.infer(receiver, env).stops_evaluation()
+        });
+        let operands_return = self
+            .eval_args(forms, env, receiver_returns)
+            .last()
+            .is_none_or(|(value, _)| !value.stops_evaluation());
+        self.check_path(receiver_returns && operands_return, |checker| {
+            checker.unchecked_form(span, "JVM call is outside the supported member set")
+        })
+    }
+
+    fn jvm_string_call(
         &mut self,
         head: &str,
         args: &[Form],
@@ -235,7 +325,8 @@ fn dot_form(args: &[Form]) -> Option<(&Form, &str, &[Form])> {
         return None;
     };
     match &member.without_metadata().kind {
-        Kind::List(xs) if tail.is_empty() => {
+        Kind::List(xs) => {
+            // The nested method list owns its arguments in JVM dot forms.
             let (head, args) = xs.split_first()?;
             Some((receiver, head.symbol()?, args))
         }

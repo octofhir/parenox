@@ -327,19 +327,10 @@ impl<'model> Checker<'model> {
             }
             Some("throw") => return self.throw_form(&xs[1..], span, env),
             Some("try") => return self.try_form(&xs[1..], env, tail),
+            Some("new") => return self.jvm_new_form(&xs[1..], span, env),
             Some(name) if !name.contains('/') && (name.starts_with('.') || name.ends_with('.')) => {
-                if let Some(value) = self.jvm_string_call(name, &xs[1..], span, env) {
+                if let Some(value) = self.jvm_call(name, xs[0].span, &xs[1..], span, env) {
                     return value;
-                }
-                if env.inline_function(name).is_some() {
-                    if name != "." {
-                        let args: Vec<_> = self.eval_args(&xs[1..], env, true).collect();
-                        if !call_returns(&args) {
-                            return Value::new(Type::Never);
-                        }
-                    }
-                    return self
-                        .unchecked_form(span, "JVM call is outside the supported member set");
                 }
             }
             _ => {}

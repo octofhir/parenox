@@ -882,9 +882,11 @@ An unproved guard reports `PNX9008` and doesn't narrow callers. See
 On known String receivers, checked JVM calls include `length`, `charAt`,
 `startsWith(String)`, `endsWith(String)`, and `indexOf(String)`.
 Offsets count UTF-16 code units. A String hint identifies the class but
-does not rule out nil. General interop and other overloads remain outside
-the supported subset. Known explicit throws can narrow the set of reachable
-handlers; ordinary calls may throw.
+does not rule out nil. The checker recognizes JVM member and constructor
+syntax. Dispatch outside the modeled members reports a coverage gap. In
+`(. receiver (method args...) trailing...)`, Clojure/JVM takes arguments
+from the nested method list. Known explicit throws can narrow the set of
+reachable handlers. Ordinary calls may throw.
 
 `clojure.string/upper-case`, `lower-case`, and `capitalize` use the
 value's JVM `toString` method. The checker accepts proven non-nil

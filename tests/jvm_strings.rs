@@ -3,6 +3,74 @@ use parenox::{DocumentHover, Session, Source};
 const SOURCE: &str = include_str!("../examples/jvm_strings.cljc");
 
 #[test]
+fn unmodeled_jvm_forms_keep_their_syntax_and_eager_operand_resolution() {
+    let source = r#"(ns demo)
+(defn member {:t/sig '[t/any :-> t/any]} [file] (.getName file))
+(defn nested {:t/sig '[t/any :-> t/any]} [file] (. file (getName) ignored))
+(defn constructor {:t/sig '[:-> t/any]} [] (java.io.File. "document.txt"))
+(defn new-form {:t/sig '[:-> t/any]} [] (new java.io.File unknown-file))
+(defn static-field {:t/sig '[:-> t/any]} [] (. java.io.File separator))
+(defn malformed {:t/sig '[:-> t/any]} [] (.getName))
+(defn malformed-new {:t/sig '[:-> t/any]} [] (new "java.io.File"))
+(defn nested-length {:t/sig '[:-> #{:match}]} []
+  (if (= 4 (. "text" (length) ignored)) :match nil))
+"#;
+    let report = Session::default().check("jvm.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &source[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX9001", "(.getName file)"),
+            ("PNX9001", "(. file (getName) ignored)"),
+            ("PNX9001", "(java.io.File. \"document.txt\")"),
+            ("PNX9001", "(new java.io.File unknown-file)"),
+            ("PNX2304", "unknown-file"),
+            ("PNX9001", "(. java.io.File separator)"),
+            ("PNX1001", "(.getName)"),
+            ("PNX1001", "(new \"java.io.File\")"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn a_resolved_macro_takes_precedence_over_dotted_member_syntax() {
+    let source = r#"(ns demo)
+(defmacro .length [_] :from-macro)
+(defn explicit {:t/sig '[:-> t/any]} [] (.length ignored))
+(defn stock {:t/sig '[t/any :-> t/any]} [file] (.. file getName))
+"#;
+    let report = Session::default().check("macros.clj", source);
+    let [declaration, custom, stock] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(declaration.code, "PNX9001");
+    for (finding, operator, name) in [
+        (custom, ".length", ".length"),
+        (stock, "..", "clojure.core/.."),
+    ] {
+        assert_eq!(finding.code, "PNX9001");
+        assert_eq!(
+            finding.message,
+            format!("Macro {name} has no checked scope")
+        );
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            operator
+        );
+    }
+}
+
+#[test]
 fn ordinary_string_calls_check_arity_only_after_eager_arguments_can_return() {
     let source = r#"(ns demo (:require [clojure.string :as str]))
 (defn dead-call {:t/sig '[:-> string?]} []

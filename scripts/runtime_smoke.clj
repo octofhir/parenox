@@ -1329,6 +1329,19 @@
                     (ex-message (ex-cause e)))))))
 (println "Clojure/JVM compiler checks in stored closures: 8 assertions passed")
 
+(let [file (new java.io.File "document.txt")]
+  (assert (= "document.txt" (.getName file) (. file getName) (.. file getName))))
+(assert (= "document.txt"
+           (eval '(. (java.io.File. "document.txt") (getName) ignored-member-tail))))
+(assert (= 4 (eval '(. "text" (length) ignored-member-tail))))
+(assert (try (eval '(fn [] (.getName)))
+             false
+             (catch clojure.lang.Compiler$CompilerException e
+               (clojure.string/includes? (ex-message (ex-cause e)) "Malformed member expression"))))
+(defmacro .opaque-smoke-member [_] :macro)
+(assert (= :macro (.opaque-smoke-member ignored-member-argument)))
+(println "Clojure/JVM interop syntax: 5 assertions passed")
+
 (assert (= \a (. "😀a" (charAt 2))))
 (assert (Character/isHighSurrogate (.charAt "😀" 0)))
 (assert (try (.charAt "😀" 2) false (catch StringIndexOutOfBoundsException _ true)))
