@@ -855,7 +855,8 @@ With a fixed or generic callback contract, a function literal evaluates its
 metadata at the argument position. Inline callees, prepared callbacks and
 `let` initializers follow the same evaluation order. Contextual inference
 runs after the eager operands can return. Compiler checks still cover the
-closure when the call is unreachable.
+closure on unreachable paths. They resolve names and check syntax inside
+ordinary `fn`, `fn*`, and `#()` literals there.
 Sequential bodies apply the same rule to later forms and to function
 postconditions. A proven failure in `finally` also prevents a normal result
 from the enclosing `try`.

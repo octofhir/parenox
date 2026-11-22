@@ -158,11 +158,11 @@ fn a_computed_parent_key_supplies_context_only_when_it_reaches_the_declared_fiel
 
     let failed_key = source.replace("(if true :stage :other)", "(subs nil 0)");
     let report = check(&failed_key);
-    let mut runtime_findings = report.diagnostics.iter().filter(|d| d.code == "PNX2322");
-    let finding = runtime_findings
-        .next()
-        .unwrap_or_else(|| panic!("{report:#?}"));
-    assert!(runtime_findings.next().is_none(), "{report:#?}");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
     assert_eq!(
         &failed_key[finding.span.start.offset..finding.span.end.offset],
         "nil"

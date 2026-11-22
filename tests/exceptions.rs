@@ -132,3 +132,44 @@ fn a_known_function_reports_wrong_arity_only_when_invoked() {
         "(typed)"
     );
 }
+
+#[test]
+fn unreached_function_literals_keep_their_lexical_compiler_checks() {
+    for expression in [
+        "(do (throw nil) {:run (fn again [x] (again x))})",
+        "(do (throw nil) {:run #(reduce)})",
+        "(do (throw nil) {:run #(inc %)})",
+        "(do (throw nil) {:run (fn* [x] x)})",
+        "(do (throw nil) (reduce))",
+    ] {
+        let report = check(expression, "nil?");
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+
+    let declared = Session::default().check(
+        "closures.clj",
+        "(defn- helper [] :ok) (defn f {:t/sig '[:-> nil?]} []
+           (do (throw nil) (apply helper [])))",
+    );
+    assert!(declared.ok && declared.complete, "{declared:#?}");
+
+    for (literal, operand, code) in [
+        ("(fn [x] (missing x))", "missing", "PNX2304"),
+        ("#(missing %)", "missing", "PNX2304"),
+        ("(fn* [x] (missing x))", "missing", "PNX2304"),
+        ("(fn [] (count))", "(count)", "PNX2554"),
+        ("(fn [] (reduce missing))", "missing", "PNX2304"),
+    ] {
+        let source =
+            format!("(defn f {{:t/sig '[:-> nil?]}} [] (do (throw nil) {{:run {literal}}}))");
+        let report = Session::default().check("closures.clj", &source);
+        let [diagnostic] = report.diagnostics.as_slice() else {
+            panic!("{literal}: {report:#?}");
+        };
+        assert_eq!(diagnostic.code, code);
+        assert_eq!(
+            &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+            operand
+        );
+    }
+}

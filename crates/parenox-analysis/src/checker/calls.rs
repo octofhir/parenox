@@ -545,6 +545,9 @@ impl<'model> Checker<'model> {
     }
 
     pub(super) fn unchecked_core_function(&mut self, resolved: &str, span: Span) -> Value {
+        if !self.path_reachable {
+            return Value::new(Type::Never);
+        }
         self.unchecked_form(
             span,
             &format!("Type analysis for {resolved} is unavailable"),

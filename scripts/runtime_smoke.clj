@@ -1293,6 +1293,22 @@
     (assert (try (skipped) false (catch NullPointerException _ true)))))
 (println "Clojure/JVM map lookup arity: 8 assertions passed")
 
+(let [run (eval '(fn []
+                   (do (throw nil)
+                       {:named (fn again [x] (again x))
+                        :shorthand #(reduce)
+                        :raw (fn* [x] x)})))]
+  (assert (try (run) false (catch NullPointerException _ true))))
+(doseq [literal '[(fn [x] (no-such-closure-target x))
+                  #(no-such-closure-target %)
+                  (fn* [x] (no-such-closure-target x))]]
+  (assert (try (eval (list 'fn [] (list 'do '(throw nil) literal)))
+               false
+               (catch clojure.lang.Compiler$CompilerException e
+                 (= "Unable to resolve symbol: no-such-closure-target in this context"
+                    (ex-message (ex-cause e)))))))
+(println "Clojure/JVM compiler checks in unreachable closures: 4 assertions passed")
+
 (assert (= \a (. "😀a" (charAt 2))))
 (assert (Character/isHighSurrogate (.charAt "😀" 0)))
 (assert (try (.charAt "😀" 2) false (catch StringIndexOutOfBoundsException _ true)))

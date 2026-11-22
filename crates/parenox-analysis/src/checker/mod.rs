@@ -939,7 +939,7 @@ impl Checker<'_> {
             Kind::Symbol(s) | Kind::AnonymousArgument(s) => {
                 self.observe_completion(form.span, env);
                 if let Some(value) = env.get(s) {
-                    if let Some(function) = env.inline_function(s) {
+                    if self.path_reachable && let Some(function) = env.inline_function(s) {
                         self.withhold_captured_facts(Some(function));
                         self.diagnostics.push(Diagnostic::analysis_gap(
                             "PNX9001", form.span,
@@ -953,6 +953,9 @@ impl Checker<'_> {
                 } else if s.contains('.') && let Some(value) = self.dotted_function_class_use(s, form.span, false) {
                     value
                 } else if self.model.local_function_at(s, form.span.start.offset).is_some_and(Function::inferred) {
+                    if !self.path_reachable {
+                        return Value::new(Type::Never);
+                    }
                     self.error(
                         "PNX9002",
                         form.span,
@@ -1038,13 +1041,7 @@ impl Checker<'_> {
                 ..Value::new(Type::empty_list())
             },
             Kind::List(xs) => self.list(xs, form.span, env, tail),
-            Kind::AnonymousFunction(_) => {
-                self.withhold_captured_facts(env.inline_functions());
-                self.unsupported(
-                    form.span,
-                    "#() is currently supported in direct calls and inline callbacks",
-                )
-            }
+            Kind::AnonymousFunction(function) => self.anonymous_fn_value(function, form.span, env),
             Kind::Quote(inner) => self.quoted_data(inner),
             Kind::SyntaxQuote(_) | Kind::Unquote { .. } => {
                 self.withhold_literals_after_opaque_form();

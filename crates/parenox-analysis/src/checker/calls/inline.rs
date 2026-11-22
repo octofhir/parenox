@@ -363,26 +363,15 @@ impl<'model> Checker<'model> {
     }
 
     pub(super) fn fn_star_value(&mut self, parts: &[Form], span: Span, env: &Env) -> Value {
-        self.withhold_captured_facts(env.inline_functions());
-        let function = InlineFunction::Function { parts, raw: true };
-        let mut scope = env.clone();
-        if let Some(name) = function.name() {
-            scope.insert(name.into(), Value::new(Type::Unknown));
+        if self.path_reachable {
+            self.withhold_captured_facts(env.inline_functions());
         }
+        let function = InlineFunction::Function { parts, raw: true };
         let start = self.diagnostics.len();
-        self.inspect_path(false, |checker| {
-            checker.check_inline(
-                function,
-                Vec::new(),
-                &scope,
-                InlineSite {
-                    constructor: span,
-                    call: span,
-                    invoked: false,
-                    callback: None,
-                },
-            )
-        });
+        let value = self.check_uninvoked_literal(function, span, env);
+        if !self.path_reachable {
+            return value;
+        }
         if self.diagnostics.len() != start {
             return Value::new(Type::Unknown);
         }
@@ -390,6 +379,56 @@ impl<'model> Checker<'model> {
             span,
             "fn* is currently supported in direct calls and inline callbacks",
         )
+    }
+
+    pub(super) fn unreached_fn_value(&mut self, parts: &[Form], span: Span, env: &Env) -> Value {
+        self.check_uninvoked_literal(InlineFunction::Function { parts, raw: false }, span, env)
+    }
+
+    pub(in crate::checker) fn anonymous_fn_value(
+        &mut self,
+        function: &AnonymousFunction,
+        span: Span,
+        env: &Env,
+    ) -> Value {
+        if !self.path_reachable {
+            return self.check_uninvoked_literal(InlineFunction::Literal(function), span, env);
+        }
+        self.withhold_captured_facts(env.inline_functions());
+        self.unsupported(
+            span,
+            "#() is currently supported in direct calls and inline callbacks",
+        )
+    }
+
+    fn check_uninvoked_literal(
+        &mut self,
+        function: InlineFunction<'_>,
+        span: Span,
+        env: &Env,
+    ) -> Value {
+        if self.callback_depth >= MAX_CALLBACK_DEPTH {
+            self.type_query = None;
+            return self.unchecked_form(span, "Local fn nesting limit exceeded");
+        }
+        let named = function.name().map(|name| {
+            let mut scope = env.clone();
+            scope.insert(name.into(), Value::new(Type::Unknown));
+            scope
+        });
+        self.callback_depth += 1;
+        let value = self.inspect_path(false, |checker| {
+            checker.call_inline(
+                function,
+                Vec::new(),
+                span,
+                span,
+                named.as_ref().unwrap_or(env),
+                false,
+            )
+        });
+        self.callback_depth -= 1;
+        value
     }
 
     fn inline_syntax<'form>(&self, form: &'form Form, env: &Env) -> Option<InlineSyntax<'form>> {
@@ -912,6 +951,8 @@ impl<'model> Checker<'model> {
         }
         let context = if site.callback.is_some() {
             "callback passed"
+        } else if site.constructor == site.call && !site.invoked {
+            "fn literal"
         } else {
             "fn called"
         };

@@ -81,6 +81,29 @@ impl CoreForm {
             _ => return Threading::from_core_symbol(name).map(Self::Thread),
         })
     }
+
+    fn ordinary_call(&self) -> bool {
+        matches!(
+            self,
+            Self::Lookup
+                | Self::Contains
+                | Self::GetIn
+                | Self::Assoc
+                | Self::AssocIn
+                | Self::Fnil
+                | Self::Update
+                | Self::MapTransform
+                | Self::GroupBy
+                | Self::MergeWith
+                | Self::Apply
+                | Self::Reduce
+                | Self::ReduceKv
+                | Self::PredicateSearch(_)
+                | Self::VectorTransform
+                | Self::RegexMatch
+                | Self::Substring
+        )
+    }
 }
 
 impl Checker<'_> {
@@ -93,6 +116,16 @@ impl Checker<'_> {
         env: &Env,
         tail: bool,
     ) -> Value {
+        if !self.path_reachable
+            && form.ordinary_call()
+            && xs[0]
+                .symbol()
+                .is_some_and(|operator| self.model.can_use_standard_core(operator, self.globals))
+        {
+            // These standard calls have no arity checks before operand compilation.
+            self.eval_args(&xs[1..], env, false).for_each(drop);
+            return Value::new(Type::Never);
+        }
         match form {
             CoreForm::Thread(threading) => self.thread_form(xs, span, env, threading, name, tail),
             CoreForm::NamedThread => self.named_thread(xs, span, env, tail),
@@ -120,6 +153,14 @@ impl Checker<'_> {
             CoreForm::GetIn => self.get_in(xs, span, env),
             CoreForm::Assoc => self.assoc(xs, span, env),
             CoreForm::AssocIn => self.assoc_in(xs, span, env),
+            CoreForm::Fn
+                if !self.path_reachable
+                    && self
+                        .model
+                        .can_use_standard_core(xs[0].symbol().unwrap(), self.globals) =>
+            {
+                self.unreached_fn_value(&xs[1..], span, env)
+            }
             CoreForm::Fn | CoreForm::Fnil => {
                 self.withhold_captured_facts(env.inline_functions());
                 if matches!(form, CoreForm::Fn)
