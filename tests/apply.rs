@@ -1,6 +1,48 @@
 use parenox::{Session, Source};
 
 #[test]
+fn apply_keeps_the_selected_target_and_its_argument_context() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (defn choose
+          {:t/sig '[boolean? :-> (s/or :number int? :text string?)]} [numeric?]
+          (apply (if numeric? #(inc %) str)
+                 [(if numeric? 1 "label")]))
+        (defn format-number
+          {:t/sig '[(s/fspec :args (s/cat :value number?) :ret string?) :-> string?]} [render]
+          (render 7))
+        (defn format-text
+          {:t/sig '[(s/fspec :args (s/cat :value string?) :ret string?) :-> string?]} [render]
+          (render "label"))
+        (defn by-type {:t/sig '[boolean? :-> string?]} [numeric?]
+          (apply (if numeric? format-number format-text)
+                 [(fn [message]
+                    (if numeric?
+                      (str (inc message))
+                      (subs message 1)))]))"#;
+    let mut session = Session::default();
+    let path = "reports.clj";
+    let baseline = session.check(path, source);
+    assert!(baseline.ok && baseline.complete, "{baseline:#?}");
+
+    let edited = source.replace("(str (inc message))", "(subs message 1)");
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("Number"));
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "message"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "reports/format-number"
+    );
+}
+
+#[test]
 fn exact_apply_arguments_keep_callback_context_and_compiler_checks() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (defn message

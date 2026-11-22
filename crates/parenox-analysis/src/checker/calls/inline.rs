@@ -671,8 +671,8 @@ impl<'model> Checker<'model> {
             && let [[first], [other]] = arms.branches
         {
             let start = self.diagnostics.len();
-            // Choose the callback before evaluating later arguments, and
-            // hold that choice through the entire collection operation.
+            // Choose the callable before evaluating later arguments and
+            // keep that choice throughout the operation.
             let [left, right] =
                 self.check_if_paths(test, env, first_truth, |checker, scope, truth| {
                     check(

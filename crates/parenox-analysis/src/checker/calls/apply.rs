@@ -29,6 +29,20 @@ impl Checker<'_> {
             );
             return Value::new(Type::Unknown);
         };
+        self.with_callback_choice(callee, env, |checker, selected, scope| {
+            checker.apply_using(apply, selected, prefix, spread, span, scope)
+        })
+    }
+
+    fn apply_using(
+        &mut self,
+        apply: &Form,
+        callee: &Form,
+        prefix: &[Form],
+        spread: &Form,
+        span: Span,
+        env: &Env,
+    ) -> Value {
         let callable = self.prepare_callable(callee, env);
         if let Callable::Value(function) = &callable.kind
             && matches!(function.known, Type::Function(_))
