@@ -35,6 +35,47 @@ fn known_core_vars_without_a_model_report_a_coverage_gap() {
 }
 
 #[test]
+fn the_core_catalog_distinguishes_opaque_macros_vars_and_missing_names() {
+    let source = r#"(ns demo (:refer-clojure :exclude [symbol]))
+        (defn resource {:t/sig '[:-> t/any]} []
+          (with-open [input (java.io.StringReader. "text")] (slurp input)))
+        (defn known {:t/sig '[:-> t/any]} [] (clojure.core/symbol "text"))
+        (defn excluded {:t/sig '[:-> t/any]} [] (symbol "text"))
+        (defn misspelled {:t/sig '[:-> t/any]} [] (misspelld "text"))
+        (defn local {:t/sig '[:-> number?]} []
+          (let [with-open (fn [x] (inc x))] (with-open 3)))
+        (defn macro-value {:t/sig '[:-> t/any]} [] with-open)
+    "#;
+    let report = Session::default().check("core.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic.code.as_str(),
+                &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX9001", "with-open"),
+            ("PNX9001", "clojure.core/symbol"),
+            ("PNX2304", "symbol"),
+            ("PNX2304", "misspelld"),
+            ("PNX2304", "with-open"),
+        ],
+        "{report:#?}"
+    );
+    assert!(
+        report.diagnostics[0]
+            .message
+            .contains("has no checked scope")
+    );
+}
+
+#[test]
 fn clojure_core_referrals_respect_exclusions_renames_and_local_vars() {
     let good = include_str!("../examples/core_imports.clj");
     let report = Session::default().check("core_imports.clj", good);

@@ -395,10 +395,7 @@ impl<'model> Checker<'model> {
                     return self.macro_scope(scope, &xs[1..], span, env);
                 }
                 Some(DeclaredValue::OpaqueMacro) => {
-                    self.withhold_captured_facts(env.inline_functions());
-                    self.withhold_literals_after_opaque_form();
-                    return self
-                        .unchecked_form(xs[0].span, &format!("Macro {name} has no checked scope"));
+                    return self.unchecked_macro(name, xs[0].span, env);
                 }
                 Some(DeclaredValue::PrivateMacro) => {
                     self.error(
@@ -474,6 +471,13 @@ impl<'model> Checker<'model> {
                             self.unchecked_core_function(&resolved, xs[0].span)
                         };
                     }
+                    if self
+                        .model
+                        .standard_core_binding(name, &resolved, self.globals)
+                        == Some(crate::core_names::CoreBinding::Macro)
+                    {
+                        return self.unchecked_macro(&resolved, xs[0].span, env);
+                    }
                 }
                 _ => {}
             }
@@ -531,6 +535,12 @@ impl<'model> Checker<'model> {
             self.observe_lookup(xs[0].without_metadata().span, &value);
         }
         value
+    }
+
+    fn unchecked_macro(&mut self, name: &str, span: Span, env: &Env) -> Value {
+        self.withhold_captured_facts(env.inline_functions());
+        self.withhold_literals_after_opaque_form();
+        self.unchecked_form(span, &format!("Macro {name} has no checked scope"))
     }
 
     pub(super) fn unchecked_function(&mut self, name: &str, span: Span) -> Value {

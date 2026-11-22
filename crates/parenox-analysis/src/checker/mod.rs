@@ -1001,8 +1001,15 @@ impl Checker<'_> {
                     Value::new(Type::Unknown)
                 } else {
                     let resolved = self.model.resolve(s);
-                    if self.model.known_standard_core_function(s, &resolved, self.globals) {
-                        return self.unchecked_core_function(&resolved, form.span);
+                    match self.model.standard_core_binding(s, &resolved, self.globals) {
+                        Some(crate::core_names::CoreBinding::Var) => {
+                            return self.unchecked_core_function(&resolved, form.span);
+                        }
+                        Some(crate::core_names::CoreBinding::Macro) => {
+                            self.error("PNX2304", form.span, format!("Macro {resolved} has no function value"));
+                            return Value::new(Type::Unknown);
+                        }
+                        None => {}
                     }
                     let qualified = self.model.function_name(s);
                     let external = qualified.split_once('/').is_some_and(|(namespace, _)| {

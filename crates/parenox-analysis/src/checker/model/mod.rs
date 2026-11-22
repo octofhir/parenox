@@ -452,6 +452,19 @@ impl Model {
             && self.can_use_standard_core(spelling, globals)
     }
 
+    pub(super) fn standard_core_binding(
+        &self,
+        spelling: &str,
+        resolved: &str,
+        globals: &Globals,
+    ) -> Option<crate::core_names::CoreBinding> {
+        let name = resolved.strip_prefix("clojure.core/")?;
+        if !self.can_use_standard_core(spelling, globals) {
+            return None;
+        }
+        crate::core_names::core_binding(name)
+    }
+
     pub(super) fn resolve(&self, name: &str) -> String {
         self.names.resolve(name)
     }

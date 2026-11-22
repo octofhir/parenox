@@ -212,6 +212,9 @@ Exporting the regex object as an EDN literal value is unsupported.
   `clojure.core` namespace and references to the current namespace are already
   available. A `:refer` on an alias-only libspec requires proof of an earlier
   direct load in that `ns`.
+- The standard `clojure.core` catalog follows the version pinned in
+  `deps.edn`. A public Var with an unchecked type reports a coverage gap.
+  A macro with an unchecked scope reports the gap at its operator.
 - Repeating a field with the same spec in `s/keys` preserves its type and
   required presence. Different unqualified specs that resolve to the same
   field still report a collision.

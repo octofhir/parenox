@@ -1,5 +1,13 @@
 ;; Optional independent smoke check against actual Clojure/JVM.
 ;; Run from the project root: clojure -M scripts/runtime_smoke.clj
+(require '[clojure.edn :as edn])
+(let [publics (ns-publics 'clojure.core)
+      groups (group-by (comp boolean :macro meta val) publics)
+      names-in (fn [macro?] (sort (map (comp str key) (get groups macro?))))
+      catalog (edn/read-string (slurp "crates/parenox-analysis/src/core_names/jvm.edn"))]
+  (assert (= {:macros (names-in true) :vars (names-in false)} catalog)))
+(println "Clojure/JVM public core catalog: 1 assertion passed")
+
 (load-file "examples/bad.clj")
 (assert (= :throws
            (try (demo/display-name {:id "1"})
@@ -70,7 +78,6 @@
 (assert (= 42 ((eval '(fn [^String x] x)) 42)))
 (println "Clojure/JVM metadata and characters: 8 assertions passed")
 
-(require '[clojure.edn :as edn])
 (doseq [read [read-string edn/read-string]]
   (assert (= [0xd83d 0xde03 33]
              (mapv int (read "\"\\uD83D\\uDE03!\""))))
