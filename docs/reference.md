@@ -225,7 +225,9 @@ Exporting the regex object as an EDN literal value is unsupported.
   fixed-arity calls can supply types to `fn` and `#()` arguments, including
   values at declared keys in a literal map argument. Fixed callback contracts
   also reach fields through nested literal maps when the contract declares
-  each key on the path. Each such field receives its own callback type.
+  each key on the path. For maps with known source-order evaluation, a
+  computed key can select the field when its value is proved exactly.
+  Each such field receives its own callback type.
   General callback and variadic inference remain limited.
 - `t/all` supports a fixed generic arity with up to two input type
   parameters and one immediate callback result parameter. Inference uses

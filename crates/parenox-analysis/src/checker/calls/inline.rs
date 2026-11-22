@@ -498,13 +498,14 @@ impl<'model> Checker<'model> {
         let direct_callbacks = expected.fields.values().any(|field| {
             matches!(field.value_constraint(), Some(Type::Function(signatures)) if signatures.len() == 1)
         });
-        if !direct_callbacks
-            && (remaining == 0
-                || !expected
+        let nested_maps = || {
+            remaining != 0
+                && expected
                     .fields
                     .values()
-                    .any(|field| matches!(field.value_constraint(), Some(Type::Map(_)))))
-        {
+                    .any(|field| matches!(field.value_constraint(), Some(Type::Map(_))))
+        };
+        if !direct_callbacks && !nested_maps() {
             return None;
         }
         let pairs = entries.as_chunks::<2>().0;
@@ -523,7 +524,12 @@ impl<'model> Checker<'model> {
                                     .contextual_map_at_depth(value, expected, env, remaining - 1)
                                     .is_some())
                     }),
-                None => direct_callbacks && ordered && self.contextual_callback_form(value, env),
+                None if ordered => {
+                    // The map evaluator can prove the key before choosing the field contract.
+                    (direct_callbacks && self.contextual_callback_form(value, env))
+                        || (value.map().is_some() && nested_maps())
+                }
+                None => false,
             })
             .then_some((entries, expected))
     }

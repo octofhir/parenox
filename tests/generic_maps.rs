@@ -123,6 +123,53 @@ fn a_nested_fixed_callback_has_a_distinct_path_from_a_generic_result_callback() 
 }
 
 #[test]
+fn a_computed_parent_key_supplies_context_only_when_it_reaches_the_declared_field() {
+    let source = r#"(ns demo.computed-stage (:require [clojure.spec.alpha :as s]))
+        (defn render
+          {:t/sig '[{:stage {:run (s/fspec :args (s/cat :value string?) :ret number?)}}
+                   :-> number?]}
+          [options] ((get-in options [:stage :run]) "text"))
+        (defn invoke {:t/sig '[:-> number?]} []
+          (render {(if true :stage :other) {:run (fn [label] (inc label))}}))"#;
+    let check = |source| Session::default().check("computed-stage.clj", source);
+    let report = check(source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "label"
+    );
+
+    let missing = source.replace("(if true", "(if false");
+    let report = check(&missing);
+    assert!(report.diagnostics.iter().any(|d| d.code == "PNX2322"
+        && d.message.contains("Argument 1")
+        && d.actual.as_deref().is_some_and(|ty| ty.contains(":other"))));
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| { &missing[d.span.start.offset..d.span.end.offset] == "label" })
+    );
+
+    let failed_key = source.replace("(if true :stage :other)", "(subs nil 0)");
+    let report = check(&failed_key);
+    let mut runtime_findings = report.diagnostics.iter().filter(|d| d.code == "PNX2322");
+    let finding = runtime_findings
+        .next()
+        .unwrap_or_else(|| panic!("{report:#?}"));
+    assert!(runtime_findings.next().is_none(), "{report:#?}");
+    assert_eq!(
+        &failed_key[finding.span.start.offset..finding.span.end.offset],
+        "nil"
+    );
+}
+
+#[test]
 fn map_callbacks_use_generic_input_types_from_other_arguments() {
     let source = r#"(ns demo.generic-options (:require [clojure.spec.alpha :as s]))
         (defn render
