@@ -97,6 +97,7 @@ pub(super) struct CallArguments<'a> {
     pub(super) values: &'a [(Value, Span)],
     forms: ArgumentForms<'a>,
     output_gap_explained: bool,
+    output_callback_span: Option<Span>,
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +127,7 @@ impl<'a> CallArguments<'a> {
 struct EvaluatedArguments {
     values: Vec<(Value, Span)>,
     output_gap_explained: bool,
+    output_callback_span: Option<Span>,
 }
 
 struct ContextualArgument<'a> {
@@ -178,6 +180,7 @@ impl From<Vec<(Value, Span)>> for EvaluatedArguments {
         Self {
             values,
             output_gap_explained: false,
+            output_callback_span: None,
         }
     }
 }
@@ -549,6 +552,7 @@ impl<'model> Checker<'model> {
                 values: &args.values,
                 forms: ArgumentForms::Written(&xs[1..]),
                 output_gap_explained: args.output_gap_explained,
+                output_callback_span: args.output_callback_span,
             },
             xs[0].span,
             span,
@@ -1098,6 +1102,7 @@ impl<'model> Checker<'model> {
                         values: &args,
                         forms,
                         output_gap_explained: false,
+                        output_callback_span: None,
                     },
                     callable.span,
                     span,

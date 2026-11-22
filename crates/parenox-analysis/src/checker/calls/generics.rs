@@ -84,6 +84,7 @@ impl Checker<'_> {
             }
         }
         let mut output_gap_explained = false;
+        let mut output_callback_span = None;
         if !callbacks.is_empty() {
             let binders = signature.parameters.as_ref().expect("generic signature");
             let output_callback = binders.output().and_then(|(_, parameter)| {
@@ -130,6 +131,7 @@ impl Checker<'_> {
                         )
                         .map(|callback| {
                             if check_body && let Some((parameter, witness)) = output {
+                                output_callback_span = Some(form.without_metadata().span);
                                 output_gap_explained =
                                     callback.rejected_return.as_ref().is_some_and(|ty| {
                                         *ty == Type::Never
@@ -153,6 +155,7 @@ impl Checker<'_> {
         EvaluatedArguments {
             values,
             output_gap_explained,
+            output_callback_span,
         }
     }
 
@@ -207,7 +210,8 @@ impl Checker<'_> {
                     .and_then(|ty| output_evidence(&witness, ty, binders, &evidence));
                 match candidate {
                     Ok(candidate) => {
-                        output_valid = self.generic_bound(function, parameter, &candidate, *span);
+                        let span = arguments.output_callback_span.unwrap_or(*span);
+                        output_valid = self.generic_bound(function, parameter, &candidate, span);
                         evidence.insert(index, candidate);
                     }
                     Err(Compatibility::Mismatch) => {} // The argument check below reports it.

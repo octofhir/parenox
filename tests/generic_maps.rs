@@ -274,6 +274,32 @@ fn a_callback_result_can_supply_the_only_type_parameter() {
 }
 
 #[test]
+fn a_result_bound_points_to_the_selected_nested_callback() {
+    let source = r#"(ns rendered (:require [clojure.spec.alpha :as s]))
+(defn message
+  {:t/sig '(t/all [(out :< number?)]
+             [{:result-code number?
+               :result {:message-fn (s/fspec :args (s/cat) :ret out)}} :-> out])}
+  [reply] ((get-in reply [:result :message-fn])))
+(defn good {:t/sig '[:-> number?]} []
+  (message {:result-code 0 :result {:message-fn (fn [] 42)}}))
+(defn bad {:t/sig '[:-> t/any]} []
+  (message {:result-code 0
+            :result {(if true :message-fn :unused) (fn [] "wrong")}}))"#;
+    let report = Session::default().check("rendered.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    assert!(finding.message.contains("Bound for type parameter out"));
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "(fn [] \"wrong\")"
+    );
+}
+
+#[test]
 fn a_required_map_callback_can_supply_the_calls_result_type() {
     let source = r#"(ns demo.result-options (:require [clojure.spec.alpha :as s]))
         (defn render
