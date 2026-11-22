@@ -8,6 +8,18 @@
   (assert (= {:macros (names-in true) :vars (names-in false)} catalog)))
 (println "Clojure/JVM public core catalog: 1 assertion passed")
 
+(let [scope (create-ns 'parenox.smoke.default-imports)
+      imports (ns-imports scope)
+      catalog (edn/read-string
+               (slurp "crates/parenox-analysis/src/checker/model/imports/jvm.edn"))
+      expected (into {} (map (fn [^String name]
+                               [(symbol (subs name (inc (.lastIndexOf name ".")))) name]))
+                     catalog)
+      actual (into {} (map (fn [[name ^Class type]] [name (.getName type)])) imports)]
+  (assert (= expected actual))
+  (assert (not (contains? imports 'Record))))
+(println "Clojure/JVM default class import catalog: 2 assertions passed")
+
 (load-file "examples/bad.clj")
 (assert (= :throws
            (try (demo/display-name {:id "1"})

@@ -1,6 +1,8 @@
 //! Static JVM class names introduced by an ns import clause.
+use std::{collections::HashMap, sync::LazyLock};
+
 use super::{Declarations, Globals, Model};
-use crate::reader::{Form, Kind};
+use crate::reader::{Form, Kind, read_edn};
 
 /// The source token of the effective symbolic type hint.
 pub(crate) fn java_type_tag_at(form: &Form, offset: usize) -> Option<&Form> {
@@ -124,36 +126,23 @@ fn qualified_java_name(name: &str) -> bool {
         })
 }
 
-// A subset of the JVM classes in ns-imports on the pinned Clojure version.
 fn implicit_java_class(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "BigDecimal" => "java.math.BigDecimal",
-        "BigInteger" => "java.math.BigInteger",
-        "Boolean" => "java.lang.Boolean",
-        "Byte" => "java.lang.Byte",
-        "Callable" => "java.util.concurrent.Callable",
-        "Character" => "java.lang.Character",
-        "Class" => "java.lang.Class",
-        "Double" => "java.lang.Double",
-        "Exception" => "java.lang.Exception",
-        "Float" => "java.lang.Float",
-        "Integer" => "java.lang.Integer",
-        "Long" => "java.lang.Long",
-        "Math" => "java.lang.Math",
-        "Number" => "java.lang.Number",
-        "Object" => "java.lang.Object",
-        "Runnable" => "java.lang.Runnable",
-        "Short" => "java.lang.Short",
-        "StrictMath" => "java.lang.StrictMath",
-        "String" => "java.lang.String",
-        "StringBuffer" => "java.lang.StringBuffer",
-        "StringBuilder" => "java.lang.StringBuilder",
-        "System" => "java.lang.System",
-        "Thread" => "java.lang.Thread",
-        "Thread$State" => "java.lang.Thread$State",
-        "Void" => "java.lang.Void",
-        _ => return None,
-    })
+    static IMPORTS: LazyLock<HashMap<Box<str>, Box<str>>> = LazyLock::new(|| {
+        let forms = read_edn(include_str!("imports/jvm.edn")).expect("valid JVM import catalog");
+        forms[0]
+            .vector()
+            .expect("JVM import catalog is a vector")
+            .iter()
+            .map(|form| {
+                let Kind::String(qualified) = &form.kind else {
+                    unreachable!("JVM class names are strings");
+                };
+                let short = qualified.rsplit('.').next().unwrap();
+                (Box::from(short), Box::from(qualified.as_str()))
+            })
+            .collect()
+    });
+    IMPORTS.get(name).map(Box::as_ref)
 }
 
 impl Model {

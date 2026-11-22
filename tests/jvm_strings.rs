@@ -75,8 +75,11 @@ fn imported_class_values_follow_lexical_resolution_and_import_edits() {
     let source = r#"(ns demo (:import [java.io File]))
 (defn imported {:t/sig '[:-> t/any]} [] File)
 (defn implicit {:t/sig '[:-> t/any]} [] String)
+(defn defaults {:t/sig '[:-> t/any]} []
+  [ExceptionInfo java.lang.ArithmeticException AutoCloseable])
 (defn shadowed {:t/sig '[:-> number?]} [] (let [File 1] File))
 (defn typo {:t/sig '[:-> t/any]} [] Fiel)
+(defn missing-import {:t/sig '[:-> t/any]} [] Record)
 "#;
     let mut session = Session::default();
     let original = session.check("jvm.clj", source);
@@ -95,7 +98,11 @@ fn imported_class_values_follow_lexical_resolution_and_import_edits() {
         [
             ("PNX9001", "File"),
             ("PNX9001", "String"),
-            ("PNX2304", "Fiel")
+            ("PNX9001", "ExceptionInfo"),
+            ("PNX9001", "java.lang.ArithmeticException"),
+            ("PNX9001", "AutoCloseable"),
+            ("PNX2304", "Fiel"),
+            ("PNX2304", "Record"),
         ],
         "{original:#?}"
     );

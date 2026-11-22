@@ -893,8 +893,11 @@ from the nested method list. Project reference checks in untyped bodies
 follow the receiver and evaluated operands of `.` and `new`.
 Known explicit throws can narrow the set of reachable handlers. Ordinary
 calls may throw.
-Imported classes and recognized implicit classes resolve as class values,
-which report a type analysis coverage gap. Class-qualified members such as
+Explicit imports and the pinned Clojure/JVM default imports resolve as class
+values, which report a type analysis coverage gap.
+[JVM default import table](https://github.com/clojure/clojure/blob/cbf52795e0b8767c93980e73c437212cf8a29a36/src/jvm/clojure/lang/RT.java#L40-L147)
+
+Class-qualified members such as
 `String/valueOf` and `File/new` have a dispatch coverage gap. A loaded
 namespace or alias with that name takes precedence.
 
