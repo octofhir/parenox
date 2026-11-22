@@ -16,7 +16,8 @@ use super::super::{
     queries::InferredCall,
 };
 use super::{
-    Callable, ContextualArgument, CoreForm, PreparedCallable, call_returns, combinators::Combiner,
+    Callable, ContextualArgument, CoreForm, PreparedCallable, ScopedCallable, call_returns,
+    combinators::Combiner,
 };
 use crate::reader::{AnonymousFunction, Form, Kind, Span};
 use crate::types::{Arity, MAX_CALLBACK_MAP_DEPTH, MapType, Signature, Type};
@@ -175,6 +176,21 @@ enum InlineSyntax<'a> {
     Fnil(&'a [Form]),
     Partial(&'a [Form]),
     Combiner(Combiner, &'a [Form]),
+}
+
+fn inline_function_target<'form, 'model>(
+    form: &'form Form,
+    env: &Env,
+    function: InlineFunction<'form>,
+) -> Callable<'form, 'model> {
+    if function.name().is_some() {
+        Callable::Captured {
+            function: CapturedInline::single(form, env),
+            compile_when_uninvoked: true,
+        }
+    } else {
+        Callable::Inline(function)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -343,7 +359,10 @@ impl<'model> Checker<'model> {
                 compile_when_uninvoked: false,
             }
         } else {
-            match self.inline_syntax(form, env)? {
+            let Some(syntax) = self.inline_syntax(form, env) else {
+                return self.prepare_scoped_inline(form, env);
+            };
+            match syntax {
                 InlineSyntax::Function(function) => {
                     if let Some(value) = self
                         .literal_metadata_outcome(
@@ -357,13 +376,8 @@ impl<'model> Checker<'model> {
                         let closure = CapturedInline::single(form, env);
                         self.call_captured(&closure, Vec::new(), form.span, env, false, true);
                         Callable::Value(value)
-                    } else if function.name().is_some() {
-                        Callable::Captured {
-                            function: CapturedInline::single(form, env),
-                            compile_when_uninvoked: true,
-                        }
                     } else {
-                        Callable::Inline(function)
+                        inline_function_target(form, env, function)
                     }
                 }
                 InlineSyntax::Fnil(parts) => self.prepare_fnil(parts, form.span, env),
@@ -676,11 +690,16 @@ impl<'model> Checker<'model> {
         }
     }
 
-    fn callback_paths<'a>(&self, form: &'a Form, env: &Env) -> Option<CallbackPaths<'a>> {
+    fn callback_paths<'a>(
+        &self,
+        form: &'a Form,
+        env: &Env,
+        allow_branches: bool,
+    ) -> Option<CallbackPaths<'a>> {
         if let Some(body) = do_body(form) {
             return Some(CallbackPaths::Sequence(body));
         }
-        if let Some(arms) = self.conditional_arms(form, env) {
+        if allow_branches && let Some(arms) = self.conditional_arms(form, env) {
             return Some(CallbackPaths::Conditional(arms));
         }
         let bare = form.without_metadata();
@@ -706,7 +725,16 @@ impl<'model> Checker<'model> {
     }
 
     fn contextual_choice<'a>(&self, form: &'a Form, env: &Env) -> Option<CallbackPaths<'a>> {
-        let paths = self.callback_paths(form, env)?;
+        self.find_callback_paths(form, env, true)
+    }
+
+    fn find_callback_paths<'a>(
+        &self,
+        form: &'a Form,
+        env: &Env,
+        allow_branches: bool,
+    ) -> Option<CallbackPaths<'a>> {
+        let paths = self.callback_paths(form, env, allow_branches)?;
         let mut pending = Vec::new();
         let mut let_bindings = Vec::new();
         paths.enqueue_tails(&mut pending, &mut let_bindings);
@@ -732,11 +760,58 @@ impl<'model> Checker<'model> {
             if reads_binding || self.contextual_callback_form(tail, env) {
                 return Some(paths);
             }
-            if let Some(path) = self.callback_paths(tail, env) {
+            if let Some(path) = self.callback_paths(tail, env, allow_branches) {
                 path.enqueue_tails(&mut pending, &mut let_bindings);
             }
         }
         None
+    }
+
+    #[inline(never)]
+    fn prepare_scoped_inline<'form>(
+        &mut self,
+        form: &'form Form,
+        env: &Env,
+    ) -> Option<PreparedCallable<'form, 'model>> {
+        // Direct and collection calls keep one callable across all invocations.
+        let paths = self.find_callback_paths(form, env, false)?;
+        let reachable = self.path_reachable && env.reachable();
+        let (mut choice, value) =
+            self.prepare_choice_from_paths(form, env, reachable, paths, false);
+        let Some(branch) = choice.callbacks.pop() else {
+            return Some(PreparedCallable::new(
+                Callable::Value(choice.eager.unwrap_or(value)),
+                form.span,
+            ));
+        };
+        let kind = if let Some(function) = branch
+            .form
+            .symbol()
+            .and_then(|name| branch.scope.inline_function(name))
+        {
+            Callable::Captured {
+                function: function.clone(),
+                compile_when_uninvoked: false,
+            }
+        } else if let Some(InlineSyntax::Function(function)) =
+            self.inline_syntax(branch.form, &branch.scope)
+        {
+            inline_function_target(branch.form, &branch.scope, function)
+        } else {
+            Callable::Value(self.unchecked_form(
+                branch.form.span,
+                "Unable to resolve the prepared callback constructor",
+            ))
+        };
+        Some(PreparedCallable::new(
+            Callable::Scoped(Box::new(ScopedCallable {
+                target: PreparedCallable::new(kind, branch.form.span),
+                scope: branch.scope,
+                compiled_scope: choice.compiled_scope,
+                returns: branch.returns,
+            })),
+            form.span,
+        ))
     }
 
     #[inline(never)]
@@ -747,9 +822,21 @@ impl<'model> Checker<'model> {
         reachable: bool,
     ) -> Option<(Box<PreparedChoice<'a>>, Value)> {
         let paths = self.contextual_choice(form, env)?;
+        let (choice, value) = self.prepare_choice_from_paths(form, env, reachable, paths, true);
+        Some((Box::new(choice), value))
+    }
+
+    fn prepare_choice_from_paths<'a>(
+        &mut self,
+        form: &'a Form,
+        env: &Env,
+        reachable: bool,
+        paths: CallbackPaths<'a>,
+        allow_branches: bool,
+    ) -> (PreparedChoice<'a>, Value) {
         let mut prepared = CallbackPreparation::default();
         let value = self.inspect_path(reachable, |checker| {
-            checker.prepare_callback_paths(paths, env, &mut prepared)
+            checker.prepare_callback_paths(paths, env, &mut prepared, allow_branches)
         });
         let eager = match prepared.eager.len() {
             0 => None,
@@ -758,14 +845,14 @@ impl<'model> Checker<'model> {
         };
         // A let can compile local helpers before the contextual body calls them.
         let compiled_scope = prepared.has_let.then_some(form.span);
-        Some((
-            Box::new(PreparedChoice {
+        (
+            PreparedChoice {
                 callbacks: prepared.callbacks,
                 eager,
                 compiled_scope,
-            }),
+            },
             value,
-        ))
+        )
     }
 
     #[inline(never)]
@@ -774,6 +861,7 @@ impl<'model> Checker<'model> {
         paths: CallbackPaths<'a>,
         env: &Env,
         prepared: &mut CallbackPreparation<'a>,
+        allow_branches: bool,
     ) -> Value {
         prepared.has_let |= matches!(paths, CallbackPaths::Let { .. });
         let mut deferred = [false; 2];
@@ -782,7 +870,9 @@ impl<'model> Checker<'model> {
             // Binding forms can introduce a local that shadows a callback constructor.
             let modeled_tail = do_tail(body).is_some_and(|form| {
                 checker.contextual_callback_form(form, scope)
-                    || checker.callback_paths(form, scope).is_some()
+                    || checker
+                        .callback_paths(form, scope, allow_branches)
+                        .is_some()
             });
             if !modeled_tail {
                 return checker.check_path(reachable, |checker| checker.body(body, scope, false));
@@ -800,10 +890,10 @@ impl<'model> Checker<'model> {
             if !checker.contextual_callback_form(form, scope) {
                 // The enclosing argument already selected contextual preparation.
                 // Visit a nested wrapper once in its actual scope.
-                if let Some(paths) = checker.callback_paths(form, scope) {
+                if let Some(paths) = checker.callback_paths(form, scope, allow_branches) {
                     deferred[index] = true;
                     return checker.check_path(reachable, |checker| {
-                        checker.prepare_callback_paths(paths, scope, prepared)
+                        checker.prepare_callback_paths(paths, scope, prepared, allow_branches)
                     });
                 }
                 return checker.infer_path(form, scope, reachable, false);

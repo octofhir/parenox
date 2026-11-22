@@ -47,6 +47,7 @@ enum Callable<'form, 'model> {
         function: CapturedInline,
         compile_when_uninvoked: bool,
     },
+    Scoped(Box<ScopedCallable<'form, 'model>>),
     Fnil(Box<Fnil<'form, 'model>>),
     Partial(Box<Partial<'form, 'model>>),
     Combined(CombinedCallable<'form, 'model>),
@@ -59,6 +60,7 @@ impl Callable<'_, '_> {
     fn returns(&self) -> bool {
         match self {
             Self::Value(value) => !value.stops_evaluation(),
+            Self::Scoped(scoped) => scoped.returns,
             Self::Fnil(wrapper) => wrapper.returns,
             Self::Partial(wrapper) => wrapper.returns,
             Self::Combined(combined) => combined.returns,
@@ -71,6 +73,13 @@ pub(super) struct PreparedCallable<'form, 'model> {
     kind: Callable<'form, 'model>,
     span: Span,
     literal_keyword: Option<&'form Form>,
+}
+
+struct ScopedCallable<'form, 'model> {
+    target: PreparedCallable<'form, 'model>,
+    scope: Env,
+    compiled_scope: Option<Span>,
+    returns: bool,
 }
 
 impl<'form, 'model> PreparedCallable<'form, 'model> {
@@ -1135,6 +1144,9 @@ impl<'model> Checker<'model> {
             Callable::Captured { function, .. } => {
                 self.withhold_captured_facts(Some(function));
             }
+            Callable::Scoped(scoped) => {
+                self.withhold_callback_facts(&scoped.target, &scoped.scope);
+            }
             Callable::Private(function) => self.withhold_type_facts(function.span),
             Callable::Fnil(wrapper) => self.withhold_callback_facts(&wrapper.target, env),
             Callable::Partial(wrapper) => self.withhold_callback_facts(&wrapper.target, env),
@@ -1169,6 +1181,19 @@ impl<'model> Checker<'model> {
                 function,
                 compile_when_uninvoked,
             } => self.call_captured(function, args, span, env, invoked, *compile_when_uninvoked),
+            Callable::Scoped(scoped) => {
+                let start = self.diagnostics.len();
+                let result = self.call_prepared_with_forms(
+                    &scoped.target,
+                    args,
+                    forms,
+                    span,
+                    &scoped.scope,
+                    invoked,
+                );
+                self.dedup_diagnostics_with_prior(start, scoped.compiled_scope);
+                result
+            }
             Callable::Fnil(wrapper) => self.call_fnil(wrapper, args, span, env, invoked),
             Callable::Partial(wrapper) => {
                 let args = wrapper.prefix.iter().cloned().chain(args).collect();

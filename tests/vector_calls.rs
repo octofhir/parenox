@@ -34,6 +34,36 @@ fn checks_vector_pipelines_and_narrows_elements_with_core_predicates() {
 }
 
 #[test]
+fn scoped_callback_expressions_use_the_actual_invocation_types() {
+    let body = r#"(ns labels (:require [clojure.spec.alpha :as s]))
+        (defn labels {:t/sig '[string? :-> (s/coll-of string? :kind vector?)]} [title]
+          (mapv (let [prefix (subs title 1)]
+                  (fn [message] (str prefix (subs message 1))))
+                ["label"]))
+        (defn immediate {:t/sig '[string? :-> string?]} [prefix]
+          ((do (count prefix)
+               (let [prefix 7
+                     callback #(str (inc prefix) (subs % 1))]
+                 callback))
+           prefix))"#;
+    let mut session = Session::default();
+    let report = session.check("labels.clj", body);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = body.replace("(subs message 1)", "(inc message)");
+    let report = session.check("labels.clj", &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "message"
+    );
+}
+
+#[test]
 fn into_checks_transducers_with_the_actual_vector_positions() {
     let report = check(
         r#"
@@ -320,6 +350,7 @@ fn empty_inputs_skip_invocation_but_still_check_callback_expressions() {
     for (expr, code) in [
         (r#"(mapv (fnil inc (inc "bad")) [])"#, "PNX2322"),
         ("(mapv (fn [x y] missing) [])", "PNX2304"),
+        ("(mapv (do 0 (let [] (fn [x] missing))) [])", "PNX2304"),
         ("(mapv inc [1] [2])", "PNX2554"),
         ("(mapv inc 42)", "PNX2322"),
         ("(mapv inc {:x 1})", "PNX2322"),
@@ -436,6 +467,12 @@ fn vector_calls_evaluate_the_callback_expression_then_their_collection_arguments
         (
             "callback",
             r#"(mapv (fnil identity (throw (ex-info "callback" {:stage :callback})))
+                     (throw (ex-info "collection" {:stage :collection})))"#,
+        ),
+        (
+            "callback",
+            r#"(mapv (let [prefix (throw (ex-info "callback" {:stage :callback}))]
+                       (fn [message] (str prefix message)))
                      (throw (ex-info "collection" {:stage :collection})))"#,
         ),
         (
