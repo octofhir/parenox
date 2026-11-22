@@ -39,7 +39,7 @@ use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use combinators::CombinedCallable;
 use forms::CoreForm;
-use inline::{CallbackBranch, CallbackReturn, Fnil, InlineFunction, Partial};
+use inline::{CallbackReturn, Fnil, InlineFunction, Partial, PreparedChoice};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
@@ -207,7 +207,7 @@ struct ContextualArgument<'a> {
 enum DeferredCallback<'a> {
     Argument(ContextualArgument<'a>),
     Choice {
-        branches: Vec<CallbackBranch<'a>>,
+        choice: Box<PreparedChoice<'a>>,
         expected: &'a Type,
     },
 }
@@ -805,11 +805,10 @@ impl<'model> Checker<'model> {
                 continue;
             }
             if expects_callback
-                && let Some((branches, argument)) =
-                    self.prepare_callback_choice(form, env, reachable)
+                && let Some((choice, argument)) = self.prepare_callback_choice(form, env, reachable)
             {
                 reachable = !argument.stops_evaluation();
-                deferred.push((index, DeferredCallback::Choice { branches, expected }));
+                deferred.push((index, DeferredCallback::Choice { choice, expected }));
                 values.push((argument, form.span));
                 continue;
             }
@@ -840,9 +839,9 @@ impl<'model> Checker<'model> {
                         contextual.apply(&mut values[index].0, value);
                     }
                 }
-                DeferredCallback::Choice { branches, expected } => {
+                DeferredCallback::Choice { choice, expected } => {
                     let start = self.diagnostics.len();
-                    let value = Value::union_branches(branches.into_iter().map(|branch| {
+                    let callbacks = choice.callbacks.into_iter().map(|branch| {
                         infer_argument(
                             self,
                             branch.form,
@@ -850,7 +849,8 @@ impl<'model> Checker<'model> {
                             reachable && branch.returns,
                             &branch.scope,
                         )
-                    }));
+                    });
+                    let value = Value::union_branches(choice.eager.into_iter().chain(callbacks));
                     self.dedup_diagnostics(start);
                     if reachable {
                         values[index].0 = value;

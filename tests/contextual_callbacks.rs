@@ -102,6 +102,74 @@ fn conditional_callback_keeps_eager_failures_and_compiler_checks() {
 }
 
 #[test]
+fn conditional_callbacks_keep_ordinary_branches() {
+    let source = format!(
+        r#"{EXAMPLE}
+        (s/def ::maybe-transform (s/nilable ::text-transform))
+        (defn render {{:t/sig '[::maybe-transform :-> string?]}} [callback]
+          (if-let [f callback] (f "label") "fallback"))
+        (defn trim-label {{:t/sig '[string? :-> string?]}} [text] (subs text 1))
+        (defn nil-fallback {{:t/sig '[(s/nilable string?) :-> string?]}} [suffix]
+          (render (if (some? suffix)
+                    (fn [text] (str (subs suffix 1) text))
+                    nil)))
+        (defn known-fallback {{:t/sig '[boolean? :-> string?]}} [trim?]
+          (let [fallback #(subs % 1)]
+            (transform (if trim? trim-label fallback) "label")))
+        (defn caught {{:t/sig '[:-> #{{:branch}}]}} []
+          (try
+            (transform (if true
+                         (throw (ex-info "branch" {{:stage :branch}}))
+                         (fn [text] (inc text)))
+                       (throw (ex-info "operand" {{:stage :operand}})))
+            (catch clojure.lang.ExceptionInfo e (:stage (ex-data e)))))"#
+    );
+    let path = "mixed_callback.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, &source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+    let broken = source.replace(
+        "(str (subs suffix 1) text)",
+        "(do (inc text) (subs suffix 1))",
+    );
+    let report = session.check(path, &broken);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &broken[finding.span.start.offset..finding.span.end.offset],
+        "text"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "demo.contextual-callbacks/render"
+    );
+    let cold = Session::default().check(path, &broken);
+    assert_eq!(
+        serde_json::to_value(&report.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, &source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+    let wrong_fallback =
+        source.replace("(if trim? trim-label fallback)", "(if trim? nil fallback)");
+    let report = session.check(path, &wrong_fallback);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert!(finding.actual.as_deref().unwrap().contains("Nil"));
+    assert_eq!(
+        &wrong_fallback[finding.span.start.offset..finding.span.end.offset],
+        "(if trim? nil fallback)"
+    );
+}
+
+#[test]
 fn nilable_callback_contracts_contextualize_written_closures() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))

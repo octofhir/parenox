@@ -30,6 +30,16 @@ pub(super) fn contextual_map_type(expected: &Type) -> Option<&MapType> {
     Some(map)
 }
 
+fn conditional_arms(form: &Form) -> Option<(&Form, &Form, &Form)> {
+    let Kind::List(parts) = &form.without_metadata().kind else {
+        return None;
+    };
+    let [head, test, yes, no] = parts.as_slice() else {
+        return None;
+    };
+    (head.symbol() == Some("if")).then_some((test, yes, no))
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum InlineFunction<'a> {
     Function { parts: &'a [Form], raw: bool },
@@ -127,6 +137,11 @@ pub(super) struct CallbackBranch<'a> {
     pub(super) form: &'a Form,
     pub(super) scope: Env,
     pub(super) returns: bool,
+}
+
+pub(super) struct PreparedChoice<'a> {
+    pub(super) callbacks: Vec<CallbackBranch<'a>>,
+    pub(super) eager: Option<Value>,
 }
 
 pub(super) struct ContextualCallback {
@@ -505,7 +520,10 @@ impl<'model> Checker<'model> {
         env: &Env,
         mut check: impl FnMut(&mut Self, &Form, &Env) -> Value,
     ) -> Value {
-        if let Some((test, yes, no)) = self.callback_choice(callback, env) {
+        if let Some((test, yes, no)) = conditional_arms(callback)
+            && self.inline_callback_literal(yes, env)
+            && self.inline_callback_literal(no, env)
+        {
             let start = self.diagnostics.len();
             // Choose the callback before evaluating later arguments, and
             // hold that choice through the entire collection operation.
@@ -519,35 +537,30 @@ impl<'model> Checker<'model> {
         }
     }
 
-    fn callback_choice<'a>(
-        &self,
-        callback: &'a Form,
-        env: &Env,
-    ) -> Option<(&'a Form, &'a Form, &'a Form)> {
-        let Kind::List(parts) = &callback.without_metadata().kind else {
-            return None;
-        };
-        let [head, test, yes, no] = parts.as_slice() else {
-            return None;
-        };
-        (head.symbol() == Some("if")
-            && self.inline_callback_literal(yes, env)
-            && self.inline_callback_literal(no, env))
-        .then_some((test, yes, no))
-    }
-
     #[inline(never)]
     pub(super) fn prepare_callback_choice<'a>(
         &mut self,
         form: &'a Form,
         env: &Env,
         reachable: bool,
-    ) -> Option<(Vec<CallbackBranch<'a>>, Value)> {
-        let (test, yes, no) = self.callback_choice(form, env)?;
+    ) -> Option<(Box<PreparedChoice<'a>>, Value)> {
+        let (test, yes, no) = conditional_arms(form)?;
+        let yes_is_callback = self.contextual_callback_form(yes, env);
+        let no_is_callback = self.contextual_callback_form(no, env);
+        if !yes_is_callback && !no_is_callback {
+            return None;
+        }
         let mut callbacks = Vec::with_capacity(2);
-        let value = self.check_path(reachable, |checker| {
-            let branches = checker.check_if_paths(test, env, true, |checker, scope, truth| {
-                let form = if truth { yes } else { no };
+        let branches = self.inspect_path(reachable, |checker| {
+            checker.check_if_paths(test, env, true, |checker, scope, truth| {
+                let (form, is_callback) = if truth {
+                    (yes, yes_is_callback)
+                } else {
+                    (no, no_is_callback)
+                };
+                if !is_callback {
+                    return checker.infer(form, scope);
+                }
                 let value =
                     checker.contextual_callback_argument(form, scope, checker.path_reachable);
                 callbacks.push(CallbackBranch {
@@ -556,10 +569,15 @@ impl<'model> Checker<'model> {
                     returns: !value.stops_evaluation(),
                 });
                 value
-            });
-            Value::union_branches(branches)
+            })
         });
-        Some((callbacks, value))
+        let returns = reachable && branches.iter().any(|branch| !branch.stops_evaluation());
+        let eager = branches
+            .into_iter()
+            .zip([yes_is_callback, no_is_callback])
+            .find_map(|(branch, is_callback)| (!is_callback).then_some(branch));
+        let value = Value::new(if returns { Type::Unknown } else { Type::Never });
+        Some((Box::new(PreparedChoice { callbacks, eager }), value))
     }
 
     pub(super) fn contextual_callback_form(&self, form: &Form, env: &Env) -> bool {
