@@ -6,6 +6,62 @@ fn check(expression: &str, expected: &str) -> Report {
 }
 
 #[test]
+fn a_literal_nil_call_operator_is_rejected_before_its_operands() {
+    let source = "(ns demo) (defn bad {:t/sig '[:-> t/any]} [] (nil missing-name))";
+    let report = Session::default().check("exceptions.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX1001");
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "nil"
+    );
+}
+
+#[test]
+fn calling_a_value_known_to_be_nil_throws_only_when_invoked() {
+    for (expression, target) in [
+        ("(let [callback nil] (callback 1))", "callback"),
+        ("((quote nil) 1)", "(quote nil)"),
+        ("((if false inc nil) 1)", "nil"),
+        ("(apply nil [1])", "nil"),
+        ("(mapv nil [1])", "nil"),
+    ] {
+        let source = format!(
+            r#"(ns demo) (defn f {{:t/sig '[:-> #{{:caught}}]}} []
+                 (try {expression}
+                   (catch IllegalArgumentException _ (inc "unreachable"))
+                   (catch NullPointerException _ :caught)))"#,
+        );
+        let report = Session::default().check("exceptions.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete);
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(finding.expected.as_deref(), Some("Callable"));
+        assert_eq!(finding.actual.as_deref(), Some("Nil"));
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            target
+        );
+    }
+
+    let not_invoked = check("(empty? (mapv nil []))", "#{true}");
+    assert!(not_invoked.ok && not_invoked.complete, "{not_invoked:#?}");
+
+    let blocked = check(
+        r#"(try
+             (let [callback nil] (callback (throw (ex-info "operand" {}))))
+             (catch NullPointerException _ (inc "unreachable"))
+             (catch clojure.lang.ExceptionInfo _ :operand))"#,
+        "#{:operand}",
+    );
+    assert!(blocked.ok && blocked.complete, "{blocked:#?}");
+}
+
+#[test]
 fn explicit_exceptions_preserve_data_and_terminate_the_path() {
     let good = include_str!("../examples/exceptions.clj");
     let report = Session::default().check("exceptions.clj", good);

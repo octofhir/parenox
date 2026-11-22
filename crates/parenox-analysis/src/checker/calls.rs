@@ -34,7 +34,7 @@ use super::{
     nil_part,
     queries::InferredCall,
 };
-use crate::reader::{Form, Span};
+use crate::reader::{Form, Kind, Span};
 use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use combinators::CombinedCallable;
@@ -377,6 +377,10 @@ impl<'model> Checker<'model> {
 
     pub(super) fn list(&mut self, xs: &[Form], span: Span, env: &Env, tail: bool) -> Value {
         self.observe_completion(xs[0].without_metadata().span, env);
+        if matches!(xs[0].kind, Kind::Nil) {
+            self.error("PNX1001", xs[0].span, "Cannot call the literal nil");
+            return Value::new(Type::Unknown);
+        }
         if let Some(name) = xs[0].symbol()
             && !env.contains_key(name)
             && let Some(value) =
@@ -898,6 +902,16 @@ impl<'model> Checker<'model> {
     ) -> Value {
         let args = arguments.values;
         if !self.path_reachable || function.stops_evaluation() || !call_returns(args) {
+            return Value::new(Type::Never);
+        }
+        if function.known == Type::Nil {
+            self.diagnostics.push(Diagnostic::type_mismatch(
+                head,
+                "Call target",
+                "Callable".into(),
+                "Nil".into(),
+            ));
+            self.null_pointer();
             return Value::new(Type::Never);
         }
         if matches!(

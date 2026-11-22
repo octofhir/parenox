@@ -906,6 +906,9 @@ omitted alternative supplies `nil`.
 `apply` also resolves a predicate-controlled target before checking its
 fixed arguments and spread. A direct call whose operator is a conditional
 checks written arguments against the selected function in each branch.
+A literal `nil` in the operator position is a compiler error. A computed
+target known to be `nil` raises `NullPointerException` when invoked, after
+its arguments have evaluated.
 The same rule applies to a declared callback field in a literal map. With a
 generic contract, each reachable alternative can use inferred input types and
 contribute evidence for the result parameter.
