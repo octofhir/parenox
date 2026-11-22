@@ -341,7 +341,7 @@ impl<'model> Checker<'model> {
         {
             if let Some(diagnostic) =
                 self.model
-                    .missing_qualified_var(name, target.without_metadata().span, self.globals)
+                    .missing_var_operand(name, target.without_metadata().span, self.globals)
             {
                 self.diagnostics.push(diagnostic);
                 return Value::new(Type::Unknown);

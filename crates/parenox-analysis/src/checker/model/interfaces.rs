@@ -498,20 +498,12 @@ impl Model {
     }
 
     pub fn interface_key(&self, globals: &Globals, has_declaration_findings: bool) -> InterfaceKey {
-        // Extern-only vars can exist in the source's own namespace without
-        // adding an edge to the project's namespace load order.
-        let own = std::iter::once((self.names.namespace.as_str(), false));
+        // Var operands can depend on the current namespace's published inventory.
+        let own = std::iter::once(self.names.namespace.as_str());
         let dependencies = own
-            .chain(
-                self.local_interface
-                    .dependencies
-                    .iter()
-                    .map(|name| (name.as_str(), true)),
-            )
-            .map(|(name, external)| Dependency {
-                source: external
-                    .then(|| globals.exports.get(name).cloned())
-                    .flatten(),
+            .chain(self.local_interface.dependencies.iter().map(String::as_str))
+            .map(|name| Dependency {
+                source: globals.exports.get(name).cloned(),
                 externs: globals
                     .externs
                     .as_ref()

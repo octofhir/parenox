@@ -937,8 +937,9 @@ untyped source call reports `PNX9002` and a comparison without enough
 type information can report `PNX9004`. An unknown field does not hide a
 definite mismatch elsewhere in the value.
 
-For `#'alias/name` and `(var alias/name)`, a complete source inventory can
-prove that the target Var is absent and report `PNX2304` at its name.
+For `#'name` and `(var alias/name)`, a complete source inventory can prove
+that the target Var is absent and report `PNX2304` at its name. A bare Var
+operand looks up namespace mappings even inside a lexical binding.
 This reference check also runs in untyped function bodies and visits
 branches that the JVM compiles even when they cannot run.
 The JVM checks the first operand of `var` and ignores any trailing forms

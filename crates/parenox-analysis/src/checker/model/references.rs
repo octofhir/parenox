@@ -830,7 +830,7 @@ impl<'a, F: FnMut(&str, &str, usize) -> ProjectCall> References<'a, '_, F> {
                             globals,
                         } = &mut self.purpose
                         {
-                            diagnostics.extend(model.missing_qualified_var(var, span, globals));
+                            diagnostics.extend(model.missing_var_operand(var, span, globals));
                         }
                         self.record_reference(var, span, false);
                     }

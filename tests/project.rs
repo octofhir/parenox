@@ -701,6 +701,64 @@ fn qualified_var_references_distinguish_proven_absence_from_private_vars() {
 }
 
 #[test]
+fn local_var_operands_resolve_namespace_mappings_inside_let() {
+    let source = r#"(ns app (:refer-clojure :exclude [map ns]))
+;; reserved declaration.
+(defn local-ref {:t/sig '[:-> t/any]} [] (let [local 1] #'local))
+(defn self-ref {:t/sig '[:-> t/any]} [] #'app/local)
+(defn excluded {:t/sig '[:-> t/any]} [] #'map)
+(defn core-vars {:t/sig '[:-> t/any]} [] [#'ns #'assoc])
+(defn class-ref {:t/sig '[:-> t/any]} [] #'String)"#;
+    let updated = source.replace(";; reserved declaration.", "(def ^:private local 42)");
+    let app = Source {
+        path: "app.clj",
+        source,
+    };
+    let edited = Source {
+        source: &updated,
+        ..app
+    };
+    let missing = |report: &parenox::ProjectReport, source: &str| {
+        report.files[0]
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "PNX2304")
+            .map(|d| source[d.span.start.offset..d.span.end.offset].to_owned())
+            .collect::<Vec<_>>()
+    };
+    let normalize = |report: &parenox::ProjectReport| {
+        serde_json::to_value(&report.files[0].diagnostics).unwrap()
+    };
+    let mut session = Session::default();
+    let before = session.check_project(&[app], None);
+    assert_eq!(
+        missing(&before, source),
+        ["local", "app/local", "map", "String"],
+        "{before:#?}"
+    );
+    assert_eq!(
+        before.files[0]
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "PNX9001")
+            .count(),
+        2
+    );
+    let after = session.check_project(&[edited], None);
+    assert_eq!(missing(&after, &updated), ["map", "String"], "{after:#?}");
+    assert_eq!(after.files[0].stats.checked_functions, 2);
+    assert_eq!(after.files[0].stats.reused_functions, 3);
+    assert_eq!(
+        normalize(&after),
+        normalize(&Session::default().check_project(&[edited], None))
+    );
+    assert_eq!(
+        normalize(&before),
+        normalize(&session.check_project(&[app], None))
+    );
+}
+
+#[test]
 fn load_time_code_can_make_a_provider_var_inventory_incomplete() {
     let consumer = Source {
         path: "app.clj",

@@ -759,17 +759,33 @@ impl Model {
         self.names.runtime_alias_gap(symbol)
     }
 
-    pub(super) fn missing_qualified_var(
+    pub(super) fn missing_var_operand(
         &self,
         name: &str,
         span: Span,
         globals: &Globals,
     ) -> Option<Diagnostic> {
-        if name == "/" || !name.contains('/') || self.runtime_alias_gap(name).is_some() {
+        if self.runtime_alias_gap(name).is_some() {
             return None;
         }
-        let (namespace, local) = self.names.resolve_parts(name);
-        if namespace == self.namespace() {
+        let (namespace, local) = if name != "/" && name.contains('/') {
+            self.names.resolve_parts(name)
+        } else {
+            // The compiler looks in the namespace mappings, even inside a let.
+            // Its ns and in-ns Vars remain available after a core exclusion.
+            if matches!(name, "ns" | "in-ns")
+                || self.unavailable_all_refers
+                || self.names.refers.contains_key(name)
+                || (self.names.core_visible(name)
+                    && (globals.project_namespaces.contains("clojure.core")
+                        || crate::core_names::core_binding(name).is_some()))
+            {
+                return None;
+            }
+            (self.namespace(), name)
+        };
+        if namespace == "user" && namespace == self.namespace() {
+            // The default runtime namespace can have startup mappings.
             return None;
         }
         let source = globals.exports.get(namespace)?;

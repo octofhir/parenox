@@ -1457,6 +1457,25 @@
                       (ex-message (ex-cause e))))))))
 (println "Clojure/JVM qualified Var references: 6 assertions passed")
 
+(binding [*ns* (create-ns 'parenox.smoke.local-var)]
+  (clojure.core/refer 'clojure.core :exclude '[map ns in-ns])
+  (doseq [[form expected] '[[(let [local 1] #'local)
+                             "Unable to resolve var: local in this context"]
+                            [#'parenox.smoke.local-var/local
+                             "Unable to resolve var: parenox.smoke.local-var/local in this context"]
+                            [#'map "Unable to resolve var: map in this context"]
+                            [#'String "Expecting var, but String is mapped to class java.lang.String"]]]
+    (assert (try (eval form)
+                 false
+                 (catch clojure.lang.Compiler$CompilerException e
+                   (= expected (ex-message (ex-cause e)))))))
+  (assert (identical? #'clojure.core/ns (eval '(var ns))))
+  (assert (identical? #'clojure.core/in-ns (eval '(var in-ns))))
+  (eval '(def ^:private local 42))
+  (assert (= 42 (deref (eval '(let [local 1] #'local)))))
+  (assert (= 42 (deref (eval '(var parenox.smoke.local-var/local))))))
+(println "Clojure/JVM local namespace Var operands: 8 assertions passed")
+
 (let [setup (create-ns 'parenox.smoke.var-setup)
       provider (create-ns 'parenox.smoke.var-initializer)]
   (binding [*ns* setup]
