@@ -1,5 +1,6 @@
 //! Namespaced map keys. An explicit prefix is part of the reader syntax.
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use super::{
     Form, ImmediateSyntaxQuote, Kind, MAX_NESTING_DEPTH, NamespaceToken, Position, ReadError,
@@ -96,18 +97,13 @@ impl Reader<'_> {
         }
         if !self.preserves_map_entries(&entries) {
             let namespace = prefix.as_ref().and_then(Form::symbol).unwrap();
-            if self.namespace_tokens.is_some()
-                && entries.as_chunks::<2>().0.iter().any(|[key, _]| {
-                    matches!(Self::immediate_syntax_quote_value(key),
-                        Some(ImmediateSyntaxQuote::Form(value))
-                        if matches!(value.without_metadata().kind,
-                            Kind::Symbol(_) | Kind::AnonymousArgument(_) | Kind::Keyword(_)))
-                })
-            {
-                self.projected_key_namespaces
-                    .insert(start.offset, namespace.to_owned());
-            }
-            if let Err(error) = qualify_namespaced_entries(&mut entries, namespace, self.source) {
+            if let Err(error) = qualify_namespaced_entries_at(
+                &mut entries,
+                namespace,
+                self.source,
+                start.offset,
+                &mut self.projected_key_namespaces,
+            ) {
                 self.retain_rejected_literal(start, Kind::Map(entries));
                 return Err(error);
             }
@@ -125,6 +121,24 @@ pub fn qualify_namespaced_entries(
         qualify_key(key, namespace);
     }
     uniqueness::check_qualified_map(entries, source, namespace)
+}
+
+pub fn qualify_namespaced_entries_at(
+    entries: &mut [Form],
+    namespace: &str,
+    source: &str,
+    offset: usize,
+    projected_key_namespaces: &mut BTreeMap<usize, String>,
+) -> Result<(), ReadError> {
+    if entries.as_chunks::<2>().0.iter().any(|[key, _]| {
+        matches!(Reader::immediate_syntax_quote_value(key),
+            Some(ImmediateSyntaxQuote::Form(value))
+                if matches!(value.without_metadata().kind,
+                    Kind::Symbol(_) | Kind::AnonymousArgument(_) | Kind::Keyword(_)))
+    }) {
+        projected_key_namespaces.insert(offset, namespace.to_owned());
+    }
+    qualify_namespaced_entries(entries, namespace, source)
 }
 
 fn qualify_key(key: &mut Form, namespace: &str) {

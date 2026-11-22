@@ -67,6 +67,7 @@ pub(super) fn check_set(
     values: &[Form],
     source: &str,
     compare_raw_auto_keywords: bool,
+    projected_key_namespaces: &BTreeMap<usize, String>,
 ) -> Result<(), ReadError> {
     if values.len() >= 2 {
         check(
@@ -74,7 +75,8 @@ pub(super) fn check_set(
             Context {
                 source,
                 resolve_keyword: None,
-                projected_key_namespaces: None,
+                projected_key_namespaces: (!projected_key_namespaces.is_empty())
+                    .then_some(projected_key_namespaces),
                 compare_raw_auto_keywords,
             },
             KeyNames::Plain,
@@ -88,6 +90,7 @@ pub(super) fn check_map(
     entries: &[Form],
     source: &str,
     compare_raw_auto_keywords: bool,
+    projected_key_namespaces: &BTreeMap<usize, String>,
 ) -> Result<(), ReadError> {
     if entries.len() >= 4 {
         check(
@@ -95,7 +98,8 @@ pub(super) fn check_map(
             Context {
                 source,
                 resolve_keyword: None,
-                projected_key_namespaces: None,
+                projected_key_namespaces: (!projected_key_namespaces.is_empty())
+                    .then_some(projected_key_namespaces),
                 compare_raw_auto_keywords,
             },
             KeyNames::Plain,

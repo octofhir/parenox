@@ -8,7 +8,7 @@ mod uniqueness;
 pub use edn::{read_edn, validate_edn};
 pub use names::array_class_component;
 #[doc(hidden)]
-pub use namespace_map::qualify_namespaced_entries;
+pub use namespace_map::{qualify_namespaced_entries, qualify_namespaced_entries_at};
 pub use numbers::{
     IntegerLiteralClass, NumericLiteral, classify_number, classify_number_with_class,
 };
@@ -265,7 +265,7 @@ pub struct CheckRead {
     /// Reader data omitted from evaluation that may still need namespace validation.
     pub inactive_namespace_forms: Vec<Form>,
     pub namespace_tokens: Vec<NamespaceToken>,
-    /// Explicit map namespaces needed to compare projected keys after alias resolution.
+    /// Resolved map namespaces needed to compare projected keys in enclosing collections.
     pub projected_key_namespaces: BTreeMap<usize, String>,
     pub unchecked_dispatches: Option<UncheckedDispatches>,
     pub comments: Vec<LineComment>,
@@ -1132,9 +1132,12 @@ impl<'a> Reader<'a> {
         self.bump(); // {
         self.token(SyntaxKind::OpenSet, start);
         let values = self.collection('}', start)?;
-        if let Err(error) =
-            uniqueness::check_set(&values, self.source, self.last_tag_end <= start.offset)
-        {
+        if let Err(error) = uniqueness::check_set(
+            &values,
+            self.source,
+            self.last_tag_end <= start.offset,
+            &self.projected_key_namespaces,
+        ) {
             self.retain_rejected_literal(start, Kind::Set(values));
             return Err(error);
         }
@@ -1151,9 +1154,12 @@ impl<'a> Reader<'a> {
                 }
                 return Err(self.error(start, "Map literal requires an even number of forms"));
             }
-            if let Err(error) =
-                uniqueness::check_map(&entries, self.source, self.last_tag_end <= start.offset)
-            {
+            if let Err(error) = uniqueness::check_map(
+                &entries,
+                self.source,
+                self.last_tag_end <= start.offset,
+                &self.projected_key_namespaces,
+            ) {
                 self.retain_rejected_literal(start, Kind::Map(entries));
                 return Err(error);
             }

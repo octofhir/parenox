@@ -32,6 +32,11 @@ fn immediate_unquotes_can_duplicate_collection_keys_without_losing_syntax() {
             "{demo/a 1}",
         ),
         (
+            "{#:demo {`~:a 1} :first {:demo/a 1} :second} :after",
+            "{:demo/a 1}",
+        ),
+        ("#{#:demo {`~:a 1} {:demo/a 1}} :after", "{:demo/a 1}"),
+        (
             "{a 1 `(clojure.core/unquote a ignored) 2} :after",
             "`(clojure.core/unquote a ignored)",
         ),
@@ -62,6 +67,7 @@ fn projected_names_keep_their_namespace_when_checking_duplicates() {
         "{a 1 `a 2}",
         "#:demo {_/a 1 `~a 2}",
         "{#:demo {`~a 1} :qualified {a 1} :plain}",
+        "#{#:demo {`~:a 1} {:a 1}}",
     ] {
         let parsed = reader::parse(source);
         assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
@@ -141,6 +147,7 @@ fn deferred_duplicate_checks_keep_the_namespace_read_for_a_projected_key() {
         ("#:demo {::d/a 1 `~:a 2}", "`~:a"),
         ("#:^:marker demo {::d/a 1 `~:a 2}", "`~:a"),
         ("{#:demo {`~:a 1} :first {::d/a 1} :second}", "{::d/a 1}"),
+        ("{#::d{`~:a 1} :first {:demo/a 1} :second}", "{:demo/a 1}"),
     ] {
         let source = format!("(ns reports (:require [demo :as-alias d]))\n(def data '{literal})");
         let path = "reports.clj";
@@ -178,6 +185,24 @@ fn deferred_duplicate_checks_keep_the_namespace_read_for_a_projected_key() {
             serde_json::to_value(&original.diagnostics).unwrap()
         );
     }
+}
+
+#[test]
+fn projected_names_in_auto_namespaced_maps_can_duplicate_set_members() {
+    let source = "(ns reports) (def data '#{#::{`~:a 1} {:reports/a 1}})";
+    let parsed = reader::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let report = Session::default().check("reports.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX9000");
+    assert!(finding.message.contains("Duplicate element"));
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "{:reports/a 1}"
+    );
 }
 
 #[test]

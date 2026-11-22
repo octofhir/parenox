@@ -6,7 +6,7 @@ use super::{Declarations, Names};
 use crate::checker::quote::quoted_symbol;
 use crate::reader::{
     CheckRead, Form, Kind, NamespaceToken, Position, ReadError, Span,
-    check_resolved_collection_with_namespaces, qualify_namespaced_entries,
+    check_resolved_collection_with_namespaces, qualify_namespaced_entries_at,
 };
 
 struct LiteralError {
@@ -16,7 +16,6 @@ struct LiteralError {
 
 struct ReaderNamespaces<'a> {
     declarations: &'a Declarations,
-    projected_key_namespaces: &'a BTreeMap<usize, String>,
     scopes: Vec<ReaderNamespace>,
     namespaces: Vec<NamespaceAliases>,
     prelude: ReaderPrelude,
@@ -103,7 +102,7 @@ impl Declarations {
         if read.namespace_tokens.is_empty() {
             return Ok(());
         }
-        let namespaces = ReaderNamespaces::new(self, read, count, &read.projected_key_namespaces);
+        let namespaces = ReaderNamespaces::new(self, read, count);
         let alias = namespaces
             .validate_reader_aliases(source, &read.namespace_tokens, read_end)
             .err();
@@ -112,9 +111,18 @@ impl Declarations {
         let before = alias
             .as_ref()
             .map_or(read_end, |error| error.span.start.offset);
-        let active = namespaces.resolve_reader_literals(source, &mut read.forms[..count], before);
-        let inactive =
-            namespaces.resolve_reader_literals(source, &mut read.inactive_namespace_forms, before);
+        let active = namespaces.resolve_reader_literals(
+            source,
+            &mut read.forms[..count],
+            before,
+            &mut read.projected_key_namespaces,
+        );
+        let inactive = namespaces.resolve_reader_literals(
+            source,
+            &mut read.inactive_namespace_forms,
+            before,
+            &mut read.projected_key_namespaces,
+        );
         active
             .err()
             .into_iter()
@@ -143,12 +151,7 @@ impl Declarations {
 }
 
 impl<'a> ReaderNamespaces<'a> {
-    fn new(
-        declarations: &'a Declarations,
-        read: &CheckRead,
-        count: usize,
-        projected_key_namespaces: &'a BTreeMap<usize, String>,
-    ) -> Self {
+    fn new(declarations: &'a Declarations, read: &CheckRead, count: usize) -> Self {
         let namespaces = read.forms[..count].iter().filter_map(|form| {
             let Kind::List(items) = &form.without_metadata().kind else {
                 return None;
@@ -191,7 +194,6 @@ impl<'a> ReaderNamespaces<'a> {
         }
         Self {
             declarations,
-            projected_key_namespaces,
             scopes,
             namespaces: namespace_aliases,
             prelude,
@@ -443,6 +445,7 @@ impl<'a> ReaderNamespaces<'a> {
         source: &str,
         forms: &mut [Form],
         before: usize,
+        projected_key_namespaces: &mut BTreeMap<usize, String>,
     ) -> Result<(), LiteralError> {
         for form in forms {
             if form.span.start.offset >= before {
@@ -452,7 +455,12 @@ impl<'a> ReaderNamespaces<'a> {
             let located = |error| LiteralError { read_end, error };
             match &mut form.kind {
                 Kind::AutoNamespacedMap { alias, entries } => {
-                    self.resolve_reader_literals(source, entries, before)?;
+                    self.resolve_reader_literals(
+                        source,
+                        entries,
+                        before,
+                        projected_key_namespaces,
+                    )?;
                     if read_end > before {
                         continue;
                     }
@@ -474,24 +482,49 @@ impl<'a> ReaderNamespaces<'a> {
                             *keyword = resolved;
                         }
                     }
-                    qualify_namespaced_entries(entries, namespace, source).map_err(located)?;
+                    qualify_namespaced_entries_at(
+                        entries,
+                        namespace,
+                        source,
+                        at,
+                        projected_key_namespaces,
+                    )
+                    .map_err(located)?;
                     form.kind = Kind::Map(std::mem::take(entries));
                 }
                 Kind::List(items) | Kind::Vector(items) | Kind::Map(items) | Kind::Set(items) => {
-                    self.resolve_reader_literals(source, items, before)?;
+                    self.resolve_reader_literals(source, items, before, projected_key_namespaces)?;
                 }
-                Kind::AnonymousFunction(function) => {
-                    self.resolve_reader_literals(source, &mut function.body, before)?
-                }
+                Kind::AnonymousFunction(function) => self.resolve_reader_literals(
+                    source,
+                    &mut function.body,
+                    before,
+                    projected_key_namespaces,
+                )?,
                 Kind::Quote(item)
                 | Kind::SyntaxQuote(item)
                 | Kind::Unquote { form: item, .. }
                 | Kind::Conditional { form: item, .. } => {
-                    self.resolve_reader_literals(source, std::slice::from_mut(item), before)?;
+                    self.resolve_reader_literals(
+                        source,
+                        std::slice::from_mut(item),
+                        before,
+                        projected_key_namespaces,
+                    )?;
                 }
                 Kind::Metadata(metadata, object) | Kind::Tagged(metadata, object) => {
-                    self.resolve_reader_literals(source, std::slice::from_mut(metadata), before)?;
-                    self.resolve_reader_literals(source, std::slice::from_mut(object), before)?;
+                    self.resolve_reader_literals(
+                        source,
+                        std::slice::from_mut(metadata),
+                        before,
+                        projected_key_namespaces,
+                    )?;
+                    self.resolve_reader_literals(
+                        source,
+                        std::slice::from_mut(object),
+                        before,
+                        projected_key_namespaces,
+                    )?;
                 }
                 Kind::Keyword(keyword)
                     if keyword.starts_with("::")
@@ -518,7 +551,7 @@ impl<'a> ReaderNamespaces<'a> {
                     form,
                     source,
                     &|keyword, position| self.resolve_reader_keyword(keyword, position),
-                    self.projected_key_namespaces,
+                    projected_key_namespaces,
                 )
                 .map_err(located)?;
             }
