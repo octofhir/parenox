@@ -169,9 +169,10 @@ impl Checker<'_> {
             return Some(Value::new(Type::Never));
         }
         let tag = env.java_hint(receiver);
-        let string_receiver = match tag.map(|name| self.model.class_name(name)) {
-            Some("String" | "java.lang.String") => true,
-            Some(_) => false,
+        let string_receiver = match tag {
+            Some(hint) => hint.name().is_some_and(|name| {
+                matches!(self.model.class_name(name), "String" | "java.lang.String")
+            }),
             None => receiver_type.known.subtype_of(&Type::String.nilable()),
         };
         if !string_receiver {

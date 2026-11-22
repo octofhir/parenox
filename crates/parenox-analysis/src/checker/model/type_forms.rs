@@ -18,7 +18,8 @@ use crate::checker::maps::literal_key_type;
 use crate::checker::quote::quoted_symbol;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{
-    ExtraFields, Field, IntegerType, MAX_TUPLE_ITEMS, MapType, Parameters, SPEC_INVALID, Type,
+    ExtraFields, Field, IntegerType, JvmArrayClass, MAX_TUPLE_ITEMS, MapType, Parameters,
+    SPEC_INVALID, Type,
 };
 
 pub(super) fn read_type(
@@ -494,6 +495,7 @@ pub(super) fn core_predicate_type(name: &str) -> Option<Type> {
         "number?" => Type::Number,
         "integer?" => Type::Integral(IntegerType::ANY),
         "int?" => Type::Integral(IntegerType::FIXED),
+        "bytes?" => Type::JvmArray(JvmArrayClass::Byte),
         "boolean?" => Type::Boolean,
         "false?" => Type::Bool(false),
         "any?" => Type::SpecValue,

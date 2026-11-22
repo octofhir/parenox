@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::Value;
-use super::metadata::java_type_hint;
-use crate::reader::Form;
+use super::metadata::{JavaTypeHint, java_type_hint};
+use crate::reader::{Form, Kind};
 use crate::types::Type;
 
 pub(super) const MAX_SELECTOR_KEYS: usize = 32;
@@ -16,7 +16,7 @@ pub(super) struct Env {
     next_binding: usize,
     retained_owners: BTreeMap<BindingId, Value>,
     pinned_owners: Vec<BindingId>,
-    java_hints: BTreeMap<String, String>,
+    java_hints: BTreeMap<String, JavaTypeHint<String>>,
     presence: Vec<Presence>,
     selectors: BTreeMap<String, Selector>,
     impossible: bool,
@@ -178,16 +178,36 @@ impl Env {
         }
     }
 
-    pub(super) fn java_hint<'a>(&'a self, form: &'a Form) -> Option<&'a str> {
+    pub(super) fn java_hint<'a>(&'a self, form: &'a Form) -> Option<JavaTypeHint<&'a str>> {
+        if let Kind::List(items) = &form.without_metadata().kind
+            && let Some((head, body)) = items.split_first()
+        {
+            match (head.symbol(), body) {
+                // The JVM compiler derives the class from the final expression.
+                (Some("do"), _) => return self.java_hint(body.last()?),
+                (Some("if"), [_, yes] | [_, yes, _]) => {
+                    let no = body.get(2);
+                    let when_true = self.java_hint(yes);
+                    let when_false = no.and_then(|no| self.java_hint(no));
+                    return match (when_true, when_false) {
+                        (a, b) if a == b => a,
+                        (a, None) if no.is_none_or(is_nil_literal) => a,
+                        (None, b) if is_nil_literal(yes) => b,
+                        _ => Some(JavaTypeHint::Unresolved),
+                    };
+                }
+                _ => {}
+            }
+        }
         java_type_hint(form).or_else(|| {
             form.symbol()
                 .and_then(|name| self.java_hints.get(name))
-                .map(String::as_str)
+                .map(JavaTypeHint::as_deref)
         })
     }
 
-    pub(super) fn set_java_hint(&mut self, name: &str, hint: &str) {
-        self.java_hints.insert(name.into(), hint.into());
+    pub(super) fn set_java_hint(&mut self, name: &str, hint: JavaTypeHint<String>) {
+        self.java_hints.insert(name.into(), hint);
     }
 
     pub(super) fn is_alias(&self, name: &str) -> bool {
@@ -294,4 +314,8 @@ impl Env {
             present,
         });
     }
+}
+
+fn is_nil_literal(form: &Form) -> bool {
+    matches!(form.without_metadata().kind, Kind::Nil)
 }

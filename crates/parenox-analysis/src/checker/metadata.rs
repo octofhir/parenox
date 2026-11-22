@@ -8,11 +8,45 @@ use std::collections::BTreeSet;
 
 const MAX_ORDERED_METADATA_KEYS: usize = 8;
 
-pub(super) fn java_type_hint(form: &Form) -> Option<&str> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum JavaTypeHint<T> {
+    Symbol(T),
+    Text(T),
+    Unresolved,
+}
+
+impl<T> JavaTypeHint<T> {
+    pub(super) fn name(self) -> Option<T> {
+        match self {
+            Self::Symbol(name) | Self::Text(name) => Some(name),
+            Self::Unresolved => None,
+        }
+    }
+
+    pub(super) fn map<U>(self, f: impl FnOnce(T) -> U) -> JavaTypeHint<U> {
+        match self {
+            Self::Symbol(name) => JavaTypeHint::Symbol(f(name)),
+            Self::Text(name) => JavaTypeHint::Text(f(name)),
+            Self::Unresolved => JavaTypeHint::Unresolved,
+        }
+    }
+}
+
+impl JavaTypeHint<String> {
+    pub(super) fn as_deref(&self) -> JavaTypeHint<&str> {
+        match self {
+            Self::Symbol(name) => JavaTypeHint::Symbol(name),
+            Self::Text(name) => JavaTypeHint::Text(name),
+            Self::Unresolved => JavaTypeHint::Unresolved,
+        }
+    }
+}
+
+pub(super) fn java_type_hint(form: &Form) -> Option<JavaTypeHint<&str>> {
     let tag = form.metadata(":tag")?;
     match &tag.without_metadata().kind {
-        Kind::String(name) => Some(name),
-        _ => tag.symbol(),
+        Kind::String(name) => Some(JavaTypeHint::Text(name)),
+        _ => tag.symbol().map(JavaTypeHint::Symbol),
     }
 }
 

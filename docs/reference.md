@@ -763,6 +763,16 @@ value and the optional missing-key default.
 The `number?` predicate can accept a JVM object with a custom `ILookup`.
 Parenox reports a coverage gap when the receiver's type leaves this behavior
 open.
+
+`alength` uses the JVM array overload selected by a direct type hint such as
+`^bytes`, `^ints`, `^objects`, `^byte/1` or `^"[B"`. Hints follow ordinary
+`let` aliases. The checker verifies the receiver's type and nilability
+independently of its hint. `bytes?` supplies byte-array type evidence in
+contracts and guards. One-argument array constructors handle numeric sizes,
+nil and ordinary literal vectors with compatible elements. Two-argument
+initializers and opaque sequence inputs report incomplete analysis.
+[Clojure Java interop](https://clojure.org/reference/java_interop)
+
 Set invocation and lookups through `get`, `get-in` and `req!` use the stored
 element's type. An ordinary literal set can prove that a key is absent.
 Small literal sets with exact scalar

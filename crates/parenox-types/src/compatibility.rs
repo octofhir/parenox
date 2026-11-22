@@ -3,7 +3,7 @@ mod explain;
 
 use std::borrow::Cow;
 
-use super::{SPEC_INVALID, Signature, Type};
+use super::{JvmArrayClass, SPEC_INVALID, Signature, Type};
 use crate::{ExternMismatch, ExternMismatchReason};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -185,6 +185,8 @@ impl Type {
             (Type::Key(key), Type::SpecKeyword) => (key != SPEC_INVALID).into(),
             (Type::Keyword, Type::SpecKeyword) => Unproven,
             (Type::Number, Type::Integral(_) | Type::Integer(_)) => Unproven,
+            (Type::JvmArray(_), Type::JvmArray(JvmArrayClass::Any)) => Proven,
+            (Type::JvmArray(JvmArrayClass::Any), Type::JvmArray(_)) => Unproven,
             (Type::Integral(_) | Type::Integer(_), Type::Integral(_) | Type::Integer(_)) => {
                 let actual = self.integer_type().unwrap();
                 match actual.intersection(expected.integer_type().unwrap()) {

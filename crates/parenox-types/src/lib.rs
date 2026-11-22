@@ -178,6 +178,37 @@ impl fmt::Display for Signature {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum JvmArrayClass {
+    Any,
+    Reference,
+    Boolean,
+    Byte,
+    Char,
+    Short,
+    Int,
+    Long,
+    Float,
+    Double,
+}
+
+impl fmt::Display for JvmArrayClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Any => "JVM array",
+            Self::Reference => "Object[]",
+            Self::Boolean => "boolean[]",
+            Self::Byte => "byte[]",
+            Self::Char => "char[]",
+            Self::Short => "short[]",
+            Self::Int => "int[]",
+            Self::Long => "long[]",
+            Self::Float => "float[]",
+            Self::Double => "double[]",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type {
     Unknown,
@@ -204,6 +235,7 @@ pub enum Type {
     NonIntegral,
     String,
     Pattern,
+    JvmArray(JvmArrayClass),
     Character,
     Char(char),
     Str(String),
@@ -569,6 +601,7 @@ impl fmt::Display for Type {
             Type::NonIntegral => write!(f, "Number that is not a Clojure integer"),
             Type::String => write!(f, "String"),
             Type::Pattern => write!(f, "Pattern"),
+            Type::JvmArray(class) => fmt::Display::fmt(class, f),
             Type::Character => write!(f, "Character"),
             Type::Char(c) => match c {
                 '\n' => write!(f, "\\newline"),

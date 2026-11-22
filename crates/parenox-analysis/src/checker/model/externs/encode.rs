@@ -4,7 +4,7 @@ use std::fmt::{self, Write};
 use super::{ExternalDeclaration, Model, is_modeled_call};
 use crate::reader::{MAX_NESTING_DEPTH, Span};
 use crate::types::{
-    ExtraFields, IntegerClass, IntegerRange, IntegerType, MapType, Signature, Type,
+    ExtraFields, IntegerClass, IntegerRange, IntegerType, JvmArrayClass, MapType, Signature, Type,
 };
 
 impl Model {
@@ -270,6 +270,7 @@ impl SnapshotWriter {
             }
             Type::String => "clojure.core/string?",
             Type::Pattern => "java.util.regex.Pattern",
+            Type::JvmArray(JvmArrayClass::Byte) => "clojure.core/bytes?",
             Type::Character => "clojure.core/char?",
             Type::Keyword => "clojure.core/keyword?",
             Type::SpecKeyword => {

@@ -1,6 +1,7 @@
 //! Function resolution, call-site inference and built-in calls.
 mod apply;
 mod arithmetic;
+mod arrays;
 mod combinators;
 mod comprehensions;
 mod diagnostics;
@@ -35,8 +36,11 @@ use super::{
     queries::InferredCall,
 };
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, Compatibility, IntegerClass, IntegerType, Signature, Type};
+use crate::types::{
+    Arity, Compatibility, IntegerClass, IntegerType, JvmArrayClass, Signature, Type,
+};
 use crate::{ContractOrigin, Diagnostic};
+use arrays::array_constructor;
 use combinators::CombinedCallable;
 use forms::CoreForm;
 use inline::{CallbackReturn, Fnil, InlineFunction, Partial, PreparedChoice};
@@ -115,6 +119,13 @@ enum ArgumentForms<'a> {
     Written(&'a [Form]),
     Projected(&'a [Option<&'a Form>]),
     Unavailable,
+}
+
+#[derive(Clone, Copy)]
+struct WrittenBuiltin<'a> {
+    operator: &'a str,
+    operands: &'a [Form],
+    env: &'a Env,
 }
 
 #[derive(Clone, Copy)]
@@ -532,7 +543,16 @@ impl<'model> Checker<'model> {
                             return self.direct_extremum(&resolved, &xs[1..], span, env);
                         }
                         let args = self.typed_args(&xs[1..], env);
-                        return self.builtin(&resolved, &args, span, Some(name));
+                        return self.builtin(
+                            &resolved,
+                            &args,
+                            span,
+                            Some(WrittenBuiltin {
+                                operator: name,
+                                operands: &xs[1..],
+                                env,
+                            }),
+                        );
                     }
                     if self
                         .model
@@ -1315,10 +1335,10 @@ impl<'model> Checker<'model> {
         name: &str,
         args: &[(Value, Span)],
         span: Span,
-        written_operator: Option<&str>,
+        written: Option<WrittenBuiltin<'_>>,
     ) -> Value {
         let start = self.diagnostics.len();
-        let value = self.check_builtin(name, args, span, written_operator);
+        let value = self.check_builtin(name, args, span, written);
         self.note_builtin_contract(start, name);
         value
     }
@@ -1341,17 +1361,19 @@ impl<'model> Checker<'model> {
         name: &str,
         args: &[(Value, Span)],
         span: Span,
-        written_operator: Option<&str>,
+        written: Option<WrittenBuiltin<'_>>,
     ) -> Value {
         let arity_ok = builtin_arities(name)
             .iter()
             .any(|arity| arity.accepts(args.len()));
         let returns = call_returns(args);
         if !arity_ok {
-            let rejected_at_compile_time = written_operator.is_some_and(|operator| {
+            let rejected_at_compile_time = written.is_some_and(|call| {
                 name == "clojure.lang.MapEntry/create"
                     || (unconditional_core_inliner(name)
-                        && self.model.can_use_standard_core(operator, self.globals))
+                        && self
+                            .model
+                            .can_use_standard_core(call.operator, self.globals))
             });
             if !rejected_at_compile_time && (!returns || !self.path_reachable) {
                 return Value::new(Type::Never);
@@ -1373,6 +1395,9 @@ impl<'model> Checker<'model> {
         }
         if !returns {
             return Value::new(Type::Never);
+        }
+        if let Some(class) = array_constructor(name) {
+            return self.jvm_array(name, class, args, span);
         }
         if matches!(name, "clojure.core/min" | "clojure.core/max") {
             return self.extremum(name, args);
@@ -1401,6 +1426,7 @@ impl<'model> Checker<'model> {
                     | "clojure.core/ex-data"
                     | "clojure.core/identity"
                     | "clojure.core/="
+                    | "clojure.core/alength"
                     | "clojure.core/str"
                     | "clojure.core/name"
                     | "clojure.core/map?"
@@ -1445,6 +1471,13 @@ impl<'model> Checker<'model> {
                 return reduction::reduced_operation(name, &args[0].0);
             }
             "clojure.core/=" => self.equality(args),
+            "clojure.core/alength" => {
+                let (receiver, span) = &args[0];
+                let operand = written.map(|call| (&call.operands[0], call.env));
+                let hint = operand.and_then(|(form, env)| env.java_hint(form));
+                let span = operand.map_or(*span, |(form, _)| form.without_metadata().span);
+                return self.array_length(receiver, span, hint);
+            }
             "clojure.core/empty?" | "clojure.core/not-empty" => {
                 return self.emptiness_call(name, &args[0]);
             }
@@ -1658,6 +1691,7 @@ fn unconditional_core_inliner(name: &str) -> bool {
             | "clojure.core/nil?"
             | "clojure.core/boolean"
             | "clojure.core/count"
+            | "clojure.core/alength"
     )
 }
 
@@ -1682,6 +1716,9 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         | "clojure.core/find"
         | "clojure.core/select-keys"
         | "clojure.core/zipmap" => &[Arity::Fixed(2)],
+        name if array_constructor(name).is_some_and(|class| class != JvmArrayClass::Reference) => {
+            &[Arity::Fixed(1), Arity::Fixed(2)]
+        }
         _ => &[Arity::Fixed(1)],
     }
 }
@@ -1693,6 +1730,7 @@ pub(super) fn predicate_type(name: &str) -> Option<Type> {
         "clojure.core/number?" => Some(Type::Number),
         "clojure.core/integer?" => Some(Type::Integral(IntegerType::ANY)),
         "clojure.core/int?" => Some(Type::Integral(IntegerType::FIXED)),
+        "clojure.core/bytes?" => Some(Type::JvmArray(JvmArrayClass::Byte)),
         "clojure.core/boolean?" => Some(Type::Boolean),
         "clojure.core/keyword?" => Some(Type::Keyword),
         "clojure.core/symbol?" => Some(Type::Symbol),
@@ -1836,6 +1874,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/key"
             | "clojure.core/val"
             | "clojure.core/count"
+            | "clojure.core/alength"
             | "clojure.core/empty?"
             | "clojure.core/not-empty"
             | "clojure.core/nth"
@@ -1873,6 +1912,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.string/split"
             | "clojure.string/join"
     ) || predicate_type(name).is_some()
+        || array_constructor(name).is_some()
 }
 
 pub(super) fn arity_counts(counts: impl Iterator<Item = Arity>) -> String {

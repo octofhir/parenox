@@ -110,6 +110,12 @@ impl Checker<'_> {
         }
     }
 
+    pub(in crate::checker) fn negative_array_size(&mut self) {
+        if let Some(throws) = &mut self.throws {
+            throws.record(ExceptionClass::NegativeArraySizeException, Type::Throwable);
+        }
+    }
+
     pub(in crate::checker) fn illegal_argument(&mut self) {
         if let Some(throws) = &mut self.throws {
             throws.record(ExceptionClass::IllegalArgumentException, Type::Throwable);
