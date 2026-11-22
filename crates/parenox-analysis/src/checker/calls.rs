@@ -594,9 +594,15 @@ impl<'model> Checker<'model> {
     }
 
     fn call_inferred_operator(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
+        let (head, operands) = xs.split_first().unwrap();
+        if let Some(value) = self.check_predicate_choice(head, env, |checker, selected, scope| {
+            checker.call_selected_operator(selected, operands, span, scope)
+        }) {
+            return value;
+        }
         let start = self.diagnostics.len();
-        if let Some(callable) = self.prepare_inline(&xs[0], env) {
-            let args: Vec<_> = self.eval_args(&xs[1..], env, callable.returns()).collect();
+        if let Some(callable) = self.prepare_inline(head, env) {
+            let args: Vec<_> = self.eval_args(operands, env, callable.returns()).collect();
             let invoked = call_returns(&args);
             // Prepared callbacks elsewhere use synthetic arguments. Only
             // this call has the written forms for signature help.
@@ -607,16 +613,16 @@ impl<'model> Checker<'model> {
                 let local = self.local_call(function, &args);
                 let result = self.call_prepared(&callable, args, span, env, true);
                 let local = local.filter(|_| start == self.diagnostics.len());
-                self.observe_inferred_call(span, &xs[1..], local, &result);
+                self.observe_inferred_call(span, operands, local, &result);
                 return result;
             }
             return self.call_prepared(&callable, args, span, env, invoked);
         }
-        let function = self.infer(&xs[0], env);
+        let function = self.infer(head, env);
         // An unresolved var might be a macro. Its arguments are inspected for
         // findings, but may not be evaluated in this lexical scope at runtime.
         if function.known == Type::Unknown
-            && xs[0].symbol().is_some_and(|name| !env.contains_key(name))
+            && head.symbol().is_some_and(|name| !env.contains_key(name))
         {
             self.withhold_captured_facts(env.inline_functions());
             self.withhold_literals_after_opaque_form();
@@ -624,7 +630,7 @@ impl<'model> Checker<'model> {
             let enclosing_throws = self.throws.take();
             // An unconfirmed macro may reorder or discard operands. Check
             // each provisionally without taking its effects as call evidence.
-            for operand in &xs[1..] {
+            for operand in operands {
                 self.infer_path(operand, env, true, false);
             }
             self.type_query = observation;
@@ -632,20 +638,54 @@ impl<'model> Checker<'model> {
             self.may_throw();
             return Value::new(Type::Unknown);
         }
+        self.call_written_operator_value(&function, head, operands, span, env)
+    }
+
+    fn call_selected_operator(
+        &mut self,
+        selected: &Form,
+        operands: &[Form],
+        span: Span,
+        env: &Env,
+    ) -> Value {
+        let callable = self.prepare_callable(selected, env);
+        if let Callable::Value(function) = &callable.kind {
+            return self.call_written_operator_value(function, selected, operands, span, env);
+        }
+        let args: Vec<_> = self.eval_args(operands, env, callable.returns()).collect();
+        let invoked = call_returns(&args);
+        self.call_prepared_with_forms(
+            &callable,
+            args,
+            ArgumentForms::Written(operands),
+            span,
+            env,
+            invoked,
+        )
+    }
+
+    fn call_written_operator_value(
+        &mut self,
+        function: &Value,
+        head: &Form,
+        written: &[Form],
+        span: Span,
+        env: &Env,
+    ) -> Value {
         let operands = CallOperands {
-            prefix: &xs[1..],
+            prefix: written,
             tail: OperandTail::Items(&[]),
             vector_metadata: None,
         };
-        let args = self.call_args(&function, operands, span, env);
+        let args = self.call_args(function, operands, span, env);
         let value = self.call_value(
-            &function,
-            args.arguments(ArgumentForms::Written(&xs[1..])),
-            xs[0].span,
+            function,
+            args.arguments(ArgumentForms::Written(written)),
+            head.span,
             span,
         );
-        if self.type_query.is_some() && xs[0].keyword().is_some() {
-            self.observe_lookup(xs[0].without_metadata().span, &value);
+        if self.type_query.is_some() && head.keyword().is_some() {
+            self.observe_lookup(head.without_metadata().span, &value);
         }
         value
     }

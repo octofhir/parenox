@@ -7,6 +7,48 @@ fn check(body: &str) -> Report {
 }
 
 #[test]
+fn a_conditional_operator_supplies_context_to_its_written_arguments() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (defn choose
+          {:t/sig '[boolean? :-> (s/or :number int? :text string?)]} [numeric?]
+          ((if numeric? #(inc %) str) (if numeric? 7 "label")))
+        (defn number-label
+          {:t/sig '[(s/fspec :args (s/cat :value number?) :ret string?) :-> string?]} [format]
+          (format 7))
+        (defn text-label
+          {:t/sig '[(s/fspec :args (s/cat :value string?) :ret string?) :-> string?]} [format]
+          (format "label"))
+        (defn direct {:t/sig '[boolean? :-> string?]} [numeric?]
+          ((if numeric? number-label text-label)
+           (fn [message]
+             (if numeric? (str (inc message)) (subs message 1)))))
+        (defn before-arity {:t/sig '[:-> #{:argument}]} []
+          (try
+            ((if true inc str) (throw (ex-info "operand" {})) 2)
+            (catch clojure.lang.ExceptionInfo _ :argument)))"#;
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replace("(str (inc message))", "(subs message 1)");
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "message"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "reports/number-label"
+    );
+}
+
+#[test]
 fn raw_fn_uses_contextual_arguments_and_ordinary_body_maps() {
     for (expression, contract) in [
         (

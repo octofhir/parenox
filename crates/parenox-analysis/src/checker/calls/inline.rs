@@ -663,29 +663,39 @@ impl<'model> Checker<'model> {
         env: &Env,
         mut check: impl FnMut(&mut Self, &Form, &Env) -> Value,
     ) -> Value {
-        if let Some(arms) = self.conditional_arms(callback, env)
-            && let ConditionalTest::Predicate {
+        self.check_predicate_choice(callback, env, &mut check)
+            .unwrap_or_else(|| check(self, callback, env))
+    }
+
+    pub(super) fn check_predicate_choice(
+        &mut self,
+        callback: &Form,
+        env: &Env,
+        mut check: impl FnMut(&mut Self, &Form, &Env) -> Value,
+    ) -> Option<Value> {
+        let arms = self.conditional_arms(callback, env)?;
+        let (
+            ConditionalTest::Predicate {
                 form: test,
                 first_truth,
-            } = arms.test
-            && let [[first], [other]] = arms.branches
-        {
-            let start = self.diagnostics.len();
-            // Choose the callable before evaluating later arguments and
-            // keep that choice throughout the operation.
-            let [left, right] =
-                self.check_if_paths(test, env, first_truth, |checker, scope, truth| {
-                    check(
-                        checker,
-                        if truth == first_truth { first } else { other },
-                        scope,
-                    )
-                });
-            self.dedup_diagnostics(start);
-            left.join(right)
-        } else {
-            check(self, callback, env)
-        }
+            },
+            [[first], [other]],
+        ) = (arms.test, arms.branches)
+        else {
+            return None;
+        };
+        let start = self.diagnostics.len();
+        // Choose the callable before evaluating later arguments and
+        // keep that choice throughout the operation.
+        let [left, right] = self.check_if_paths(test, env, first_truth, |checker, scope, truth| {
+            check(
+                checker,
+                if truth == first_truth { first } else { other },
+                scope,
+            )
+        });
+        self.dedup_diagnostics(start);
+        Some(left.join(right))
     }
 
     fn callback_paths<'a>(

@@ -99,7 +99,11 @@ fn runtime_arity_checks_require_arguments_to_return() {
 
 #[test]
 fn reached_runtime_arity_errors_can_be_caught() {
-    for expression in ["(subs \"input\")", "(deref :input :extra)"] {
+    for expression in [
+        "(subs \"input\")",
+        "(deref :input :extra)",
+        "((if true inc str) 1 2)",
+    ] {
         let source = format!(
             "(ns demo) (defn caught {{:t/sig '[:-> #{{:arity}}]}} [] \
              (let [result (try {expression} (catch clojure.lang.ArityException _ :arity))] result))"

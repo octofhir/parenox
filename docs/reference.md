@@ -902,7 +902,8 @@ remaining operands and invoke the closure with its lexical bindings.
 A predicate-controlled choice between two callback expressions applies to
 the whole vector transformation, including the evaluation of its collections.
 `apply` also resolves a predicate-controlled target before checking its
-fixed arguments and spread.
+fixed arguments and spread. A direct call whose operator is a conditional
+checks written arguments against the selected function in each branch.
 The same rule applies to a declared callback field in a literal map. With a
 generic contract, each reachable alternative can use inferred input types and
 contribute evidence for the result parameter.
