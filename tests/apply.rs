@@ -122,6 +122,53 @@ fn apply_checks_vector_metadata_before_invoking_contextual_callbacks() {
 }
 
 #[test]
+fn apply_context_follows_the_standard_list_binding() {
+    let source = r#"(ns reports
+          (:refer-clojure :rename {list pack})
+          (:require [clojure.spec.alpha :as s]))
+        (defn message
+          {:t/sig '(t/all [value]
+            [value (s/nilable (s/fspec :args (s/cat :text value) :ret value)) :-> value])}
+          [text render]
+          (if-let [callback render] (callback text) text))
+        (defn absent {:t/sig '[string? :-> string?]} [text]
+          (apply message text (pack nil)))
+        (defn present {:t/sig '[string? :-> string?]} [text]
+          (apply message text (pack (fn [value] (subs value 1)))))
+        (defn no-args {:t/sig '[:-> #{:local}]} [] :local)
+        (defn shadowed {:t/sig '[:-> #{:local}]} []
+          (let [pack (fn [_] [])] (apply no-args (pack :ignored))))"#;
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+
+    let broken = source.replace("(subs value 1)", r#"(do (inc value) "bad")"#);
+    let report = session.check(path, &broken);
+    assert!(report.complete, "{report:#?}");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &broken[finding.span.start.offset..finding.span.end.offset],
+        "value"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "reports/message"
+    );
+    let cold = Session::default().check(path, &broken);
+    assert_eq!(
+        serde_json::to_value(&report.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
+#[test]
 fn applies_str_to_realized_bounded_string_mappings() {
     let source = r#"(ns demo (:refer-clojure :rename {map each partial prefix}))
 (defn suffix {:t/sig '[:-> #{" hey  end"}]} []

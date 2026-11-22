@@ -30,14 +30,9 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let callable = self.prepare_callable(callee, env);
-        let exact_items = if matches!(spread.kind, Kind::Nil) {
-            Some(&[][..])
-        } else {
-            spread.vector()
-        };
-        if let Some(items) = exact_items
-            && let Callable::Value(function) = &callable.kind
+        if let Callable::Value(function) = &callable.kind
             && matches!(function.known, Type::Function(_))
+            && let Some(items) = self.exact_spread_items(spread, env)
         {
             let operands = CallOperands {
                 prefix,
@@ -88,7 +83,8 @@ impl Checker<'_> {
         if apply
             .symbol()
             .is_some_and(|name| self.model.can_use_standard_core(name, self.globals))
-            && let Some(operands) = self.concat_operands(spread, env)
+            && let Some(operands) =
+                self.standard_collection_operands(spread, env, "clojure.core/concat")
         {
             // concat constructs a lazy result only after evaluating all its
             // operands. Traversing the proved vectors adds no effects.
@@ -284,12 +280,25 @@ impl Checker<'_> {
         Value::new(self.str_result(&mapped))
     }
 
-    fn concat_operands<'form>(&self, form: &'form Form, env: &Env) -> Option<&'form [Form]> {
+    fn exact_spread_items<'form>(&self, form: &'form Form, env: &Env) -> Option<&'form [Form]> {
+        if matches!(form.kind, Kind::Nil) {
+            return Some(&[]);
+        }
+        form.vector()
+            .or_else(|| self.standard_collection_operands(form, env, "clojure.core/list"))
+    }
+
+    fn standard_collection_operands<'form>(
+        &self,
+        form: &'form Form,
+        env: &Env,
+        constructor: &str,
+    ) -> Option<&'form [Form]> {
         let Kind::List(forms) = &form.kind else {
             return None;
         };
         let (head, operands) = forms.split_first()?;
-        (self.standard_core_name(head, env)?.as_str() == "clojure.core/concat").then_some(operands)
+        (self.standard_core_name(head, env)? == constructor).then_some(operands)
     }
 
     fn apply_open(
