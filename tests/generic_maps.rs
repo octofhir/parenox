@@ -224,6 +224,56 @@ fn an_eager_field_can_supply_the_type_for_a_callback_in_the_same_map() {
 }
 
 #[test]
+fn a_callback_result_can_supply_the_only_type_parameter() {
+    let provider = Source {
+        path: "rendered.clj",
+        source: r#"(ns rendered (:require [clojure.spec.alpha :as s]))
+(defn invoke {:t/sig '(t/all [result] [(s/fspec :args (s/cat) :ret result) :-> result])}
+  [callback] (callback))
+(defn message
+  {:t/sig '(t/all [result]
+             [{:result-code number?
+               :message-fn (s/fspec :args (s/cat) :ret result)} :-> result])}
+  [{:keys [message-fn]}]
+  (message-fn))"#,
+    };
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [rendered :as r]))
+(defn direct {:t/sig '[:-> string?]} []
+  (r/invoke (fn [] "direct")))
+(defn rendered {:t/sig '[:-> string?]} []
+  (r/message {:result-code 0 :message-fn (fn [] "formatted")}))
+(defn invalid {:t/sig '[:-> t/any]} []
+  (r/message {:result-code 1 :message-fn (fn [] (subs 42 0))}))"#,
+    };
+    let mut session = Session::default();
+    let with_source = session.check_project(&[app, provider], None);
+    let export = session.export_externs(&[provider], &[]);
+    let edn = export.edn.unwrap_or_else(|| panic!("{:?}", export.report));
+    let externs = Source {
+        path: "rendered.edn",
+        source: &edn,
+    };
+    let with_externs = Session::default().check_project(&[app], Some(externs));
+    for report in [with_source, with_externs] {
+        let [finding] = report.files[0].diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(
+            &app.source[finding.span.start.offset..finding.span.end.offset],
+            "42"
+        );
+        assert_eq!(
+            finding.callback_contract.as_ref().unwrap().name,
+            "rendered/message"
+        );
+    }
+}
+
+#[test]
 fn a_required_map_callback_can_supply_the_calls_result_type() {
     let source = r#"(ns demo.result-options (:require [clojure.spec.alpha :as s]))
         (defn render

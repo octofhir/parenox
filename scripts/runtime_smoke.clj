@@ -1215,6 +1215,10 @@
 (assert (= ["2" "3"] (demo.generic-callbacks/format-values [1 2])))
 (println "Clojure/JVM generic callbacks: 4 assertions passed")
 
+(let [{:keys [result-code message-fn]} {:result-code 0 :message-fn (fn [] "formatted")}]
+  (assert (= [0 "formatted"] [result-code (message-fn)])))
+(println "Clojure/JVM result callback: 1 assertion passed")
+
 (let [choose (fn [_ fallback] (nth fallback 0))
       run-on-fallback (fn [_ fallback f] (f (nth fallback 0)))]
   (assert (= "known" (choose [] ["known"])))

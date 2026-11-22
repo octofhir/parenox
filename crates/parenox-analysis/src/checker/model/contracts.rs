@@ -444,7 +444,7 @@ impl Model {
             self.error(
                 "PNX9001",
                 binders.span,
-                "t/all supports one or two input parameters and one optional callback result parameter",
+                "t/all supports up to two input parameters and one optional callback result parameter",
             );
             return None;
         };
@@ -522,11 +522,11 @@ impl Model {
             }
             output = Some(index);
         }
-        if !(1..=2).contains(&inputs) {
+        if inputs > 2 {
             self.error(
                 "PNX9001",
                 span,
-                "t/all requires one or two parameters witnessed by ordinary arguments",
+                "t/all supports up to two parameters witnessed by ordinary arguments",
             );
             return None;
         }
