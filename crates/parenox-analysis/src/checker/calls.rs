@@ -690,6 +690,24 @@ impl<'model> Checker<'model> {
         self.eval_args(args, env, true).collect()
     }
 
+    pub(super) fn reject_runtime_arity(
+        &mut self,
+        forms: &[Form],
+        span: Span,
+        env: &Env,
+        message: impl Into<String>,
+    ) -> Value {
+        let operands_return = self
+            .eval_args(forms, env, self.path_reachable)
+            .last()
+            .is_none_or(|(value, _)| !value.stops_evaluation());
+        if self.path_reachable && operands_return {
+            self.error("PNX2554", span, message);
+            self.arity_error();
+        }
+        Value::new(Type::Never)
+    }
+
     fn call_value(
         &mut self,
         function: &Value,

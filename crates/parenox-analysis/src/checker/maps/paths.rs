@@ -148,12 +148,12 @@ impl Checker<'_> {
 
     pub(in crate::checker) fn get_in(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
         if !(3..=4).contains(&xs.len()) {
-            self.error(
-                "PNX2554",
+            return self.reject_runtime_arity(
+                &xs[1..],
                 span,
+                env,
                 "get-in requires a target, key path and optional default",
             );
-            return Value::new(Type::Unknown);
         }
         if !xs[0]
             .symbol()

@@ -1286,6 +1286,13 @@
              (catch clojure.lang.ArityException _ true)))
 (println "Clojure/JVM call arity phases: 7 assertions passed")
 
+(doseq [call '[(get) (req!) (get-in) (contains?)]]
+  (let [reached (eval (list 'fn [] call))
+        skipped (eval (list 'fn [] (list 'do '(throw nil) call)))]
+    (assert (try (reached) false (catch clojure.lang.ArityException _ true)))
+    (assert (try (skipped) false (catch NullPointerException _ true)))))
+(println "Clojure/JVM map lookup arity: 8 assertions passed")
+
 (assert (= \a (. "😀a" (charAt 2))))
 (assert (Character/isHighSurrogate (.charAt "😀" 0)))
 (assert (try (.charAt "😀" 2) false (catch StringIndexOutOfBoundsException _ true)))

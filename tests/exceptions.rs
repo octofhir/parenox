@@ -87,6 +87,10 @@ fn nonreturning_arguments_keep_compiler_checks_in_later_forms() {
         ("(ex-info \"missing\")", "PNX2554"),
         ("(do (throw nil) (count))", "PNX2554"),
         (
+            "(try (count) (catch clojure.lang.ArityException _ :caught))",
+            "PNX2554",
+        ),
+        (
             "(do (throw nil) (clojure.lang.MapEntry/create :key))",
             "PNX2554",
         ),

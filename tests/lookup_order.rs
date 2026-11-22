@@ -47,6 +47,35 @@ fn argument_failures_take_precedence_over_lookup_and_later_arguments() {
 }
 
 #[test]
+fn map_reads_check_arity_after_eager_operands_and_preserve_compiler_checks() {
+    for call in ["(get)", "(req!)", "(get-in)", "(contains?)"] {
+        let skipped = check(&format!("(do (throw nil) {call})"), "nil?");
+        assert!(skipped.ok && skipped.complete, "{call}: {skipped:#?}");
+
+        let caught = check(
+            &format!("(try {call} (catch clojure.lang.ArityException _ :caught))"),
+            "#{:caught}",
+        );
+        let [diagnostic] = caught.diagnostics.as_slice() else {
+            panic!("{call}: {caught:#?}");
+        };
+        assert_eq!(diagnostic.code, "PNX2554");
+        assert!(caught.complete, "{call}: {caught:#?}");
+    }
+
+    let source = "(defn f {:t/sig '[:-> nil?]} [] (get (throw nil) :key nil unresolved))";
+    let report = Session::default().check("lookup.clj", source);
+    let [diagnostic] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX2304");
+    assert_eq!(
+        &source[diagnostic.span.start.offset..diagnostic.span.end.offset],
+        "unresolved"
+    );
+}
+
+#[test]
 fn successful_lookups_do_not_add_impossible_exception_paths() {
     for (expression, expected) in [
         ("(get {} :status :missing)", "#{:missing}"),

@@ -99,9 +99,10 @@ impl Checker<'_> {
     ) -> Value {
         let required = name == "clojure.core/req!";
         if !(3..=if required { 3 } else { 4 }).contains(&xs.len()) {
-            self.error(
-                "PNX2554",
+            return self.reject_runtime_arity(
+                &xs[1..],
                 span,
+                env,
                 format!(
                     "Invalid arity for {name}: expected a collection and key{}",
                     if required {
@@ -111,7 +112,6 @@ impl Checker<'_> {
                     }
                 ),
             );
-            return Value::new(Type::Unknown);
         }
         let args: Vec<_> = self.eval_args(&xs[1..], env, true).collect();
         if !call_returns(&args) {

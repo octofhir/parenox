@@ -563,8 +563,12 @@ impl Checker<'_> {
 
     pub(super) fn contains(&mut self, xs: &[Form], span: Span, env: &Env) -> Value {
         let [_, target, key] = xs else {
-            self.error("PNX2554", span, "contains? requires a target and key");
-            return Value::new(Type::Unknown);
+            return self.reject_runtime_arity(
+                &xs[1..],
+                span,
+                env,
+                "contains? requires a target and key",
+            );
         };
         let args: Vec<_> = self.eval_args(&xs[1..], env, true).collect();
         if !call_returns(&args) {
