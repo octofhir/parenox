@@ -465,6 +465,63 @@ fn later_required_fields_can_supply_the_callback_input_type() {
 }
 
 #[test]
+fn known_callback_result_fields_avoid_redundant_inference_gaps() {
+    let source = r#"(ns edits (:require [clojure.spec.alpha :as s]))
+        (defn select-uri
+          {:t/sig '(t/all [uri]
+                     [(s/fspec :args (s/cat) :ret {:new-uri uri :old-uri uri}) :-> uri])}
+          [make-edit] (:old-uri (make-edit)))
+        (defn partial-edit
+          {:t/sig '[:-> (t/map {:req {:old-uri string?} :opt {:new-uri string?}})]}
+          [] {:new-uri "memory:target" :old-uri "memory:source"})
+        (defn missing-guarantee {:t/sig '[:-> string?]} [] (select-uri partial-edit))
+        (defn conflicting {:t/sig '[string? :-> t/any]} [old-uri]
+          (select-uri (fn [] {:new-uri 42 :old-uri old-uri})))"#;
+    let path = "edits.clj";
+    let mut session = Session::default();
+    let report = session.check(path, source);
+    assert!(report.complete, "{report:#?}");
+    let [partial, conflict] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(partial.code, "PNX2322");
+    assert_eq!(
+        &source[partial.span.start.offset..partial.span.end.offset],
+        "partial-edit"
+    );
+    assert!(
+        partial
+            .expected
+            .as_deref()
+            .unwrap()
+            .contains(":new-uri: String")
+    );
+    assert_eq!(conflict.code, "PNX2322");
+    assert!(conflict.message.contains(":old-uri"));
+
+    let edited = source.replace(
+        "(t/map {:req {:old-uri string?} :opt {:new-uri string?}})",
+        "{:old-uri string? :new-uri string?}",
+    );
+    let warm = session.check(path, &edited);
+    let [remaining] = warm.diagnostics.as_slice() else {
+        panic!("{warm:#?}");
+    };
+    assert_eq!(remaining.code, "PNX2322");
+    assert!(remaining.message.contains(":old-uri"));
+    let cold = Session::default().check(path, &edited);
+    assert_eq!(
+        serde_json::to_value(&warm.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert_eq!(
+        serde_json::to_value(&restored.diagnostics).unwrap(),
+        serde_json::to_value(&report.diagnostics).unwrap()
+    );
+}
+
+#[test]
 fn a_required_map_callback_can_supply_the_calls_result_type() {
     let source = r#"(ns demo.result-options (:require [clojure.spec.alpha :as s]))
         (defn render

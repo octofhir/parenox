@@ -65,7 +65,7 @@ pub struct CallbackWitness<'a> {
     pub map_key: Option<&'a Type>,
     pub signature: &'a Signature,
     map_ancestors: Box<[&'a Type]>,
-    slot: ParameterSlot<'a>,
+    output: &'a Parameter,
 }
 
 impl CallbackWitness<'_> {
@@ -85,7 +85,10 @@ impl CallbackWitness<'_> {
     }
 
     pub fn evidence<'a>(&self, result: &'a Type) -> Option<Cow<'a, Type>> {
-        self.slot.evidence(result)
+        self.signature
+            .ret
+            .parameter_slots(self.output, false)
+            .find_map(|slot| slot.evidence(result))
     }
 }
 
@@ -460,7 +463,7 @@ impl Signature {
         direct.chain(projected)
     }
 
-    pub fn output_callback(&self, output: &Parameter) -> Option<CallbackWitness<'_>> {
+    pub fn output_callback<'a>(&'a self, output: &'a Parameter) -> Option<CallbackWitness<'a>> {
         self.args
             .iter()
             .enumerate()
@@ -493,16 +496,15 @@ impl Signature {
                 let [callback] = signatures.as_ref() else {
                     return None;
                 };
-                if callback.rest.is_some() {
+                if callback.rest.is_some() || !callback.ret.has_parameter_slot(output) {
                     return None;
                 }
-                let slot = callback.ret.parameter_slots(output, false).next()?;
                 Some(CallbackWitness {
                     index,
                     map_key,
                     signature: callback,
                     map_ancestors: map_ancestors.into_boxed_slice(),
-                    slot,
+                    output,
                 })
             })
     }

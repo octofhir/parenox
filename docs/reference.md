@@ -239,6 +239,7 @@ Exporting the regex object as an EDN literal value is unsupported.
   A later argument or required field can supply evidence when an earlier
   projection is empty or has an unknown type.
   A type parameter can be inferred solely from a callback result.
+  For a known callback return shape, each required map field can supply evidence.
   A dictionary can supply independent key and value types through
   `(s/map-of k v)`, including for the parameters of an inline callback.
   A callback field in a literal map can use type arguments inferred from other
