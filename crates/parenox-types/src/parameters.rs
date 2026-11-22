@@ -21,15 +21,24 @@ pub const MAX_TYPE_PARAMETERS: usize = 3;
 pub const MAX_CALLBACK_MAP_DEPTH: usize = 16;
 
 #[derive(Default)]
-pub struct TypeArguments<'a>([Option<Cow<'a, Type>>; MAX_TYPE_PARAMETERS]);
+pub struct TypeArguments<'a>([Option<TypeArgument<'a>>; MAX_TYPE_PARAMETERS]);
+
+struct TypeArgument<'a> {
+    ty: Cow<'a, Type>,
+    input: Option<usize>,
+}
 
 impl<'a> TypeArguments<'a> {
     pub fn get(&self, index: usize) -> Option<&Type> {
-        self.0[index].as_deref()
+        self.0[index].as_ref().map(|argument| argument.ty.as_ref())
+    }
+
+    pub fn input_source(&self, index: usize) -> Option<usize> {
+        self.0[index].as_ref()?.input
     }
 
     pub fn insert(&mut self, index: usize, ty: Cow<'a, Type>) {
-        self.0[index] = Some(ty);
+        self.0[index] = Some(TypeArgument { ty, input: None });
     }
 
     pub fn missing(&self) -> [bool; MAX_TYPE_PARAMETERS] {
@@ -412,29 +421,36 @@ impl Signature {
     ) -> TypeArguments<'a> {
         let mut arguments = TypeArguments::default();
         for (index, parameter) in binders.inputs() {
-            if let Some(witness) = self.input_witness(parameter)
-                && let Some(evidence) = witness.evidence(argument_at(witness.index))
-            {
-                arguments.insert(index, evidence);
-            }
+            arguments.0[index] = self.input_witnesses(parameter).find_map(|witness| {
+                let ty = witness.evidence(argument_at(witness.index))?;
+                Some(TypeArgument {
+                    ty,
+                    input: Some(witness.index),
+                })
+            });
         }
         arguments
     }
 
     pub fn input_witness(&self, parameter: &Parameter) -> Option<InputWitness<'_>> {
-        self.args
-            .iter()
-            .position(|ty| ty.is_parameter(parameter))
-            .map(|index| InputWitness {
+        self.input_witnesses(parameter).next()
+    }
+
+    fn input_witnesses<'a>(
+        &'a self,
+        parameter: &Parameter,
+    ) -> impl Iterator<Item = InputWitness<'a>> {
+        let direct = self.args.iter().enumerate().filter_map(move |(index, ty)| {
+            ty.is_parameter(parameter).then_some(InputWitness {
                 index,
                 slot: ParameterSlot::Direct,
             })
-            .or_else(|| {
-                self.args.iter().enumerate().find_map(|(index, ty)| {
-                    ty.parameter_slot(parameter, true)
-                        .map(|slot| InputWitness { index, slot })
-                })
-            })
+        });
+        let projected = self.args.iter().enumerate().filter_map(move |(index, ty)| {
+            let slot = ty.parameter_slot(parameter, true)?;
+            (!matches!(slot, ParameterSlot::Direct)).then_some(InputWitness { index, slot })
+        });
+        direct.chain(projected)
     }
 
     pub fn output_callback(&self, output: &Parameter) -> Option<CallbackWitness<'_>> {

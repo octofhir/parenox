@@ -236,6 +236,7 @@ Exporting the regex object as an EDN literal value is unsupported.
   parameters and one immediate callback result parameter. Inference uses
   arguments, not the expected return. Use `(a :< number?)` for a supported
   scalar bound. Empty collections alone do not establish an element type.
+  A later argument can supply evidence when an earlier projection is empty.
   A dictionary can supply independent key and value types through
   `(s/map-of k v)`, including for the parameters of an inline callback.
   A required callback field in a literal map can also use type arguments

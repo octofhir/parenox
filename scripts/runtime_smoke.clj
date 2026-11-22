@@ -1215,6 +1215,12 @@
 (assert (= ["2" "3"] (demo.generic-callbacks/format-values [1 2])))
 (println "Clojure/JVM generic callbacks: 4 assertions passed")
 
+(let [choose (fn [_ fallback] (nth fallback 0))
+      run-on-fallback (fn [_ fallback f] (f (nth fallback 0)))]
+  (assert (= "known" (choose [] ["known"])))
+  (assert (= "ext" (run-on-fallback [] ["text"] #(subs % 1)))))
+(println "Clojure/JVM fallback vectors and contextual calls: 2 assertions passed")
+
 (load-file "examples/map_boundary/runtime/vendor/patient_store.clj")
 (load-file "examples/map_boundary/src/map_boundary/model.clj")
 (load-file "examples/map_boundary/src/map_boundary/response.clj")

@@ -173,13 +173,15 @@ impl Checker<'_> {
             if ty.is_some() && parameter.upper.is_none() {
                 continue;
             }
-            let witness = signature
-                .input_witness(parameter)
-                .expect("declared input argument");
-            let span = args[witness.index].1;
             if let Some(ty) = ty {
+                let source = evidence.input_source(index).expect("evidenced argument");
+                let span = args[source].1;
                 valid &= self.generic_bound(function, parameter, ty, span);
             } else {
+                let witness = signature
+                    .input_witness(parameter)
+                    .expect("declared input argument");
+                let span = args[witness.index].1;
                 self.missing_parameter(function, parameter, span, &witness.evidence_site());
                 valid = false;
             }

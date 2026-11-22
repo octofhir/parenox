@@ -492,6 +492,66 @@ fn conflicting_arguments_and_callback_results_are_not_joined_into_a_wider_type()
 }
 
 #[test]
+fn a_later_argument_can_supply_evidence_for_an_empty_projection() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+(defn choose {:t/sig '(t/all [item] [(s/coll-of item :kind vector?)
+                                      (s/coll-of item :kind vector?) :-> item])}
+  [values fallback] (nth fallback 0))
+(defn run-on-fallback
+  {:t/sig '(t/all [item] [(s/coll-of item :kind vector?)
+                          (s/coll-of item :kind vector?)
+                          (s/fspec :args (s/cat :value item) :ret item) :-> item])}
+  [values fallback f] (f (nth fallback 0)))
+(defn bounded {:t/sig '(t/all [(item :< number?)] [(s/coll-of item :kind vector?)
+                                                    (s/coll-of item :kind vector?) :-> item])}
+  [values fallback] (nth fallback 0))
+(defn from-empty {:t/sig '[:-> string?]} [] (choose [] ["known"]))
+(defn with-callback {:t/sig '[:-> string?]} []
+  (run-on-fallback [] ["text"] (fn [value] (subs value 1))))
+(defn conflicting {:t/sig '[:-> number?]} [] (choose [1] ["conflict"]))
+(defn bad-bound {:t/sig '[:-> t/any]} [] (bounded [] ["outside-bound"]))
+(defn bad-callback {:t/sig '[:-> t/any]} []
+  (run-on-fallback [] ["text"] (fn [value] (inc value))))
+(defn absent {:t/sig '[:-> t/any]} [] (choose [] []))"#;
+    let mut session = Session::default();
+    let report = session.check("projected.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &source[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", "\"conflict\""),
+            ("PNX2322", "[\"outside-bound\"]"),
+            ("PNX2322", "value"),
+            ("PNX9010", "[]"),
+        ],
+        "{report:#?}"
+    );
+    assert_eq!(
+        report.diagnostics[2]
+            .callback_contract
+            .as_ref()
+            .unwrap()
+            .name,
+        "demo/run-on-fallback"
+    );
+    let offset = source.find("(subs value 1)").unwrap() + "(subs ".len();
+    let Some(DocumentHover::Local(hover)) = session.document_hover_at("projected.clj", offset)
+    else {
+        panic!("expected the callback parameter's checked type");
+    };
+    assert_eq!(hover.inferred_type, "String");
+}
+
+#[test]
 fn generic_bodies_cannot_assume_properties_of_their_parameter() {
     let report = check(
         "(defn numeric-only {:t/sig '(t/all [a] [a :-> a])} [x] (inc x))
