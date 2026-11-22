@@ -240,6 +240,95 @@ fn conditional_callback_fields_can_have_an_implicit_nil_branch() {
 }
 
 #[test]
+fn binding_conditional_callbacks_keep_their_local_scope_and_nil_rules() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::message-fn (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))
+        (defn render {:t/sig '[{:message-fn ::message-fn} :-> string?]} [report]
+          (if-let [f (:message-fn report)] (f "label") "fallback"))
+        (defn choose {:t/sig '[{:prefix (s/nilable string?)} :-> string?]} [view]
+          (render {:message-fn (when-let [prefix (:prefix view)]
+                                (fn [text] (str (subs prefix 1) text)))}))
+        (defn choose-else {:t/sig '[{:prefix (s/nilable string?)} :-> string?]} [view]
+          (render {:message-fn (if-let [prefix (:prefix view)]
+                                (fn [text] (str prefix text))
+                                (fn [text] (subs text 1)))}))
+        (defn falsey {:t/sig '[:-> string?]} []
+          (render {:message-fn (when-let [flag false] (fn [text] (do (inc text) text)))}))
+        (defn non-nil {:t/sig '[:-> string?]} []
+          (render {:message-fn (when-some [flag false] (fn [text] (str flag text)))}))
+        (defn choose-false {:t/sig '[:-> string?]} []
+          (render {:message-fn (if-some [flag false] #(str flag %) nil)}))
+        (defn from-first {:t/sig '[:-> string?]} []
+          (render {:message-fn (when-first [prefix ["root"]] #(str (subs prefix 1) %))}))"#;
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+
+    let edited = source.replace("(str flag text)", "(do (inc text) (str flag text))");
+    let warm = session.check(path, &edited);
+    let [finding] = warm.diagnostics.as_slice() else {
+        panic!("{warm:#?}");
+    };
+    assert!(warm.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "text"
+    );
+    assert_eq!(
+        finding.callback_contract.as_ref().unwrap().name,
+        "reports/render"
+    );
+    let cold = Session::default().check(path, &edited);
+    assert_eq!(
+        serde_json::to_value(&warm.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+
+    let out_of_scope = source.replace("(fn [text] (subs text 1))", "(fn [text] (subs prefix 1))");
+    let report = session.check(path, &out_of_scope);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2304");
+    assert_eq!(
+        &out_of_scope[finding.span.start.offset..finding.span.end.offset],
+        "prefix"
+    );
+}
+
+#[test]
+fn binding_conditional_checks_a_shadowed_constructor_before_later_operands() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::callback (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))
+        (defn render {:t/sig '[::callback string? :-> string?]} [callback text]
+          (if-let [f callback] (f text) text))
+        (defn replacement {:t/sig '[(s/coll-of t/any :kind vector?) number? :-> string?]}
+          [_ n] (str (inc n)))
+        (defn eager {:t/sig '[:-> #{:later}]} []
+          (try
+            (render (when-let [fn replacement] (fn [] "wrong-type"))
+                    (throw (ex-info "later" {})))
+            (catch clojure.lang.ExceptionInfo _ :later)))"#;
+    let report = Session::default().check("reports.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "\"wrong-type\""
+    );
+    assert!(finding.callback_contract.is_none());
+}
+
+#[test]
 fn nilable_callback_contracts_contextualize_written_closures() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))

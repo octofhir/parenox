@@ -679,10 +679,27 @@ impl Checker<'_> {
         name: &str,
         tail: bool,
     ) -> Value {
+        Value::union_branches(self.check_binding_conditional_paths(
+            xs,
+            span,
+            env,
+            name,
+            |checker, scope, body, _| checker.body(body, scope, tail),
+        ))
+    }
+
+    pub(super) fn check_binding_conditional_paths(
+        &mut self,
+        xs: &[Form],
+        span: Span,
+        env: &Env,
+        name: &str,
+        mut branch: impl FnMut(&mut Self, &Env, &[Form], bool) -> Value,
+    ) -> [Value; 2] {
         let when = name.starts_with("clojure.core/when-");
         if xs.len() < 2 || (!when && !(3..=4).contains(&xs.len())) {
             self.error("PNX2554", span, format!("Invalid arity for {name}"));
-            return Value::new(Type::Unknown);
+            return [Value::new(Type::Unknown), Value::new(Type::Never)];
         }
         let Some([pattern, init]) = xs[1].vector() else {
             self.error(
@@ -690,7 +707,7 @@ impl Checker<'_> {
                 xs[1].span,
                 format!("{name} requires a binding vector with exactly two forms"),
             );
-            return Value::new(Type::Unknown);
+            return [Value::new(Type::Unknown), Value::new(Type::Never)];
         };
         let valid_pattern = match &pattern.without_metadata().kind {
             Kind::Symbol(symbol) | Kind::AnonymousArgument(symbol) => {
@@ -705,7 +722,7 @@ impl Checker<'_> {
                 pattern.span,
                 format!("Invalid binding form for {name}"),
             );
-            return Value::new(Type::Unknown);
+            return [Value::new(Type::Unknown), Value::new(Type::Never)];
         }
 
         let mut input = self.infer(init, env);
@@ -761,16 +778,23 @@ impl Checker<'_> {
             } else {
                 checker.bind_initializer(pattern, init, input, &mut yes_env);
             }
-            checker.body(if when { &xs[2..] } else { &xs[2..3] }, &yes_env, tail)
+            branch(
+                checker,
+                &yes_env,
+                if when { &xs[2..] } else { &xs[2..3] },
+                true,
+            )
         });
         let no = if let Some(scope) = no_env {
-            self.infer_path(&xs[3], &scope, no_reachable, tail)
+            self.check_path(no_reachable && scope.reachable(), |checker| {
+                branch(checker, &scope, &xs[3..], false)
+            })
         } else if no_reachable {
             Value::new(Type::Nil)
         } else {
             Value::new(Type::Never)
         };
-        Value::union_branches([yes, no])
+        [yes, no]
     }
 
     pub(super) fn short_circuit(&mut self, xs: &[Form], env: &Env, or: bool, tail: bool) -> Value {

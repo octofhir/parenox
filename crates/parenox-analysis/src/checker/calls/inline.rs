@@ -34,9 +34,20 @@ pub(super) fn contextual_map_type(expected: &Type) -> Option<&MapType> {
 }
 
 struct ConditionalArms<'a> {
-    test: &'a Form,
+    test: ConditionalTest<'a>,
     branches: [Option<&'a Form>; 2],
-    first_truth: bool,
+}
+
+enum ConditionalTest<'a> {
+    Predicate {
+        form: &'a Form,
+        first_truth: bool,
+    },
+    Binding {
+        forms: &'a [Form],
+        span: Span,
+        name: String,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -518,30 +529,53 @@ impl<'model> Checker<'model> {
     }
 
     fn conditional_arms<'a>(&self, form: &'a Form, env: &Env) -> Option<ConditionalArms<'a>> {
-        let Kind::List(parts) = &form.without_metadata().kind else {
+        let bare = form.without_metadata();
+        let Kind::List(parts) = &bare.kind else {
             return None;
         };
         let [head, test, body, rest @ ..] = parts.as_slice() else {
             return None;
         };
-        let mode = if head.symbol() == Some("if") {
-            Conditional::If
+        let (test, allows_alternative) = if head.symbol() == Some("if") {
+            (
+                ConditionalTest::Predicate {
+                    form: test,
+                    first_truth: true,
+                },
+                true,
+            )
         } else {
             let name = self.standard_core_name(head, env)?;
-            let CoreForm::If(mode) = CoreForm::resolve(&name)? else {
-                return None;
-            };
-            mode
+            match CoreForm::resolve(&name)? {
+                CoreForm::If(mode) => (
+                    ConditionalTest::Predicate {
+                        form: test,
+                        first_truth: mode.runs_on_truth(),
+                    },
+                    matches!(mode, Conditional::If | Conditional::IfNot),
+                ),
+                CoreForm::BindingConditional if matches!(test.vector(), Some([_, _])) => {
+                    let allows_alternative = !name.starts_with("clojure.core/when-");
+                    (
+                        ConditionalTest::Binding {
+                            forms: parts,
+                            span: bare.span,
+                            name,
+                        },
+                        allows_alternative,
+                    )
+                }
+                _ => return None,
+            }
         };
         let other = match rest {
             [] => None,
-            [form] if matches!(mode, Conditional::If | Conditional::IfNot) => Some(form),
+            [form] if allows_alternative => Some(form),
             _ => return None,
         };
         Some(ConditionalArms {
             test,
             branches: [Some(body), other],
-            first_truth: mode.runs_on_truth(),
         })
     }
 
@@ -552,6 +586,10 @@ impl<'model> Checker<'model> {
         mut check: impl FnMut(&mut Self, &Form, &Env) -> Value,
     ) -> Value {
         if let Some(arms) = self.conditional_arms(callback, env)
+            && let ConditionalTest::Predicate {
+                form: test,
+                first_truth,
+            } = arms.test
             && let [Some(first), Some(other)] = arms.branches
             && self.inline_callback_literal(first, env)
             && self.inline_callback_literal(other, env)
@@ -560,14 +598,10 @@ impl<'model> Checker<'model> {
             // Choose the callback before evaluating later arguments, and
             // hold that choice through the entire collection operation.
             let [left, right] =
-                self.check_if_paths(arms.test, env, arms.first_truth, |checker, scope, truth| {
+                self.check_if_paths(test, env, first_truth, |checker, scope, truth| {
                     check(
                         checker,
-                        if truth == arms.first_truth {
-                            first
-                        } else {
-                            other
-                        },
+                        if truth == first_truth { first } else { other },
                         scope,
                     )
                 });
@@ -578,16 +612,13 @@ impl<'model> Checker<'model> {
         }
     }
 
-    fn contextual_choice<'a>(
-        &self,
-        form: &'a Form,
-        env: &Env,
-    ) -> Option<(ConditionalArms<'a>, [bool; 2])> {
+    fn contextual_choice<'a>(&self, form: &'a Form, env: &Env) -> Option<ConditionalArms<'a>> {
         let arms = self.conditional_arms(form, env)?;
-        let callbacks = arms
-            .branches
-            .map(|form| form.is_some_and(|form| self.contextual_callback_form(form, env)));
-        callbacks.contains(&true).then_some((arms, callbacks))
+        arms.branches
+            .iter()
+            .flatten()
+            .any(|form| self.contextual_callback_form(form, env))
+            .then_some(arms)
     }
 
     #[inline(never)]
@@ -597,32 +628,50 @@ impl<'model> Checker<'model> {
         env: &Env,
         reachable: bool,
     ) -> Option<(Box<PreparedChoice<'a>>, Value)> {
-        let (arms, choices) = self.contextual_choice(form, env)?;
+        let arms = self.contextual_choice(form, env)?;
         let mut callbacks = Vec::with_capacity(2);
-        let branches = self.inspect_path(reachable, |checker| {
-            checker.check_if_paths(arms.test, env, arms.first_truth, |checker, scope, truth| {
-                let index = usize::from(truth != arms.first_truth);
-                let Some(form) = arms.branches[index] else {
-                    return Value::new(Type::Nil);
-                };
-                if !choices[index] {
-                    return checker.infer(form, scope);
-                }
-                let value =
-                    checker.contextual_callback_argument(form, scope, checker.path_reachable);
-                callbacks.push(CallbackBranch {
-                    form,
-                    scope: scope.clone(),
-                    returns: !value.stops_evaluation(),
-                });
-                value
-            })
+        let mut deferred = [false; 2];
+        let mut visit = |checker: &mut Self, scope: &Env, index: usize| {
+            let Some(form) = arms.branches[index] else {
+                return Value::new(Type::Nil);
+            };
+            // Binding forms can introduce a local that shadows a callback constructor.
+            if !checker.contextual_callback_form(form, scope) {
+                return checker.infer(form, scope);
+            }
+            deferred[index] = true;
+            let value = checker.contextual_callback_argument(form, scope, checker.path_reachable);
+            callbacks.push(CallbackBranch {
+                form,
+                scope: scope.clone(),
+                returns: !value.stops_evaluation(),
+            });
+            value
+        };
+        let branches = self.inspect_path(reachable, |checker| match &arms.test {
+            ConditionalTest::Predicate { form, first_truth } => {
+                checker.check_if_paths(form, env, *first_truth, |checker, scope, truth| {
+                    visit(checker, scope, usize::from(truth != *first_truth))
+                })
+            }
+            ConditionalTest::Binding { forms, span, name } => checker
+                .check_binding_conditional_paths(
+                    forms,
+                    *span,
+                    env,
+                    name,
+                    |checker, scope, _, taken| visit(checker, scope, usize::from(!taken)),
+                ),
         });
         let returns = reachable && branches.iter().any(|branch| !branch.stops_evaluation());
-        let eager = branches
+        let mut eager = branches
             .into_iter()
-            .zip(choices)
-            .find_map(|(branch, is_callback)| (!is_callback).then_some(branch));
+            .zip(deferred)
+            .filter_map(|(branch, deferred)| (!deferred).then_some(branch));
+        let eager = eager.next().map(|first| match eager.next() {
+            Some(second) => Value::union_branches([first, second]),
+            None => first,
+        });
         let value = Value::new(if returns { Type::Unknown } else { Type::Never });
         Some((Box::new(PreparedChoice { callbacks, eager }), value))
     }
