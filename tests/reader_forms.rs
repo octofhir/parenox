@@ -20,6 +20,75 @@ fn file_source_and_edn_externs_keep_their_own_literal_line_endings() {
 }
 
 #[test]
+fn immediate_unquotes_can_duplicate_collection_keys_without_losing_syntax() {
+    for (source, repeated) in [
+        ("{a 1, ; ☃\n #_ :ignored `~a 2} :after", "`~a"),
+        ("#{:a `~:a} :after", "`~:a"),
+        ("#:demo {demo/a 1 `~a 2} :after", "`~a"),
+        ("#:demo {a 1 `~demo/a 2} :after", "`~demo/a"),
+        ("#:demo {:a 1 `~:demo/a 2} :after", "`~:demo/a"),
+        (
+            "{a 1 `(clojure.core/unquote a ignored) 2} :after",
+            "`(clojure.core/unquote a ignored)",
+        ),
+    ] {
+        let error = reader::read(source).unwrap_err();
+        assert!(
+            error.message.starts_with("Duplicate "),
+            "{source}: {error:?}"
+        );
+        assert_eq!(
+            &source[error.span.start.offset..error.span.end.offset],
+            repeated
+        );
+        let parsed = reader::parse(source);
+        assert_eq!(parsed.errors.len(), 1, "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.errors[0].span, error.span);
+        assert_eq!(
+            parsed.forms.last().and_then(|form| form.keyword()),
+            Some(":after")
+        );
+        assert_eq!(parsed.syntax().text().to_string(), source);
+    }
+}
+
+#[test]
+fn projected_names_keep_their_namespace_when_checking_duplicates() {
+    for source in [
+        "{a 1 `a 2}",
+        "#:demo {_/a 1 `~a 2}",
+        "{#:demo {`~a 1} :qualified {a 1} :plain}",
+    ] {
+        let parsed = reader::parse(source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+    }
+
+    for source in [
+        "(ns reports) (def data '#::{reports/a 1 `~a 2})",
+        "(ns reports) (def data '{:reports/a 1 `~::a 2})",
+    ] {
+        let report = Session::default().check("reports.clj", source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{source}: {report:#?}");
+        };
+        assert!(
+            finding.message.contains("Duplicate key"),
+            "{source}: {report:#?}"
+        );
+    }
+    let distinct = "(ns reports) (def value '#:demo {_/a 1 `~a 2 ::other 3})";
+    let report = Session::default().check("reports.clj", distinct);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| !d.message.contains("Duplicate")),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn malformed_tags_and_metadata_keep_their_operands_out_of_recovered_forms() {
     for prefix in ["#nil", "#wrong/", "^nil", "^:"] {
         for source in [

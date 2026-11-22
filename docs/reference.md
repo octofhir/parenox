@@ -980,6 +980,9 @@ are available to Rust callers. None of these run tagged readers or macros.
 In Clojure source, physical CRLF and CR inside strings and character
 literals read as LF, matching JVM file loading. Escaped values and EDN data
 keep their original line endings. The CST retains the physical spelling.
+A syntax quote that returns a written symbol or keyword through immediate
+unquote participates in duplicate-key and duplicate-member checks. A
+namespaced map compares the qualified name and retains the written syntax.
 A tagged metadata descriptor preserves the tag and payload. Analysis reports
 the unchecked data reader call at that span.
 Selected splicing conditionals can splice the lists produced by quote and

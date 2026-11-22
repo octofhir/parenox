@@ -110,30 +110,47 @@ pub fn qualify_namespaced_entries(
     for [key, _] in entries.as_chunks_mut::<2>().0 {
         qualify_key(key, namespace);
     }
-    uniqueness::check_map(entries, source, false)
+    uniqueness::check_qualified_map(entries, source, namespace)
 }
 
 fn qualify_key(key: &mut Form, namespace: &str) {
     match &mut key.kind {
         Kind::Metadata(_, target) => qualify_key(target, namespace),
-        Kind::Keyword(name) if !name.starts_with("::") => {
-            let name_without_colon = name.trim_start_matches(':');
-            if let Some(local) = name_without_colon.strip_prefix("_/") {
-                *name = format!(":{local}");
-            } else if name_without_colon == "/" || !name_without_colon.contains('/') {
-                *name = format!(":{namespace}/{name_without_colon}");
+        Kind::Keyword(name) => {
+            if let Some(qualified) = qualify_keyword(name, namespace) {
+                *name = qualified;
             }
         }
         Kind::Symbol(name) => {
-            if let Some(local) = name.strip_prefix("_/") {
-                *name = local.into();
-            } else if name == "/" || !name.contains('/') {
-                *name = format!("{namespace}/{name}");
+            if let Some(qualified) = qualify_symbol(name, namespace) {
+                *name = qualified;
             }
         }
         Kind::AnonymousArgument(name) => {
             key.kind = Kind::Symbol(format!("{namespace}/{name}"));
         }
         _ => {}
+    }
+}
+
+pub(super) fn qualify_keyword(name: &str, namespace: &str) -> Option<String> {
+    if name.starts_with("::") {
+        return None;
+    }
+    let local = name.trim_start_matches(':');
+    qualify_name(local, namespace, ":")
+}
+
+pub(super) fn qualify_symbol(name: &str, namespace: &str) -> Option<String> {
+    qualify_name(name, namespace, "")
+}
+
+fn qualify_name(name: &str, namespace: &str, prefix: &str) -> Option<String> {
+    if let Some(local) = name.strip_prefix("_/") {
+        Some(format!("{prefix}{local}"))
+    } else if name == "/" || !name.contains('/') {
+        Some(format!("{prefix}{namespace}/{name}"))
+    } else {
+        None
     }
 }
