@@ -585,6 +585,47 @@ fn returning_a_let_bound_callback_keeps_its_definition_scope() {
 }
 
 #[test]
+fn nested_callback_choices_keep_their_binding_and_nil_paths() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::message-fn (s/fspec :args (s/cat :text string?) :ret string?))
+        (defn render {:t/sig '[(s/nilable ::message-fn) :-> string?]} [callback]
+          (if-let [f callback] (f "label") "fallback"))
+        (defn select {:t/sig '[(s/nilable string?) boolean? :-> string?]} [prefix short?]
+          (render (let [trimmed (subs (or prefix "default") 1)]
+                    (if short?
+                      (fn [message] (str trimmed message))
+                      (when-let [present prefix]
+                        (do (count present)
+                            (fn [message] (str (subs present 1) (subs message 1)))))))))"#;
+    let mut session = Session::default();
+    let path = "reports.clj";
+    let report = session.check(path, source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replace("(subs message 1)", "(inc message)");
+    let report = session.check(path, &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(
+        &edited[finding.span.start.offset..finding.span.end.offset],
+        "message"
+    );
+
+    let required = source.replace("(s/nilable ::message-fn)", "::message-fn");
+    let report = session.check(path, &required);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete);
+    assert_eq!(finding.code, "PNX2322");
+    assert!(required[finding.span.start.offset..finding.span.end.offset].starts_with("(let ["));
+    assert!(finding.actual.as_deref().unwrap().contains("Nil"));
+}
+
+#[test]
 fn nilable_callback_contracts_contextualize_written_closures() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))

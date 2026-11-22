@@ -47,6 +47,34 @@ enum CallbackPaths<'a> {
     },
 }
 
+impl<'a> CallbackPaths<'a> {
+    fn enqueue_tails(&self, pending: &mut Vec<&'a Form>) -> bool {
+        match self {
+            Self::Sequence(body) => pending.extend(do_tail(body)),
+            Self::Conditional(arms) => {
+                pending.extend(arms.branches.iter().rev().filter_map(|body| do_tail(body)));
+            }
+            Self::Let { forms, .. } => {
+                let tail = do_tail(&forms[2..]);
+                // The let can give this symbol a callable meaning in its body.
+                if tail.and_then(Form::symbol).is_some_and(|name| {
+                    forms[1]
+                        .vector()
+                        .unwrap()
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .any(|[pattern, _]| pattern.symbol() == Some(name))
+                }) {
+                    return true;
+                }
+                pending.extend(tail);
+            }
+        }
+        false
+    }
+}
+
 fn do_body(form: &Form) -> Option<&[Form]> {
     let Kind::List(forms) = &form.without_metadata().kind else {
         return None;
@@ -173,6 +201,13 @@ struct CallbackBranch<'a> {
     form: &'a Form,
     scope: Env,
     returns: bool,
+}
+
+#[derive(Default)]
+struct CallbackPreparation<'a> {
+    callbacks: Vec<CallbackBranch<'a>>,
+    eager: Vec<Value>,
+    has_let: bool,
 }
 
 pub(super) struct PreparedChoice<'a> {
@@ -640,22 +675,12 @@ impl<'model> Checker<'model> {
         }
     }
 
-    fn contextual_callback_at_tail(&self, body: &[Form], env: &Env) -> bool {
-        do_tail(body).is_some_and(|form| self.contextual_callback_form(form, env))
-    }
-
-    fn contextual_choice<'a>(&self, form: &'a Form, env: &Env) -> Option<CallbackPaths<'a>> {
+    fn callback_paths<'a>(&self, form: &'a Form, env: &Env) -> Option<CallbackPaths<'a>> {
         if let Some(body) = do_body(form) {
-            return self
-                .contextual_callback_at_tail(body, env)
-                .then_some(CallbackPaths::Sequence(body));
+            return Some(CallbackPaths::Sequence(body));
         }
         if let Some(arms) = self.conditional_arms(form, env) {
-            return arms
-                .branches
-                .iter()
-                .any(|body| self.contextual_callback_at_tail(body, env))
-                .then_some(CallbackPaths::Conditional(arms));
+            return Some(CallbackPaths::Conditional(arms));
         }
         let bare = form.without_metadata();
         let Kind::List(forms) = &bare.kind else {
@@ -664,20 +689,8 @@ impl<'model> Checker<'model> {
         let [head, bindings, body @ ..] = forms.as_slice() else {
             return None;
         };
-        let bindings = bindings.vector()?;
-        let tail = do_tail(body)?;
-        // A binding in this let can introduce the callback even when the
-        // same symbol has no callable meaning in the surrounding scope.
-        let reads_binding = tail.symbol().is_some_and(|name| {
-            bindings
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .any(|[pattern, _]| pattern.symbol() == Some(name))
-        });
-        if !reads_binding && !self.contextual_callback_form(tail, env) {
-            return None;
-        }
+        bindings.vector()?;
+        body.last()?;
         let raw = head.symbol() == Some("let*");
         let resolved = raw
             || self
@@ -690,6 +703,24 @@ impl<'model> Checker<'model> {
         })
     }
 
+    fn contextual_choice<'a>(&self, form: &'a Form, env: &Env) -> Option<CallbackPaths<'a>> {
+        let paths = self.callback_paths(form, env)?;
+        let mut pending = Vec::new();
+        if paths.enqueue_tails(&mut pending) {
+            return Some(paths);
+        }
+        while let Some(tail) = pending.pop() {
+            if self.contextual_callback_form(tail, env)
+                || self
+                    .callback_paths(tail, env)
+                    .is_some_and(|path| path.enqueue_tails(&mut pending))
+            {
+                return Some(paths);
+            }
+        }
+        None
+    }
+
     #[inline(never)]
     fn prepare_callback_choice<'a>(
         &mut self,
@@ -698,14 +729,44 @@ impl<'model> Checker<'model> {
         reachable: bool,
     ) -> Option<(Box<PreparedChoice<'a>>, Value)> {
         let paths = self.contextual_choice(form, env)?;
+        let mut prepared = CallbackPreparation::default();
+        let value = self.inspect_path(reachable, |checker| {
+            checker.prepare_callback_paths(paths, env, &mut prepared)
+        });
+        let eager = match prepared.eager.len() {
+            0 => None,
+            1 => prepared.eager.pop(),
+            _ => Some(Value::union_branches(prepared.eager)),
+        };
         // A let can compile local helpers before the contextual body calls them.
-        let compiled_scope = matches!(paths, CallbackPaths::Let { .. }).then_some(form.span);
-        let mut callbacks = Vec::with_capacity(2);
+        let compiled_scope = prepared.has_let.then_some(form.span);
+        Some((
+            Box::new(PreparedChoice {
+                callbacks: prepared.callbacks,
+                eager,
+                compiled_scope,
+            }),
+            value,
+        ))
+    }
+
+    #[inline(never)]
+    fn prepare_callback_paths<'a>(
+        &mut self,
+        paths: CallbackPaths<'a>,
+        env: &Env,
+        prepared: &mut CallbackPreparation<'a>,
+    ) -> Value {
+        prepared.has_let |= matches!(paths, CallbackPaths::Let { .. });
         let mut deferred = [false; 2];
         let mut visit = |checker: &mut Self, scope: &Env, mut body: &'a [Form], index: usize| {
             let mut reachable = checker.path_reachable && scope.reachable();
             // Binding forms can introduce a local that shadows a callback constructor.
-            if !checker.contextual_callback_at_tail(body, scope) {
+            let modeled_tail = do_tail(body).is_some_and(|form| {
+                checker.contextual_callback_form(form, scope)
+                    || checker.callback_paths(form, scope).is_some()
+            });
+            if !modeled_tail {
                 return checker.check_path(reachable, |checker| checker.body(body, scope, false));
             }
             let form = loop {
@@ -719,35 +780,41 @@ impl<'model> Checker<'model> {
                 }
             };
             if !checker.contextual_callback_form(form, scope) {
+                // The enclosing argument already selected contextual preparation.
+                // Visit a nested wrapper once in its actual scope.
+                if let Some(paths) = checker.callback_paths(form, scope) {
+                    deferred[index] = true;
+                    return checker.check_path(reachable, |checker| {
+                        checker.prepare_callback_paths(paths, scope, prepared)
+                    });
+                }
                 return checker.infer_path(form, scope, reachable, false);
             }
             deferred[index] = true;
             let value = checker.contextual_callback_argument(form, scope, reachable);
-            callbacks.push(CallbackBranch {
+            prepared.callbacks.push(CallbackBranch {
                 form,
                 scope: scope.clone(),
                 returns: !value.stops_evaluation(),
             });
             value
         };
-        let branches = self.inspect_path(reachable, |checker| match paths {
-            CallbackPaths::Sequence(body) => {
-                [visit(checker, env, body, 0), Value::new(Type::Never)]
-            }
+        let branches = match paths {
+            CallbackPaths::Sequence(body) => [visit(self, env, body, 0), Value::new(Type::Never)],
             CallbackPaths::Let { forms, span, raw } => [
-                checker.check_let_body(forms, span, env, raw, |checker, body, scope| {
+                self.check_let_body(forms, span, env, raw, |checker, body, scope| {
                     visit(checker, scope, body, 0)
                 }),
                 Value::new(Type::Never),
             ],
             CallbackPaths::Conditional(arms) => match &arms.test {
                 ConditionalTest::Predicate { form, first_truth } => {
-                    checker.check_if_paths(form, env, *first_truth, |checker, scope, truth| {
+                    self.check_if_paths(form, env, *first_truth, |checker, scope, truth| {
                         let index = usize::from(truth != *first_truth);
                         visit(checker, scope, arms.branches[index], index)
                     })
                 }
-                ConditionalTest::Binding { forms, span, name } => checker
+                ConditionalTest::Binding { forms, span, name } => self
                     .check_binding_conditional_paths(
                         forms,
                         *span,
@@ -758,25 +825,18 @@ impl<'model> Checker<'model> {
                         },
                     ),
             },
-        });
-        let returns = reachable && branches.iter().any(|branch| !branch.stops_evaluation());
-        let mut eager = branches
-            .into_iter()
-            .zip(deferred)
-            .filter_map(|(branch, deferred)| (!deferred).then_some(branch));
-        let eager = eager.next().map(|first| match eager.next() {
-            Some(second) => Value::union_branches([first, second]),
-            None => first,
-        });
-        let value = Value::new(if returns { Type::Unknown } else { Type::Never });
-        Some((
-            Box::new(PreparedChoice {
-                callbacks,
-                eager,
-                compiled_scope,
-            }),
-            value,
-        ))
+        };
+        let returns =
+            self.path_reachable && branches.iter().any(|branch| !branch.stops_evaluation());
+        if self.path_reachable {
+            prepared.eager.extend(
+                branches
+                    .into_iter()
+                    .zip(deferred)
+                    .filter_map(|(branch, deferred)| (!deferred).then_some(branch)),
+            );
+        }
+        Value::new(if returns { Type::Unknown } else { Type::Never })
     }
 
     pub(super) fn prepare_contextual_argument<'a>(

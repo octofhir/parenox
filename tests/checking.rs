@@ -29,6 +29,17 @@ fn deeply_nested_conditionals_and_bindings_fit_on_a_worker_stack() {
                 let body = format!("{}{leaf}{}", open.repeat(125), close.repeat(125));
                 assert_ok(&format!("(defn deep {{:t/sig '[:-> string?]}} [] {body})"));
             }
+            let callback = format!(
+                "{}(fn [text] (subs text 1)){}",
+                "(if-let [present true] ".repeat(120),
+                " nil)".repeat(120),
+            );
+            assert_ok(&format!(
+                "(defn consume
+                   {{:t/sig '[(s/fspec :args (s/cat :text string?) :ret string?) :-> string?]}}
+                   [callback] (callback \"label\"))
+                 (defn deep {{:t/sig '[:-> string?]}} [] (consume {callback}))",
+            ));
         })
         .unwrap()
         .join()
