@@ -14,6 +14,63 @@ fn expected_signature_types_fn_parameters_and_anonymous_arguments() {
 }
 
 #[test]
+fn nilable_callback_contracts_contextualize_written_closures() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (s/def ::render (s/nilable (s/fspec :args (s/cat :text string?) :ret string?)))
+        (defn message {:t/sig '[::render :-> string?]} [render]
+          (if-let [callback render] (callback "label") "fallback"))
+        (defn from-map {:t/sig '[{:message-fn ::render} :-> string?]} [report]
+          (message (:message-fn report)))
+        (defn forward {:t/sig '(t/all [value] [value ::render :-> value])} [value render]
+          (message render)
+          value)
+        (defn without-closure {:t/sig '[:-> string?]} []
+          (str (message nil) (from-map {:message-fn nil})))
+        (defn direct {:t/sig '[:-> string?]} []
+          (message (fn [text] (subs text 1))))
+        (defn mapped {:t/sig '[:-> string?]} []
+          (from-map {:message-fn (fn [text] (subs text 1))}))
+        (defn generic {:t/sig '[:-> number?]} []
+          (forward 42 (fn [text] (subs text 1))))"#;
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let passing = session.check(path, source);
+    assert!(passing.ok && passing.complete, "{passing:#?}");
+
+    let broken = source.replace("(subs text 1)", r#"(do (inc text) "bad")"#);
+    let report = session.check(path, &broken);
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 3, "{report:#?}");
+    for (finding, contract) in
+        report
+            .diagnostics
+            .iter()
+            .zip(["reports/message", "reports/from-map", "reports/forward"])
+    {
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(finding.actual.as_deref(), Some("String"));
+        assert_eq!(finding.callback_contract.as_ref().unwrap().name, contract);
+        assert_eq!(
+            &broken[finding.span.start.offset..finding.span.end.offset],
+            "text"
+        );
+        let Some(DocumentHover::Local(hover)) =
+            session.document_hover_at(path, finding.span.start.offset)
+        else {
+            panic!("Expected a local type at the callback operand");
+        };
+        assert_eq!(hover.inferred_type, "String");
+    }
+    let cold = Session::default().check(path, &broken);
+    assert_eq!(
+        serde_json::to_value(&report.diagnostics).unwrap(),
+        serde_json::to_value(&cold.diagnostics).unwrap()
+    );
+    let restored = session.check(path, source);
+    assert!(restored.ok && restored.complete, "{restored:#?}");
+}
+
+#[test]
 fn callback_argument_use_and_return_errors_point_inside_the_body() {
     let source = format!(
         "{EXAMPLE}

@@ -38,7 +38,7 @@ use crate::types::{Arity, Compatibility, IntegerType, Signature, Type};
 use crate::{ContractOrigin, Diagnostic};
 use combinators::CombinedCallable;
 use forms::CoreForm;
-use inline::{CallbackReturn, Fnil, InlineFunction, Partial};
+use inline::{CallbackReturn, Fnil, InlineFunction, Partial, contextual_signature};
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
@@ -657,7 +657,7 @@ impl<'model> Checker<'model> {
             sig.args
                 .iter()
                 .chain(&sig.rest)
-                .any(|ty| matches!(ty, Type::Function(_)))
+                .any(|ty| matches!(ty, Type::Function(_)) || contextual_signature(ty).is_some())
                 || forms.iter().enumerate().any(|(index, form)| {
                     sig.args
                         .get(index)
@@ -706,8 +706,7 @@ impl<'model> Checker<'model> {
                 .get(index)
                 .or(signature.rest.as_ref())
                 .unwrap();
-            if matches!(expected, Type::Function(signatures) if signatures.len() == 1)
-                && self.contextual_callback_form(form, env)
+            if contextual_signature(expected).is_some() && self.contextual_callback_form(form, env)
             {
                 // Reading or creating an ordinary closure does not run its body.
                 let argument = self.contextual_callback_argument(form, env, reachable);

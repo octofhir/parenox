@@ -23,6 +23,24 @@ use crate::{ContractOrigin, Diagnostic};
 const MAX_CALLBACK_DEPTH: usize = 16;
 const MAX_LOCAL_INLINE_STEPS: usize = 128;
 
+pub(super) fn contextual_signature(expected: &Type) -> Option<(&Type, &Signature)> {
+    let function = match expected {
+        Type::Union(parts) => match parts.as_slice() {
+            [Type::Nil, function @ Type::Function(_)]
+            | [function @ Type::Function(_), Type::Nil] => function,
+            _ => return None,
+        },
+        function => function,
+    };
+    let Type::Function(signatures) = function else {
+        return None;
+    };
+    let [signature] = signatures.as_ref() else {
+        return None;
+    };
+    Some((function, signature))
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum InlineFunction<'a> {
     Function { parts: &'a [Form], raw: bool },
@@ -539,7 +557,10 @@ impl<'model> Checker<'model> {
         };
         let entries = form.map()?;
         let direct_callbacks = expected.fields.values().any(|field| {
-            matches!(field.value_constraint(), Some(Type::Function(signatures)) if signatures.len() == 1)
+            field
+                .value_constraint()
+                .and_then(contextual_signature)
+                .is_some()
         });
         let nested_maps = || {
             remaining != 0
@@ -578,8 +599,7 @@ impl<'model> Checker<'model> {
     }
 
     fn contextual_callback_field(&self, callback: &Form, expected: &Type, env: &Env) -> bool {
-        matches!(expected, Type::Function(signatures) if signatures.len() == 1)
-            && self.contextual_callback_form(callback, env)
+        contextual_signature(expected).is_some() && self.contextual_callback_form(callback, env)
     }
 
     pub(super) fn contextual_map_argument<'a>(
@@ -679,12 +699,7 @@ impl<'model> Checker<'model> {
         env: &Env,
         mode: CallbackReturn,
     ) -> Option<ContextualCallback> {
-        let Type::Function(signatures) = expected else {
-            return None;
-        };
-        let [signature] = signatures.as_ref() else {
-            return None;
-        };
+        let (expected, signature) = contextual_signature(expected)?;
         let saved = form.symbol().and_then(|name| env.inline_function(name));
         let (constructor, function) = if let Some(closure) = saved {
             closure.syntax()

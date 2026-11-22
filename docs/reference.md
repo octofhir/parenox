@@ -230,7 +230,8 @@ Exporting the regex object as an EDN literal value is unsupported.
   also reach fields through nested literal maps when the contract declares
   each key on the path. For maps with known source-order evaluation, a
   computed key can select the field when its value is proved exactly.
-  Each such field receives its own callback type.
+  Each such field receives its own callback type. A literal closure can use
+  the function signature from `(s/nilable (s/fspec ...))`.
   General callback and variadic inference remain limited.
 - `t/all` supports a fixed generic arity with up to two input type
   parameters and one immediate callback result parameter. Inference uses
