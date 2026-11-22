@@ -224,7 +224,7 @@ impl Type {
     }
 
     pub fn has_parameter_slot(&self, parameter: &Parameter) -> bool {
-        self.parameter_slot(parameter, false).is_some()
+        self.parameter_slots(parameter, false).next().is_some()
     }
 
     pub fn has_nullable_parameter(&self, parameter: &Parameter) -> bool {
@@ -242,15 +242,17 @@ impl Type {
         }
     }
 
-    fn parameter_slot(
-        &self,
+    fn parameter_slots<'a>(
+        &'a self,
         parameter: &Parameter,
         allow_callback_fields: bool,
-    ) -> Option<ParameterSlot<'_>> {
-        match self {
-            Self::Parameter(found) if found.as_ref() == parameter => Some(ParameterSlot::Direct),
+    ) -> impl Iterator<Item = ParameterSlot<'a>> {
+        let (slot, fields) = match self {
+            Self::Parameter(found) if found.as_ref() == parameter => {
+                (Some(ParameterSlot::Direct), None)
+            }
             Self::Vector(element) if element.is_parameter(parameter) => {
-                Some(ParameterSlot::VectorElement)
+                (Some(ParameterSlot::VectorElement), None)
             }
             Self::Map(map) => match &map.extra {
                 ExtraFields::Typed(types)
@@ -261,13 +263,14 @@ impl Type {
                 {
                     // A shared binder uses the value's inferred type. A closed
                     // shape can retain a literal key when its values widen.
-                    if types[1].is_parameter(parameter) {
+                    let slot = if types[1].is_parameter(parameter) {
                         Some(ParameterSlot::DictionaryValue)
                     } else {
                         types[0]
                             .is_parameter(parameter)
                             .then_some(ParameterSlot::DictionaryKey)
-                    }
+                    };
+                    (slot, None)
                 }
                 ExtraFields::Closed
                     if map.fields.values().all(|field| {
@@ -277,15 +280,21 @@ impl Type {
                             || !field.ty.contains_parameter()
                     }) =>
                 {
-                    map.fields.iter().find_map(|(key, field)| {
-                        (field.required && field.ty.is_parameter(parameter))
-                            .then_some(ParameterSlot::RequiredField(key))
-                    })
+                    (None, Some(&map.fields))
                 }
-                _ => None,
+                _ => (None, None),
             },
-            _ => None,
-        }
+            _ => (None, None),
+        };
+        slot.into_iter().chain(
+            fields
+                .into_iter()
+                .flatten()
+                .filter_map(move |(key, field)| {
+                    (field.required && field.ty.is_parameter(parameter))
+                        .then_some(ParameterSlot::RequiredField(key))
+                }),
+        )
     }
 
     fn substitute(&self, replacements: &Replacements<'_>) -> Self {
@@ -443,9 +452,10 @@ impl Signature {
                 slot: ParameterSlot::Direct,
             })
         });
-        let projected = self.args.iter().enumerate().filter_map(move |(index, ty)| {
-            let slot = ty.parameter_slot(parameter, true)?;
-            (!matches!(slot, ParameterSlot::Direct)).then_some(InputWitness { index, slot })
+        let projected = self.args.iter().enumerate().flat_map(move |(index, ty)| {
+            ty.parameter_slots(parameter, true)
+                .filter(|slot| !matches!(slot, ParameterSlot::Direct))
+                .map(move |slot| InputWitness { index, slot })
         });
         direct.chain(projected)
     }
@@ -486,7 +496,7 @@ impl Signature {
                 if callback.rest.is_some() {
                     return None;
                 }
-                let slot = callback.ret.parameter_slot(output, false)?;
+                let slot = callback.ret.parameter_slots(output, false).next()?;
                 Some(CallbackWitness {
                     index,
                     map_key,

@@ -422,6 +422,49 @@ fn optional_callbacks_receive_context_from_required_fields() {
 }
 
 #[test]
+fn later_required_fields_can_supply_the_callback_input_type() {
+    let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
+        (defn render
+          {:t/sig '(t/all [uri]
+                     [{:new-uri uri :old-uri uri
+                       :message-fn (s/fspec :args (s/cat :value uri) :ret string?)}
+                      :-> string?])}
+          [edit] ((:message-fn edit) (:old-uri edit)))
+        (defn open-map {:t/sig '[map? string? :-> string?]} [edit old-uri]
+          (render {:new-uri (:untyped edit) :old-uri old-uri
+                   :message-fn (fn [uri] (do (inc uri) "bad"))}))
+        (defn conflicting {:t/sig '[string? :-> string?]} [old-uri]
+          (render {:new-uri 42 :old-uri old-uri
+                   :message-fn (fn [_] "message")}))"#;
+    let path = "reports.clj";
+    let mut session = Session::default();
+    let report = session.check(path, source);
+    assert!(!report.complete, "{report:#?}");
+    assert!(report.diagnostics.iter().any(|d| d.code == "PNX9003"));
+    assert!(report.diagnostics.iter().all(|d| d.code != "PNX9010"));
+    let mismatches: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "PNX2322")
+        .collect();
+    let [callback, conflict] = mismatches.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(callback.actual.as_deref(), Some("String"));
+    assert_eq!(
+        &source[callback.span.start.offset..callback.span.end.offset],
+        "uri"
+    );
+    let Some(DocumentHover::Local(hover)) =
+        session.document_hover_at(path, callback.span.start.offset)
+    else {
+        panic!("Expected a type at the callback operand");
+    };
+    assert_eq!(hover.inferred_type, "String");
+    assert!(conflict.message.contains(":old-uri"));
+}
+
+#[test]
 fn a_required_map_callback_can_supply_the_calls_result_type() {
     let source = r#"(ns demo.result-options (:require [clojure.spec.alpha :as s]))
         (defn render
