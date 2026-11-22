@@ -846,8 +846,9 @@ standard `partial` are evaluated in source order. After a proven runtime failure
 later expressions still get compiler checks such as name resolution. Their
 runtime types and diagnostics are withheld, including when a vector literal
 supplies `apply` arguments.
-Standard `subs` and `deref` report wrong arity once their operands can return.
-A reached arity failure participates in `catch clojure.lang.ArityException`.
+Standard `subs`, `deref`, and the modeled `clojure.string` functions report
+wrong arity once the call can run and its operands can return. A reached arity
+failure participates in `catch clojure.lang.ArityException`.
 With a fixed or generic callback contract, a function literal evaluates its
 metadata at the argument position. Inline callees, prepared callbacks and
 `let` initializers follow the same evaluation order. Contextual inference

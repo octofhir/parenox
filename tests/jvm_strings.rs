@@ -3,6 +3,43 @@ use parenox::{DocumentHover, Session, Source};
 const SOURCE: &str = include_str!("../examples/jvm_strings.cljc");
 
 #[test]
+fn ordinary_string_calls_check_arity_only_after_eager_arguments_can_return() {
+    let source = r#"(ns demo (:require [clojure.string :as str]))
+(defn dead-call {:t/sig '[:-> string?]} []
+  (do (subs nil 0) (str/upper-case)))
+(defn dead-arguments {:t/sig '[:-> string?]} []
+  (str/upper-case (subs nil 0) missing-extra))
+(defn reached-call {:t/sig '[:-> string?]} []
+  (str/upper-case))
+(defn inlined-call {:t/sig '[:-> number?]} []
+  (do (subs nil 0) (inc)))
+"#;
+    let report = Session::default().check("demo.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", "nil"),
+            ("PNX2322", "nil"),
+            ("PNX2304", "missing-extra"),
+            ("PNX2554", "(str/upper-case)"),
+            ("PNX2322", "nil"),
+            ("PNX2554", "(inc)"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn eager_vector_inputs_stop_only_after_a_proven_runtime_failure() {
     let source = r#"(ns demo)
 (defn accepts-at-runtime {:t/sig '[string? :-> string?]} [_] "a")

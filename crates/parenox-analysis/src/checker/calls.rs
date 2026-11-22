@@ -1084,6 +1084,11 @@ impl<'model> Checker<'model> {
             .any(|arity| arity.accepts(args.len()));
         let returns = call_returns(args);
         if !arity_ok {
+            // The modeled clojure.string Vars are ordinary JVM function calls.
+            // Core inliners and static interop can reject arity during compilation.
+            if name.starts_with("clojure.string/") && (!returns || !self.path_reachable) {
+                return Value::new(Type::Never);
+            }
             self.error(
                 "PNX2554",
                 span,

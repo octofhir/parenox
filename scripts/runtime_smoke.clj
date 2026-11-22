@@ -1262,6 +1262,21 @@
 (assert (try (subs "😀" 3) false (catch StringIndexOutOfBoundsException _ true)))
 (println "Clojure/JVM substring bounds: 4 assertions passed")
 
+(assert (try (do (subs nil 0) (clojure.string/upper-case))
+             false
+             (catch NullPointerException _ true)))
+(assert (try (clojure.string/upper-case (subs nil 0) "extra")
+             false
+             (catch NullPointerException _ true)))
+(assert (try (clojure.string/upper-case)
+             false
+             (catch clojure.lang.ArityException _ true)))
+(assert (try (eval '(fn [] (do (subs nil 0) (inc))))
+             false
+             (catch clojure.lang.Compiler$CompilerException e
+               (instance? clojure.lang.ArityException (ex-cause e)))))
+(println "Clojure/JVM call arity phases: 4 assertions passed")
+
 (assert (= \a (. "😀a" (charAt 2))))
 (assert (Character/isHighSurrogate (.charAt "😀" 0)))
 (assert (try (.charAt "😀" 2) false (catch StringIndexOutOfBoundsException _ true)))
