@@ -4,7 +4,7 @@ use super::{
     bounded_state, reducer_argument,
 };
 use crate::reader::{Form, Span};
-use crate::types::Type;
+use crate::types::{LengthBounds, Type};
 
 struct KvCall<'a, 'form, 'model> {
     callable: &'a PreparedCallable<'form, 'model>,
@@ -168,6 +168,7 @@ impl Checker<'_> {
                 self.reduce_open_with(
                     call.initial.clone(),
                     result,
+                    LengthBounds::NONEMPTY,
                     "reduce-kv",
                     call.span,
                     |checker, accumulator, step| {

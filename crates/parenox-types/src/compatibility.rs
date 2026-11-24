@@ -129,6 +129,13 @@ impl Type {
             (Type::Unknown, _) | (_, Type::Unknown) => Unproven,
             (Type::Any, Type::Never) => Mismatch,
             (Type::Any, _) => Unproven,
+            (
+                Type::BoundedCollection(actual, actual_bounds),
+                Type::BoundedCollection(expected, bounds),
+            ) => actual
+                .compatibility(expected)
+                .and(|| actual_bounds.compatibility(*bounds)),
+            (Type::BoundedCollection(actual, _), expected) => actual.compatibility(expected),
             (Type::Union(parts), expected) => {
                 Compatibility::all(parts.iter().map(|actual| actual.compatibility(expected)))
             }
@@ -159,6 +166,9 @@ impl Type {
             | (Type::Boolean | Type::SpecValue, Type::SpecTruthy) => Unproven,
             (_, Type::SpecValue | Type::SpecTruthy) => Proven,
             (Type::SpecValue | Type::SpecTruthy, _) => Unproven,
+            (actual, Type::BoundedCollection(expected, bounds)) => actual
+                .compatibility(expected)
+                .and(|| actual.length_bounds().compatibility(*bounds)),
             (actual, Type::SpecCollection(element)) => collection(actual, element),
             (
                 Type::SpecCollection(_),

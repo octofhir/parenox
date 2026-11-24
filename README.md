@@ -15,6 +15,13 @@ powers the CLI, a stdio language server, and an incremental JSON Lines session.
 
 ## Quick start
 
+Main preview builds are available for macOS ARM64 and Linux x86-64 (glibc).
+Each archive contains `parenox` and the license files. Verify downloads against
+`SHA256SUMS`, then put the extracted binary on your `PATH`.
+[Download main preview](https://github.com/octofhir/parenox/releases/tag/main-preview)
+
+To build from source:
+
 ```sh
 git clone https://github.com/octofhir/parenox.git
 cd parenox

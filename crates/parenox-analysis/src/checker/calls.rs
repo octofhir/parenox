@@ -12,6 +12,7 @@ mod indexing;
 mod inline;
 mod interop;
 pub(super) use interop::{dot_form, is_modeled_string_member, new_arguments};
+mod lazy_map;
 mod macro_scopes;
 mod reduction;
 mod search;
@@ -44,6 +45,7 @@ use arrays::array_constructor;
 use combinators::CombinedCallable;
 use forms::CoreForm;
 use inline::{CallbackReturn, Fnil, InlineFunction, Partial, PreparedChoice};
+use interop::QualifiedJvmMember;
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
@@ -56,6 +58,11 @@ enum Callable<'form, 'model> {
     Partial(Box<Partial<'form, 'model>>),
     Combined(CombinedCallable<'form, 'model>),
     Private(&'model Function),
+    Unchecked {
+        name: &'form str,
+        arities: &'model [Arity],
+    },
+    JvmMember(QualifiedJvmMember),
     Builtin(String),
     Value(Value),
 }
@@ -497,19 +504,12 @@ impl<'model> Checker<'model> {
                         {
                             return Value::new(Type::Never);
                         }
-                        let count = xs.len() - 1;
-                        if !arities.iter().any(|arity| arity.accepts(count)) {
-                            self.error(
-                                "PNX2554",
-                                xs[0].span,
-                                format!(
-                                    "{name} expects {} arguments, got {count}",
-                                    arity_counts(arities.iter().copied())
-                                ),
-                            );
-                            self.may_throw();
-                            return Value::new(Type::Unknown);
-                        }
+                        return self.call_unchecked_function(
+                            name,
+                            arities,
+                            xs.len() - 1,
+                            xs[0].span,
+                        );
                     } else {
                         self.withhold_captured_facts(env.inline_functions());
                         self.withhold_literals_after_opaque_form();
@@ -574,6 +574,11 @@ impl<'model> Checker<'model> {
                         return self.unchecked_macro(&resolved, xs[0].span, env);
                     }
                     if self.model.known_java_member(name, self.globals) {
+                        if let Some(value) =
+                            self.qualified_instance_call(&xs[0], &xs[1..], span, env)
+                        {
+                            return value;
+                        }
                         return self.unmodeled_jvm_call(None, &xs[1..], span, env);
                     }
                     if self.model.has_unavailable_value_scope(name, self.globals) {
@@ -749,6 +754,28 @@ impl<'model> Checker<'model> {
             span,
             format!("No checked signature for source function {name}"),
         ));
+        Value::new(Type::Unknown)
+    }
+
+    fn call_unchecked_function(
+        &mut self,
+        name: &str,
+        arities: &[Arity],
+        count: usize,
+        span: Span,
+    ) -> Value {
+        if arities.iter().any(|arity| arity.accepts(count)) {
+            return self.unchecked_function(name, span);
+        }
+        self.error(
+            "PNX2554",
+            span,
+            format!(
+                "{name} expects {} arguments, got {count}",
+                arity_counts(arities.iter().copied())
+            ),
+        );
+        self.may_throw();
         Value::new(Type::Unknown)
     }
 
@@ -1153,15 +1180,25 @@ impl<'model> Checker<'model> {
             {
                 return prepare(Callable::Private(function));
             }
-            if self
+            match self
                 .model
                 .declared_value(name, self.globals, callee.span.start.offset)
-                .is_none()
             {
-                let resolved = self.model.resolve(name);
-                if self.is_available_builtin(name, &resolved) {
-                    return prepare(Callable::Builtin(resolved));
+                Some(DeclaredValue::UncheckedFunction(function))
+                    if let Some(arities) = &function.arities =>
+                {
+                    return prepare(Callable::Unchecked { name, arities });
                 }
+                None => {
+                    let resolved = self.model.resolve(name);
+                    if self.is_available_builtin(name, &resolved) {
+                        return prepare(Callable::Builtin(resolved));
+                    }
+                    if let Some(member) = self.qualified_jvm_member(callee) {
+                        return prepare(Callable::JvmMember(member));
+                    }
+                }
+                _ => {}
             }
         }
         prepare(Callable::Value(self.infer(callee, env)))
@@ -1175,6 +1212,7 @@ impl<'model> Checker<'model> {
                 "clojure.core/count"
                     | "clojure.core/first"
                     | "clojure.core/nth"
+                    | "clojure.core/range"
                     | "clojure.core/subvec"
                     | "clojure.core/str"
                     | "clojure.core/inc"
@@ -1248,7 +1286,10 @@ impl<'model> Checker<'model> {
                     self.withhold_callback_facts(stage, env);
                 }
             }
-            Callable::Value(_) | Callable::Builtin(_) => {
+            Callable::Value(_)
+            | Callable::Builtin(_)
+            | Callable::Unchecked { .. }
+            | Callable::JvmMember(_) => {
                 if let Some(keyword) = callback.literal_keyword {
                     self.withhold_type_facts(keyword.span);
                 }
@@ -1299,6 +1340,10 @@ impl<'model> Checker<'model> {
                 args.into_iter().map(|(value, _)| value).collect(),
                 span,
             ),
+            Callable::Unchecked { name, arities } => {
+                self.call_unchecked_function(name, arities, args.len(), callable.span)
+            }
+            Callable::JvmMember(member) => self.call_jvm_member(*member, &args, span),
             Callable::Builtin(name)
                 if name == "clojure.core/str" && matches!(forms, ArgumentForms::Unavailable) =>
             {
@@ -1439,6 +1484,7 @@ impl<'model> Checker<'model> {
                     | "clojure.core/peek"
                     | "clojure.core/set"
                     | "clojure.core/seq"
+                    | "clojure.core/range"
                     | "clojure.core/subvec"
                     | "clojure.core/first"
                     | "clojure.core/next"
@@ -1480,6 +1526,17 @@ impl<'model> Checker<'model> {
                 return self.emptiness_call(name, &args[0]);
             }
             "clojure.core/nth" => return self.nth(args),
+            "clojure.core/range" => return self.range(args),
+            "clojure.core/odd?" | "clojure.core/even?" => {
+                let (number, site) = &args[0];
+                self.expect(number, &Type::Integral(IntegerType::ANY), *site, name);
+                number
+                    .known
+                    .exact_long_value()
+                    .map_or(Type::Boolean, |value| {
+                        Type::Bool((value & 1 != 0) == (name == "clojure.core/odd?"))
+                    })
+            }
             "clojure.core/subvec" => return self.subvec(args),
             "clojure.core/list" => return sequences::list_value(args),
             "clojure.core/cons" => return self.cons(args),
@@ -1695,6 +1752,12 @@ fn unconditional_core_inliner(name: &str) -> bool {
 
 fn builtin_arities(name: &str) -> &'static [Arity] {
     match name {
+        "clojure.core/range" => &[
+            Arity::Fixed(0),
+            Arity::Fixed(1),
+            Arity::Fixed(2),
+            Arity::Fixed(3),
+        ],
         "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj"
         | "clojure.core/list" | "clojure.core/merge" => &[Arity::Variadic(0)],
         "clojure.core/-"
@@ -1872,6 +1935,9 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/key"
             | "clojure.core/val"
             | "clojure.core/count"
+            | "clojure.core/range"
+            | "clojure.core/odd?"
+            | "clojure.core/even?"
             | "clojure.core/alength"
             | "clojure.core/empty?"
             | "clojure.core/not-empty"

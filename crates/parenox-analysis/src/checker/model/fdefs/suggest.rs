@@ -32,8 +32,11 @@ impl Declarations {
             return None;
         }
         let index = forms.partition_point(|form| form.span.end.offset <= offset);
-        let form = forms.get(index)?;
-        if offset < form.span.start.offset || self.functions.binary_search(&index).is_err() {
+        let top_level = forms.get(index)?;
+        let form = self.function_form(forms, index);
+        if !(form.span.start.offset..form.span.end.offset).contains(&offset)
+            || self.functions.binary_search(&index).is_err()
+        {
             return None;
         }
         let Kind::List(items) = &form.without_metadata().kind else {
@@ -108,7 +111,7 @@ impl Declarations {
         let draft = result.is_none() || args.iter().any(Option::is_none);
 
         // Keep a same-line comment on the definition and leave the next form alone.
-        let end = form.span.end.offset;
+        let end = top_level.span.end.offset;
         let line_end = source[end..]
             .find(['\r', '\n'])
             .map_or(source.len(), |i| end + i);

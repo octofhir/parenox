@@ -96,3 +96,60 @@ fn nested_group_callbacks_are_bounded() {
         "{report:#?}"
     );
 }
+
+#[test]
+fn reduce_uses_the_nonempty_bucket_after_lookup() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn exact {:t/sig '[:-> int?]} []
+          (reduce (fn [a b] (+ a b)) (:bucket (group-by (fn [_] :bucket) [1 2]))))
+        (defn guarded {:t/sig '[(s/coll-of int? :kind vector?) :-> number?]} [items]
+          (let [{:keys [bucket]} (group-by (fn [_] :bucket) items)]
+            (if bucket (reduce (fn [a b] (+ a b)) bucket) 0)))
+        (defn dictionary {:t/sig '[(s/coll-of string? :kind vector?) :-> string?]} [items]
+          (if-let [bucket (get (group-by identity items) "bucket")]
+            (reduce (fn [a _] a) bucket)
+            ""))
+        (defn updated {:t/sig '[(s/coll-of int? :kind vector?) :-> map?]} [items]
+          (update-vals (group-by (fn [_] :bucket) items)
+            (fn [bucket] (reduce (fn [a b] (+ a b)) bucket))))
+        (defn comprehension {:t/sig '[(s/coll-of int? :kind vector?) :-> t/any]} [items]
+          (for [[_ bucket] (group-by (fn [_] :bucket) items)]
+            (reduce (fn [a b] (+ a b)) bucket)))
+    "#;
+    let report = Session::default().check("group_by.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn reduce_still_checks_empty_input_when_a_bucket_is_absent() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn unchecked-lookup {:t/sig '[(s/coll-of int? :kind vector?) :-> number?]} [items]
+          (reduce (fn [a b] (+ a b)) (get (group-by (fn [_] :bucket) items) :bucket)))
+        (defn empty-default {:t/sig '[:-> number?]} []
+          (reduce (fn [a b] (+ a b)) (get (group-by (fn [_] :bucket) [1]) :missing [])))
+    "#;
+    let report = Session::default().check("group_by.clj", source);
+    assert_eq!(
+        report
+            .diagnostics
+            .iter()
+            .filter(|finding| finding.code == "PNX2554")
+            .count(),
+        2,
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn vals_preserves_bucket_shapes_for_a_lazy_mapping_callback() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn grouped {:t/sig '[:-> (s/coll-of number? :kind seq?)]} []
+          (map (fn [group] (reduce (fn [a b] (+ a b)) group))
+               (vals (group-by odd? [1 2 3]))))
+        "#;
+    let report = Session::default().check("group_by.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}

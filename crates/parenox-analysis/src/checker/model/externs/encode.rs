@@ -4,7 +4,8 @@ use std::fmt::{self, Write};
 use super::{ExternalDeclaration, Model, is_modeled_call};
 use crate::reader::{MAX_NESTING_DEPTH, Span};
 use crate::types::{
-    ExtraFields, IntegerClass, IntegerRange, IntegerType, JvmArrayClass, MapType, Signature, Type,
+    ExtraFields, IntegerClass, IntegerRange, IntegerType, JvmArrayClass, LengthBounds, MapType,
+    Signature, Type,
 };
 
 impl Model {
@@ -259,6 +260,9 @@ impl SnapshotWriter {
                     out.ty(element)
                 });
             }
+            Type::BoundedCollection(collection, bounds) => {
+                return self.bounded_collection(collection, *bounds);
+            }
             Type::Number => "clojure.core/number?",
             Type::Integral(IntegerType::ANY) => "clojure.core/integer?",
             Type::Integral(IntegerType::FIXED) => "clojure.core/int?",
@@ -270,6 +274,7 @@ impl SnapshotWriter {
             }
             Type::String => "clojure.core/string?",
             Type::Pattern => "java.util.regex.Pattern",
+            Type::JvmIterator => "java.util.Iterator",
             Type::JvmArray(JvmArrayClass::Byte) => "clojure.core/bytes?",
             Type::Character => "clojure.core/char?",
             Type::Keyword => "clojure.core/keyword?",
@@ -333,6 +338,45 @@ impl SnapshotWriter {
         self.nested(1, "(clojure.spec.alpha/coll-of ", ")", |out| {
             out.ty(item)?;
             Ok(write!(out, " :kind clojure.core/{kind}")?)
+        })
+    }
+
+    fn bounded_collection(&mut self, ty: &Type, bounds: LengthBounds) -> Encoded {
+        let (item, kind) = match ty {
+            Type::SpecCollection(item) => (item.as_ref(), None),
+            Type::Vector(item) => (item.as_ref(), Some("vector?")),
+            Type::Set(item) => (item.as_ref(), Some("set?")),
+            Type::Union(parts) => match parts.as_slice() {
+                [Type::Seq(item), Type::SeqTuple(empty)] if empty.is_empty() => {
+                    (item.as_ref(), Some("seq?"))
+                }
+                [Type::List(item), Type::ListTuple(empty)] if empty.is_empty() => {
+                    (item.as_ref(), Some("list?"))
+                }
+                _ => {
+                    return Err(EncodeError::Unsupported(
+                        "bounded collection kind is unavailable",
+                    ));
+                }
+            },
+            _ => {
+                return Err(EncodeError::Unsupported(
+                    "bounded collection kind is unavailable",
+                ));
+            }
+        };
+        self.nested(1, "(clojure.spec.alpha/coll-of ", ")", |out| {
+            out.ty(item)?;
+            if let Some(kind) = kind {
+                write!(out, " :kind clojure.core/{kind}")?;
+            }
+            if bounds.min > 0 {
+                write!(out, " :min-count {}", bounds.min)?;
+            }
+            if let Some(max) = bounds.max {
+                write!(out, " :max-count {max}")?;
+            }
+            Ok(())
         })
     }
 

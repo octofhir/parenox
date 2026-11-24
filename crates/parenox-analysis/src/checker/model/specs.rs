@@ -94,7 +94,8 @@ impl Declarations {
 
     pub(super) fn has_inline_spec_composition(&self, forms: &[Form]) -> bool {
         self.functions.iter().any(|&index| {
-            let Kind::List(items) = &forms[index].without_metadata().kind else {
+            let Kind::List(items) = &self.function_form(forms, index).without_metadata().kind
+            else {
                 return false;
             };
             let [_, name, tail @ ..] = items.as_slice() else {

@@ -203,6 +203,24 @@ pub(super) struct DeclaredVar {
     pub private: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FunctionSource {
+    index: usize,
+    with_test: bool,
+}
+
+impl FunctionSource {
+    pub(super) fn form(self, forms: &[Form]) -> &Form {
+        let form = &forms[self.index];
+        if self.with_test
+            && let Kind::List(items) = &form.without_metadata().kind
+        {
+            return &items[1];
+        }
+        form
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Declarations {
     pub(super) names: Names,
@@ -222,6 +240,8 @@ pub(crate) struct Declarations {
     pub(super) reflection_flags: Vec<Span>,
     pub(super) fdefs: Vec<usize>,
     pub(super) functions: Vec<usize>,
+    // A subset of functions whose declaration is the first macro argument.
+    with_test_functions: Vec<usize>,
     pub(super) test_forms: Vec<usize>,
     pub(crate) refers_to_assert_expr: bool,
     pub(super) method_forms: Vec<usize>,
@@ -586,6 +606,17 @@ impl Declarations {
         }
     }
 
+    pub(super) fn function_source(&self, index: usize) -> FunctionSource {
+        FunctionSource {
+            index,
+            with_test: self.with_test_functions.binary_search(&index).is_ok(),
+        }
+    }
+
+    pub(super) fn function_form<'a>(&self, forms: &'a [Form], index: usize) -> &'a Form {
+        self.function_source(index).form(forms)
+    }
+
     pub(super) fn source_declarations<'a>(
         &'a self,
         forms: &'a [Form],
@@ -599,7 +630,12 @@ impl Declarations {
             .chain(self.unchecked_vars.iter().map(|index| (index, false)))
             .chain(self.macros.iter().map(|index| (index, false)))
             .filter_map(move |(&index, function)| {
-                let Kind::List(items) = &forms[index].without_metadata().kind else {
+                let form = if function {
+                    self.function_form(forms, index)
+                } else {
+                    &forms[index]
+                };
+                let Kind::List(items) = &form.without_metadata().kind else {
                     return None;
                 };
                 let name = items.get(1)?;
@@ -1048,6 +1084,7 @@ impl Declarations {
                         }
                     }
                 }
+                "clojure.test/with-test" if model.read_with_test(forms, index, xs, globals) => {}
                 "clojure.core/declare" => {
                     model.read_declare(&xs[1..]);
                     for name in &xs[1..] {
@@ -1250,7 +1287,12 @@ impl Declarations {
             .chain(self.functions.iter().map(|&index| (index, true)));
         definitions
             .filter_map(|(index, function)| {
-                let Kind::List(items) = &forms[index].without_metadata().kind else {
+                let form = if function {
+                    self.function_form(forms, index)
+                } else {
+                    &forms[index]
+                };
+                let Kind::List(items) = &form.without_metadata().kind else {
                     return None;
                 };
                 let [_, name, tail @ ..] = items.as_slice() else {
@@ -1271,6 +1313,64 @@ impl Declarations {
                         .1
                         .any(|[key, value]| !inert(key) || !inert(value))
             })
+    }
+
+    fn read_with_test(
+        &mut self,
+        forms: &[Form],
+        index: usize,
+        items: &[Form],
+        globals: Option<&Globals>,
+    ) -> bool {
+        let [head, definition, tests @ ..] = items else {
+            return false;
+        };
+        let unshadowed = |op: &str| {
+            op.contains('/')
+                || (self.all_refers.iter().all(|ns| ns == "clojure.test")
+                    && !self.forward_vars.contains_key(op)
+                    && self.source_declarations(forms, op).next().is_none())
+        };
+        if ["clojure.test", "clojure.core"].into_iter().any(|ns| {
+            self.namespace() == ns || globals.is_some_and(|g| g.project_namespaces.contains(ns))
+        }) || self.has_unchecked_dispatch(forms[index].span)
+            || self.has_top_level_require
+            || self.has_top_level_in_ns
+            || !self.unmodeled_calls.is_empty()
+            || !head.symbol().is_some_and(unshadowed)
+        {
+            return false;
+        }
+        let Kind::List(parts) = &definition.without_metadata().kind else {
+            return false;
+        };
+        let [operator, name, tail @ ..] = parts.as_slice() else {
+            return false;
+        };
+        if !name.symbol().is_some_and(unqualified)
+            || !operator.symbol().is_some_and(|op| {
+                matches!(
+                    self.names.resolve_parts(op),
+                    ("clojure.core", "defn" | "defn-")
+                ) && unshadowed(op)
+            })
+        {
+            return false;
+        }
+        let (_, mut attributes) = function_parts(tail);
+        let marker =
+            attributes.find_map(|[key, value]| (key.keyword() == Some(":macro")).then_some(value));
+        self.replace_source_macro(name, marker, definition.span);
+        self.functions.push(index);
+        self.with_test_functions.push(index);
+        if !tests.is_empty() {
+            self.diagnostics.push(Diagnostic::analysis_gap(
+                "PNX9001",
+                head.span,
+                "Type checking for the with-test test body is unavailable",
+            ));
+        }
+        true
     }
 
     fn replace_source_macro(&mut self, name: &Form, marker: Option<&Form>, span: Span) {

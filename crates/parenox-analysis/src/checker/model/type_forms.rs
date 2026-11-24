@@ -18,8 +18,8 @@ use crate::checker::maps::literal_key_type;
 use crate::checker::quote::quoted_symbol;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{
-    ExtraFields, Field, IntegerType, JvmArrayClass, MAX_TUPLE_ITEMS, MapType, Parameters,
-    SPEC_INVALID, Type,
+    ExtraFields, Field, IntegerType, JvmArrayClass, LengthBounds, MAX_TUPLE_ITEMS, MapType,
+    Parameters, SPEC_INVALID, Type,
 };
 
 pub(super) fn read_type(
@@ -181,6 +181,17 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
         }
         match &form.without_metadata().kind {
             Kind::Symbol(s) if self.literal_shapes && s == "t/any" => Type::Any,
+            Kind::Symbol(s)
+                if self.literal_shapes
+                    && (s == "java.util.Iterator"
+                        || self
+                            .names
+                            .imports
+                            .get(s)
+                            .is_some_and(|class| class == "java.util.Iterator")) =>
+            {
+                Type::JvmIterator
+            }
             Kind::Symbol(s) => predicate_type(self.names, s).unwrap_or_else(|| {
                 if self.names.spec_core_shadows.contains(s) {
                     self.diagnostics.push(Diagnostic::analysis_gap(
@@ -375,29 +386,42 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
     fn collection(&mut self, form: &Form, element: &Form, options: &[Form]) -> Type {
         let (pairs, extra) = options.as_chunks::<2>();
         if !extra.is_empty()
-            || pairs
-                .iter()
-                .any(|[key, _]| !matches!(key.keyword(), Some(":kind" | ":gen-max")))
+            || pairs.iter().any(|[key, _]| {
+                !matches!(
+                    key.keyword(),
+                    Some(":kind" | ":gen-max" | ":min-count" | ":max-count")
+                )
+            })
         {
             self.error("PNX9001", form.span, "Unsupported type form");
             return Type::Unknown;
         }
+        let Some(bounds) = self.collection_bounds(pairs, form.span) else {
+            return Type::Unknown;
+        };
+        let constrain = |ty| {
+            if bounds == LengthBounds::UNBOUNDED {
+                ty
+            } else {
+                Type::BoundedCollection(Box::new(ty), bounds)
+            }
+        };
         let Some([_, kind]) = pairs
             .iter()
             .rfind(|[key, _]| key.keyword() == Some(":kind"))
         else {
             let element = self.parse(element);
             if collection_element(&element) {
-                return Type::SpecCollection(Box::new(element));
+                return constrain(Type::SpecCollection(Box::new(element)));
             }
             self.diagnostics.push(Diagnostic::analysis_gap(
                 "PNX9001",
                 form.span,
-                "A collection spec without :kind requires any?, strings, or modeled map shapes",
+                "A collection spec without :kind requires any?, numbers, strings, or modeled map shapes",
             ));
             return Type::Unknown;
         };
-        match kind
+        let ty = match kind
             .symbol()
             .filter(|symbol| !self.names.spec_core_shadows.contains(*symbol))
             .map(|symbol| self.names.resolve_parts(symbol))
@@ -411,7 +435,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                 Type::empty_list(),
                 Type::List(Box::new(self.parse(element))),
             ]),
-            Some(("clojure.core", "map?")) => {
+            Some(("clojure.core", "map?")) if bounds == LengthBounds::UNBOUNDED => {
                 match &self.parse(element) {
                     // Each map member is an entry, even if its key or value
                     // happens to be the spec-invalid keyword.
@@ -433,13 +457,52 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                 self.error("PNX9001", kind.span, "Unsupported collection kind");
                 Type::Unknown
             }
+        };
+        if ty == Type::Unknown {
+            ty
+        } else {
+            constrain(ty)
         }
+    }
+
+    fn collection_bounds(&mut self, pairs: &[[Form; 2]], span: Span) -> Option<LengthBounds> {
+        let mut minimum = None;
+        let mut maximum = None;
+        for [key, value] in pairs {
+            let limit = match key.keyword() {
+                Some(":min-count") => &mut minimum,
+                Some(":max-count") => &mut maximum,
+                _ => continue,
+            };
+            let Some(count) = Type::integer_literal(value, self.source)
+                .and_then(|value| value.exact_integer_value())
+                .and_then(|count| usize::try_from(count).ok())
+            else {
+                self.error(
+                    "PNX9001",
+                    value.span,
+                    "Collection bounds require nonnegative integer literals",
+                );
+                return None;
+            };
+            *limit = Some(count);
+        }
+        let min = minimum.unwrap_or(0);
+        if maximum.is_some_and(|max| max < min) {
+            self.error(
+                "PNX9001",
+                span,
+                "Collection maximum is smaller than its minimum",
+            );
+            return None;
+        }
+        Some(LengthBounds { min, max: maximum })
     }
 }
 
 fn collection_element(element: &Type) -> bool {
     match element {
-        Type::SpecValue | Type::String | Type::Str(_) => true,
+        Type::SpecValue | Type::String | Type::Str(_) | Type::Number | Type::Integral(_) => true,
         Type::Map(map) => !map.has_unknown_value_constraint(),
         Type::Union(parts) => parts.iter().all(collection_element),
         _ => false,

@@ -61,7 +61,7 @@ impl Declarations {
         let untyped_allowed = uses_standard_partial_calls(globals);
         let mut unchecked = None;
         for &index in functions {
-            let form = &forms[index];
+            let form = self.function_form(forms, index);
             let Kind::List(items) = &form.without_metadata().kind else {
                 continue;
             };

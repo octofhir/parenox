@@ -5,11 +5,11 @@ use std::borrow::Cow;
 
 use super::super::recur::{bounded_state, widen_growing_collections};
 use super::{
-    Callable, Checker, Env, PreparedCallable, Value, vectors::CollectionError,
+    Callable, Checker, Env, LiteralContainer, PreparedCallable, Value, vectors::CollectionError,
     vectors::element_type,
 };
 use crate::reader::{Form, Span};
-use crate::types::Type;
+use crate::types::{LengthBounds, Type};
 
 const MAX_REDUCE_ALTERNATIVES: usize = 16;
 const MAX_REDUCE_STATES: usize = 16;
@@ -87,14 +87,27 @@ impl Checker<'_> {
                 Type::Vector(element) if **element == Type::Never => &[][..],
                 Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => items,
                 Type::MapEntry(items) => items.as_slice(),
-                Type::Vector(element) | Type::Seq(element) | Type::List(element) => {
-                    let item =
-                        Value::with_notes(element.as_ref().clone(), collection.notes.clone());
+                Type::Vector(_)
+                | Type::Seq(_)
+                | Type::List(_)
+                | Type::SpecCollection(_)
+                | Type::BoundedCollection(..) => {
+                    let element = element_type(shape.clone())
+                        .unwrap_or_else(|_| unreachable!("a collection has an element type"));
+                    let item = collection.traversal_element(element);
+                    let bounds = if matches!(
+                        collection.literal_container,
+                        Some(LiteralContainer::NonemptyVector)
+                    ) {
+                        LengthBounds::NONEMPTY
+                    } else {
+                        shape.length_bounds()
+                    };
                     result = result.join(self.reduce_open(
                         &callable,
                         initial,
                         (item, source.span),
-                        matches!(shape, Type::Seq(_) | Type::List(_)),
+                        bounds,
                         span,
                         env,
                     ));
@@ -152,6 +165,10 @@ impl Checker<'_> {
                     shape,
                     Type::Tuple(_) | Type::Vector(_) | Type::List(_)
                 ) || matches!(shape, Type::SeqTuple(items) | Type::ListTuple(items) if !items.is_empty());
+                let casts_reducer = casts_reducer
+                    || matches!(shape,
+                        Type::BoundedCollection(collection, _) if matches!(collection.as_ref(), Type::Vector(_))
+                    );
                 alternatives.push((Cow::Borrowed(shape), casts_reducer));
             }
         }
@@ -225,23 +242,27 @@ impl Checker<'_> {
         callable: &PreparedCallable<'_, '_>,
         initial: Option<&(Value, Span)>,
         input: (Value, Span),
-        nonempty: bool,
+        bounds: LengthBounds,
         span: Span,
         env: &Env,
     ) -> Value {
         let accumulator = initial.cloned().unwrap_or_else(|| input.clone());
-        let mut result = if nonempty && initial.is_some() {
-            Value::new(Type::Never)
-        } else {
+        let steps = bounds.after_consuming(usize::from(initial.is_none()));
+        let mut result = if steps.includes(0) && bounds.includes(usize::from(initial.is_none())) {
             accumulator.0.clone()
+        } else {
+            Value::new(Type::Never)
         };
-        if initial.is_none() && !nonempty {
+        if initial.is_none() && bounds.includes(0) {
             result = result.join(self.call_prepared(callable, Vec::new(), span, env, true));
+        } else if steps.max == Some(0) {
+            self.call_prepared(callable, Vec::new(), span, env, false);
         }
 
         self.reduce_open_with(
             accumulator,
             result,
+            steps,
             "reduce",
             span,
             |checker, accumulator, step| {
@@ -261,12 +282,17 @@ impl Checker<'_> {
         &mut self,
         mut accumulator: (Value, Span),
         mut result: Value,
+        steps: LengthBounds,
         name: &str,
         span: Span,
         mut apply: impl FnMut(&mut Self, (Value, Span), usize) -> Value,
     ) -> Value {
         let mut seen = vec![vec![accumulator.0.clone()]];
-        for step in 1..=MAX_REDUCE_STATES {
+        for step in 1..=steps
+            .max
+            .unwrap_or(MAX_REDUCE_STATES)
+            .min(MAX_REDUCE_STATES)
+        {
             let next = apply(self, accumulator, step);
             let (mut next, finished) = partition_reduced(next);
             result = result.join(finished);
@@ -276,16 +302,36 @@ impl Checker<'_> {
             if next.known == Type::Unknown {
                 return next;
             }
+            if steps.max == Some(step) {
+                return result.join(next);
+            }
             widen_growing_collections(std::slice::from_mut(&mut next), &seen);
             if !bounded_state(std::slice::from_ref(&next)) {
                 break;
             }
-            result = result.join(next.clone());
-            if seen.iter().any(|state| state[0].same_value_facts(&next)) {
+            if step >= steps.min {
+                result = result.join(next.clone());
+            }
+            if let Some(first) = seen
+                .iter()
+                .position(|state| state[0].same_value_facts(&next))
+            {
+                // The remaining lengths can only reach states in this cycle.
+                let period = step - first;
+                for (phase, state) in seen[first..].iter().enumerate() {
+                    let at = step + phase;
+                    let repetitions = steps.min.saturating_sub(at).div_ceil(period);
+                    if steps.includes(at + repetitions * period) {
+                        result = result.join(state[0].clone());
+                    }
+                }
                 return result;
             }
             seen.push(vec![next.clone()]);
             accumulator = (next, span);
+        }
+        if steps.max == Some(0) {
+            return result;
         }
         self.unsupported(
             span,

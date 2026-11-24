@@ -55,7 +55,7 @@ pub(crate) struct Function {
     ordinary_dotted: bool,
     pub span: Span,
     // Index in the immutable source forms shared with the file snapshot.
-    source_index: usize,
+    source: declarations::FunctionSource,
 }
 
 impl Function {
@@ -354,7 +354,7 @@ impl Model {
         let source_arities_known = !opaque_definition && declarations.has_known_var_surface(forms);
         for &index in &declarations.functions {
             model.read_function(
-                (index, &forms[index]),
+                (declarations.function_source(index), forms),
                 source,
                 globals,
                 &mut fdefs,

@@ -102,3 +102,35 @@ fn uninvoked_named_functions_keep_compiler_diagnostics() {
     let range = finding.span.start.offset..finding.span.end.offset;
     assert_eq!(&source[range], "missing");
 }
+
+#[test]
+fn named_variadic_callbacks_use_their_own_arity_for_recursion_and_apply() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn direct {:t/sig '[:-> (s/coll-of int? :kind seq?)]} []
+          (map (fn node [x & [option]]
+                 (if option (+ x option) (node x 1)))
+               [1 2]))
+        (defn via-apply {:t/sig '[:-> (s/coll-of int? :kind seq?)]} []
+          (map (fn node [x & [option]]
+                 (if option x (apply node [x 1])))
+               [1 2]))
+        (defn overloaded {:t/sig '[:-> (s/coll-of string? :kind seq?)]} []
+          (map (fn node ([x] (node x 1)) ([x y] (str x y))) [1]))
+        "#;
+    let report = Session::default().check("named.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (original, replacement, code) in [
+        ("(node x 1)", "(node)", "PNX2554"),
+        ("(apply node [x 1])", "(apply node [])", "PNX2554"),
+        ("(node x 1)", "(node x \"bad\")", "PNX2322"),
+    ] {
+        let source = source.replacen(original, replacement, 1);
+        let report = Session::default().check("named.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert_eq!(finding.code, code, "{report:#?}");
+    }
+}

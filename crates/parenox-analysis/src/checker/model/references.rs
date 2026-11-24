@@ -224,7 +224,7 @@ impl Declarations {
         let unchecked = model.unchecked_definition_offsets();
         self.functions
             .iter()
-            .map(|&index| &forms[index])
+            .map(|&index| self.function_form(forms, index))
             .filter(move |form| unchecked.contains(&form.span.start.offset))
     }
 
@@ -361,7 +361,7 @@ impl Declarations {
         } else if inside_method {
             visit.method(form);
         } else if inside_function {
-            visit.definition(form);
+            visit.definition(self.function_form(forms, index));
         } else if let Kind::List(items) = &form.without_metadata().kind
             && let [head, name, tail @ ..] = items.as_slice()
             && head.symbol() == Some("def")
@@ -482,7 +482,7 @@ impl Declarations {
             purpose,
         };
         for &index in selected_functions.unwrap_or(&self.functions) {
-            visit.definition(&forms[index]);
+            visit.definition(self.function_form(forms, index));
         }
         if selected_functions.is_some() {
             return;
@@ -525,6 +525,8 @@ impl Declarations {
     pub(crate) fn top_level_names<'a>(&'a self, forms: &'a [Form]) -> BTreeSet<&'a str> {
         forms
             .iter()
+            .enumerate()
+            .map(|(index, _)| self.function_form(forms, index))
             .filter_map(|form| {
                 let Kind::List(items) = &form.without_metadata().kind else {
                     return None;

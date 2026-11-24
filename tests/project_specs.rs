@@ -139,7 +139,7 @@ fn external_fdefs_and_unmodeled_collection_elements_report_incomplete_coverage()
     let source = r#"(ns catalogs (:require [clojure.spec.alpha :as s]))
         (s/def ::labels (s/coll-of string? :gen-max 1))
         (defn labels {:t/sig '[:-> ::labels]} [] ["ready"])
-        (s/def ::numbers (s/coll-of number? :gen-max 1))
+        (s/def ::keywords (s/coll-of keyword? :gen-max 1))
         (s/fdef clojure.core/str :args (s/cat :name string?) :ret string?)"#;
     let report = Session::default().check("catalogs.clj", source);
     assert!(!report.complete);

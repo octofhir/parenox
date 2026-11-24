@@ -180,9 +180,16 @@ impl Checker<'_> {
         reachable: bool,
         tail: bool,
     ) -> Value {
-        self.check_path(reachable && env.reachable(), |checker| {
-            checker.infer_position(form, env, tail)
-        })
+        if reachable && env.reachable() {
+            self.infer_position(form, env, tail)
+        } else {
+            self.infer_unreachable(form, env, tail)
+        }
+    }
+
+    #[inline(never)]
+    fn infer_unreachable(&mut self, form: &Form, env: &Env, tail: bool) -> Value {
+        self.check_path(false, |checker| checker.infer_position(form, env, tail))
     }
 
     pub(super) fn check_path(

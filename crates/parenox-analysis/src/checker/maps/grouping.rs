@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 
 use super::super::{
-    Checker, Env, Value,
+    Checker, Env, LiteralContainer, Value,
     calls::{PreparedCallable, iteration_may_throw},
     vector_type,
 };
@@ -55,7 +55,12 @@ impl Checker<'_> {
         let start = self.diagnostics.len();
         let result = self.group_items(&items, &call);
         self.dedup_diagnostics(start);
-        Value::new(result)
+        let mut value = Value::new(result);
+        let proof = LiteralContainer::GroupBuckets;
+        if proof.matches_type(&value.known) {
+            value.literal_container = Some(proof);
+        }
+        value
     }
 
     fn group_items(&mut self, items: &Type, call: &GroupBy<'_, '_, '_>) -> Type {

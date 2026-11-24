@@ -14,7 +14,8 @@ impl Declarations {
         offset: usize,
     ) -> Option<String> {
         let index = forms.partition_point(|form| form.span.end.offset <= offset);
-        let form = forms.get(index)?.without_metadata();
+        forms.get(index)?;
+        let form = self.function_form(forms, index).without_metadata();
         let Kind::List(items) = &form.kind else {
             return None;
         };

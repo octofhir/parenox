@@ -1,4 +1,4 @@
-use parenox::{DocumentHover, Report, Session};
+use parenox::{DocumentHover, Report, Session, Source};
 
 fn check(expression: &str, ret: &str) -> Report {
     let source = format!("(ns demo) (defn run {{:t/sig '[:-> {ret}]}} [] {expression})");
@@ -258,4 +258,86 @@ fn direct_reductions_use_map_entries_set_elements_and_utf16_units() {
         let report = check(expression, expected);
         assert!(report.ok && report.complete, "{expression}: {report:#?}");
     }
+}
+
+#[test]
+fn reduce_uses_both_collection_bounds_to_choose_invocations_and_results() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (s/fdef singleton :args (s/cat :xs (s/coll-of int? :min-count 1 :max-count 1)) :ret int?)
+        (defn singleton [xs] (reduce (fn [a b c] :unused) xs))
+        (s/fdef at-least-two :args (s/cat :xs (s/coll-of int? :min-count 2)) :ret string?)
+        (defn at-least-two [xs] (reduce (fn [a b] "always") xs))
+        (s/fdef exactly-two :args (s/cat :xs (s/coll-of int? :kind vector? :min-count 2 :max-count 2)) :ret #{:once})
+        (defn exactly-two [xs] (reduce (fn [a b] (if (keyword? a) :again :once)) xs))
+        (s/fdef empty-with-init :args (s/cat :xs (s/coll-of int? :max-count 0)) :ret int?)
+        (defn empty-with-init [xs] (reduce (fn [a] :unused) 42 xs))
+        "#;
+    let report = Session::default().check("reduce.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn reduce_checks_zero_arity_only_for_empty_inputs_and_reports_invalid_steps() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn maybe-empty {:t/sig '[(s/coll-of int? :max-count 2) :-> t/any]} [xs]
+          (reduce (fn [a b] (+ a b)) xs))
+        (defn maybe-nil {:t/sig '[(s/nilable (s/coll-of int? :min-count 1)) :-> t/any]} [xs]
+          (reduce (fn [a b] (+ a b)) xs))
+        (defn wrong-step {:t/sig '[(s/coll-of int? :min-count 2) :-> t/any]} [xs]
+          (reduce (fn [a] a) xs))
+        "#;
+    let report = Session::default().check("reduce.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| (finding.code.as_str(), finding.message.as_str()))
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2554", "fn expects 2 arguments, got 0"),
+            ("PNX2554", "fn expects 2 arguments, got 0"),
+            ("PNX2554", "fn expects 1 arguments, got 2"),
+        ],
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn nonempty_contracts_cross_namespaces_and_survive_extern_export() {
+    let provider = Source {
+        path: "groups.clj",
+        source: r#"
+          (ns groups (:require [clojure.spec.alpha :as s]))
+          (s/def ::nonempty (s/coll-of int? :min-count 1))
+          (s/fdef sample :args (s/cat) :ret ::nonempty)
+          (defn sample [] [1 2])
+          "#,
+    };
+    let client = Source {
+        path: "client.clj",
+        source: r#"
+          (ns client (:require [groups :as g]))
+          (defn total {:t/sig '[:-> number?]} []
+            (reduce (fn [a b] (+ a b)) (g/sample)))
+          "#,
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[provider, client], None);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let exported = session.export_externs(&[provider], &[]);
+    let edn = exported
+        .edn
+        .unwrap_or_else(|| panic!("{:#?}", exported.report));
+    assert!(edn.contains(":min-count 1"), "{edn}");
+    let report = Session::default().check_project(
+        &[client],
+        Some(Source {
+            path: "groups.edn",
+            source: &edn,
+        }),
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
 }

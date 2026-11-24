@@ -592,6 +592,7 @@ pub(super) enum CollectionError {
 
 pub(super) fn element_type(collection: Type) -> Result<Type, CollectionError> {
     match collection {
+        Type::BoundedCollection(collection, _) => element_type(*collection),
         Type::Vector(element) | Type::Set(element) | Type::Seq(element) | Type::List(element) => {
             Ok(*element)
         }

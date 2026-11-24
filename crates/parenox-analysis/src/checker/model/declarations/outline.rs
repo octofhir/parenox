@@ -21,7 +21,8 @@ impl Declarations {
     pub(crate) fn outline<'a>(&self, forms: &'a [Form]) -> Vec<SourceSymbol<'a>> {
         use SourceSymbolKind::*;
         let mut symbols = Vec::new();
-        for (index, form) in forms.iter().enumerate() {
+        for index in 0..forms.len() {
+            let form = self.function_form(forms, index);
             let Kind::List(items) = &form.without_metadata().kind else {
                 continue;
             };

@@ -173,9 +173,10 @@ impl Model {
 
     pub(in crate::checker) fn known_java_class(&self, name: &str) -> bool {
         let short = name.rsplit('.').next().unwrap();
-        name == "java.util.Date"
-            || implicit_java_class(short)
-                .is_some_and(|qualified| name == short || name == qualified)
+        matches!(
+            name,
+            "java.util.Date" | "java.io.InputStream" | "java.util.Iterator"
+        ) || implicit_java_class(short).is_some_and(|qualified| name == short || name == qualified)
             || self.names.imports.contains_key(name)
             || self
                 .names

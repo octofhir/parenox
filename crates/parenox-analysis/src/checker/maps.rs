@@ -481,7 +481,10 @@ impl Checker<'_> {
             Type::Set(element) => value.set_lookup_type(element, key, default_type()),
             Type::Map(map)
                 if let Some([stored_key, stored]) = map.dictionary_types()
-                    && !matches!(value.literal_container, Some(LiteralContainer::Map(_))) =>
+                    && !matches!(
+                        value.literal_container,
+                        Some(LiteralContainer::Map(_) | LiteralContainer::GroupBuckets)
+                    ) =>
             {
                 // The contract describes stored entries. A comparator can
                 // accept a lookup key outside the stored key domain.
@@ -539,6 +542,21 @@ impl Checker<'_> {
                 Type::Unknown
             }
         };
+        if !selected_default
+            && matches!(
+                value.literal_container,
+                Some(LiteralContainer::GroupBuckets)
+            )
+            && default.is_none_or(|value| {
+                value.known == Type::Nil
+                    || matches!(
+                        value.literal_container,
+                        Some(LiteralContainer::NonemptyVector)
+                    )
+            })
+        {
+            literal_container = Some(&LiteralContainer::NonemptyVector);
+        }
         if let Some(default) = default {
             notes.extend(default.notes.clone());
             if selected_default {

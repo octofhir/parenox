@@ -1,7 +1,7 @@
 //! Clojure try, catch and finally scopes.
 use super::Throws;
 use crate::checker::bindings::dotted_binding_error;
-use crate::checker::{Checker, Env, Value};
+use crate::checker::{Checker, Env, Value, metadata::JavaTypeHint};
 use crate::reader::{Form, Kind};
 use crate::types::Type;
 
@@ -74,6 +74,7 @@ impl ExceptionClass {
 
 struct Handler<'a> {
     class: Option<ExceptionClass>,
+    class_name: &'a str,
     binding: &'a str,
     body: &'a [Form],
 }
@@ -186,6 +187,7 @@ impl Checker<'_> {
         }
         Some(Handler {
             class: resolved,
+            class_name: name,
             binding,
             body,
         })
@@ -214,6 +216,10 @@ impl Checker<'_> {
             local.insert(
                 handler.binding.to_owned(),
                 Value::new(ty.unwrap_or(Type::Never)),
+            );
+            local.set_java_hint(
+                handler.binding,
+                JavaTypeHint::Symbol(self.model.class_name(handler.class_name).to_owned()),
             );
             let caught = self.check_path(reachable, |checker| {
                 checker.body(handler.body, &local, false)

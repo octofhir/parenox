@@ -88,13 +88,14 @@ impl Model {
 
     pub(super) fn read_function<'a>(
         &mut self,
-        (index, form): (usize, &'a Form),
+        (definition, forms): (super::declarations::FunctionSource, &'a [Form]),
         source: &str,
         globals: &Globals,
         fdefs: &mut BTreeMap<String, &[Form]>,
         guards: &mut BTreeMap<String, &'a Form>,
         source_arities_known: bool,
     ) {
+        let form = definition.form(forms);
         let Kind::List(xs) = &form.without_metadata().kind else {
             unreachable!()
         };
@@ -274,7 +275,7 @@ impl Model {
             data_body_eligible,
             ordinary_dotted: super::bare_dotted_name(symbol) && !opaque_callable(),
             span,
-            source_index: index,
+            source: definition,
         };
         if let Some(guard) = guard {
             guards.insert(name.clone(), guard);
@@ -292,7 +293,7 @@ impl Model {
         function: &Function,
         arity: Arity,
     ) -> Clause<'_> {
-        let form = &self.source_forms[function.source_index];
+        let form = function.source.form(&self.source_forms);
         let Kind::List(items) = &form.without_metadata().kind else {
             unreachable!("function declarations point to source lists");
         };

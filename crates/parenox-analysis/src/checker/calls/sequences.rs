@@ -3,10 +3,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::super::{Checker, LiteralContainer, Value, exact_set_member, literal_vector_value};
-use super::literal_equality;
+use super::{literal_equality, vectors::element_type};
 use crate::Diagnostic;
 use crate::reader::Span;
-use crate::types::{ExtraFields, IntegerType, MAX_TUPLE_ITEMS, MapType, Type};
+use crate::types::{ExtraFields, IntegerClass, IntegerType, MAX_TUPLE_ITEMS, MapType, Type};
 
 #[derive(Clone, Copy)]
 enum ReadSequence {
@@ -14,6 +14,27 @@ enum ReadSequence {
     Head,
     Tail,
     Rest,
+}
+
+fn fixed_range(start: i64, end: i64, step: i64) -> Type {
+    if start == end {
+        return Type::empty_list();
+    }
+    if step == 0 {
+        return Type::Seq(Box::new(Type::exact_long(start, IntegerClass::IntOrLong)));
+    }
+    let before_end = |item: &i64| if step > 0 { *item < end } else { *item > end };
+    // Inputs are i32 values widened to i64, so the bounded walk cannot overflow.
+    let items: Vec<_> = (0..=MAX_TUPLE_ITEMS)
+        .map(|index| start + step * index as i64)
+        .take_while(before_end)
+        .map(|item| Type::exact_long(item, IntegerClass::IntOrLong))
+        .collect();
+    match items.len() {
+        0 => Type::empty_list(),
+        len if len <= MAX_TUPLE_ITEMS => Type::SeqTuple(items.into_boxed_slice()),
+        _ => Type::Seq(Box::new(Type::Integral(IntegerType::FIXED))),
+    }
 }
 
 impl ReadSequence {
@@ -130,6 +151,43 @@ fn disj_exact_set(collection: &Value, keys: &[(Value, Span)]) -> Option<Value> {
 }
 
 impl Checker<'_> {
+    pub(super) fn range(&mut self, args: &[(Value, Span)]) -> Value {
+        for (arg, span) in args {
+            self.expect(arg, &Type::Number, *span, "clojure.core/range");
+        }
+        if args.is_empty() {
+            return Value::new(Type::Seq(Box::new(Type::Integral(IntegerType::ANY))));
+        }
+        let fixed = Type::Integral(IntegerType::FIXED);
+        let integer = Type::Integral(IntegerType::ANY);
+        if args.iter().all(|(arg, _)| arg.known.subtype_of(&fixed))
+            && let Some(values) = args
+                .iter()
+                .map(|(arg, _)| arg.known.exact_integer_value().map(i64::from))
+                .collect::<Option<Vec<_>>>()
+        {
+            let (start, end, step) = match values.as_slice() {
+                [end] => (0, *end, 1),
+                [start, end] => (*start, *end, 1),
+                [start, end, step] => (*start, *end, *step),
+                _ => unreachable!("range arities are validated before inference"),
+            };
+            return Value::new(fixed_range(start, end, step));
+        }
+        self.may_throw();
+        let element = if args.iter().all(|(arg, _)| arg.known.subtype_of(&fixed)) {
+            fixed
+        } else if args.iter().all(|(arg, _)| arg.known.subtype_of(&integer)) {
+            integer
+        } else {
+            Type::Number
+        };
+        Value::new(Type::union([
+            Type::empty_list(),
+            Type::Seq(Box::new(element)),
+        ]))
+    }
+
     pub(super) fn cons(&mut self, args: &[(Value, Span)]) -> Value {
         let (item, _) = &args[0];
         let (tail, span) = &args[1];
@@ -496,7 +554,18 @@ impl Checker<'_> {
         let start = self.diagnostics.len();
         let result = self.read_map_component(&value.known, name, *span);
         self.dedup_diagnostics(start);
-        Value::with_notes(result, value.notes.clone())
+        let mut result = Value::with_notes(result, value.notes.clone());
+        let proof = LiteralContainer::GroupBucketSequence;
+        if name == "clojure.core/vals"
+            && matches!(
+                value.literal_container,
+                Some(LiteralContainer::GroupBuckets)
+            )
+            && proof.matches_type(&result.known)
+        {
+            result.literal_container = Some(proof);
+        }
+        result
     }
 
     fn read_map_component(&mut self, ty: &Type, name: &str, span: Span) -> Type {
@@ -578,6 +647,15 @@ impl Checker<'_> {
             Type::Seq(element) => op.open(element, 1),
             Type::List(element) => op.list_result(op.open(element, 1)),
             Type::SpecCollection(element) => op.open(element, 0),
+            Type::BoundedCollection(collection, bounds) => {
+                let element = element_type(collection.as_ref().clone())
+                    .unwrap_or_else(|_| unreachable!("collection has an element type"));
+                if bounds.max == Some(bounds.min) && bounds.min <= MAX_TUPLE_ITEMS {
+                    op.fixed(&vec![element; bounds.min])
+                } else {
+                    op.open(&element, bounds.min)
+                }
+            }
             Type::Str(text) => {
                 let items: Vec<_> = text
                     .encode_utf16()
@@ -679,7 +757,32 @@ fn sequence_kind(ty: Type, persistent_list: bool) -> Type {
 pub(in crate::checker) fn iteration_may_throw(ty: &Type) -> bool {
     match ty {
         Type::Seq(_) | Type::Any | Type::Unknown | Type::SpecCollection(_) => true,
+        Type::BoundedCollection(collection, _) => iteration_may_throw(collection),
         Type::Union(parts) => parts.iter().any(iteration_may_throw),
+        _ => false,
+    }
+}
+
+pub(super) fn definitely_not_seqable(ty: &Type) -> bool {
+    match ty {
+        Type::Union(parts) => parts.iter().all(definitely_not_seqable),
+        Type::Bool(_)
+        | Type::Boolean
+        | Type::Char(_)
+        | Type::Character
+        | Type::Key(_)
+        | Type::Keyword
+        | Type::SpecKeyword
+        | Type::SimpleSymbol
+        | Type::QualifiedSymbol
+        | Type::Symbol
+        | Type::Sym(_)
+        | Type::Integer(_)
+        | Type::Integral(IntegerType {
+            class: IntegerClass::Fixed | IntegerClass::IntOrLong,
+            ..
+        }) => true,
+        // Custom Number and BigInteger subclasses may implement Seqable.
         _ => false,
     }
 }
@@ -689,6 +792,9 @@ pub(super) fn collection_emptiness(ty: &Type) -> Option<Type> {
         Type::Nil => Type::Bool(true),
         Type::Never => Type::Never,
         Type::Any | Type::Unknown | Type::SpecCollection(_) => Type::Boolean,
+        Type::BoundedCollection(_, bounds) if bounds.max == Some(0) => Type::Bool(true),
+        Type::BoundedCollection(_, bounds) if bounds.min > 0 => Type::Bool(false),
+        Type::BoundedCollection(..) => Type::Boolean,
         Type::Parameter(parameter) => return collection_emptiness(parameter.upper.as_ref()?),
         Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => {
             Type::Bool(items.is_empty())
@@ -744,6 +850,7 @@ fn counted_type(ty: &Type) -> Option<Type> {
         Type::Str(text) => text.encode_utf16().count(),
         Type::Tuple(items) | Type::SeqTuple(items) | Type::ListTuple(items) => items.len(),
         Type::MapEntry(_) => 2,
+        Type::BoundedCollection(_, bounds) if bounds.max == Some(bounds.min) => bounds.min,
         Type::Vector(element) | Type::Set(element) if **element == Type::Never => 0,
         Type::String
         | Type::Map(_)
@@ -751,6 +858,8 @@ fn counted_type(ty: &Type) -> Option<Type> {
         | Type::Seq(_)
         | Type::List(_)
         | Type::Set(_)
+        | Type::SpecCollection(_)
+        | Type::BoundedCollection(..)
         | Type::Unknown => return Some(JVM_COUNT),
         Type::Never => return Some(Type::Never),
         Type::Parameter(parameter) => return counted_type(parameter.upper.as_ref()?),

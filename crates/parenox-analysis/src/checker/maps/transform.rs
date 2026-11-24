@@ -1,7 +1,7 @@
 //! Eager contextual calls that transform map keys or values.
 use std::collections::{BTreeMap, btree_map::Entry};
 
-use super::super::{Checker, Env, Value, calls::PreparedCallable};
+use super::super::{Checker, Env, LiteralContainer, Value, calls::PreparedCallable};
 use super::MAX_MAP_CALLBACK_CHECKS;
 use crate::reader::{Form, Span};
 use crate::types::{ExtraFields, Field, MapType, Type};
@@ -17,6 +17,7 @@ struct MapUpdate<'a, 'form, 'model> {
     name: &'a str,
     env: &'a Env,
     notes: &'a [String],
+    origin: Option<&'a LiteralContainer>,
 }
 
 impl Checker<'_> {
@@ -72,6 +73,7 @@ impl Checker<'_> {
             name,
             env,
             notes: &input.notes,
+            origin: input.literal_container.as_ref(),
         };
         let start = self.diagnostics.len();
         let result = self.transform_map_type(input.known, &update);
@@ -284,7 +286,18 @@ impl Checker<'_> {
             .and_then(|key| update.field_spans.get(key))
             .copied()
             .unwrap_or(update.target);
-        let args = vec![(Value::with_notes(old, update.notes.to_vec()), value_span)];
+        let mut value = Value::with_notes(old, update.notes.to_vec());
+        if !updating_keys && let Some(proof) = update.origin {
+            let child = if matches!(proof, LiteralContainer::GroupBuckets) {
+                Some(&LiteralContainer::NonemptyVector)
+            } else {
+                key.and_then(|key| proof.map_field(key))
+            };
+            value.literal_container = child
+                .filter(|proof| proof.matches_type(&value.known))
+                .cloned();
+        }
+        let args = vec![(value, value_span)];
         let start = self.diagnostics.len();
         let result = self.call_prepared(update.callable, args, update.span, update.env, true);
         for diagnostic in &mut self.diagnostics[start..] {

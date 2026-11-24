@@ -103,12 +103,19 @@ enum LiteralContainer {
     Map(Option<Arc<BTreeMap<Type, LiteralContainer>>>),
     Set(Option<Arc<[Type]>>),
     Vector(Option<Arc<[Option<LiteralContainer>]>>),
+    // Every stored value in an ordinary group-by result is a nonempty vector.
+    GroupBuckets,
+    GroupBucketSequence,
+    NonemptyVector,
     List(Option<Arc<[Option<LiteralContainer>]>>),
     Positions(Arc<[Option<LiteralContainer>]>),
 }
 
 impl LiteralContainer {
     fn map_field(&self, key: &Type) -> Option<&Self> {
+        if matches!(self, Self::GroupBuckets) {
+            return Some(&Self::NonemptyVector);
+        }
         let Self::Map(Some(fields)) = self else {
             return None;
         };
@@ -116,6 +123,9 @@ impl LiteralContainer {
     }
 
     fn position_child(&self, index: usize) -> Option<&Self> {
+        if matches!(self, Self::GroupBucketSequence) {
+            return Some(&Self::NonemptyVector);
+        }
         let items = self.child_positions()?;
         items.get(index).and_then(Option::as_ref)
     }
@@ -132,7 +142,10 @@ impl LiteralContainer {
     fn matches_type(&self, ty: &Type) -> bool {
         match (self, ty) {
             (Self::Map(_), Type::Map(_)) => true,
-            (Self::Set(_), Type::Set(_)) => true,
+            (Self::Set(_), Type::Set(_)) | (Self::GroupBuckets, Type::Map(_)) => true,
+            (Self::NonemptyVector, Type::Tuple(items)) => !items.is_empty(),
+            (Self::NonemptyVector, Type::Vector(item)) => **item != Type::Never,
+            (Self::GroupBucketSequence, Type::Seq(_) | Type::SeqTuple(_)) => true,
             (Self::Vector(items), Type::Tuple(types))
             | (Self::List(items), Type::ListTuple(types)) => items
                 .as_ref()
@@ -142,7 +155,13 @@ impl LiteralContainer {
             }
             (Self::Positions(items), Type::MapEntry(_)) => items.len() == 2,
             (
-                Self::Vector(_) | Self::List(_) | Self::Positions(_) | Self::Set(_),
+                Self::Vector(_)
+                | Self::List(_)
+                | Self::Positions(_)
+                | Self::Set(_)
+                | Self::GroupBuckets
+                | Self::GroupBucketSequence
+                | Self::NonemptyVector,
                 Type::Union(parts),
             ) => parts
                 .iter()
@@ -181,7 +200,13 @@ impl LiteralContainer {
             } else {
                 Self::List(None)
             }),
-            (left @ Self::Positions(_), right) if left == right => Some(left),
+            (
+                left @ (Self::Positions(_)
+                | Self::GroupBuckets
+                | Self::GroupBucketSequence
+                | Self::NonemptyVector),
+                right,
+            ) if left == right => Some(left),
             _ => None,
         }
     }
@@ -395,6 +420,15 @@ impl Value {
                 );
                 payload.map(|proof| LiteralContainer::Positions(Arc::from([None, Some(proof)])))
             }
+            (_, Some(LiteralContainer::GroupBuckets)) => {
+                Some(LiteralContainer::Positions(Arc::from([
+                    None,
+                    Some(LiteralContainer::NonemptyVector),
+                ])))
+            }
+            (_, Some(LiteralContainer::GroupBucketSequence)) => {
+                Some(LiteralContainer::NonemptyVector)
+            }
             (_, proof) => proof
                 .as_ref()
                 .and_then(LiteralContainer::child_positions)
@@ -415,8 +449,10 @@ impl Value {
                 _ => false,
             }
         }
-        !matches!(self.literal_container, Some(LiteralContainer::Vector(_)))
-            && contains_tuple(&self.known)
+        !matches!(
+            self.literal_container,
+            Some(LiteralContainer::Vector(_) | LiteralContainer::NonemptyVector)
+        ) && contains_tuple(&self.known)
     }
 
     fn merge_container_origins(&mut self, other: &mut Self) -> Option<LiteralContainer> {
@@ -932,6 +968,17 @@ impl Checker<'_> {
             self.partial_method_opaque = true;
             return Value::new(Type::Unknown);
         }
+        if let Kind::List(items) = &form.kind
+            && !items.is_empty()
+        {
+            return self.list(items, form.span, env, tail);
+        }
+        self.infer_non_call(form, env, tail)
+    }
+
+    // Keep literal and metadata temporaries out of the recursive call frame.
+    #[inline(never)]
+    fn infer_non_call(&mut self, form: &Form, env: &Env, tail: bool) -> Value {
         match &form.kind {
             Kind::Nil => Value::new(Type::Nil),
             Kind::Bool(b) => Value::new(Type::Bool(*b)),
@@ -990,11 +1037,10 @@ impl Checker<'_> {
             }
             Kind::Map(xs) => self.map_literal(xs, maps::MapLiteral::Expression(env)),
             Kind::AutoNamespacedMap { .. } => self.unchecked_form(form.span, "Namespaced map needs source namespace context"),
-            Kind::List(xs) if xs.is_empty() => Value {
+            Kind::List(_) => Value {
                 literal_container: Some(LiteralContainer::List(None)),
                 ..Value::new(Type::empty_list())
             },
-            Kind::List(xs) => self.list(xs, form.span, env, tail),
             Kind::AnonymousFunction(function) => self.anonymous_fn_value(function, form.span, env),
             Kind::Quote(inner) => self.quoted_data(inner),
             Kind::SyntaxQuote(_) | Kind::Unquote { .. } => {

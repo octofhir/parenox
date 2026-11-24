@@ -2,13 +2,14 @@
 use std::collections::BTreeSet;
 
 use super::super::{LiteralContainer, metadata::MetadataTarget};
+use super::sequences::definitely_not_seqable;
 use super::{
     ArgumentForms, CallOperands, Callable, Checker, Env, OperandTail, PreparedCallable, Value,
     arity_counts, builtin_arities, call_returns, key_callable_name, vectors::CollectionError,
     vectors::element_type,
 };
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, IntegerClass, IntegerType, Signature, Type};
+use crate::types::{Arity, Signature, Type};
 
 const MAX_SPREAD_ALTERNATIVES: usize = 16;
 const CORE_STR: &str = "clojure.core/str";
@@ -261,7 +262,7 @@ impl Checker<'_> {
         let items = match (&input.known, &input.literal_container) {
             (Type::Nil, _) => &[][..],
             (Type::Tuple(items), Some(LiteralContainer::Vector(_))) => items,
-            (ty, _) if definitely_not_seqable_for_mapping(ty) => {
+            (ty, _) if definitely_not_seqable(ty) => {
                 self.error(
                     "PNX2322",
                     source.span,
@@ -515,30 +516,6 @@ impl Checker<'_> {
                 );
             }
         }
-    }
-}
-
-fn definitely_not_seqable_for_mapping(ty: &Type) -> bool {
-    match ty {
-        Type::Union(parts) => parts.iter().all(definitely_not_seqable_for_mapping),
-        Type::Bool(_)
-        | Type::Boolean
-        | Type::Char(_)
-        | Type::Character
-        | Type::Key(_)
-        | Type::Keyword
-        | Type::SpecKeyword
-        | Type::SimpleSymbol
-        | Type::QualifiedSymbol
-        | Type::Symbol
-        | Type::Sym(_)
-        | Type::Integer(_)
-        | Type::Integral(IntegerType {
-            class: IntegerClass::Fixed | IntegerClass::IntOrLong,
-            ..
-        }) => true,
-        // Custom Number and BigInteger subclasses may implement Seqable.
-        _ => false,
     }
 }
 

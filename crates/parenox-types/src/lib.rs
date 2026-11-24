@@ -1,4 +1,5 @@
 //! Type representation, comparison and specialization for Parenox contracts.
+mod collections;
 mod compatibility;
 mod indexing;
 mod integers;
@@ -6,6 +7,7 @@ mod maps;
 mod mismatch;
 mod parameters;
 
+pub use collections::LengthBounds;
 pub use compatibility::{Compatibility, extern_drift};
 pub use indexing::IndexedItem;
 pub use integers::{IntegerClass, IntegerRange, IntegerType};
@@ -221,6 +223,7 @@ pub enum Type {
     /// A Clojure persistent collection constrained by its immediate members.
     /// A map's immediate members are its entries, not the keys and values.
     SpecCollection(Box<Type>),
+    BoundedCollection(Box<Type>, LengthBounds),
     Parameter(Arc<Parameter>),
     Never,
     Nil,
@@ -235,6 +238,7 @@ pub enum Type {
     NonIntegral,
     String,
     Pattern,
+    JvmIterator,
     JvmArray(JvmArrayClass),
     Character,
     Char(char),
@@ -307,6 +311,9 @@ impl Type {
                 Type::MapEntry(Box::new([key.inferred(), value.inferred()]))
             }
             Type::Vector(t) => Type::Vector(Box::new(t.inferred())),
+            Type::BoundedCollection(t, bounds) => {
+                Type::BoundedCollection(Box::new(t.inferred()), *bounds)
+            }
             Type::Tuple(items) => {
                 Type::Vector(Box::new(Type::union(items.iter().map(Type::inferred))))
             }
@@ -336,6 +343,7 @@ impl Type {
             | Type::Tuple(_)
             | Type::SeqTuple(_)
             | Type::ListTuple(_) => true,
+            Type::BoundedCollection(..) => true,
             Type::Union(xs) => xs.iter().any(Type::requires_precise_type),
             Type::MapEntry(items) => items.iter().any(Type::requires_precise_type),
             Type::SpecCollection(t)
@@ -560,6 +568,7 @@ impl Type {
                 items.iter().any(|ty| ty.any_component(predicate))
             }
             Type::SpecCollection(t)
+            | Type::BoundedCollection(t, _)
             | Type::Vector(t)
             | Type::Set(t)
             | Type::Seq(t)
@@ -590,6 +599,10 @@ impl fmt::Display for Type {
                 write!(f, "Collection of spec values")
             }
             Type::SpecCollection(element) => write!(f, "Collection<{element}>"),
+            Type::BoundedCollection(ty, bounds) => match bounds.max {
+                Some(max) => write!(f, "{ty} with length {}..={max}", bounds.min),
+                None => write!(f, "{ty} with length at least {}", bounds.min),
+            },
             Type::Parameter(parameter) => write!(f, "{}", parameter.name),
             Type::Never => write!(f, "Never"),
             Type::Nil => write!(f, "Nil"),
@@ -601,6 +614,7 @@ impl fmt::Display for Type {
             Type::NonIntegral => write!(f, "Number that is not a Clojure integer"),
             Type::String => write!(f, "String"),
             Type::Pattern => write!(f, "Pattern"),
+            Type::JvmIterator => write!(f, "java.util.Iterator"),
             Type::JvmArray(class) => fmt::Display::fmt(class, f),
             Type::Character => write!(f, "Character"),
             Type::Char(c) => match c {
