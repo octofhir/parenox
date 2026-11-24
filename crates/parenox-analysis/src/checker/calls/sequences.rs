@@ -386,6 +386,9 @@ impl Checker<'_> {
             Type::Seq(element) => Type::Seq(joined(element)),
             Type::List(element) => Type::List(joined(element)),
             Type::Vector(element) => Type::Vector(joined(element)),
+            Type::BoundedCollection(collection, _) if collection.is_vector() => {
+                self.conj_type(collection, items, span)
+            }
             Type::Set(element) => Type::Set(joined(element)),
             Type::Tuple(previous) => {
                 let appended = previous.iter().chain(items).cloned();

@@ -148,9 +148,17 @@ impl Checker<'_> {
                 Type::SeqTuple(items) | Type::ListTuple(items) => {
                     invoked |= !items.is_empty();
                     let literal = source.vector().filter(|forms| forms.len() == items.len());
+                    // Every position of a map sequence has the same entry type.
+                    let map_item = items
+                        .first()
+                        .filter(|_| matches!(collection.known, Type::Map(_)))
+                        .map(|item| collection.traversal_element(item.clone()));
                     let items = items.iter().enumerate().map(|(index, item)| {
                         let arg = literal.map_or(source.span, |forms| forms[index].span);
-                        (collection.position_value(item.clone(), index), arg)
+                        let item = map_item
+                            .clone()
+                            .unwrap_or_else(|| collection.position_value(item.clone(), index));
+                        (item, arg)
                     });
                     self.search_items(search, callback, items, span, env)
                 }
@@ -162,7 +170,7 @@ impl Checker<'_> {
                         search,
                         callback,
                         [(
-                            Value::with_notes(item.as_ref().clone(), collection.notes.clone()),
+                            collection.traversal_element(item.as_ref().clone()),
                             source.span,
                         )],
                         span,

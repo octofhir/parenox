@@ -453,9 +453,7 @@ impl Checker<'_> {
                     IndexedItem::Absent(_) => default_type(),
                 }
             }
-            Type::MapEntry(_) | Type::Vector(_) | Type::Tuple(_) | Type::String | Type::Str(_) => {
-                default_type()
-            }
+            ty if ty.is_vector() || matches!(ty, Type::String | Type::Str(_)) => default_type(),
             Type::Never => Type::Never,
             Type::Any => {
                 self.may_throw();
@@ -654,12 +652,9 @@ impl Checker<'_> {
                 }
                 Type::Boolean
             }
-            Type::Map(_)
-            | Type::MapEntry(_)
-            | Type::Nil
-            | Type::Set(_)
-            | Type::Vector(_)
-            | Type::Tuple(_) => key_presence(ty, key).map_or(Type::Boolean, Type::Bool),
+            ty if ty.is_vector() || matches!(ty, Type::Map(_) | Type::Nil | Type::Set(_)) => {
+                key_presence(ty, key).map_or(Type::Boolean, Type::Bool)
+            }
             Type::String | Type::Str(_) if key.associative_index().is_some() => {
                 key_presence(ty, key).map_or(Type::Boolean, Type::Bool)
             }
@@ -690,7 +685,7 @@ impl Checker<'_> {
                 self.may_throw();
                 Err(Type::Unknown)
             }
-            Type::Tuple(_) | Type::Vector(_) | Type::MapEntry(_) => {
+            ty if ty.is_vector() => {
                 self.may_throw();
                 Err(self
                     .unsupported(span, format!("{name} does not yet analyze vector writes"))
@@ -723,7 +718,8 @@ impl Checker<'_> {
             return Value::new(Type::Never);
         }
         let pairs = args[1..].as_chunks::<2>().0;
-        if matches!(args[0].0.known, Type::Tuple(_) | Type::Vector(_))
+        if args[0].0.known.is_vector()
+            && !matches!(args[0].0.known, Type::MapEntry(_))
             && xs[0]
                 .symbol()
                 .is_some_and(|name| self.model.can_use_standard_core(name, self.globals))
@@ -937,7 +933,7 @@ fn key_presence(ty: &Type, key: &Type) -> Option<bool> {
             _ => None,
         },
         Type::Nil => Some(false),
-        Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) | Type::String | Type::Str(_) => {
+        ty if ty.is_vector() || matches!(ty, Type::String | Type::Str(_)) => {
             let Some(index) = key.associative_index() else {
                 return Some(false);
             };

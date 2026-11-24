@@ -1,6 +1,41 @@
 use parenox::Session;
 
 #[test]
+fn constantly_captures_a_value_and_accepts_any_invocation_arity() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn run {:t/sig '[(s/coll-of any? :kind vector?)
+                             :-> (s/tuple #{false} nil? #{:captured} #{:local})]}
+          [args]
+          (let [flag (constantly false)
+                absent (apply constantly [nil])
+                capture (constantly :captured)]
+            [(flag) (absent 1 :ignored) (apply capture args)
+             (let [constantly (fn [_] :local)] (constantly :ignored))]))
+        (defn eager {:t/sig '[:-> #{:argument}]} []
+          (try ((constantly :ignored) (throw (ex-info "argument" {:phase :argument})))
+               (catch clojure.lang.ExceptionInfo e (:phase (ex-data e)))))
+    "#;
+    let report = Session::default().check("callables.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn constantly_requires_exactly_one_constructor_argument() {
+    let source = r#"
+        (defn missing {:t/sig '[:-> any?]} [] (constantly))
+        (defn extra {:t/sig '[:-> any?]} [] (constantly :first :second))
+    "#;
+    let report = Session::default().check("callables.clj", source);
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|item| item.code.as_str())
+        .collect();
+    assert_eq!(findings, ["PNX2554", "PNX2554"], "{report:#?}");
+}
+
+#[test]
 fn maps_and_keywords_are_functions_in_direct_calls_and_callbacks() {
     let report =
         Session::default().check("callables.clj", include_str!("../examples/callables.clj"));

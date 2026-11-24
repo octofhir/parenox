@@ -219,7 +219,7 @@ impl Checker<'_> {
             Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
                 self.find_type(upper, key, span)
             }
-            Type::Map(_) | Type::MapEntry(_) | Type::Tuple(_) | Type::Vector(_) => {
+            ty if ty.is_vector() || matches!(ty, Type::Map(_)) => {
                 let (key, key_span) = key;
                 let valid = self.validate_map_key(key.clone(), *key_span, "find", true);
                 valid.map_or(Type::Unknown, |key| self.find_at(target, &key, *key_span))

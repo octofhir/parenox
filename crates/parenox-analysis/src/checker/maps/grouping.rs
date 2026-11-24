@@ -8,7 +8,7 @@ use super::super::{
 };
 use super::MAX_MAP_CALLBACK_CHECKS;
 use crate::reader::{Form, Span};
-use crate::types::{ExtraFields, Field, MapType, Type};
+use crate::types::{ExtraFields, Field, LengthBounds, MapType, Type};
 
 struct GroupBy<'a, 'form, 'model> {
     callable: &'a PreparedCallable<'form, 'model>,
@@ -78,7 +78,7 @@ impl Checker<'_> {
                 if matches!(key, Type::Never | Type::Unknown) {
                     return key;
                 }
-                let group = Type::Vector(item.clone());
+                let group = bucket_type(item.clone());
                 if key.is_literal_map_key() {
                     return group_fields(BTreeMap::from([(key, group)]));
                 }
@@ -107,7 +107,7 @@ impl Checker<'_> {
             let elements = Type::union(items.iter().cloned());
             return Type::Map(MapType::dictionary(
                 Type::union(keys),
-                Type::Vector(Box::new(elements)),
+                bucket_type(Box::new(elements)),
             ));
         }
 
@@ -159,6 +159,10 @@ impl Checker<'_> {
         }
         key
     }
+}
+
+fn bucket_type(element: Box<Type>) -> Type {
+    Type::BoundedCollection(Box::new(Type::Vector(element)), LengthBounds::NONEMPTY)
 }
 
 fn group_fields(groups: BTreeMap<Type, Type>) -> Type {

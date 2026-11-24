@@ -77,6 +77,18 @@ impl Type {
                     None => IndexedItem::Absent(None),
                 });
             }
+            Type::BoundedCollection(collection, bounds) => {
+                let item = collection.indexed_item(index)?;
+                return Some(match (position, item) {
+                    (Some(index), IndexedItem::Optional(element)) if index < bounds.min => {
+                        IndexedItem::Present(element)
+                    }
+                    (Some(index), _) if bounds.max == Some(bounds.min) && index >= bounds.min => {
+                        IndexedItem::Absent(Some(bounds.min))
+                    }
+                    (_, item) => item,
+                });
+            }
             Type::Str(text) => {
                 let mut length = 0;
                 for (index, unit) in text.encode_utf16().enumerate() {

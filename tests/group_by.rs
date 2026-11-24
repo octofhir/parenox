@@ -153,3 +153,53 @@ fn vals_preserves_bucket_shapes_for_a_lazy_mapping_callback() {
     let report = Session::default().check("group_by.clj", source);
     assert!(report.ok && report.complete, "{report:#?}");
 }
+
+#[test]
+fn group_buckets_satisfy_nonempty_vector_contracts() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn bucket {:t/sig '[(s/coll-of int? :kind vector? :min-count 1)
+                                :-> (s/coll-of int? :kind vector? :min-count 1)]}
+          [items]
+          (:bucket (group-by (constantly :bucket) items)))
+        (defn reduce-bucket {:t/sig '[(s/coll-of int? :kind vector? :min-count 1) :-> number?]}
+          [items]
+          (reduce (fn [a b] (+ a b)) (bucket items)))
+        (defn varying-keys {:t/sig '[string? string? :-> #{false}]}
+          [a b]
+          (if-let [bucket (get (group-by identity [a b]) "bucket")]
+            (empty? bucket)
+            false))
+    "#;
+    let report = Session::default().check("group_by.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let maybe_empty = source.replacen(":min-count 1", ":min-count 0", 1);
+    let report = Session::default().check("group_by.clj", &maybe_empty);
+    let [diagnostic] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(diagnostic.code, "PNX2322", "{report:#?}");
+}
+
+#[test]
+fn nonempty_buckets_keep_vector_operations() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn read-bucket
+          {:t/sig '[(s/coll-of int? :kind vector? :min-count 1)
+                    :-> (s/tuple int? int? int? int? #{true} #{true} map?
+                                 (s/coll-of int? :kind vector?) number? int?)]}
+          [items]
+          (let [bucket (:bucket (group-by (fn [_] :bucket) items))
+                [head] bucket]
+            [head (nth bucket 0) (bucket 0) (get bucket 0)
+             (contains? bucket 0) (vector? bucket)
+             {:entry (find bucket 0)}
+             (conj bucket 0)
+             (reduce-kv (fn [acc _ item] (+ acc item)) 0 bucket)
+             (first (apply list bucket))]))
+    "#;
+    let report = Session::default().check("group_by.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}

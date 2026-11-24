@@ -32,6 +32,7 @@ pub(in crate::checker) fn vector_predicate(input: &Type) -> Type {
     match input {
         Type::Never => Type::Never,
         Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => Type::Bool(true),
+        Type::BoundedCollection(collection, _) => vector_predicate(collection),
         Type::Nil
         | Type::Bool(_)
         | Type::Boolean

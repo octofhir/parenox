@@ -150,7 +150,11 @@ impl Checker<'_> {
             return self.unsupported(spread.span, "apply has too many possible collection shapes");
         }
         let mut result = Value::new(Type::Never);
-        for ty in types {
+        for shape in types {
+            let ty = match shape {
+                Type::BoundedCollection(collection, _) if shape.is_vector() => collection,
+                _ => shape,
+            };
             let elements = match ty {
                 Type::Nil => &[][..],
                 Type::Vector(element) if **element == Type::Never => &[][..],
@@ -161,7 +165,7 @@ impl Checker<'_> {
                 Type::Vector(element) | Type::Seq(element) | Type::List(element) => {
                     let open = OpenSpread {
                         element,
-                        minimum: usize::from(matches!(ty, Type::Seq(_) | Type::List(_))),
+                        minimum: usize::from(shape.length_bounds().min > 0),
                         span: spread.span,
                         notes: &collection.notes,
                     };
@@ -379,7 +383,7 @@ impl Checker<'_> {
                     self.may_throw();
                     Value::new(Type::Unknown)
                 }
-                Type::Set(_) | Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => {
+                ty if matches!(ty, Type::Set(_)) || ty.is_vector() => {
                     self.check_spread_arities(&[Arity::Fixed(1)], minimum, spread.span);
                     self.may_throw();
                     Value::new(Type::Unknown)

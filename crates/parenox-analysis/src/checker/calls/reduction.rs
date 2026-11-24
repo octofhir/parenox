@@ -391,12 +391,9 @@ fn reducer_argument(ty: &Type) -> bool {
         | Type::Keyword
         | Type::SpecKeyword
         | Type::Map(_)
-        | Type::Set(_)
-        | Type::Tuple(_)
-        | Type::Vector(_)
-        | Type::MapEntry(_) => true,
+        | Type::Set(_) => true,
         Type::Union(parts) => parts.iter().all(reducer_argument),
-        _ => false,
+        _ => ty.is_vector(),
     }
 }
 

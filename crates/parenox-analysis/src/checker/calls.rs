@@ -1070,9 +1070,7 @@ impl<'model> Checker<'model> {
                 };
                 result.join(self.call_value(&alternative, arguments, head, span))
             }),
-            Type::Vector(_) | Type::Tuple(_) | Type::MapEntry(_) => {
-                self.vector_call(function, head, args, span)
-            }
+            ty if ty.is_vector() => self.vector_call(function, head, args, span),
             Type::Set(element) => {
                 if args.len() != 1 {
                     self.error(
@@ -1213,6 +1211,8 @@ impl<'model> Checker<'model> {
                     | "clojure.core/first"
                     | "clojure.core/nth"
                     | "clojure.core/range"
+                    | "clojure.core/constantly"
+                    | "clojure.core/not="
                     | "clojure.core/subvec"
                     | "clojure.core/str"
                     | "clojure.core/inc"
@@ -1468,7 +1468,9 @@ impl<'model> Checker<'model> {
                     | "clojure.lang.MapEntry/create"
                     | "clojure.core/ex-data"
                     | "clojure.core/identity"
+                    | "clojure.core/constantly"
                     | "clojure.core/="
+                    | "clojure.core/not="
                     | "clojure.core/alength"
                     | "clojure.core/str"
                     | "clojure.core/name"
@@ -1514,7 +1516,9 @@ impl<'model> Checker<'model> {
             | "clojure.core/ensure-reduced" => {
                 return reduction::reduced_operation(name, &args[0].0);
             }
-            "clojure.core/=" => self.equality(args),
+            "clojure.core/=" | "clojure.core/not=" => {
+                self.equality(args, name == "clojure.core/not=")
+            }
             "clojure.core/alength" => {
                 let (receiver, span) = &args[0];
                 let operand = written.map(|call| (&call.operands[0], call.env));
@@ -1662,6 +1666,16 @@ impl<'model> Checker<'model> {
             "clojure.core/vector?" if args[0].0.is_literal_map() => Type::Bool(false),
             "clojure.core/vector?" => vector_predicate(&args[0].0.known),
             "clojure.core/identity" => return args[0].0.clone(),
+            "clojure.core/constantly" => Type::Function(
+                [Signature {
+                    args: Vec::new(),
+                    rest: Some(Type::Any),
+                    ret: args[0].0.known.clone(),
+                    parameters: None,
+                    nil_preserving: false,
+                }]
+                .into(),
+            ),
             "clojure.core/any?" => Type::Bool(true),
             "clojure.core/key" | "clojure.core/val" => {
                 let (entry, span) = &args[0];
@@ -1713,8 +1727,8 @@ impl<'model> Checker<'model> {
         Value::new(ty)
     }
 
-    fn equality(&mut self, args: &[(Value, Span)]) -> Type {
-        let mut result = Type::Bool(true);
+    fn equality(&mut self, args: &[(Value, Span)], negated: bool) -> Type {
+        let mut result = Type::Bool(!negated);
         for pair in args.windows(2) {
             let left = &pair[0].0.known;
             let right = &pair[1].0.known;
@@ -1727,7 +1741,7 @@ impl<'model> Checker<'model> {
                 self.may_throw();
             }
             match literal_equality(left, right) {
-                Some(false) => return Type::Bool(false),
+                Some(false) => return Type::Bool(negated),
                 Some(true) => {}
                 None => result = Type::Boolean,
             }
@@ -1762,6 +1776,7 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         | "clojure.core/list" | "clojure.core/merge" => &[Arity::Variadic(0)],
         "clojure.core/-"
         | "clojure.core/="
+        | "clojure.core/not="
         | "clojure.core/disj"
         | "clojure.core/dissoc"
         | "clojure.core/min"
@@ -1924,6 +1939,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/map?"
             | "clojure.core/vector?"
             | "clojure.core/identity"
+            | "clojure.core/constantly"
             | "clojure.core/any?"
             | "clojure.core/nil?"
             | "clojure.core/some?"
@@ -1932,6 +1948,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/boolean"
             | "clojure.core/not"
             | "clojure.core/="
+            | "clojure.core/not="
             | "clojure.core/key"
             | "clojure.core/val"
             | "clojure.core/count"

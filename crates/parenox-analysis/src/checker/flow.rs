@@ -999,7 +999,13 @@ impl Checker<'_> {
             ("clojure.core/get" | "clojure.core/get-in", [_, _]) => {
                 self.narrow_subject(test, env, truthy);
             }
-            ("clojure.core/=", [left, right]) => {
+            ("clojure.core/=" | "clojure.core/not=", [left, right])
+                if op == "clojure.core/="
+                    || self
+                        .model
+                        .can_use_standard_core(head.symbol().unwrap(), self.globals) =>
+            {
+                let truth = truth != (op == "clojure.core/not=");
                 let pair = self
                     .guard_literal(left)
                     .map(|ty| (right, ty, true))

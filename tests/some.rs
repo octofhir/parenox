@@ -1,6 +1,52 @@
 use parenox::{DocumentHover, Session};
 
 #[test]
+fn some_distinguishes_an_inequality_predicate_from_the_matching_value() {
+    let source = r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn finds-flag {:t/sig '[:-> #{true}]} []
+          (some #(not= :allowed (:type %)) [{:type :allowed} {:type :blocked}]))
+        (defn no-match {:t/sig '[:-> nil?]} []
+          (some #(not= :allowed (:type %)) [{:type :allowed}]))
+        (defn finds-type
+          {:t/sig '[(s/coll-of {:type #{:allowed :blocked}} :kind vector?)
+                     :-> (s/nilable #{:blocked})]}
+          [layers]
+          (some (fn [layer] (when (not= :allowed (:type layer)) (:type layer))) layers))
+        (defn wrong-type
+          {:t/sig '[(s/coll-of {:type keyword?} :kind vector?) :-> keyword?]}
+          [layers]
+          (let [unsupported (some #(not= :allowed (:type %)) layers)]
+            (:type unsupported)))"#;
+    let report = Session::default().check("search.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("Nil"));
+    assert_eq!(finding.contract.as_ref().unwrap().name, "demo/wrong-type");
+}
+
+#[test]
+fn inequality_preserves_variadic_and_unary_behavior() {
+    let source = r#"
+        (defn unary {:t/sig '[:-> #{false}]} [] (not= :value))
+        (defn same {:t/sig '[:-> #{false}]} [] (apply not= [1 1N 1]))
+        (defn different {:t/sig '[:-> #{true}]} [] (apply not= [1 1 2]))
+        (defn zero-args {:t/sig '[:-> any?]} [] (not=))"#;
+    let report = Session::default().check("search.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2554");
+    assert_eq!(
+        &source[finding.span.start.offset..finding.span.end.offset],
+        "(not=)"
+    );
+}
+
+#[test]
 fn some_returns_the_first_truthy_value_without_visiting_later_items() {
     let source = r#"(ns demo)
         (defn finds-empty-string {:t/sig '[:-> #{""}]} []
@@ -15,6 +61,29 @@ fn some_returns_the_first_truthy_value_without_visiting_later_items() {
           (if (reduced? (some (fn [x] (reduced x)) [false])) :kept :lost))"#;
     let report = Session::default().check("search.clj", source);
     assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn searches_preserve_literal_vectors_in_map_entries() {
+    for entry_count in [1, 36] {
+        let entries = (0..entry_count)
+            .map(|i| format!(":bucket{i} [1 2]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source = format!(
+            "(defn first-total {{:t/sig '[:-> number?]}} []
+               (some (fn [[_ bucket]] (reduce (fn [a b] (+ a b)) bucket))
+                     {{{entries}}}))
+             (defn all-totals {{:t/sig '[:-> #{{true}}]}} []
+               (every? (fn [[_ bucket]] (= 3 (reduce (fn [a b] (+ a b)) bucket)))
+                       {{{entries}}}))"
+        );
+        let report = Session::default().check("search.clj", &source);
+        assert!(
+            report.ok && report.complete,
+            "{entry_count} entries: {report:#?}"
+        );
+    }
 }
 
 #[test]

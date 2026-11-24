@@ -54,6 +54,14 @@ impl LengthBounds {
 }
 
 impl Type {
+    pub fn is_vector(&self) -> bool {
+        match self {
+            Self::Tuple(_) | Self::Vector(_) | Self::MapEntry(_) => true,
+            Self::BoundedCollection(collection, _) => collection.is_vector(),
+            _ => false,
+        }
+    }
+
     pub fn length_bounds(&self) -> LengthBounds {
         match self {
             Self::BoundedCollection(_, bounds) => *bounds,
