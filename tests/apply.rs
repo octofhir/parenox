@@ -1,6 +1,147 @@
 use parenox::{Session, Source};
 
 #[test]
+fn apply_checks_exact_collection_lengths_from_spec() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn named
+          {:t/sig '[(s/coll-of int? :kind vector? :min-count 1 :max-count 1) :-> number?]}
+          [options]
+          (apply (fn node [x & [option]]
+                   (if option (+ x option) (node x 1)))
+                 2 options))
+        (defn singleton
+          {:t/sig '[(s/coll-of int? :min-count 1 :max-count 1) :-> number?]}
+          [xs] (apply inc xs))
+        (defn empty-tail
+          {:t/sig '[(s/coll-of string? :kind vector? :max-count 0) :-> number?]}
+          [xs] (apply inc 1 xs))"#;
+    let report = Session::default().check("apply.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (tail, code) in [
+        ("(apply inc xs)", "PNX2554"),
+        ("(apply inc \"invalid\" xs)", "PNX2322"),
+    ] {
+        let edited = source.replace("(apply inc 1 xs)", tail);
+        let report = Session::default().check("apply.clj", &edited);
+        let [error] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(error.code, code, "{report:#?}");
+    }
+}
+
+#[test]
+fn apply_uses_both_bounds_for_open_collection_spreads() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn fold {:t/sig '[number? number? & number? :-> number?]}
+          [x y & more] (apply + x y more))
+        (defn sized {:t/sig '[(s/coll-of number? :min-count 2) :-> number?]}
+          [values] (apply fold values))
+        (defn describe
+          {:t/sig '[[number? :-> number?]
+                    [number? number? :-> number?]
+                    [string? string? string? & string? :-> string?]]}
+          ([x] x)
+          ([x y] y)
+          ([x y z & more] z))
+        (defn bounded {:t/sig '[(s/coll-of number? :kind vector? :max-count 1) :-> number?]}
+          [values] (apply describe 0 values))
+        (defn label {:t/sig '[[number? :-> number?]
+                             [number? number? :-> number?]
+                             [string? string? & string? :-> string?]]}
+          ([x] x)
+          ([x y] y)
+          ([x y & more] x))
+        (defn one-prefix {:t/sig '[(s/coll-of number? :kind vector? :max-count 1) :-> number?]}
+          [values] (apply label 0 values))
+        (defn large {:t/sig '[(s/coll-of (s/and int? #{2}) :kind vector? :min-count 1000000000) :-> int?]}
+          [values] (apply + values))"#;
+    let report = Session::default().check("apply.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let too_small = source.replace(":min-count 2", ":min-count 1");
+    let report = Session::default().check("apply.clj", &too_small);
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    let error = &report.diagnostics[0];
+    assert_eq!(error.code, "PNX2554");
+    assert!(
+        error.message.contains("may pass 1 arguments"),
+        "{report:#?}"
+    );
+
+    let too_precise = source.replace(
+        ":min-count 1000000000) :-> int?",
+        ":min-count 1000000000) :-> (s/and int? #{2})",
+    );
+    let report = Session::default().check("apply.clj", &too_precise);
+    assert_eq!(report.diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX9004");
+}
+
+#[test]
+fn apply_checks_each_bounded_arity_of_an_inline_callback() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn named
+          {:t/sig '[(s/coll-of int? :kind vector? :max-count 1) :-> number?]}
+          [options]
+          (apply (fn node [x & [option]]
+                   (if option (+ x option) (node x 1)))
+                 2 options))
+        (defn choose
+          {:t/sig '[(s/coll-of int? :max-count 1) :-> #{:empty :present}]}
+          [options]
+          (apply (fn ([] :empty) ([_] :present)) options))"#;
+    let report = Session::default().check("apply.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (original, replacement, code) in [
+        ("([] :empty) ", "", "PNX2554"),
+        (
+            "(s/coll-of int? :kind vector? :max-count 1)",
+            "(s/coll-of string? :kind vector? :max-count 1)",
+            "PNX2322",
+        ),
+    ] {
+        let edited = source.replace(original, replacement);
+        let report = Session::default().check("apply.clj", &edited);
+        let [error] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(error.code, code, "{report:#?}");
+    }
+}
+
+#[test]
+fn apply_limits_nested_bounded_callback_analysis() {
+    let mut body = ":done".to_owned();
+    for _ in 0..9 {
+        body = format!("(apply (fn [& items] {body}) input)");
+    }
+    let source = format!(
+        "(ns demo (:require [clojure.spec.alpha :as s]))
+         (defn nested {{:t/sig '[(s/coll-of int? :kind vector? :max-count 1) :-> t/any]}} [input]
+           {body})"
+    );
+    let report = Session::default().check("apply.clj", &source);
+    assert!(!report.complete, "{report:#?}");
+    assert!(
+        report.diagnostics.iter().any(|error| {
+            error.code == "PNX9001"
+                && error
+                    .message
+                    .contains("apply bounded spread analysis limit")
+        }),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn apply_keeps_the_selected_target_and_its_argument_context() {
     let source = r#"(ns reports (:require [clojure.spec.alpha :as s]))
         (defn choose

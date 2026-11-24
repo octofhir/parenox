@@ -2,21 +2,22 @@
 use std::collections::BTreeSet;
 
 use super::super::{LiteralContainer, metadata::MetadataTarget};
-use super::sequences::definitely_not_seqable;
+use super::sequences::{definitely_not_seqable, iteration_may_throw};
 use super::{
     ArgumentForms, CallOperands, Callable, Checker, Env, OperandTail, PreparedCallable, Value,
     arity_counts, builtin_arities, call_returns, key_callable_name, vectors::CollectionError,
     vectors::element_type,
 };
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Arity, Signature, Type};
+use crate::types::{Arity, IntegerType, LengthBounds, MAX_TUPLE_ITEMS, Signature, Type};
 
 const MAX_SPREAD_ALTERNATIVES: usize = 16;
+const MAX_SPREAD_EXPANSIONS: usize = 128;
 const CORE_STR: &str = "clojure.core/str";
 
 struct OpenSpread<'a> {
     element: &'a Type,
-    minimum: usize,
+    lengths: LengthBounds,
     span: Span,
     notes: &'a [String],
 }
@@ -151,8 +152,17 @@ impl Checker<'_> {
         }
         let mut result = Value::new(Type::Never);
         for shape in types {
+            if iteration_may_throw(shape) {
+                self.may_throw();
+            }
+            let exact_sequence;
             let ty = match shape {
-                Type::BoundedCollection(collection, _) if shape.is_vector() => collection,
+                Type::BoundedCollection(_, bounds)
+                    if bounds.max == Some(bounds.min) && bounds.min <= MAX_TUPLE_ITEMS =>
+                {
+                    exact_sequence = self.seq_type(shape, "clojure.core/apply", spread.span);
+                    &exact_sequence
+                }
                 _ => shape,
             };
             let elements = match ty {
@@ -165,11 +175,25 @@ impl Checker<'_> {
                 Type::Vector(element) | Type::Seq(element) | Type::List(element) => {
                     let open = OpenSpread {
                         element,
-                        minimum: usize::from(shape.length_bounds().min > 0),
+                        lengths: shape.length_bounds(),
                         span: spread.span,
                         notes: &collection.notes,
                     };
                     result = result.join(self.apply_open(&callable, &args, open, span));
+                    continue;
+                }
+                Type::BoundedCollection(_, lengths) => {
+                    let element = element_type(ty.clone()).unwrap_or_else(|_| {
+                        unreachable!("a bounded collection has an element type")
+                    });
+                    let open = OpenSpread {
+                        element: &element,
+                        lengths: *lengths,
+                        span: spread.span,
+                        notes: &collection.notes,
+                    };
+                    result =
+                        result.join(self.apply_bounded_callback(&callable, &args, open, span, env));
                     continue;
                 }
                 Type::Unknown => return Value::new(Type::Unknown),
@@ -333,6 +357,53 @@ impl Checker<'_> {
         Some((self.standard_core_name(head, env)?, operands))
     }
 
+    fn apply_bounded_callback(
+        &mut self,
+        callable: &PreparedCallable<'_, '_>,
+        prefix: &[(Value, Span)],
+        spread: OpenSpread<'_>,
+        span: Span,
+        env: &Env,
+    ) -> Value {
+        let minimum = spread.lengths.min;
+        let Some(maximum) = spread
+            .lengths
+            .max
+            .filter(|&max| max <= MAX_TUPLE_ITEMS && max - minimum < MAX_SPREAD_ALTERNATIVES)
+        else {
+            return self.apply_open(callable, prefix, spread, span);
+        };
+        if !matches!(
+            callable.kind,
+            Callable::Inline(_) | Callable::Captured { .. } | Callable::Scoped(_)
+        ) {
+            return self.apply_open(callable, prefix, spread, span);
+        }
+        let expansions = maximum - minimum + 1;
+        if self.apply_expansions + expansions > MAX_SPREAD_EXPANSIONS {
+            self.type_query = None;
+            self.withhold_callback_facts(callable, env);
+            self.call_prepared(callable, Vec::new(), span, env, false);
+            return self.unsupported(
+                spread.span,
+                format!("apply bounded spread analysis limit ({MAX_SPREAD_EXPANSIONS}) exceeded"),
+            );
+        }
+        self.apply_expansions += expansions;
+
+        let item = Value::with_notes(spread.element.clone(), spread.notes.to_vec());
+        let mut args = prefix.to_vec();
+        let mut result = Value::new(Type::Never);
+        let start = self.diagnostics.len();
+        for count in minimum..=maximum {
+            args.resize(prefix.len() + count, (item.clone(), spread.span));
+            result = result.join(self.call_prepared(callable, args.clone(), span, env, true));
+        }
+        self.dedup_diagnostics(start);
+        self.explain_spread_elements(start, spread.span);
+        result
+    }
+
     fn apply_open(
         &mut self,
         callable: &PreparedCallable<'_, '_>,
@@ -340,7 +411,11 @@ impl Checker<'_> {
         spread: OpenSpread<'_>,
         span: Span,
     ) -> Value {
-        let minimum = prefix.len() + spread.minimum;
+        let with_prefix = |length: usize| prefix.len().saturating_add(length);
+        let lengths = LengthBounds {
+            min: with_prefix(spread.lengths.min),
+            max: spread.lengths.max.map(with_prefix),
+        };
         let element = Value::with_notes(spread.element.clone(), spread.notes.to_vec());
         let start = self.diagnostics.len();
         let result = match &callable.kind {
@@ -359,11 +434,11 @@ impl Checker<'_> {
                 }
                 Type::Function(signatures) => {
                     let arities: Vec<_> = signatures.iter().map(Signature::arity).collect();
-                    self.check_spread_arities(&arities, minimum, spread.span);
+                    self.check_spread_arities(&arities, lengths, spread.span);
                     let value = self.check_spread_signatures(
                         signatures,
                         prefix,
-                        minimum,
+                        lengths,
                         &element,
                         spread.span,
                     );
@@ -377,14 +452,14 @@ impl Checker<'_> {
                 key if matches!(key, Type::Map(_)) || key_callable_name(key).is_some() => {
                     self.check_spread_arities(
                         &[Arity::Fixed(1), Arity::Fixed(2)],
-                        minimum,
+                        lengths,
                         spread.span,
                     );
                     self.may_throw();
                     Value::new(Type::Unknown)
                 }
                 ty if matches!(ty, Type::Set(_)) || ty.is_vector() => {
-                    self.check_spread_arities(&[Arity::Fixed(1)], minimum, spread.span);
+                    self.check_spread_arities(&[Arity::Fixed(1)], lengths, spread.span);
                     self.may_throw();
                     Value::new(Type::Unknown)
                 }
@@ -399,7 +474,7 @@ impl Checker<'_> {
                 let sequence = Type::List(Box::new(Type::union(
                     items.chain(std::iter::once(element.known.clone())),
                 )));
-                Value::new(if minimum == 0 {
+                Value::new(if lengths.min == 0 {
                     Type::union([Type::empty_list(), sequence])
                 } else {
                     sequence
@@ -412,8 +487,8 @@ impl Checker<'_> {
             Callable::Builtin(name)
                 if matches!(name.as_str(), "clojure.core/min" | "clojure.core/max") =>
             {
-                self.check_spread_arities(builtin_arities(name), minimum, spread.span);
-                let result = self.open_extremum(name, prefix, &element, minimum);
+                self.check_spread_arities(builtin_arities(name), lengths, spread.span);
+                let result = self.open_extremum(name, prefix, &element, lengths.min);
                 self.note_builtin_contract(start, name);
                 result
             }
@@ -427,16 +502,23 @@ impl Checker<'_> {
                 ) =>
             {
                 let arities = builtin_arities(name);
-                self.check_spread_arities(arities, minimum, spread.span);
+                self.check_spread_arities(arities, lengths, spread.span);
                 self.note_builtin_contract(start, name);
                 if let [Arity::Variadic(required)] = arities {
-                    // These built-ins have the same result type for every accepted count.
+                    // Check representative operands without allocating according to :min-count.
                     let mut actual = prefix.to_vec();
-                    actual.resize(
-                        minimum.max(prefix.len() + 1).max(*required),
-                        (element, spread.span),
-                    );
-                    self.builtin(name, &actual, span, None)
+                    actual.resize((prefix.len() + 1).max(*required), (element, spread.span));
+                    let result = self.builtin(name, &actual, span, None);
+                    self.may_throw();
+                    match name.as_str() {
+                        "clojure.core/+" | "clojure.core/-" | "clojure.core/*"
+                            if result.known.exact_long_value().is_some() =>
+                        {
+                            Value::new(Type::Integral(IntegerType::FIXED))
+                        }
+                        "clojure.core/=" | "clojure.core/not=" => Value::new(Type::Boolean),
+                        _ => result,
+                    }
                 } else {
                     self.may_throw();
                     Value::new(Type::Unknown)
@@ -451,7 +533,7 @@ impl Checker<'_> {
         result
     }
 
-    fn check_spread_arities(&mut self, arities: &[Arity], minimum: usize, span: Span) {
+    fn check_spread_arities(&mut self, arities: &[Arity], lengths: LengthBounds, span: Span) {
         // One count above the largest fixed arity represents the unbounded tail.
         // For a variadic arm all counts at or above its required count are covered.
         let boundary = arities
@@ -461,9 +543,11 @@ impl Checker<'_> {
                 Arity::Variadic(required) => required,
             })
             .max()
-            .unwrap_or(minimum);
-        if let Some(missing) = (minimum..=boundary.max(minimum))
-            .find(|&count| !arities.iter().any(|arity| arity.accepts(count)))
+            .unwrap_or(lengths.min)
+            .max(lengths.min);
+        let end = lengths.max.map_or(boundary, |max| max.min(boundary));
+        if let Some(missing) =
+            (lengths.min..=end).find(|&count| !arities.iter().any(|arity| arity.accepts(count)))
         {
             self.error(
                 "PNX2554",
@@ -480,14 +564,27 @@ impl Checker<'_> {
         &mut self,
         signatures: &[Signature],
         prefix: &[(Value, Span)],
-        minimum: usize,
+        lengths: LengthBounds,
         element: &Value,
         span: Span,
     ) -> Value {
         self.may_throw();
         let matching: Vec<_> = signatures
             .iter()
-            .filter(|signature| signature.rest.is_some() || signature.args.len() >= minimum)
+            .filter(|signature| {
+                let required = signature.args.len();
+                if signature.rest.is_none() {
+                    return lengths.includes(required);
+                }
+                // At the variadic arity's minimum, the fixed clause wins.
+                lengths.max.is_none_or(|max| {
+                    max > required
+                        || (max == required
+                            && !signatures
+                                .iter()
+                                .any(|sig| sig.arity() == Arity::Fixed(required)))
+                })
+            })
             .collect();
         if matching.is_empty() {
             return Value::new(Type::Unknown);
@@ -503,7 +600,13 @@ impl Checker<'_> {
         }
         let expected_elements: BTreeSet<_> = matching
             .iter()
-            .flat_map(|sig| sig.args.iter().skip(prefix.len()).chain(sig.rest.as_ref()))
+            .flat_map(|sig| {
+                let rest = sig
+                    .rest
+                    .as_ref()
+                    .filter(|_| lengths.max.is_none_or(|max| max > sig.args.len()));
+                sig.args.iter().skip(prefix.len()).chain(rest)
+            })
             .collect();
         for ty in expected_elements {
             self.expect(element, ty, span, "apply collection elements");
