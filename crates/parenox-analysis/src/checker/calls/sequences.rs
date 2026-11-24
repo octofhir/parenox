@@ -6,7 +6,9 @@ use super::super::{Checker, LiteralContainer, Value, exact_set_member, literal_v
 use super::{literal_equality, vectors::element_type};
 use crate::Diagnostic;
 use crate::reader::Span;
-use crate::types::{ExtraFields, IntegerClass, IntegerType, MAX_TUPLE_ITEMS, MapType, Type};
+use crate::types::{
+    ExtraFields, IntegerClass, IntegerType, LengthBounds, MAX_TUPLE_ITEMS, MapType, Type,
+};
 
 #[derive(Clone, Copy)]
 enum ReadSequence {
@@ -23,18 +25,24 @@ fn fixed_range(start: i64, end: i64, step: i64) -> Type {
     if step == 0 {
         return Type::Seq(Box::new(Type::exact_long(start, IntegerClass::IntOrLong)));
     }
-    let before_end = |item: &i64| if step > 0 { *item < end } else { *item > end };
-    // Inputs are i32 values widened to i64, so the bounded walk cannot overflow.
-    let items: Vec<_> = (0..=MAX_TUPLE_ITEMS)
-        .map(|index| start + step * index as i64)
-        .take_while(before_end)
-        .map(|item| Type::exact_long(item, IntegerClass::IntOrLong))
-        .collect();
-    match items.len() {
-        0 => Type::empty_list(),
-        len if len <= MAX_TUPLE_ITEMS => Type::SeqTuple(items.into_boxed_slice()),
-        _ => Type::Seq(Box::new(Type::Integral(IntegerType::FIXED))),
+    // Inputs are i32 values widened to i64, so even the full distance fits.
+    let distance = if step > 0 { end - start } else { start - end };
+    if distance <= 0 {
+        return Type::empty_list();
     }
+    let length = usize::try_from(1 + (distance - 1) / step.abs())
+        .expect("the distance between i32 endpoints fits usize");
+    if length > MAX_TUPLE_ITEMS {
+        return Type::BoundedCollection(
+            Box::new(Type::Seq(Box::new(Type::Integral(IntegerType::FIXED)))),
+            LengthBounds::exact(length),
+        );
+    }
+    Type::SeqTuple(
+        (0..length)
+            .map(|index| Type::exact_long(start + step * index as i64, IntegerClass::IntOrLong))
+            .collect(),
+    )
 }
 
 impl ReadSequence {
@@ -60,6 +68,28 @@ impl ReadSequence {
         }
     }
 
+    fn bounded(self, element: Type, bounds: LengthBounds, preserve_bounds: bool) -> Type {
+        if bounds.max == Some(bounds.min) && bounds.min <= MAX_TUPLE_ITEMS {
+            return self.fixed(&vec![element; bounds.min]);
+        }
+        if !preserve_bounds || matches!(self, Self::Head) {
+            return self.open(&element, bounds.min);
+        }
+        let remaining = match self {
+            Self::Tail | Self::Rest => bounds.after_consuming(1),
+            _ => bounds,
+        };
+        if remaining.max == Some(0) {
+            return self.fixed(&[]);
+        }
+        let result = nonempty_sequence(element, remaining);
+        match self {
+            Self::Rest if remaining.min == 0 => Type::union([Type::empty_seq(), result]),
+            _ if remaining.min == 0 => result.nilable(),
+            _ => result,
+        }
+    }
+
     fn exact_set(self, members: &[Type]) -> Type {
         if members.len() < 2 {
             if matches!(self, Self::Rest) {
@@ -79,6 +109,19 @@ impl ReadSequence {
         } else {
             sequence_kind(result, true)
         }
+    }
+}
+
+pub(super) fn nonempty_sequence(element: Type, lengths: LengthBounds) -> Type {
+    let nonempty = LengthBounds {
+        min: lengths.min.max(1),
+        max: lengths.max,
+    };
+    let sequence = Type::Seq(Box::new(element));
+    if nonempty == LengthBounds::NONEMPTY {
+        sequence
+    } else {
+        Type::BoundedCollection(Box::new(sequence), nonempty)
     }
 }
 
@@ -386,7 +429,9 @@ impl Checker<'_> {
             Type::Seq(element) => Type::Seq(joined(element)),
             Type::List(element) => Type::List(joined(element)),
             Type::Vector(element) => Type::Vector(joined(element)),
-            Type::BoundedCollection(collection, _) if collection.is_vector() => {
+            Type::BoundedCollection(collection, _)
+                if collection.is_vector() || matches!(collection.as_ref(), Type::Seq(_)) =>
+            {
                 self.conj_type(collection, items, span)
             }
             Type::Set(element) => Type::Set(joined(element)),
@@ -498,7 +543,7 @@ impl Checker<'_> {
         if iteration_may_throw(&value.known) {
             self.may_throw();
         }
-        let result = self.read_sequence(operation, &value.known, name, span);
+        let result = self.read_sequence(operation, &value.known, name, span, true);
         if matches!(operation, ReadSequence::Head) {
             if matches!(value.known, Type::Map(_)) {
                 return value.traversal_element(result);
@@ -527,7 +572,8 @@ impl Checker<'_> {
     }
 
     pub(in crate::checker) fn seq_type(&mut self, ty: &Type, name: &str, span: Span) -> Type {
-        self.read_sequence(ReadSequence::Start, ty, name, span)
+        // Traversal consumers dispatch on nil, fixed positions, or a homogeneous sequence.
+        self.read_sequence(ReadSequence::Start, ty, name, span, false)
     }
 
     pub(in crate::checker) fn seq_value_type(
@@ -627,7 +673,14 @@ impl Checker<'_> {
         }
     }
 
-    fn read_sequence(&mut self, op: ReadSequence, ty: &Type, name: &str, span: Span) -> Type {
+    fn read_sequence(
+        &mut self,
+        op: ReadSequence,
+        ty: &Type,
+        name: &str,
+        span: Span,
+        preserve_bounds: bool,
+    ) -> Type {
         match ty {
             Type::Never | Type::Unknown => ty.clone(),
             Type::Any => {
@@ -635,7 +688,7 @@ impl Checker<'_> {
                 Type::Unknown
             }
             Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
-                self.read_sequence(op, upper, name, span)
+                self.read_sequence(op, upper, name, span, preserve_bounds)
             }
             Type::Nil if matches!(op, ReadSequence::Rest) => Type::empty_list(),
             Type::Nil => op.fixed(&[]),
@@ -653,11 +706,7 @@ impl Checker<'_> {
             Type::BoundedCollection(collection, bounds) => {
                 let element = element_type(collection.as_ref().clone())
                     .unwrap_or_else(|_| unreachable!("collection has an element type"));
-                if bounds.max == Some(bounds.min) && bounds.min <= MAX_TUPLE_ITEMS {
-                    op.fixed(&vec![element; bounds.min])
-                } else {
-                    op.open(&element, bounds.min)
-                }
+                op.bounded(element, *bounds, preserve_bounds)
             }
             Type::Str(text) => {
                 let items: Vec<_> = text
@@ -676,7 +725,7 @@ impl Checker<'_> {
             Type::Union(parts) => Type::union(
                 parts
                     .iter()
-                    .map(|part| self.read_sequence(op, part, name, span)),
+                    .map(|part| self.read_sequence(op, part, name, span, preserve_bounds)),
             ),
             actual => {
                 self.illegal_argument();

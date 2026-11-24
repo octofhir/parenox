@@ -40,6 +40,31 @@ fn range_accepts_zero_through_three_arguments_and_preserves_bounded_lengths() {
 }
 
 #[test]
+fn large_integer_ranges_keep_exact_lengths() {
+    for expression in [
+        "(= 33 (count (range 33)))",
+        "(= 34 (count (range 100 0 -3)))",
+        "(= 33 (count (rest (range 100 0 -3))))",
+        "(= 0 (count (range 5 1 2)))",
+        "(= 1000000000 (count (range -1000000000 1000000000 2)))",
+        "(= 2 (count (range 2147483647 -2147483648 -2147483648)))",
+    ] {
+        let report = check(expression, "#{true}");
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check("(nth (range 100) 100 \"missing\")", "#{\"missing\"}");
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let report = check("(apply inc (range 100))", "any?");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2554");
+    assert!(finding.message.contains("100 arguments"), "{report:#?}");
+}
+
+#[test]
 fn lazy_map_accepts_one_callback_argument_per_source() {
     for (expression, result) in [
         (
@@ -64,6 +89,38 @@ fn lazy_map_accepts_one_callback_argument_per_source() {
         let report = check(expression, result);
         assert!(report.ok && report.complete, "{expression}: {report:#?}");
     }
+}
+
+#[test]
+fn lazy_map_preserves_the_shortest_source_bounds() {
+    for (expression, result) in [
+        ("(= 100 (count (map inc (range 100))))", "#{true}"),
+        ("(= 2 (count (map + (range 100) [10 20])))", "#{true}"),
+        (
+            "(map + (range) [10 20])",
+            "(s/coll-of number? :kind seq? :min-count 1 :max-count 2)",
+        ),
+        ("(apply inc (map inc [10]))", "int?"),
+        ("(empty? (map + (range) []))", "#{true}"),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn mapped
+          {:t/sig '[(s/coll-of int? :kind vector? :min-count 2 :max-count 4)
+                    :-> (s/coll-of number? :kind seq? :min-count 2 :max-count 3)]}
+          [items] (map + items (range 3)))"#;
+    let report = Session::default().check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replacen(":min-count 2", ":min-count 0", 1);
+    let report = Session::default().check("demo.clj", &edited);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
 }
 
 #[test]

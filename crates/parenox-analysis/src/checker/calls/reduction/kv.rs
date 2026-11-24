@@ -78,9 +78,7 @@ impl Checker<'_> {
             Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
                 self.reduce_kv_type(upper, call)
             }
-            Type::BoundedCollection(collection, _) if ty.is_vector() => {
-                self.reduce_kv_type(collection, call)
-            }
+            Type::BoundedCollection(collection, _) => self.reduce_kv_type(collection, call),
             Type::Map(_) | Type::Tuple(_) | Type::Vector(_) => {
                 // Native maps and vectors cast the reducer even when empty.
                 if let Callable::Value(function) = &call.callable.kind

@@ -54,6 +54,44 @@ fn seq_emptiness_preserves_nil_elements_and_index_errors() {
 }
 
 #[test]
+fn sequence_reads_keep_spec_length_bounds() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn third
+          {:t/sig '[(s/coll-of int? :kind vector? :min-count 3 :max-count 4)
+                    :-> (s/tuple int? int?)]}
+          [items]
+          [(first (next (next (seq items))))
+           (nth (next items) 1 nil)])
+        (defn tail
+          {:t/sig '[(s/coll-of int? :kind vector? :min-count 2 :max-count 4)
+                    :-> (s/coll-of int? :kind seq? :min-count 1 :max-count 3)]}
+          [items] (rest items))
+        (defn singleton-tail
+          {:t/sig '[(s/coll-of int? :kind vector? :max-count 1)
+                    :-> (s/tuple nil? #{true})]}
+          [items] [(next items) (empty? (rest items))])
+        (defn choose
+          {:t/sig '[[number? :-> number?] [number? number? :-> number?]]}
+          ([x] x)
+          ([x y] (+ x y)))
+        (defn bounded-apply
+          {:t/sig '[(s/coll-of int? :kind vector? :max-count 2) :-> number?]}
+          [items] (apply choose 0 (next (seq items))))"#;
+    let report = Session::default().check("sequences.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let edited = source.replace(":min-count 3", ":min-count 2");
+    let report = Session::default().check("sequences.clj", &edited);
+    assert!(report.complete, "{report:#?}");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.contract.as_ref().unwrap().name, "demo/third");
+}
+
+#[test]
 fn rest_returns_a_truthy_empty_list_and_keeps_remaining_positions() {
     for (expression, contract) in [
         ("(if (rest nil) \"truthy\" 0)", "string?"),

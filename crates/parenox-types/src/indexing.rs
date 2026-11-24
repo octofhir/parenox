@@ -1,11 +1,23 @@
 //! Positions for the modeled Clojure indexed collections.
-use super::{IntegerClass, IntegerRange, IntegerType, Type};
+use super::{IntegerClass, IntegerRange, IntegerType, LengthBounds, Type};
 
 pub enum IndexedItem<'a> {
     Present(&'a Type),
     PresentChar(char),
     Optional(&'a Type),
     Absent(Option<usize>),
+}
+
+impl IndexedItem<'_> {
+    fn with_bounds(self, position: Option<usize>, bounds: LengthBounds) -> Self {
+        match (position, self) {
+            (Some(index), Self::Optional(element)) if index < bounds.min => Self::Present(element),
+            (Some(index), _) if bounds.max == Some(bounds.min) && index >= bounds.min => {
+                Self::Absent(Some(bounds.min))
+            }
+            (_, item) => item,
+        }
+    }
 }
 
 impl Type {
@@ -58,6 +70,11 @@ impl Type {
             Type::SeqTuple(items) | Type::ListTuple(items) => {
                 Some(fixed_item(items, usize::try_from(index).ok()))
             }
+            Type::BoundedCollection(collection, bounds) => Some(
+                collection
+                    .nth_item(index)?
+                    .with_bounds(usize::try_from(index).ok(), *bounds),
+            ),
             _ => self.indexed_item(index),
         }
     }
@@ -78,16 +95,11 @@ impl Type {
                 });
             }
             Type::BoundedCollection(collection, bounds) => {
-                let item = collection.indexed_item(index)?;
-                return Some(match (position, item) {
-                    (Some(index), IndexedItem::Optional(element)) if index < bounds.min => {
-                        IndexedItem::Present(element)
-                    }
-                    (Some(index), _) if bounds.max == Some(bounds.min) && index >= bounds.min => {
-                        IndexedItem::Absent(Some(bounds.min))
-                    }
-                    (_, item) => item,
-                });
+                return Some(
+                    collection
+                        .indexed_item(index)?
+                        .with_bounds(position, *bounds),
+                );
             }
             Type::Str(text) => {
                 let mut length = 0;

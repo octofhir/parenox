@@ -1,11 +1,11 @@
 //! Deferred callbacks for clojure.core/map.
 use super::{
     Checker, Env, PreparedCallable, Value, call_returns,
-    sequences::{definitely_not_seqable, iteration_may_throw},
+    sequences::{definitely_not_seqable, nonempty_sequence},
     vectors::element_type,
 };
 use crate::reader::{Form, Span};
-use crate::types::Type;
+use crate::types::{LengthBounds, Type};
 
 impl Checker<'_> {
     pub(super) fn lazy_map(&mut self, forms: &[Form], span: Span, env: &Env) -> Value {
@@ -52,9 +52,11 @@ impl Checker<'_> {
         span: Span,
         env: &Env,
     ) -> Value {
-        let mut exact_empty = false;
-        let mut may_be_empty = false;
-        let mut may_fail_to_seq = false;
+        let mut lengths = LengthBounds {
+            min: usize::MAX,
+            max: None,
+        };
+        let mut lengths_known = true;
         let mut unsupported = false;
         let args = inputs
             .into_iter()
@@ -64,10 +66,18 @@ impl Checker<'_> {
                     return (self.unchecked_tuple_traversal("map", source), source);
                 }
                 let seq = self.map_source_seq(&input.known, source);
-                exact_empty |= seq == Type::Nil;
-                may_fail_to_seq |=
-                    matches!(seq, Type::Never | Type::Unknown) || iteration_may_throw(&input.known);
-                may_be_empty |= seq.without_nil() != seq;
+                lengths_known &= !matches!(seq, Type::Never | Type::Unknown);
+                let source_lengths = input.known.length_bounds();
+                let traversal_lengths = seq.length_bounds();
+                lengths.min = lengths
+                    .min
+                    .min(source_lengths.min.max(traversal_lengths.min));
+                lengths.max = lengths
+                    .max
+                    .into_iter()
+                    .chain(source_lengths.max)
+                    .chain(traversal_lengths.max)
+                    .min();
                 let element = element_type(seq)
                     .unwrap_or_else(|_| unreachable!("seq_type returns sequence shapes"));
                 (input.traversal_element(element), source)
@@ -78,7 +88,7 @@ impl Checker<'_> {
             self.withhold_callback_facts(callable, env);
         }
         let item = self.call_prepared(callable, args, span, env, can_invoke);
-        if exact_empty && !unsupported && !may_fail_to_seq {
+        if lengths_known && !unsupported && lengths.max == Some(0) {
             return Value::new(Type::empty_seq());
         }
         let element = if unsupported {
@@ -86,9 +96,14 @@ impl Checker<'_> {
         } else {
             item.known
         };
-        let no_values = element == Type::Never;
-        let results = Type::Seq(Box::new(element));
-        let ty = if may_be_empty || no_values || unsupported || may_fail_to_seq {
+        let lengths = if !lengths_known || unsupported || element == Type::Never {
+            LengthBounds::UNBOUNDED
+        } else {
+            lengths
+        };
+        // A completed traversal emits one value per step up to the shortest input.
+        let results = nonempty_sequence(element, lengths);
+        let ty = if lengths.min == 0 {
             Type::union([Type::empty_seq(), results])
         } else {
             results
