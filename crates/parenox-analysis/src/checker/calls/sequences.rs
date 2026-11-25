@@ -145,15 +145,19 @@ fn infinite_sequence(element: Type) -> Type {
 pub(super) enum SequenceSlice {
     Take(Option<usize>),
     Drop(Option<usize>),
+    DropLast(Option<usize>),
+    TakeLast(Option<usize>),
+    ButLast,
 }
 
 impl SequenceSlice {
     pub(super) fn new(name: &str, count: &Type) -> Self {
-        let limit = nonnegative_count(count);
         match name {
-            "clojure.core/take" => Self::Take(limit),
-            "clojure.core/drop" => Self::Drop(limit),
-            _ => unreachable!("take or drop was resolved before slicing"),
+            "clojure.core/take" => Self::Take(nonnegative_count(count)),
+            "clojure.core/drop" => Self::Drop(exact_drop_count(count)),
+            "clojure.core/drop-last" => Self::DropLast(exact_drop_count(count)),
+            "clojure.core/take-last" => Self::TakeLast(exact_drop_count(count)),
+            _ => unreachable!("the slice operation was resolved before slicing"),
         }
     }
 
@@ -161,21 +165,36 @@ impl SequenceSlice {
         match self {
             Self::Take(Some(limit)) => Some(0..limit.min(length)),
             Self::Drop(Some(count)) => Some(count.min(length)..length),
-            Self::Take(None) | Self::Drop(None) => None,
+            Self::DropLast(Some(count)) => Some(0..length.saturating_sub(count)),
+            Self::TakeLast(Some(count)) => Some(length.saturating_sub(count)..length),
+            Self::ButLast => Some(0..length.saturating_sub(1)),
+            Self::Take(None) | Self::Drop(None) | Self::DropLast(None) | Self::TakeLast(None) => {
+                None
+            }
         }
     }
 
     pub(super) fn lengths(self, source: LengthBounds) -> LengthBounds {
         match self {
-            Self::Take(Some(limit)) => LengthBounds {
+            Self::Take(Some(limit)) | Self::TakeLast(Some(limit)) => LengthBounds {
                 min: limit.min(source.min),
                 max: Some(source.max.map_or(limit, |max| max.min(limit))),
             },
-            Self::Drop(Some(count)) => source.after_consuming(count),
-            Self::Take(None) | Self::Drop(None) => LengthBounds {
-                min: 0,
-                max: source.max,
-            },
+            Self::Drop(Some(count)) | Self::DropLast(Some(count)) => source.after_consuming(count),
+            Self::ButLast => source.after_consuming(1),
+            Self::Take(None) | Self::Drop(None) | Self::DropLast(None) | Self::TakeLast(None) => {
+                LengthBounds {
+                    min: 0,
+                    max: source.max,
+                }
+            }
+        }
+    }
+
+    fn empty(self) -> Type {
+        match self {
+            Self::TakeLast(_) | Self::ButLast => Type::Nil,
+            _ => Type::empty_seq(),
         }
     }
 }
@@ -186,9 +205,16 @@ fn nonnegative_count(count: &Type) -> Option<usize> {
         .map(|value| usize::try_from(value.max(0)).unwrap_or(usize::MAX))
 }
 
+fn exact_drop_count(count: &Type) -> Option<usize> {
+    // IDrop can convert non-fixed counts through double before skipping.
+    let value = count.exact_long_value()?;
+    (value <= (1_i64 << 53) || count.subtype_of(&Type::Integral(IntegerType::FIXED)))
+        .then(|| usize::try_from(value.max(0)).unwrap_or(usize::MAX))
+}
+
 fn slice_sequence_type(sequence: Type, slice: SequenceSlice) -> Type {
     match sequence {
-        Type::Nil => Type::empty_seq(),
+        Type::Nil => slice.empty(),
         Type::Never | Type::Unknown => Type::Unknown,
         Type::Union(parts) => Type::union(
             parts
@@ -198,18 +224,22 @@ fn slice_sequence_type(sequence: Type, slice: SequenceSlice) -> Type {
         Type::SeqTuple(items) | Type::ListTuple(items)
             if let Some(positions) = slice.positions(items.len()) =>
         {
-            Type::SeqTuple(items[positions].into())
+            if positions.is_empty() {
+                slice.empty()
+            } else {
+                Type::SeqTuple(items[positions].into())
+            }
         }
         shape => {
             let lengths = slice.lengths(shape.length_bounds());
             if lengths.max == Some(0) {
-                return Type::empty_seq();
+                return slice.empty();
             }
             let element = element_type(shape)
                 .unwrap_or_else(|_| unreachable!("a sequence has an element type"));
             let sequence = nonempty_sequence(element, lengths);
             if lengths.min == 0 {
-                Type::union([Type::empty_seq(), sequence])
+                Type::union([slice.empty(), sequence])
             } else {
                 sequence
             }
@@ -219,7 +249,7 @@ fn slice_sequence_type(sequence: Type, slice: SequenceSlice) -> Type {
 
 fn slice_sequence_value(sequence: &Value, slice: SequenceSlice) -> Value {
     if matches!(slice, SequenceSlice::Take(Some(0))) {
-        return Value::new(Type::empty_seq());
+        return Value::new(slice.empty());
     }
     let mut result = Value::with_notes(
         slice_sequence_type(sequence.known.clone(), slice),
@@ -255,6 +285,46 @@ fn sequence_lengths(source: &Type, sequence: &Type) -> LengthBounds {
     }
 }
 
+fn spaced_lengths(source: LengthBounds, spacing: usize) -> LengthBounds {
+    LengthBounds {
+        min: source.min.div_ceil(spacing),
+        max: source.max.map(|size| size.div_ceil(spacing)),
+    }
+}
+
+fn full_partitions(length: usize, size: usize, step: usize) -> usize {
+    length.checked_sub(size).map_or(0, |rest| 1 + rest / step)
+}
+
+fn partial_partition(length: usize, size: usize, step: usize) -> Option<usize> {
+    full_partitions(length, size, step)
+        .checked_mul(step)
+        .filter(|&start| start < length)
+}
+
+fn may_use_padding(lengths: LengthBounds, size: usize, step: usize) -> bool {
+    if size <= 1 {
+        return false;
+    }
+    if size > step {
+        return true;
+    }
+    // Without overlap, a final partial group exists exactly at remainders 1..size.
+    let length = lengths.min.max(1);
+    let remainder = length % step;
+    if (1..size).contains(&remainder) {
+        return true;
+    }
+    let distance = if remainder == 0 {
+        1
+    } else {
+        step - remainder + 1
+    };
+    length
+        .checked_add(distance)
+        .is_some_and(|next| lengths.includes(next))
+}
+
 fn positional_sequence(items: Vec<Value>) -> Value {
     let (types, children): (Vec<_>, Vec<_>) = items
         .into_iter()
@@ -265,6 +335,44 @@ fn positional_sequence(items: Vec<Value>) -> Value {
         result.literal_container = Some(LiteralContainer::Positions(Arc::from(children)));
     }
     result
+}
+
+fn sequence_item_equality(left: &Type, right: &Type) -> Option<bool> {
+    literal_equality(left, right).or_else(|| {
+        ((left.is_vector() && has_closed_scalar_class(right))
+            || (right.is_vector() && has_closed_scalar_class(left)))
+        .then_some(false)
+    })
+}
+
+fn dedupe_skips_initial(item: &Type) -> Option<bool> {
+    // Clojure 1.13's transducer initializes the previous value to ::none.
+    let initial = Type::Key(":clojure.core/none".into());
+    sequence_item_equality(&initial, item)
+        .or_else(|| (item.known_intersection(&initial) == Some(Type::Never)).then_some(false))
+}
+
+fn bounded_sequence_value(element: Type, lengths: LengthBounds, sequence: Value) -> Value {
+    let result = if lengths.max == Some(0) {
+        Type::empty_seq()
+    } else if lengths.min == 0 {
+        Type::union([Type::empty_seq(), nonempty_sequence(element, lengths)])
+    } else {
+        nonempty_sequence(element, lengths)
+    };
+    Value::with_notes(result, sequence.notes)
+}
+
+fn modeled_distinct_source(ty: &Type) -> bool {
+    match ty {
+        Type::Nil | Type::Never | Type::Unknown => true,
+        Type::Union(parts) => parts.iter().all(modeled_distinct_source),
+        Type::Parameter(parameter) => parameter
+            .upper
+            .as_ref()
+            .is_some_and(modeled_distinct_source),
+        ty => ty.nth_item(0).is_some() || definitely_not_seqable(ty),
+    }
 }
 
 fn repeated_values(item: &Value, length: usize) -> Value {
@@ -382,11 +490,19 @@ impl Checker<'_> {
         args: &[(Value, Span)],
         span: Span,
     ) -> Value {
-        let [(count, count_span), (source, source_span)] = args else {
-            return self.unsupported(
-                span,
-                format!("Type analysis for an unapplied {name} transducer is unavailable"),
-            );
+        let default;
+        let ((count, count_span), (source, source_span)) = match args {
+            [count, source] => (count, source),
+            [source] if name == "clojure.core/drop-last" => {
+                default = (Value::new(Type::Integer(1)), span);
+                (&default, source)
+            }
+            _ => {
+                return self.unsupported(
+                    span,
+                    format!("Type analysis for an unapplied {name} transducer is unavailable"),
+                );
+            }
         };
         self.expect(count, &Type::Number, *count_span, name);
         let split_at = name == "clojure.core/split-at";
@@ -395,8 +511,10 @@ impl Checker<'_> {
         if matches!(slice, SequenceSlice::Take(Some(0))) {
             return Value::new(Type::empty_seq());
         }
-        if matches!(slice, SequenceSlice::Drop(None))
-            && !has_closed_scalar_class(&source.known)
+        if matches!(
+            slice,
+            SequenceSlice::Drop(None) | SequenceSlice::DropLast(None)
+        ) && !has_closed_scalar_class(&source.known)
             && !matches!(source.literal_container, Some(LiteralContainer::List(_)))
         {
             // IDrop collections can check the argument during construction.
@@ -701,6 +819,497 @@ impl Checker<'_> {
         Value::with_notes(result, sequence.notes)
     }
 
+    pub(super) fn take_nth(&mut self, args: &[(Value, Span)], span: Span) -> Value {
+        const NAME: &str = "clojure.core/take-nth";
+        let [(step, step_span), (source, source_span)] = args else {
+            return self.unsupported(
+                span,
+                "Type analysis for a take-nth transducer is unavailable",
+            );
+        };
+        let enclosing = self.throws.take();
+        let sequence = self.sequence_call(NAME, source, *source_span);
+        self.throws = enclosing;
+        if matches!(sequence.known, Type::Unknown | Type::Never) {
+            return Value::new(Type::Unknown);
+        }
+        let source_lengths = sequence_lengths(&source.known, &sequence.known);
+        if source_lengths.max == Some(0) {
+            return Value::new(Type::empty_seq());
+        }
+        self.expect(step, &Type::Number, *step_span, NAME);
+        let spacing = exact_drop_count(&step.known);
+        let fixed = match &sequence.known {
+            Type::SeqTuple(items) | Type::ListTuple(items) => Some(items.as_ref()),
+            _ => None,
+        };
+        if let (Some(spacing @ 1..), Some(items)) = (spacing, fixed) {
+            let values = items
+                .iter()
+                .enumerate()
+                .step_by(spacing)
+                .map(|(index, item)| sequence.position_value(item.clone(), index))
+                .collect();
+            return positional_sequence(values);
+        }
+        let first = if spacing == Some(0) {
+            fixed.and_then(|items| items.first()).cloned()
+        } else {
+            None
+        };
+        let element = first.unwrap_or_else(|| {
+            element_type(sequence.known)
+                .unwrap_or_else(|_| unreachable!("a sequence has an element type"))
+        });
+        let result = match spacing {
+            Some(0) => infinite_sequence(element),
+            Some(spacing) => nonempty_sequence(element, spaced_lengths(source_lengths, spacing)),
+            None => Type::Seq(Box::new(element)),
+        };
+        Value::with_notes(
+            if source_lengths.min == 0 {
+                Type::union([Type::empty_seq(), result])
+            } else {
+                result
+            },
+            sequence.notes,
+        )
+    }
+
+    pub(super) fn dedupe(&mut self, args: &[(Value, Span)], span: Span) -> Value {
+        const NAME: &str = "clojure.core/dedupe";
+        let [(source, source_span)] = args else {
+            return self.unsupported(span, "Type analysis for a dedupe transducer is unavailable");
+        };
+        // sequence with a transducer probes for an initial output at construction.
+        let sequence = self.eager_sequence(NAME, source, *source_span);
+        if matches!(sequence.known, Type::Unknown | Type::Never) {
+            return sequence;
+        }
+        let source_lengths = sequence_lengths(&source.known, &sequence.known);
+        if source_lengths.max == Some(0) {
+            return Value::with_notes(Type::empty_seq(), sequence.notes);
+        }
+        if let Type::SeqTuple(items) | Type::ListTuple(items) = &sequence.known {
+            let mut values = Vec::new();
+            let mut minimum = 0;
+            for (index, item) in items.iter().enumerate() {
+                let skip = if index == 0 {
+                    dedupe_skips_initial(item)
+                } else {
+                    sequence_item_equality(&items[index - 1], item)
+                };
+                if skip != Some(true) {
+                    minimum += usize::from(skip == Some(false));
+                    values.push(sequence.position_value(item.clone(), index));
+                }
+            }
+            if minimum == values.len() {
+                let mut result = positional_sequence(values);
+                result.notes = sequence.notes;
+                return result;
+            }
+            self.may_throw();
+            let lengths = LengthBounds {
+                min: minimum,
+                max: Some(values.len()),
+            };
+            let element = Type::union(values.into_iter().map(|item| item.known));
+            return bounded_sequence_value(element, lengths, sequence);
+        }
+        let element = element_type(sequence.known.clone())
+            .unwrap_or_else(|_| unreachable!("a sequence has an element type"));
+        let skips_initial = dedupe_skips_initial(&element);
+        let uniform = literal_equality(&element, &element) == Some(true);
+        let lengths = LengthBounds {
+            min: usize::from(source_lengths.min > 0 && skips_initial == Some(false)),
+            max: if uniform {
+                Some(usize::from(skips_initial != Some(true)))
+            } else {
+                source_lengths.max
+            },
+        };
+        bounded_sequence_value(element, lengths, sequence)
+    }
+
+    pub(super) fn distinct(&mut self, args: &[(Value, Span)], span: Span) -> Value {
+        const NAME: &str = "clojure.core/distinct";
+        let [(source, source_span)] = args else {
+            return self.unsupported(
+                span,
+                "Type analysis for a distinct transducer is unavailable",
+            );
+        };
+        // The first lazy step destructures the original collection using nth.
+        // Later steps destructure the seq returned by rest.
+        if source.is_literal_map() || source.is_literal_set() {
+            self.diagnostics.push(Diagnostic::type_mismatch(
+                *source_span,
+                NAME,
+                "an input supporting nth".into(),
+                source.ty.to_string(),
+            ));
+            return Value::new(Type::Unknown);
+        }
+        if !modeled_distinct_source(&source.known) {
+            return self.unchecked_form(
+                *source_span,
+                "Type analysis for distinct cannot verify nth on this source type",
+            );
+        }
+        let sequence = self.read_lazy_source(NAME, source, *source_span);
+        if matches!(sequence.known, Type::Never | Type::Unknown) {
+            return Value::with_notes(Type::Unknown, sequence.notes);
+        }
+        let source_lengths = sequence_lengths(&source.known, &sequence.known);
+        if source_lengths.max == Some(0) {
+            return Value::with_notes(Type::empty_seq(), sequence.notes);
+        }
+        if let Type::SeqTuple(items) | Type::ListTuple(items) = &sequence.known
+            && items.len() <= MAX_TUPLE_ITEMS
+        {
+            let mut values = Vec::new();
+            let mut minimum = 0;
+            'positions: for (index, item) in items.iter().enumerate() {
+                let mut first_occurrence = true;
+                for previous in &items[..index] {
+                    match sequence_item_equality(previous, item) {
+                        Some(true) => continue 'positions,
+                        Some(false) => {}
+                        None => first_occurrence = false,
+                    }
+                }
+                minimum += usize::from(first_occurrence);
+                values.push(sequence.position_value(item.clone(), index));
+            }
+            if minimum == values.len() {
+                let mut result = positional_sequence(values);
+                result.notes = sequence.notes;
+                return result;
+            }
+            let lengths = LengthBounds {
+                min: minimum,
+                max: Some(values.len()),
+            };
+            let element = Type::union(values.into_iter().map(|item| item.known));
+            return bounded_sequence_value(element, lengths, sequence);
+        }
+        let element = element_type(sequence.known.clone())
+            .unwrap_or_else(|_| unreachable!("a sequence has an element type"));
+        let lengths = LengthBounds {
+            min: usize::from(source_lengths.min > 0),
+            max: if literal_equality(&element, &element) == Some(true) {
+                Some(1)
+            } else {
+                source_lengths.max
+            },
+        };
+        bounded_sequence_value(element, lengths, sequence)
+    }
+
+    pub(super) fn partition_all(&mut self, args: &[(Value, Span)], span: Span) -> Value {
+        const NAME: &str = "clojure.core/partition-all";
+        let ((size, size_span), step, (source, source_span)) = match args {
+            [size, source] => (size, None, source),
+            [size, step, source] => (size, Some(step), source),
+            _ => {
+                return self.unsupported(
+                    span,
+                    "Type analysis for a partition-all transducer is unavailable",
+                );
+            }
+        };
+        let mut sequence = self.read_lazy_source(NAME, source, *source_span);
+        if matches!(sequence.known, Type::Unknown | Type::Never) {
+            return Value::new(Type::Unknown);
+        }
+        let lengths = sequence_lengths(&source.known, &sequence.known);
+        if lengths.max == Some(0) {
+            return Value::new(Type::empty_seq());
+        }
+        self.expect(size, &Type::Number, *size_span, "partition-all size");
+        let step = step.map_or(size, |(step, span)| {
+            self.expect(step, &Type::Number, *span, "partition-all step");
+            step
+        });
+        let size = nonnegative_count(&size.known);
+        let spacing = exact_drop_count(&step.known);
+
+        let result = if spacing == Some(0) {
+            sequence.narrow(sequence.known.without_nil());
+            infinite_sequence(slice_sequence_value(&sequence, SequenceSlice::Take(size)).known)
+        } else {
+            if let (Some(size), Some(spacing)) = (size, spacing)
+                && let Type::SeqTuple(items) | Type::ListTuple(items) = &sequence.known
+                && items
+                    .len()
+                    .div_ceil(spacing)
+                    .saturating_mul(size.min(items.len()))
+                    <= MAX_TUPLE_ITEMS
+            {
+                let groups = (0..items.len()).step_by(spacing).map(|first| {
+                    let end = first.saturating_add(size).min(items.len());
+                    positional_sequence(
+                        (first..end)
+                            .map(|index| sequence.position_value(items[index].clone(), index))
+                            .collect(),
+                    )
+                });
+                return positional_sequence(groups.collect());
+            }
+            let last_size = spacing.map_or(1, |spacing| {
+                if lengths.max == Some(lengths.min) {
+                    1 + (lengths.min - 1) % spacing
+                } else {
+                    1
+                }
+            });
+            let group_lengths = LengthBounds {
+                min: size.map_or(0, |size| size.min(last_size)),
+                max: size.into_iter().chain(lengths.max).min(),
+            };
+            let group = if group_lengths.max == Some(0) {
+                Type::empty_seq()
+            } else {
+                let item = element_type(sequence.known)
+                    .unwrap_or_else(|_| unreachable!("a sequence has an element type"));
+                let group = nonempty_sequence(item, group_lengths);
+                if group_lengths.min == 0 {
+                    Type::union([Type::empty_seq(), group])
+                } else {
+                    group
+                }
+            };
+            let outer = spacing.map_or(LengthBounds::UNBOUNDED, |spacing| {
+                spaced_lengths(lengths, spacing)
+            });
+            nonempty_sequence(group, outer)
+        };
+        Value::with_notes(
+            if lengths.min == 0 {
+                Type::union([Type::empty_seq(), result])
+            } else {
+                result
+            },
+            sequence.notes,
+        )
+    }
+
+    pub(super) fn partition(&mut self, args: &[(Value, Span)], span: Span) -> Value {
+        const NAME: &str = "clojure.core/partition";
+        let (width, stride, padding, (source, source_span)) = match args {
+            [width, source] => (width, None, None, source),
+            [width, step, source] => (width, Some(step), None, source),
+            [width, step, pad, source] => (width, Some(step), Some(pad), source),
+            _ => unreachable!("partition arity was checked"),
+        };
+        let source_sequence = self.read_lazy_source(NAME, source, *source_span);
+        if matches!(source_sequence.known, Type::Never | Type::Unknown) {
+            return Value::new(Type::Unknown);
+        }
+        let lengths = sequence_lengths(&source.known, &source_sequence.known);
+        if lengths.max == Some(0) {
+            return Value::new(Type::empty_seq());
+        }
+        self.expect(&width.0, &Type::Number, width.1, "partition size");
+        if let Some((step, step_span)) = stride {
+            self.expect(step, &Type::Number, *step_span, "partition step");
+        }
+        let stride = &stride.unwrap_or(width).0;
+        if [&width.0, stride]
+            .into_iter()
+            .any(|value| value.known.compatibility(&Type::Number) == Compatibility::Mismatch)
+        {
+            return Value::new(Type::Unknown);
+        }
+        let (Some(size @ 1..), Some(step @ 1..)) = (
+            nonnegative_count(&width.0.known),
+            exact_drop_count(&stride.known),
+        ) else {
+            return self.unchecked_form(
+                span,
+                "partition needs a known positive integer size and step",
+            );
+        };
+        if size > i32::MAX as usize {
+            return self.unchecked_form(
+                width.1,
+                "partition size exceeds the JVM collection count range",
+            );
+        }
+        let padding = padding.filter(|_| may_use_padding(lengths, size, step));
+        let pad_sequence = padding.map_or_else(
+            || Value::new(Type::Nil),
+            |(pad, span)| self.read_lazy_source(NAME, pad, *span),
+        );
+        if matches!(pad_sequence.known, Type::Never | Type::Unknown) {
+            return Value::new(Type::Unknown);
+        }
+        let groups = |length| {
+            full_partitions(length, size, step)
+                + usize::from(padding.is_some() && partial_partition(length, size, step).is_some())
+        };
+        let outer_lengths = LengthBounds {
+            min: groups(lengths.min),
+            max: lengths.max.map(groups),
+        };
+        if outer_lengths.max == Some(0) {
+            return Value::new(Type::empty_seq());
+        }
+        if let Type::SeqTuple(items) | Type::ListTuple(items) = &source_sequence.known
+            && let Some(pad_items) = match &pad_sequence.known {
+                Type::Nil => Some(&[][..]),
+                Type::SeqTuple(items) | Type::ListTuple(items) => Some(items.as_ref()),
+                _ => None,
+            }
+            && groups(items.len()).saturating_mul(size) <= MAX_TUPLE_ITEMS
+        {
+            let result = (0..groups(items.len())).map(|group| {
+                let start = group * step;
+                let end = start.saturating_add(size).min(items.len());
+                let source = (start..end)
+                    .map(|index| source_sequence.position_value(items[index].clone(), index));
+                let padding = pad_items
+                    .iter()
+                    .take(size - (end - start))
+                    .enumerate()
+                    .map(|(index, item)| pad_sequence.position_value(item.clone(), index));
+                positional_sequence(source.chain(padding).collect())
+            });
+            return positional_sequence(result.collect());
+        }
+        let shape_item = |sequence: Value| {
+            element_type(sequence.known)
+                .unwrap_or_else(|_| unreachable!("a sequence has an element type"))
+        };
+        let pad_lengths = pad_sequence.known.length_bounds();
+        let element = Type::union([shape_item(source_sequence), shape_item(pad_sequence)]);
+        let group_lengths = LengthBounds {
+            min: if padding.is_some() {
+                size.min(1_usize.saturating_add(pad_lengths.min))
+            } else {
+                size
+            },
+            max: Some(size),
+        };
+        let result = nonempty_sequence(nonempty_sequence(element, group_lengths), outer_lengths);
+        Value::new(if outer_lengths.min == 0 {
+            Type::union([Type::empty_seq(), result])
+        } else {
+            result
+        })
+    }
+
+    pub(super) fn take_last(&mut self, args: &[(Value, Span)]) -> Value {
+        const NAME: &str = "clojure.core/take-last";
+        let [(count, count_span), (source, source_span)] = args else {
+            unreachable!("take-last arity was checked");
+        };
+        let sequence = self.sequence_call(NAME, source, *source_span);
+        if sequence.stops_evaluation() {
+            return sequence;
+        }
+        self.expect(count, &Type::Number, *count_span, NAME);
+        if count.known.compatibility(&Type::Number) == Compatibility::Mismatch {
+            if nil_part(&count.known) != Type::Never {
+                self.null_pointer();
+            }
+            if !count.known.subtype_of(&Type::Nil) {
+                self.class_cast();
+            }
+            return Value::new(Type::Never);
+        }
+        let slice = SequenceSlice::new(NAME, &count.known);
+        if matches!(slice, SequenceSlice::TakeLast(None))
+            || !matches!(
+                source.literal_container,
+                Some(
+                    LiteralContainer::Vector(_)
+                        | LiteralContainer::List(_)
+                        | LiteralContainer::Set(_)
+                )
+            ) && !has_closed_scalar_class(&source.known)
+        {
+            self.may_throw();
+        }
+        if matches!(slice, SequenceSlice::TakeLast(Some(0))) {
+            return Value::new(Type::Nil);
+        }
+        slice_sequence_value(&sequence, slice)
+    }
+
+    pub(super) fn reverse(&mut self, (source, span): &(Value, Span)) -> Value {
+        let sequence = self.eager_sequence("clojure.core/reverse", source, *span);
+        if sequence.stops_evaluation() || sequence.known == Type::Unknown {
+            return sequence;
+        }
+        if let Type::SeqTuple(items) | Type::ListTuple(items) = &sequence.known {
+            let args: Vec<_> = items
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(index, item)| (sequence.position_value(item.clone(), index), *span))
+                .collect();
+            let mut result = list_value(&args);
+            result.notes = sequence.notes;
+            return result;
+        }
+        let lengths = sequence_lengths(&source.known, &sequence.known);
+        if lengths.max == Some(0) {
+            return list_value(&[]);
+        }
+        let element = element_type(sequence.known)
+            .unwrap_or_else(|_| unreachable!("a sequence has an element type"));
+        let result = sequence_kind(nonempty_sequence(element, lengths), true);
+        Value::with_notes(
+            if lengths.min == 0 {
+                Type::union([Type::empty_list(), result])
+            } else {
+                result
+            },
+            sequence.notes,
+        )
+    }
+
+    pub(super) fn butlast(&mut self, (source, span): &(Value, Span)) -> Value {
+        let sequence = self.eager_sequence("clojure.core/butlast", source, *span);
+        if sequence.stops_evaluation() {
+            return sequence;
+        }
+        slice_sequence_value(&sequence, SequenceSlice::ButLast)
+    }
+
+    fn eager_sequence(&mut self, name: &str, source: &Value, span: Span) -> Value {
+        let sequence = self.sequence_call(name, source, span);
+        // Traversing the entire source can force deferred sequence steps.
+        if !sequence.stops_evaluation()
+            && !matches!(
+                source.literal_container,
+                Some(
+                    LiteralContainer::Vector(_)
+                        | LiteralContainer::List(_)
+                        | LiteralContainer::Set(_)
+                )
+            )
+            && !has_closed_scalar_class(&source.known)
+        {
+            self.may_throw();
+        }
+        if matches!(&sequence.known, Type::SeqTuple(items) | Type::ListTuple(items)
+            if items.contains(&Type::Never))
+        {
+            return Value::new(Type::Never);
+        }
+        sequence
+    }
+
+    fn read_lazy_source(&mut self, name: &str, source: &Value, span: Span) -> Value {
+        let enclosing = self.throws.take();
+        let sequence = self.sequence_call(name, source, span);
+        self.throws = enclosing;
+        sequence
+    }
+
     fn read_lazy_sources(&mut self, name: &str, args: &[(Value, Span)]) -> Vec<Value> {
         let enclosing = self.throws.take();
         let mut sequences = Vec::with_capacity(args.len());
@@ -920,7 +1529,8 @@ impl Checker<'_> {
             Type::List(element) => Type::List(joined(element)),
             Type::Vector(element) => Type::Vector(joined(element)),
             Type::BoundedCollection(collection, _)
-                if collection.is_vector() || matches!(collection.as_ref(), Type::Seq(_)) =>
+                if collection.is_vector()
+                    || matches!(collection.as_ref(), Type::Seq(_) | Type::List(_)) =>
             {
                 self.conj_type(collection, items, span)
             }
@@ -1008,7 +1618,16 @@ impl Checker<'_> {
             | "clojure.core/concat"
             | "clojure.core/interpose"
             | "clojure.core/interleave"
-            | "clojure.core/cycle" => ReadSequence::Start,
+            | "clojure.core/cycle"
+            | "clojure.core/take-nth"
+            | "clojure.core/take-last"
+            | "clojure.core/drop-last"
+            | "clojure.core/reverse"
+            | "clojure.core/butlast"
+            | "clojure.core/dedupe"
+            | "clojure.core/distinct"
+            | "clojure.core/partition-all"
+            | "clojure.core/partition" => ReadSequence::Start,
             "clojure.core/first" => ReadSequence::Head,
             "clojure.core/next" => ReadSequence::Tail,
             "clojure.core/rest" => ReadSequence::Rest,
@@ -1203,7 +1822,12 @@ impl Checker<'_> {
             Type::BoundedCollection(collection, bounds) => {
                 let element = element_type(collection.as_ref().clone())
                     .unwrap_or_else(|_| unreachable!("collection has an element type"));
-                op.bounded(element, *bounds, preserve_bounds)
+                let result = op.bounded(element, *bounds, preserve_bounds);
+                if matches!(collection.as_ref(), Type::List(_)) {
+                    op.list_result(result)
+                } else {
+                    result
+                }
             }
             Type::Str(text) => {
                 let items: Vec<_> = text
@@ -1231,6 +1855,14 @@ impl Checker<'_> {
                         | "clojure.core/interpose"
                         | "clojure.core/interleave"
                         | "clojure.core/cycle"
+                        | "clojure.core/take-nth"
+                        | "clojure.core/take-last"
+                        | "clojure.core/drop-last"
+                        | "clojure.core/reverse"
+                        | "clojure.core/butlast"
+                        | "clojure.core/dedupe"
+                        | "clojure.core/partition-all"
+                        | "clojure.core/partition"
                 ) && !definitely_not_seqable(actual) =>
             {
                 self.unchecked_form(
@@ -1309,6 +1941,9 @@ fn sequence_kind(ty: Type, persistent_list: bool) -> Type {
         (Type::Seq(item), true) => Type::List(item),
         (Type::ListTuple(items), false) => Type::SeqTuple(items),
         (Type::List(item), false) => Type::Seq(item),
+        (Type::BoundedCollection(inner, bounds), kind) => {
+            Type::BoundedCollection(Box::new(sequence_kind(*inner, kind)), bounds)
+        }
         (Type::Union(parts), _) => Type::union(
             parts
                 .into_iter()

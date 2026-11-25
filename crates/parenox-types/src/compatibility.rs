@@ -135,6 +135,15 @@ impl Type {
             ) => actual
                 .compatibility(expected)
                 .and(|| actual_bounds.compatibility(*bounds)),
+            (Type::BoundedCollection(actual, _), Type::Union(parts)) => {
+                let bounded = Compatibility::any(parts.iter().map(|part| self.compatibility(part)));
+                if bounded == Proven || !matches!(actual.as_ref(), Type::Union(_)) {
+                    bounded
+                } else {
+                    // The collection's shapes may match different union alternatives.
+                    bounded.max(actual.compatibility(expected))
+                }
+            }
             (Type::BoundedCollection(actual, _), expected) => actual.compatibility(expected),
             (Type::Union(parts), expected) => {
                 Compatibility::all(parts.iter().map(|actual| actual.compatibility(expected)))

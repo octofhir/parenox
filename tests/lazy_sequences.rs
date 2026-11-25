@@ -466,6 +466,403 @@ fn repeatedly_checks_nullary_callbacks_and_preserves_length() {
 }
 
 #[test]
+fn take_nth_preserves_spacing_and_repeats_the_head_for_nonpositive_steps() {
+    for (expression, result) in [
+        (
+            "(apply inc (take-nth 2 [8 \"ignored\"]))",
+            "(s/and int? #{9})",
+        ),
+        ("(= 34 (count (take-nth 3 (range 100))))", "#{true}"),
+        (
+            "(first (first (rest (take-nth 2 [false :unused [\"nested\"]]))))",
+            "#{\"nested\"}",
+        ),
+        (
+            "(take 3 (take-nth 0 [:a :b]))",
+            "(s/coll-of #{:a} :kind seq? :min-count 3 :max-count 3)",
+        ),
+        ("(first (take-nth -2 [:a :b]))", "#{:a}"),
+        ("(empty? (take-nth :unused []))", "#{true}"),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check("(take-nth 1)", "any?");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX9001");
+}
+
+#[test]
+fn take_last_preserves_tail_positions_and_reads_the_source_eagerly() {
+    for (expression, result) in [
+        ("(take-last 0 [1])", "nil?"),
+        ("(take-last 2 [])", "nil?"),
+        ("(take-last -1 [:unused])", "nil?"),
+        ("(apply inc (take-last 1 [false 8]))", "(s/and int? #{9})"),
+        (
+            "(first (first (take-last 1 [false [\"nested\"]])))",
+            "#{\"nested\"}",
+        ),
+        (
+            "(= 10 (count (take-last 10 (range 1000000000))))",
+            "#{true}",
+        ),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check(
+        "(try (take-last 0 false) (catch IllegalArgumentException _ :caught))",
+        "#{:caught}",
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+}
+
+#[test]
+fn drop_last_preserves_prefix_positions_and_length() {
+    for (expression, result) in [
+        ("(empty? (drop-last [1]))", "#{true}"),
+        ("(apply inc (drop-last [8 false]))", "(s/and int? #{9})"),
+        (
+            "(first (first (drop-last 1 [[\"nested\"] :discarded])))",
+            "#{\"nested\"}",
+        ),
+        ("(first (drop-last -1 [:kept]))", "#{:kept}"),
+        (
+            "(= 10 (count (drop-last 999999990 (range 1000000000))))",
+            "#{true}",
+        ),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = Session::default().check(
+        "demo.clj",
+        r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn bounded
+          {:t/sig '[(s/coll-of int? :kind vector? :min-count 2 :max-count 4)
+                    :-> (s/coll-of int? :kind seq? :min-count 1 :max-count 3)]}
+          [items] (drop-last items))"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+    for (expression, result) in [
+        (
+            "(try (do (drop-last 0 false) :lazy) (catch Exception _ :eager))",
+            "#{:lazy}",
+        ),
+        (
+            "(try (drop-last :bad [1]) (catch ClassCastException _ :caught))",
+            "#{:caught}",
+        ),
+    ] {
+        let report = check(expression, result);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, "PNX2322");
+    }
+}
+
+#[test]
+fn reverse_preserves_reversed_positions_and_list_length() {
+    for (expression, result) in [
+        ("(empty? (reverse nil))", "#{true}"),
+        ("(first (reverse [false :last]))", "#{:last}"),
+        (
+            "(first (first (reverse [false [\"nested\"]])))",
+            "#{\"nested\"}",
+        ),
+        (
+            "(apply (fn [a b] (str a b)) (reverse [\"b\" \"a\"]))",
+            "#{\"ab\"}",
+        ),
+        (
+            "(= 1000000000 (count (reverse (range 1000000000))))",
+            "#{true}",
+        ),
+        (
+            "(reverse (range 100))",
+            "(s/coll-of int? :kind list? :min-count 100 :max-count 100)",
+        ),
+        (
+            "(next (reverse (range 100)))",
+            "(s/coll-of int? :kind list? :min-count 99 :max-count 99)",
+        ),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check(
+        "(try (reverse false) (catch IllegalArgumentException _ :caught))",
+        "#{:caught}",
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+}
+
+#[test]
+fn butlast_returns_nil_or_a_checked_prefix() {
+    for (expression, result) in [
+        ("(butlast nil)", "nil?"),
+        ("(butlast [8])", "nil?"),
+        ("(apply inc (butlast [8 false]))", "(s/and int? #{9})"),
+        (
+            "(first (first (butlast [[\"nested\"] :last])))",
+            "#{\"nested\"}",
+        ),
+        (
+            "(= 999999999 (count (butlast (range 1000000000))))",
+            "#{true}",
+        ),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn bounded
+          {:t/sig '[(s/coll-of int? :kind vector? :min-count 1 :max-count 2)
+                    :-> (s/nilable (s/coll-of int? :kind seq? :min-count 1 :max-count 1))]}
+          [items] (butlast items))
+        (defn pass-through
+          {:t/sig '[(s/coll-of int? :kind seq? :min-count 1 :max-count 1)
+                    :-> (s/nilable (s/coll-of int? :kind seq? :min-count 1 :max-count 1))]}
+          [items] items)"#;
+    let report = Session::default().check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let incompatible = source.replacen(
+        ":min-count 1 :max-count 1))",
+        ":min-count 2 :max-count 2))",
+        1,
+    );
+    let report = Session::default().check("demo.clj", &incompatible);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    let report = check(
+        "(try (butlast false) (catch IllegalArgumentException _ :caught))",
+        "#{:caught}",
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+}
+
+#[test]
+fn partition_all_tracks_partial_partitions_and_the_step() {
+    for (expression, result) in [
+        ("(empty? (partition-all :unused []))", "#{true}"),
+        (
+            "(let [[front tail] (partition-all 2 [:a false \"tail\"])]
+               [(nth front 1) (first tail) (count tail)])",
+            "(s/tuple #{false} #{\"tail\"} (s/and int? #{1}))",
+        ),
+        (
+            "(let [[front tail] (partition-all 3 2 [:a :b :c :d])]
+               [(nth front 2) (first tail) (nth tail 1)])",
+            "(s/tuple #{:c} #{:c} #{:d})",
+        ),
+        (
+            "(= 15625000 (count (partition-all 64 (range 1000000000))))",
+            "#{true}",
+        ),
+        (
+            "(partition-all 2 (range 100))",
+            "(s/coll-of (s/coll-of int? :kind seq? :min-count 2 :max-count 2)
+                        :kind seq? :min-count 50 :max-count 50)",
+        ),
+        ("(= 3 (count (partition-all 0 2 [0 1 2 3 4])))", "#{true}"),
+        (
+            "(= 2 (count (first (partition-all 2 0 [1 2 3]))))",
+            "#{true}",
+        ),
+        (
+            "(= 3 (count (take 3 (partition-all 2 0 [1 2 3]))))",
+            "#{true}",
+        ),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check("(partition-all 2)", "any?");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX9001");
+}
+
+#[test]
+fn partition_keeps_full_groups_and_limits_padding_to_the_partial_tail() {
+    for (expression, result) in [
+        ("(empty? (partition :unused []))", "#{true}"),
+        ("(= 1 (count (partition 2 [1 2 3])))", "#{true}"),
+        (
+            "(let [[first-group second-group] (partition 3 1 [:a false \"c\" :d])]
+               [(nth first-group 1) (first second-group) (nth second-group 2)])",
+            "(s/tuple #{false} #{false} #{:d})",
+        ),
+        (
+            "(= 15625000 (count (partition 64 (range 1000000001))))",
+            "#{true}",
+        ),
+        (
+            "(let [[_ tail] (partition 3 3 [\"pad\"] [:a :b :c :last])]
+               [(first tail) (nth tail 1) (count tail)])",
+            "(s/tuple #{:last} #{\"pad\"} (s/and int? #{2}))",
+        ),
+        ("(= 1 (count (partition 2 2 false [1 2])))", "#{true}"),
+        ("(= 3 (count (partition 3 1 [:pad] [1 2 3 4])))", "#{true}"),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = Session::default().check(
+        "demo.clj",
+        r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn one-group
+          {:t/sig '[(s/coll-of int? :kind vector? :min-count 3 :max-count 4)
+                    :-> (s/coll-of (s/coll-of int? :kind seq? :min-count 2 :max-count 2)
+                                    :kind seq? :min-count 1 :max-count 1)]}
+          [items] (partition 2 10 false items))"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+    let report = check("(partition 2 0 [1 2 3])", "any?");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX9001");
+}
+
+#[test]
+fn dedupe_tracks_adjacent_runs_and_preserves_the_first_value_of_each_run() {
+    for (expression, result) in [
+        ("(empty? (dedupe nil))", "#{true}"),
+        (
+            "(= 4 (count (dedupe [nil nil false false nil 2 2N])))",
+            "#{true}",
+        ),
+        (
+            "(first (first (rest (dedupe [:a :a [\"nested\"]]))))",
+            "#{\"nested\"}",
+        ),
+        (
+            "(first (dedupe [:clojure.core/none :clojure.core/none :kept]))",
+            "#{:kept}",
+        ),
+        (
+            "(first (rest (dedupe [:clojure.core/none :kept :clojure.core/none])))",
+            "#{:clojure.core/none}",
+        ),
+        ("(apply inc (dedupe [8 8N]))", "(s/and int? #{9})"),
+        (
+            "(= 1 (count (dedupe (repeat 1000000000 :same))))",
+            "#{true}",
+        ),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+
+    let report = check(
+        "(try (do (dedupe false) :ok) (catch IllegalArgumentException _ :caught))",
+        "#{:caught}",
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+
+    let report = Session::default().check(
+        "demo.clj",
+        r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn run {:t/sig '[keyword? :-> (s/coll-of keyword? :kind seq? :min-count 2 :max-count 4)]}
+          [item] (dedupe [:left :left item :right :tail]))"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let report = check("(dedupe)", "any?");
+    assert_eq!(report.diagnostics[0].code, "PNX9001");
+    let report = check("(dedupe [] [])", "any?");
+    assert_eq!(report.diagnostics[0].code, "PNX2554");
+}
+
+#[test]
+fn distinct_keeps_first_occurrences_and_bounds_the_result_length() {
+    for (expression, result) in [
+        ("(empty? (distinct nil))", "#{true}"),
+        (
+            "(= 4 (count (distinct [nil false nil 8 8N false :last])))",
+            "#{true}",
+        ),
+        ("(apply inc (distinct [8 8N]))", "(s/and int? #{9})"),
+        (
+            "(first (first (rest (distinct [:a [\"nested\"] :a]))))",
+            "#{\"nested\"}",
+        ),
+        (
+            "(first (distinct [:clojure.core/none :clojure.core/none]))",
+            "#{:clojure.core/none}",
+        ),
+        ("(= 2 (count (distinct \"aab\")))", "#{true}"),
+        ("(first (distinct (seq #{:a})))", "#{:a}"),
+        (
+            "(= 1 (count (distinct (repeat 1000000000 :same))))",
+            "#{true}",
+        ),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+
+    let report = Session::default().check(
+        "demo.clj",
+        r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn run {:t/sig '[keyword? :-> (s/coll-of keyword? :kind seq? :min-count 2 :max-count 3)]}
+          [item] (distinct [:left :right item :left :right]))"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for source in ["false", "#{:a :b}", "{:a 1}"] {
+        let report = check(
+            &format!("(try (do (distinct {source}) :built) (catch Exception _ :caught))"),
+            "#{:built}",
+        );
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, "PNX2322");
+    }
+
+    let report = check("(distinct)", "any?");
+    assert_eq!(report.diagnostics[0].code, "PNX9001");
+    let report = check("(distinct (int-array 2))", "any?");
+    assert_eq!(report.diagnostics[0].code, "PNX9001");
+    let report = check("(distinct [] [])", "any?");
+    assert_eq!(report.diagnostics[0].code, "PNX2554");
+}
+
+#[test]
 fn unsupported_map_traversal_is_distinguished_from_a_nonseqable_source() {
     let array = check("(map identity (byte-array 4))", "t/any");
     assert!(!array.complete, "{array:#?}");

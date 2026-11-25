@@ -1219,6 +1219,15 @@ impl<'model> Checker<'model> {
                     | "clojure.core/interleave"
                     | "clojure.core/repeat"
                     | "clojure.core/cycle"
+                    | "clojure.core/take-nth"
+                    | "clojure.core/take-last"
+                    | "clojure.core/drop-last"
+                    | "clojure.core/reverse"
+                    | "clojure.core/butlast"
+                    | "clojure.core/dedupe"
+                    | "clojure.core/distinct"
+                    | "clojure.core/partition-all"
+                    | "clojure.core/partition"
                     | "clojure.core/constantly"
                     | "clojure.core/not="
                     | "clojure.core/subvec"
@@ -1503,6 +1512,15 @@ impl<'model> Checker<'model> {
                     | "clojure.core/interleave"
                     | "clojure.core/repeat"
                     | "clojure.core/cycle"
+                    | "clojure.core/take-nth"
+                    | "clojure.core/take-last"
+                    | "clojure.core/drop-last"
+                    | "clojure.core/reverse"
+                    | "clojure.core/butlast"
+                    | "clojure.core/dedupe"
+                    | "clojure.core/distinct"
+                    | "clojure.core/partition-all"
+                    | "clojure.core/partition"
                     | "clojure.core/subvec"
                     | "clojure.core/first"
                     | "clojure.core/next"
@@ -1552,7 +1570,18 @@ impl<'model> Checker<'model> {
             "clojure.core/interleave" => return self.interleave(args),
             "clojure.core/repeat" => return self.repeat(args),
             "clojure.core/cycle" => return self.cycle(&args[0]),
-            "clojure.core/take" | "clojure.core/drop" | "clojure.core/split-at" => {
+            "clojure.core/take-nth" => return self.take_nth(args, span),
+            "clojure.core/take-last" => return self.take_last(args),
+            "clojure.core/reverse" => return self.reverse(&args[0]),
+            "clojure.core/butlast" => return self.butlast(&args[0]),
+            "clojure.core/dedupe" => return self.dedupe(args, span),
+            "clojure.core/distinct" => return self.distinct(args, span),
+            "clojure.core/partition-all" => return self.partition_all(args, span),
+            "clojure.core/partition" => return self.partition(args, span),
+            "clojure.core/take"
+            | "clojure.core/drop"
+            | "clojure.core/split-at"
+            | "clojure.core/drop-last" => {
                 return self.slice_sequence(name, args, span);
             }
             "clojure.core/odd?" | "clojure.core/even?" => {
@@ -1816,13 +1845,19 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         | "clojure.core/ex-info"
         | "clojure.string/split" => &[Arity::Fixed(2), Arity::Fixed(3)],
         "clojure.string/replace" => &[Arity::Fixed(3)],
+        "clojure.core/dedupe" | "clojure.core/distinct" => &[Arity::Fixed(0), Arity::Fixed(1)],
+        "clojure.core/partition-all" => &[Arity::Fixed(1), Arity::Fixed(2), Arity::Fixed(3)],
+        "clojure.core/partition" => &[Arity::Fixed(2), Arity::Fixed(3), Arity::Fixed(4)],
         "clojure.core/take"
         | "clojure.core/drop"
+        | "clojure.core/drop-last"
         | "clojure.core/interpose"
-        | "clojure.core/repeat" => &[Arity::Fixed(1), Arity::Fixed(2)],
+        | "clojure.core/repeat"
+        | "clojure.core/take-nth" => &[Arity::Fixed(1), Arity::Fixed(2)],
         "clojure.string/join" => &[Arity::Fixed(1), Arity::Fixed(2)],
         "clojure.core/cons"
         | "clojure.core/split-at"
+        | "clojure.core/take-last"
         | "clojure.lang.MapEntry/create"
         | "clojure.core/find"
         | "clojure.core/select-keys"
@@ -1996,6 +2031,15 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/interleave"
             | "clojure.core/repeat"
             | "clojure.core/cycle"
+            | "clojure.core/take-nth"
+            | "clojure.core/take-last"
+            | "clojure.core/drop-last"
+            | "clojure.core/reverse"
+            | "clojure.core/butlast"
+            | "clojure.core/dedupe"
+            | "clojure.core/distinct"
+            | "clojure.core/partition-all"
+            | "clojure.core/partition"
             | "clojure.core/odd?"
             | "clojure.core/even?"
             | "clojure.core/alength"

@@ -167,7 +167,8 @@ impl Checker<'_> {
                 ) || matches!(shape, Type::SeqTuple(items) | Type::ListTuple(items) if !items.is_empty());
                 let casts_reducer = casts_reducer
                     || matches!(shape,
-                        Type::BoundedCollection(collection, _) if matches!(collection.as_ref(), Type::Vector(_))
+                        Type::BoundedCollection(collection, _)
+                            if matches!(collection.as_ref(), Type::Vector(_) | Type::List(_))
                     );
                 alternatives.push((Cow::Borrowed(shape), casts_reducer));
             }
