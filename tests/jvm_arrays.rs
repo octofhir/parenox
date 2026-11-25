@@ -1,6 +1,264 @@
 use parenox::Session;
 
 #[test]
+fn boolean_and_char_array_setters_preserve_the_original_argument() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn nil-flag {:t/sig '[:-> nil?]} []
+  (aset-boolean (boolean-array 1) 0 nil))
+(defn truthy {:t/sig '[:-> #{"kept"}]} []
+  (first (aset-boolean (boolean-array 1) 0 ["kept"])))
+(defn dynamic-flag {:t/sig '[t/any :-> t/any]} [flag]
+  (aset-boolean (boolean-array 1) 0 flag))
+(defn char-number {:t/sig '[:-> (s/and int? #{65})]} []
+  (aset-char (char-array 1) 0 65))
+(defn widened-char {:t/sig '[:-> #{\x}]} []
+  (apply aset-char [(int-array 1) 0 \x]))
+(defn dynamic-char {:t/sig '[char? :-> char?]} [value]
+  (try (aset-char (char-array 1) 0 value)
+       (catch IllegalArgumentException _ :wrong)))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (body, exception, code) in [
+        (
+            "(aset-boolean (int-array 1) 0 true)",
+            "IllegalArgumentException",
+            "PNX2322",
+        ),
+        (
+            "(aset-char (short-array 1) 0 65)",
+            "IllegalArgumentException",
+            "PNX2322",
+        ),
+        (
+            "(aset-char (char-array 1) 0 65536)",
+            "IllegalArgumentException",
+            "PNX2801",
+        ),
+        (
+            "(aset-char (char-array 1) 0 -1)",
+            "IllegalArgumentException",
+            "PNX2801",
+        ),
+        (
+            "(aset-char (char-array 1) 0 nil)",
+            "NullPointerException",
+            "PNX2322",
+        ),
+        (
+            r"(aset-boolean (boolean-array 1) \u0000 true)",
+            "ClassCastException",
+            "PNX2322",
+        ),
+        (
+            "(aset-boolean (boolean-array 0) 0 nil)",
+            "ArrayIndexOutOfBoundsException",
+            "PNX2801",
+        ),
+    ] {
+        let source = format!(
+            "(defn f {{:t/sig '[:-> #{{:caught}}]}} []
+               (try (do {body} :returned) (catch {exception} _ :caught)))"
+        );
+        let report = Session::default().check("arrays.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, code, "{report:#?}");
+    }
+}
+
+#[test]
+fn numeric_array_setters_widen_stores_and_return_original_values() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn byte-write {:t/sig '[:-> (s/and int? #{42})]} []
+  (aset-byte (double-array 1) 0 42))
+(defn short-write {:t/sig '[:-> #{\x}]} []
+  (aset-short (int-array 1) 0 \x))
+(defn int-write {:t/sig '[:-> (s/and integer? #{9})]} []
+  (apply aset-int [(long-array 1) 0 9N]))
+(defn long-write {:t/sig '[:-> (s/and int? #{13})]} []
+  (aset-long (float-array 1) 0 13))
+(defn float-write {:t/sig '[:-> (s/and int? #{4})]} []
+  (aset-float (double-array 1) 0 4))
+(defn double-write {:t/sig '[:-> number?]} []
+  (aset-double (double-array 1) 0 4.5))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (body, exception, code) in [
+        (
+            "(aset-long (int-array 1) 0 2)",
+            "IllegalArgumentException",
+            "PNX2322",
+        ),
+        (
+            "(aset-byte (byte-array 1) 0 128)",
+            "IllegalArgumentException",
+            "PNX2801",
+        ),
+        (
+            "(aset-int (int-array 1) 0 4294967296N)",
+            "ArithmeticException",
+            "PNX2801",
+        ),
+        (
+            "(aset-long (long-array 1) 0 9223372036854775808N)",
+            "IllegalArgumentException",
+            "PNX2801",
+        ),
+        (
+            "(aset-double (double-array 1) 0 nil)",
+            "NullPointerException",
+            "PNX2322",
+        ),
+        (
+            r"(aset-float (float-array 1) 0 \x)",
+            "ClassCastException",
+            "PNX2322",
+        ),
+        (
+            r"(aset-short (short-array 1) \u0000 1)",
+            "ClassCastException",
+            "PNX2322",
+        ),
+        (
+            "(aset-int (int-array 2) 2 1)",
+            "ArrayIndexOutOfBoundsException",
+            "PNX2801",
+        ),
+    ] {
+        let source = format!(
+            "(defn f {{:t/sig '[:-> #{{:caught}}]}} []
+               (try (do {body} :returned) (catch {exception} _ :caught)))"
+        );
+        let report = Session::default().check("arrays.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, code, "{report:#?}");
+    }
+
+    for source in [
+        "(defn f {:t/sig '[:-> t/any]} [] (aset-int (object-array [(int-array 1)]) 0 0 1))",
+        r#"(ns demo (:require [clojure.spec.alpha :as s]))
+            (defn write {:t/sig '[bytes? (s/coll-of int? :kind vector? :min-count 2) :-> t/any]}
+              [buffer indices-and-value] (apply aset-byte buffer indices-and-value))"#,
+    ] {
+        let report = Session::default().check("arrays.clj", source);
+        assert!(!report.complete, "{report:#?}");
+        assert_eq!(report.diagnostics[0].code, "PNX9001");
+    }
+}
+
+#[test]
+fn aset_checks_reference_boolean_and_character_array_writes() {
+    let source = r#"
+(ns demo)
+(defn store-reference {:t/sig '[:-> #{"saved"}]} []
+  (first (aset (object-array 1) 0 ["saved"])))
+(defn store-flag {:t/sig '[:-> #{false}]} []
+  (aset (boolean-array 1) \u0000 false))
+(defn store-char {:t/sig '[:-> #{\x}]} []
+  (apply aset [(char-array 1) 0 \x]))
+(defn store-nil {:t/sig '[:-> nil?]} []
+  (aset (object-array 1) 0 nil))
+(defn read-after-write {:t/sig '[:-> boolean?]} []
+  (let [flags (boolean-array 1)]
+    (aset flags 0 true)
+    (nth flags 0 :missing)))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (body, exception, code) in [
+        (
+            "(aset (object-array 1) 1 :item)",
+            "ArrayIndexOutOfBoundsException",
+            "PNX2801",
+        ),
+        (
+            "(aset (object-array 1) 4294967296N :item)",
+            "ArithmeticException",
+            "PNX2801",
+        ),
+        (
+            "(aset (boolean-array 1) 0 :bad)",
+            "IllegalArgumentException",
+            "PNX2322",
+        ),
+        (
+            "(apply aset [(char-array 1) 0 97])",
+            "IllegalArgumentException",
+            "PNX2322",
+        ),
+    ] {
+        let source = format!(
+            "(defn f {{:t/sig '[:-> #{{:caught}}]}} []
+               (try (do {body} :returned) (catch {exception} _ :caught)))"
+        );
+        let report = Session::default().check("arrays.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, code, "{report:#?}");
+    }
+
+    for body in [
+        "(aset (byte-array 1) 0 3)",
+        "(aset (object-array [(boolean-array 1)]) 0 0 false)",
+    ] {
+        let source = format!("(defn f {{:t/sig '[:-> t/any]}} [] {body})");
+        let report = Session::default().check("arrays.clj", &source);
+        assert!(!report.complete, "{report:#?}");
+        assert_eq!(report.diagnostics[0].code, "PNX9001");
+    }
+}
+
+#[test]
+fn aclone_preserves_array_class_and_length_for_direct_and_apply_calls() {
+    let source = r#"
+(ns demo)
+(defn clone-buffer {:t/sig '[bytes? :-> bytes?]} [^bytes buffer] (aclone buffer))
+(defn clone-size {:t/sig '[:-> #{true}]} []
+  (= 3 (alength (apply aclone [(object-array [:a :b :c])]))))
+(defn clone-read {:t/sig '[:-> boolean?]} []
+  (nth (aclone (boolean-array 1)) 0 :missing))
+(defn clone-empty {:t/sig '[:-> nil?]} []
+  (seq (aclone (char-array 0))))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (body, exception) in [
+        (r#"(aclone "not an array")"#, "IllegalArgumentException"),
+        ("(apply aclone [nil])", "NullPointerException"),
+        (
+            "(let [^ints a (byte-array 1)] (aclone a))",
+            "ClassCastException",
+        ),
+    ] {
+        let source = format!(
+            "(defn f {{:t/sig '[:-> #{{:caught}}]}} []
+               (try (do {body} :returned) (catch {exception} _ :caught)))"
+        );
+        let report = Session::default().check("arrays.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, "PNX2322");
+    }
+}
+
+#[test]
 fn aget_checks_boxed_reads_hints_and_indices() {
     let source = r#"
 (ns demo)

@@ -230,7 +230,7 @@ pub(crate) struct Declarations {
     pub(super) all_refers: BTreeSet<String>,
     pub(super) unavailable_all_refers: bool,
     pub(super) referrals: Vec<ExplicitReferral>,
-    pub(super) namespace_usages: Vec<(String, Span)>,
+    pub(super) namespace_usages: Vec<(String, Span, bool)>,
     pub(super) namespace_alias_sites: BTreeMap<String, Span>,
     pub(super) java_import_sites: Vec<(Span, String)>,
     pub(crate) has_top_level_require: bool,

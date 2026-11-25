@@ -494,6 +494,94 @@ fn checks_top_level_calls_to_source_functions_without_running_them() {
 }
 
 #[test]
+fn unannotated_mode_checks_functions_and_methods_without_assuming_argument_types() {
+    let source = Source {
+        path: "smoke.clj",
+        source: r#"(ns smoke)
+(defn accepts-unknown [x] (inc x))
+(defn bad [] (inc "oops"))
+(defmulti render identity)
+(defmethod render :bad [x] (inc :bad))"#,
+    };
+    let default = Session::default().check_project(&[source], None);
+    assert_eq!(default.stats.checked_functions, 0);
+
+    let report = Session::default()
+        .with_unannotated_bodies(true)
+        .check_project(&[source], None);
+    assert_eq!(report.stats.checked_functions, 3);
+    assert!(!report.complete);
+    let findings = &report.files[0].diagnostics;
+    let errors: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .map(|finding| (finding.code.as_str(), finding.span.start.line))
+        .collect();
+    assert_eq!(errors, [("PNX2322", 3), ("PNX2322", 5)], "{report:#?}");
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.code == "PNX9002")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn checks_local_defmethod_bodies_against_multimethod_fdefs() {
+    let source = Source {
+        path: "render.clj",
+        source: r#"(ns demo (:require [clojure.spec.alpha :as s] [clojure.string :as str]))
+(defmulti render identity)
+(s/fdef render :args (s/cat :value string?) :ret string?)
+(defmethod render :default [value] (str/trim value))
+(defmethod render :bad [value] 42)
+(defmethod render :other [value fallback] fallback)"#,
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[source], None);
+    assert_eq!(report.stats.checked_functions, 2, "{report:#?}");
+    let findings = &report.files[0].diagnostics;
+    let errors: Vec<_> = findings
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .collect();
+    let [error] = errors.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(
+        &source.source[error.span.start.offset..error.span.end.offset],
+        "42"
+    );
+    assert_eq!(error.contract.as_ref().unwrap().name, "demo/render");
+    assert!(findings.iter().any(
+        |finding| finding.span.start.line == 4 && finding.message.contains("Dispatch analysis")
+    ));
+    assert!(findings.iter().any(|finding| finding.span.start.line == 6
+        && finding.message.contains("Dispatch and type checking")));
+
+    let edited = source.source.replace(":ret string?", ":ret int?");
+    let report = session.check_project(
+        &[Source {
+            source: &edited,
+            ..source
+        }],
+        None,
+    );
+    let errors: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .collect();
+    let [error] = errors.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(error.span.start.line, 4);
+    assert_eq!(error.code, "PNX2322");
+}
+
+#[test]
 fn checks_multimethod_bodies_and_keeps_conditional_bindings_in_scope() {
     let methods = Source {
         path: "methods.clj",
@@ -1713,6 +1801,140 @@ fn an_extern_edit_only_invalidates_callers_of_its_namespace() {
     let restored = run(&mut session, &files, Some(externs));
     assert!(restored.ok && restored.complete, "{restored:#?}");
     assert_eq!(restored.stats.checked_functions, 1);
+}
+
+#[test]
+fn cycle_diagnostics_distinguish_members_from_blocked_namespaces() {
+    let sources = [
+        Source {
+            path: "downstream.clj",
+            source: "(ns downstream\n  (:require [other-a :as-alias alias]\n            [bridge]\n            [other-a]))",
+        },
+        Source {
+            path: "bridge.clj",
+            source: "(ns bridge (:require [a]))",
+        },
+        Source {
+            path: "a.clj",
+            source: "(ns a (:require [b]))",
+        },
+        Source {
+            path: "b.clj",
+            source: "(ns b (:require [a] [independent]))",
+        },
+        Source {
+            path: "other-a.clj",
+            source: "(ns other-a (:require [other-b]))",
+        },
+        Source {
+            path: "other-b.clj",
+            source: "(ns other-b (:require [other-a]))",
+        },
+        Source {
+            path: "independent.clj",
+            source: "(ns independent) (defn f {:t/sig '[:-> int?]} [] 1)",
+        },
+        Source {
+            path: "inferred.clj",
+            source: "(ns inferred) (defn f [] (other-a/f))",
+        },
+    ];
+    let assert_cycles = |report: &parenox::ProjectReport, members: &[&str], blocked: &[&str]| {
+        for file in &report.files {
+            let diagnostic = file
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.code == "PNX9005");
+            if members.contains(&file.path.as_str()) {
+                assert!(
+                    diagnostic.is_some_and(|diagnostic| diagnostic
+                        .message
+                        .starts_with("Namespace dependency cycle")),
+                    "{file:#?}"
+                );
+            } else if blocked.contains(&file.path.as_str()) {
+                assert!(
+                    diagnostic.is_some_and(|diagnostic| diagnostic
+                        .message
+                        .starts_with("This namespace depends on")),
+                    "{file:#?}"
+                );
+            } else {
+                assert!(file.ok && file.complete, "{file:#?}");
+            }
+        }
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&sources, None);
+    assert_eq!(report.stats.checked_functions, 1);
+    assert_cycles(
+        &report,
+        &["a.clj", "b.clj", "other-a.clj", "other-b.clj"],
+        &["bridge.clj", "downstream.clj", "inferred.clj"],
+    );
+    let downstream = report
+        .files
+        .iter()
+        .find(|file| file.path == "downstream.clj")
+        .unwrap();
+    let finding = downstream
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PNX9005")
+        .unwrap();
+    assert_eq!(finding.span.start.line, 3);
+    assert_eq!(finding.notes, ["Dependency bridge could not be checked."]);
+    let member = report
+        .files
+        .iter()
+        .find(|file| file.path == "a.clj")
+        .unwrap();
+    let finding = member
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PNX9005")
+        .unwrap();
+    assert_eq!(
+        &sources[2].source[finding.span.start.offset..finding.span.end.offset],
+        "b"
+    );
+    assert_eq!(finding.notes, ["Dependency b is in the same cycle."]);
+
+    let mut edited = sources;
+    edited[3].source = "(ns b (:require [independent]))";
+    let report = session.check_project(&edited, None);
+    assert_cycles(
+        &report,
+        &["other-a.clj", "other-b.clj"],
+        &["downstream.clj", "inferred.clj"],
+    );
+    let downstream = report
+        .files
+        .iter()
+        .find(|file| file.path == "downstream.clj")
+        .unwrap();
+    let finding = downstream
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PNX9005")
+        .unwrap();
+    assert_eq!(finding.span.start.line, 4);
+    assert_eq!(finding.notes, ["Dependency other-a could not be checked."]);
+    let inferred = report
+        .files
+        .iter()
+        .find(|file| file.path == "inferred.clj")
+        .unwrap();
+    let finding = inferred
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "PNX9005")
+        .unwrap();
+    assert_eq!(
+        &sources[7].source[finding.span.start.offset..finding.span.end.offset],
+        "inferred"
+    );
+    assert_eq!(finding.notes, ["Dependency other-a could not be checked."]);
 }
 
 #[test]

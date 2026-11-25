@@ -177,16 +177,22 @@ impl Declarations {
     pub(crate) fn namespace_usage(&self, namespace: &str) -> Option<Span> {
         self.namespace_usages
             .iter()
-            .rfind(|(name, _)| name == namespace)
-            .map(|(_, span)| *span)
+            .rfind(|(name, _, _)| name == namespace)
+            .map(|(_, span, _)| *span)
+    }
+
+    pub(crate) fn dependency_require_sites(&self) -> impl Iterator<Item = (&str, Span)> {
+        self.namespace_usages
+            .iter()
+            .filter_map(|(name, span, loads)| loads.then_some((name.as_str(), *span)))
     }
 
     pub(crate) fn namespace_reference_at(&self, offset: usize) -> Option<&str> {
         let contains = |span: &Span| (span.start.offset..span.end.offset).contains(&offset);
         self.namespace_usages
             .iter()
-            .find(|(_, span)| contains(span))
-            .map(|(namespace, _)| namespace.as_str())
+            .find(|(_, span, _)| contains(span))
+            .map(|(namespace, _, _)| namespace.as_str())
             .or_else(|| {
                 let (alias, _) = self
                     .namespace_alias_sites
@@ -345,10 +351,13 @@ impl Declarations {
         let Some(options) = self.options(options, lib.span, clause, supported) else {
             return;
         };
-        self.namespace_usages
-            .push((namespace.to_owned(), name.without_metadata().span));
         let alias_only =
             !refer_by_default && options.contains_key(":as-alias") && !options.contains_key(":as");
+        self.namespace_usages.push((
+            namespace.to_owned(),
+            name.without_metadata().span,
+            !alias_only,
+        ));
         if alias_only {
             self.names.aliased_libraries.insert(namespace.to_owned());
         } else {

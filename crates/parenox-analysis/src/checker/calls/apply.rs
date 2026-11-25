@@ -497,12 +497,13 @@ impl Checker<'_> {
                     name.as_str(),
                     "clojure.core/conj"
                         | "clojure.core/aget"
+                        | "clojure.core/aset"
                         | "clojure.core/concat"
                         | "clojure.core/interleave"
                         | "clojure.core/merge"
                         | "clojure.core/disj"
                         | "clojure.core/dissoc"
-                ) =>
+                ) && super::primitive_array_setter(name).is_none() =>
             {
                 let arities = builtin_arities(name);
                 self.check_spread_arities(arities, lengths, spread.span);

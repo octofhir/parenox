@@ -24,6 +24,9 @@ pub(crate) enum Command {
         /// Accept analysis-coverage warnings and report incomplete checks.
         #[arg(long)]
         allow_incomplete: bool,
+        /// Check recognized function and method bodies without a declared signature.
+        #[arg(long)]
+        check_unannotated: bool,
     },
     /// Evaluate Clojure forms.
     Eval(EvalOptions),

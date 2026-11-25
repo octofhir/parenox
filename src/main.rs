@@ -38,6 +38,7 @@ fn run() -> Result<u8, String> {
         Some(Command::Check {
             options,
             allow_incomplete,
+            check_unannotated,
         }) => check(
             options,
             if allow_incomplete {
@@ -45,13 +46,16 @@ fn run() -> Result<u8, String> {
             } else {
                 CheckMode::Strict
             },
+            check_unannotated,
         ),
         Some(Command::Eval(options)) => runtime::eval(options),
         Some(Command::Run(options)) => runtime::run(options),
         Some(Command::Test(options)) => runtime::run_tests(options),
         Some(Command::Nrepl(options)) => nrepl::run(options),
         Some(Command::Definition(options)) => definition(options),
-        Some(Command::ValidateExterns(options)) => check(options, CheckMode::ValidateExterns),
+        Some(Command::ValidateExterns(options)) => {
+            check(options, CheckMode::ValidateExterns, false)
+        }
         Some(Command::ExportExterns(options)) => export_externs(options),
         Some(Command::ProposeContracts {
             options,
@@ -139,7 +143,7 @@ impl CheckMode {
     }
 }
 
-fn check(options: CheckOptions, mode: CheckMode) -> Result<u8, String> {
+fn check(options: CheckOptions, mode: CheckMode, check_unannotated: bool) -> Result<u8, String> {
     let validate_externs = mode == CheckMode::ValidateExterns;
     let config = options.resolved_config()?;
     if validate_externs && config.externs.is_empty() {
@@ -154,12 +158,13 @@ fn check(options: CheckOptions, mode: CheckMode) -> Result<u8, String> {
     } = project;
     let format = options.format();
     let color = format == Format::Pretty && options.color.enabled();
+    let mut session = Session::default().with_unannotated_bodies(check_unannotated);
     if files.len() == 1 && externs.is_empty() && dependencies.is_empty() {
         let (path, source) = files.first_key_value().unwrap();
         if format == Format::Pretty {
             eprint!("{}", output::checking(&format!("`{path}`"), color));
         }
-        let mut report = Session::default().check(path, source);
+        let mut report = session.check(path, source);
         mode.apply(&mut report);
         match format {
             Format::Json => println!(
@@ -193,7 +198,6 @@ fn check(options: CheckOptions, mode: CheckMode) -> Result<u8, String> {
         .chain(&dependencies)
         .map(FileSnapshot::as_source)
         .collect();
-    let mut session = Session::default();
     let mut result = if validate_externs {
         let (checked, trusted) = extern_sources.split_at(externs.len());
         session.validate_externs_with_dependencies(&sources, checked, trusted)

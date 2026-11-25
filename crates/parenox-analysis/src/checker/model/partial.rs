@@ -2,6 +2,7 @@
 use super::contracts::function_parts;
 use super::declarations::symbols_match;
 use super::externs::ExternalDeclaration;
+use super::multimethods::CheckedMethodBodies;
 use super::{Declarations, DeclaredValue, Globals, Model};
 use crate::checker::calls::is_modeled_string_member;
 use crate::checker::{
@@ -27,6 +28,45 @@ const STRING_OPERATORS: &[&str] = &[
 const INDEX_OPERATORS: &[&str] = &["nth", "subvec"];
 
 impl Declarations {
+    pub(crate) fn check_unannotated_bodies(
+        &self,
+        forms: &[Form],
+        model: &Model,
+        globals: &Globals,
+        source: &str,
+        checked_methods: &BTreeSet<usize>,
+    ) -> CheckedMethodBodies {
+        let mut checked = CheckedMethodBodies::default();
+        let functions = self
+            .unchecked_definitions(forms, model)
+            .map(|form| (form.span.start.offset, form, false));
+        let methods = self.method_forms.iter().filter_map(|&index| {
+            let form = &forms[index];
+            let Kind::List(items) = &form.without_metadata().kind else {
+                return None;
+            };
+            let offset = items.first()?.span.start.offset;
+            (!checked_methods.contains(&offset)).then_some((offset, form, true))
+        });
+        for (offset, form, method) in functions.chain(methods) {
+            let Some(clauses) = untyped_clauses(form, method) else {
+                continue;
+            };
+            checked.offsets.insert(offset);
+            let mut checker = Checker::new(model, globals, source);
+            for clause in clauses.values() {
+                checker.untyped_clause(clause);
+            }
+            checked.diagnostics.extend(
+                checker
+                    .diagnostics
+                    .into_iter()
+                    .filter(|diagnostic| matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")),
+            );
+        }
+        checked
+    }
+
     pub(crate) fn check_untyped_calls(
         &self,
         forms: &[Form],

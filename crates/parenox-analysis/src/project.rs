@@ -1,3 +1,4 @@
+mod dependency_cycles;
 mod extern_export;
 mod navigation;
 mod spec_proposals;
@@ -347,6 +348,7 @@ impl FileCache {
 /// In-memory source snapshots. No checked project code is executed.
 #[derive(Default)]
 pub struct Session {
+    check_unannotated: bool,
     files: BTreeMap<String, FileCache>,
     specs: SpecCache,
     externs: ExternCache,
@@ -355,6 +357,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// Check recognized bodies without a signature using unknown parameter types.
+    pub fn with_unannotated_bodies(mut self, enabled: bool) -> Self {
+        self.check_unannotated = enabled;
+        self
+    }
+
     /// Suggest an s/fdef at a top-level function in the current Clojure/JVM snapshot.
     pub fn suggest_fdef(&self, path: &str, offset: usize) -> Option<FdefSuggestion> {
         // In .cljc the selected reader branch need not be a top-level source form.
@@ -607,13 +615,60 @@ impl Session {
                 }
             }
         }
-        for index in 0..count {
-            if !built[index] {
-                reports[index].diagnostics.push(Diagnostic::new(
+        if order.len() != count {
+            let blocked = dependency_cycles::classify(&consumers, &built);
+            for index in (0..count).filter(|&index| !built[index]) {
+                let cycle = blocked.cycle[index];
+                let message = if cycle.is_some() {
+                    "Namespace dependency cycle; this file could not be checked"
+                } else {
+                    "This namespace depends on a cycle and could not be checked"
+                };
+                let cache = &entries[index].1;
+                let declarations = cache.declarations.as_ref();
+                let mut diagnostic = Diagnostic::new(
                     "PNX9005",
-                    entries[index].1.start_span(),
-                    "Namespace dependency cycle; this file could not be checked",
-                ));
+                    declarations
+                        .and_then(|declarations| declarations.namespace_selection(&cache.forms))
+                        .unwrap_or_else(|| cache.start_span()),
+                    message,
+                );
+                let is_blocker = |owner: usize| {
+                    owner != index
+                        && !built[owner]
+                        && (cycle.is_none() || cycle == blocked.cycle[owner])
+                };
+                let site = declarations.and_then(|declarations| {
+                    declarations
+                        .dependency_require_sites()
+                        .filter(|(namespace, _)| {
+                            namespaces
+                                .get(*namespace)
+                                .is_some_and(|&owner| is_blocker(owner))
+                        })
+                        .min_by_key(|(_, span)| span.start.offset)
+                });
+                let dependency = if let Some((namespace, span)) = site {
+                    diagnostic.span = span;
+                    Some(namespace)
+                } else {
+                    blocked.dependencies[index]
+                        .iter()
+                        .copied()
+                        .filter(|&owner| cycle.is_none() || cycle == blocked.cycle[owner])
+                        .filter_map(|owner| {
+                            Some(entries[owner].1.declarations.as_ref()?.namespace())
+                        })
+                        .min()
+                };
+                if let Some(namespace) = dependency {
+                    diagnostic.notes.push(if cycle.is_some() {
+                        format!("Dependency {namespace} is in the same cycle.")
+                    } else {
+                        format!("Dependency {namespace} could not be checked.")
+                    });
+                }
+                reports[index].diagnostics.push(diagnostic);
             }
         }
         let uses_runtime_aliases = entries[..count]
@@ -874,17 +929,54 @@ impl Session {
                 }
                 let calls = top_level_calls.get(&index);
                 let tests = checked_tests.get(&index);
+                let methods = if matches!(mode, SnapshotMode::Check(_)) && index < count {
+                    cache.declarations.as_ref().map(|declarations| {
+                        model.check_method_bodies(declarations, source.source, &globals)
+                    })
+                } else {
+                    None
+                };
+                let unannotated = if self.check_unannotated
+                    && let Some(methods) = &methods
+                    && let Some(declarations) = &cache.declarations
+                {
+                    Some(declarations.check_unannotated_bodies(
+                        &cache.forms,
+                        model,
+                        &globals,
+                        source.source,
+                        &methods.offsets,
+                    ))
+                } else {
+                    None
+                };
                 let declaration_start = report.diagnostics.len();
                 report
                     .diagnostics
                     .extend(model.diagnostics.iter().filter_map(|diagnostic| {
+                        let offset = diagnostic.span.start.offset;
+                        if matches!(diagnostic.code.as_str(), "PNX9001" | "PNX9002")
+                            && unannotated
+                                .as_ref()
+                                .is_some_and(|checked| checked.offsets.contains(&offset))
+                        {
+                            return None;
+                        }
                         if diagnostic.code == "PNX9001" {
-                            let offset = diagnostic.span.start.offset;
                             if tests.is_some_and(|tests| tests.contains(&offset)) {
                                 return None;
                             }
                             if let Some(call) = calls.and_then(|calls| calls.get(&offset)) {
                                 return Some(call.clone());
+                            }
+                            if methods
+                                .as_ref()
+                                .is_some_and(|methods| methods.offsets.contains(&offset))
+                            {
+                                let mut diagnostic = diagnostic.clone();
+                                diagnostic.message =
+                                    "Dispatch analysis for defmethod is unavailable".into();
+                                return Some(diagnostic);
                             }
                         }
                         Some(diagnostic.clone())
@@ -929,6 +1021,7 @@ impl Session {
                 if matches!(mode, SnapshotMode::Check(_))
                     && index < count
                     && let Some(declarations) = &cache.declarations
+                    && unannotated.is_none()
                 {
                     report.diagnostics.extend(
                         cache
@@ -1003,6 +1096,22 @@ impl Session {
                     }),
                     &mut report.diagnostics,
                 );
+                if let Some(methods) = methods {
+                    report.stats.checked_functions += methods.offsets.len();
+                    report.diagnostics.extend(methods.diagnostics);
+                }
+                if let Some(checked) = unannotated {
+                    let count = checked.offsets.len();
+                    if count > 0 {
+                        report.stats.checked_functions += count;
+                        report.diagnostics.extend(checked.diagnostics);
+                        report.diagnostics.push(Diagnostic::analysis_gap(
+                            "PNX9002",
+                            cache.start_span(),
+                            format!("Checked {count} unannotated bodies with unknown parameter types; coverage is partial"),
+                        ));
+                    }
+                }
                 cache.interface = Some(interface);
             }
             if !specs_only {

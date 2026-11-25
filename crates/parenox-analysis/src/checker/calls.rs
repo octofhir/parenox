@@ -44,7 +44,7 @@ use crate::types::{
     Arity, Compatibility, IntegerClass, IntegerType, JvmArrayClass, Signature, Type,
 };
 use crate::{ContractOrigin, Diagnostic};
-use arrays::array_constructor;
+use arrays::{array_constructor, primitive_array_setter};
 use combinators::CombinedCallable;
 use forms::CoreForm;
 use inline::{CallbackReturn, Fnil, InlineFunction, Partial, PreparedChoice};
@@ -1208,12 +1208,14 @@ impl<'model> Checker<'model> {
     fn is_available_builtin(&self, spelling: &str, resolved: &str) -> bool {
         is_builtin(resolved)
             && !self.model.has_unavailable_wildcard_scope(spelling)
-            && (!matches!(
+            && ((!matches!(
                 resolved,
                 "clojure.core/count"
                     | "clojure.core/first"
                     | "clojure.core/nth"
                     | "clojure.core/aget"
+                    | "clojure.core/aset"
+                    | "clojure.core/aclone"
                     | "clojure.core/range"
                     | "clojure.core/take"
                     | "clojure.core/drop"
@@ -1245,7 +1247,8 @@ impl<'model> Checker<'model> {
                     | "clojure.core/peek"
                     | "clojure.core/min"
                     | "clojure.core/max"
-            ) || self.model.can_use_standard_core(spelling, self.globals))
+            ) && primitive_array_setter(resolved).is_none())
+                || self.model.can_use_standard_core(spelling, self.globals))
     }
 
     pub(super) fn standard_core_name(&self, head: &Form, env: &Env) -> Option<String> {
@@ -1466,6 +1469,9 @@ impl<'model> Checker<'model> {
         if let Some(class) = array_constructor(name) {
             return self.jvm_array(name, class, args, span);
         }
+        if let Some(primitive) = primitive_array_setter(name) {
+            return self.primitive_array_set(name, primitive, args, span);
+        }
         if matches!(name, "clojure.core/min" | "clojure.core/max") {
             return self.extremum(name, args);
         }
@@ -1497,6 +1503,8 @@ impl<'model> Checker<'model> {
                     | "clojure.core/not="
                     | "clojure.core/alength"
                     | "clojure.core/aget"
+                    | "clojure.core/aset"
+                    | "clojure.core/aclone"
                     | "clojure.core/str"
                     | "clojure.core/name"
                     | "clojure.core/map?"
@@ -1565,27 +1573,37 @@ impl<'model> Checker<'model> {
             "clojure.core/=" | "clojure.core/not=" => {
                 self.equality(args, name == "clojure.core/not=")
             }
-            "clojure.core/alength" | "clojure.core/aget" => {
+            "clojure.core/alength"
+            | "clojure.core/aget"
+            | "clojure.core/aset"
+            | "clojure.core/aclone" => {
                 let (receiver, argument_span) = &args[0];
                 let operand = written.map(|call| (&call.operands[0], call.env));
                 let hint = operand.and_then(|(form, env)| env.java_hint(form));
                 let receiver_span =
                     operand.map_or(*argument_span, |(form, _)| form.without_metadata().span);
-                if name == "clojure.core/aget" {
-                    if args.len() == 2
-                        && hint.is_none()
-                        && operand.is_some_and(|(form, _)| {
-                            matches!(form.without_metadata().kind, Kind::Nil)
-                        })
-                    {
-                        return self.unchecked_form(
-                            receiver_span,
-                            "The aget overload for a literal nil receiver is unchecked",
-                        );
-                    }
-                    return self.array_get(args, receiver_span, span, hint, written.is_some());
+                let inline_overload = name == "clojure.core/aclone"
+                    || (name == "clojure.core/aget" && args.len() == 2);
+                if inline_overload
+                    && hint.is_none()
+                    && operand
+                        .is_some_and(|(form, _)| matches!(form.without_metadata().kind, Kind::Nil))
+                {
+                    return self.unchecked_form(
+                        receiver_span,
+                        &format!("The {name} overload for a literal nil receiver is unchecked"),
+                    );
                 }
-                return self.array_length(receiver, receiver_span, hint);
+                return match name {
+                    "clojure.core/aget" => {
+                        self.array_get(args, receiver_span, span, hint, written.is_some())
+                    }
+                    "clojure.core/aset" => {
+                        self.array_set(args, receiver_span, span, hint, written.is_some())
+                    }
+                    "clojure.core/aclone" => self.array_clone(receiver, receiver_span, hint),
+                    _ => self.array_length(receiver, receiver_span, hint),
+                };
             }
             "clojure.core/empty?" | "clojure.core/not-empty" => {
                 return self.emptiness_call(name, &args[0]);
@@ -1877,6 +1895,8 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         "clojure.string/replace" => &[Arity::Fixed(3)],
         "clojure.core/dedupe" | "clojure.core/distinct" => &[Arity::Fixed(0), Arity::Fixed(1)],
         "clojure.core/aget" => &[Arity::Variadic(2)],
+        "clojure.core/aset" => &[Arity::Variadic(3)],
+        name if primitive_array_setter(name).is_some() => &[Arity::Variadic(3)],
         "clojure.core/partition-all" => &[Arity::Fixed(1), Arity::Fixed(2), Arity::Fixed(3)],
         "clojure.core/partition" => &[Arity::Fixed(2), Arity::Fixed(3), Arity::Fixed(4)],
         "clojure.core/take"
@@ -2078,6 +2098,8 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/even?"
             | "clojure.core/alength"
             | "clojure.core/aget"
+            | "clojure.core/aset"
+            | "clojure.core/aclone"
             | "clojure.core/empty?"
             | "clojure.core/not-empty"
             | "clojure.core/nth"
@@ -2116,6 +2138,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.string/join"
     ) || predicate_type(name).is_some()
         || array_constructor(name).is_some()
+        || primitive_array_setter(name).is_some()
 }
 
 pub(super) fn arity_counts(counts: impl Iterator<Item = Arity>) -> String {

@@ -2,7 +2,7 @@
 use super::super::{LiteralContainer, metadata::JavaTypeHint};
 use super::{Checker, Value, has_closed_scalar_class, nil_part};
 use crate::reader::{Span, array_class_component};
-use crate::types::{Compatibility, IntegerType, JvmArrayClass, Type};
+use crate::types::{Compatibility, IntegerRange, IntegerType, JvmArrayClass, Type};
 
 pub(super) fn array_constructor(name: &str) -> Option<JvmArrayClass> {
     use JvmArrayClass::*;
@@ -18,6 +18,36 @@ pub(super) fn array_constructor(name: &str) -> Option<JvmArrayClass> {
         "clojure.core/double-array" => Double,
         _ => return None,
     })
+}
+
+pub(super) fn primitive_array_setter(name: &str) -> Option<JvmArrayClass> {
+    use JvmArrayClass::*;
+    Some(match name {
+        "clojure.core/aset-boolean" => Boolean,
+        "clojure.core/aset-char" => Char,
+        "clojure.core/aset-byte" => Byte,
+        "clojure.core/aset-short" => Short,
+        "clojure.core/aset-int" => Int,
+        "clojure.core/aset-long" => Long,
+        "clojure.core/aset-float" => Float,
+        "clojure.core/aset-double" => Double,
+        _ => return None,
+    })
+}
+
+fn accepts_primitive_write(array: JvmArrayClass, primitive: JvmArrayClass) -> bool {
+    use JvmArrayClass::*;
+    // java.lang.reflect.Array.setX permits widening from X to the component type.
+    array == primitive
+        || matches!(
+            (primitive, array),
+            (Byte, Short | Int | Long | Float | Double)
+                | (Short, Int | Long | Float | Double)
+                | (Char, Int | Long | Float | Double)
+                | (Int, Long | Float | Double)
+                | (Long, Float | Double)
+                | (Float, Double)
+        )
 }
 
 pub(in crate::checker) fn boxed_array_element(class: JvmArrayClass) -> Type {
@@ -171,26 +201,307 @@ impl Checker<'_> {
                 Ok(class) => class,
                 Err(result) => return Value::new(result),
             };
-        Value::new(self.aget_index(
+        let converted =
+            self.convert_array_index(&index.known, *index_span, inlined, "clojure.core/aget");
+        Value::new(self.access_array_index(
             class,
             receiver.known_array_length(),
-            &index.known,
+            &converted,
             *index_span,
-            inlined,
         ))
     }
 
-    fn aget_index(
+    pub(super) fn array_set(
+        &mut self,
+        args: &[(Value, Span)],
+        receiver_span: Span,
+        call_span: Span,
+        hint: Option<JavaTypeHint<&str>>,
+        inlined: bool,
+    ) -> Value {
+        const NAME: &str = "clojure.core/aset";
+        let [(receiver, _), (index, index_span), (stored, value_span)] = args else {
+            self.may_throw();
+            return self.unchecked_form(
+                call_span,
+                "Type analysis for multidimensional aset is unavailable",
+            );
+        };
+        let class = match self.check_array_receiver(receiver, receiver_span, hint, NAME) {
+            Ok(class) => class,
+            Err(result) => return Value::new(result),
+        };
+        let expected = match class {
+            JvmArrayClass::Boolean => Type::Boolean,
+            JvmArrayClass::Char => Type::Character,
+            JvmArrayClass::Reference => Type::Any,
+            _ => {
+                self.may_throw();
+                return self.unchecked_form(
+                    receiver_span,
+                    "Type analysis for aset on this JVM array class is unavailable",
+                );
+            }
+        };
+        let converted = self.convert_array_index(&index.known, *index_span, inlined, NAME);
+        if matches!(converted, Type::Never | Type::Unknown) {
+            return Value::new(converted);
+        }
+        let mut result = stored.clone();
+        let compatibility = stored.known.compatibility(&expected);
+        if compatibility != Compatibility::Proven {
+            self.expect(stored, &expected, *value_span, NAME);
+            self.illegal_argument();
+            if compatibility == Compatibility::Mismatch {
+                return Value::new(Type::Never);
+            }
+            result.narrow(expected);
+        }
+        if self.access_array_index(
+            class,
+            receiver.known_array_length(),
+            &converted,
+            *index_span,
+        ) == Type::Never
+        {
+            return Value::new(Type::Never);
+        }
+        if class == JvmArrayClass::Reference && stored.known != Type::Nil {
+            // The Reference class also covers covariant arrays with narrower component types.
+            if inlined {
+                self.array_store();
+            } else {
+                self.illegal_argument();
+            }
+        }
+        result
+    }
+
+    pub(super) fn array_clone(
+        &mut self,
+        receiver: &Value,
+        span: Span,
+        hint: Option<JavaTypeHint<&str>>,
+    ) -> Value {
+        let class = match self.check_array_receiver(receiver, span, hint, "clojure.core/aclone") {
+            Ok(class) => class,
+            Err(result) => return Value::new(result),
+        };
+        let expected = Type::JvmArray(class);
+        let actual = receiver.known.without_nil();
+        let cloned = if actual.subtype_of(&expected) {
+            actual
+        } else {
+            expected
+        };
+        if let Some(length) = receiver.known_array_length() {
+            array_with_length(cloned, length)
+        } else {
+            Value::new(cloned)
+        }
+    }
+
+    pub(super) fn primitive_array_set(
+        &mut self,
+        name: &str,
+        primitive: JvmArrayClass,
+        args: &[(Value, Span)],
+        span: Span,
+    ) -> Value {
+        let [
+            (receiver, receiver_span),
+            (index, index_span),
+            (stored, value_span),
+        ] = args
+        else {
+            self.may_throw();
+            return self.unchecked_form(
+                span,
+                &format!("Type analysis for multidimensional {name} is unavailable"),
+            );
+        };
+        // These functions call Array.setX and do not inline at the call site.
+        let class = match self.check_array_receiver(receiver, *receiver_span, None, name) {
+            Ok(class) => class,
+            Err(result) => return Value::new(result),
+        };
+        if class == JvmArrayClass::Any {
+            self.may_throw();
+            return self.unchecked_form(
+                *receiver_span,
+                "Primitive array writes need a known component class",
+            );
+        }
+        let converted = self.convert_array_index(&index.known, *index_span, false, name);
+        if matches!(converted, Type::Never | Type::Unknown) {
+            return Value::new(converted);
+        }
+        let written = self.primitive_array_value(primitive, &stored.known, *value_span, name);
+        if matches!(written, Type::Never | Type::Unknown) {
+            return Value::new(written);
+        }
+        if !accepts_primitive_write(class, primitive) {
+            self.illegal_argument();
+            self.error(
+                "PNX2322",
+                *receiver_span,
+                format!("{name} cannot store a {primitive} component in {class}"),
+            );
+            return Value::new(Type::Never);
+        }
+        if self.access_array_index(
+            class,
+            receiver.known_array_length(),
+            &converted,
+            *index_span,
+        ) == Type::Never
+        {
+            return Value::new(Type::Never);
+        }
+        let mut result = stored.clone();
+        result.narrow(written);
+        result
+    }
+
+    fn primitive_array_value(
+        &mut self,
+        primitive: JvmArrayClass,
+        value: &Type,
+        span: Span,
+        name: &str,
+    ) -> Type {
+        use JvmArrayClass::*;
+        if primitive == Boolean {
+            // Clojure boolean accepts every value. The setter returns its original argument.
+            return value.clone();
+        }
+        match value {
+            Type::Never => return Type::Never,
+            Type::Unknown => {
+                self.may_throw();
+                return Type::Unknown;
+            }
+            Type::Union(parts) => {
+                return Type::union(
+                    parts
+                        .iter()
+                        .map(|part| self.primitive_array_value(primitive, part, span, name)),
+                );
+            }
+            _ => {}
+        }
+        let accepts_char = matches!(primitive, Byte | Short | Char | Int | Long);
+        let exact = match value {
+            Type::Char(c) if accepts_char => Some(i64::from(u32::from(*c))),
+            value if has_closed_scalar_class(value) => value.exact_long_value(),
+            _ => None,
+        };
+        if let Some(exact) = exact {
+            let fits = match primitive {
+                Byte => i8::try_from(exact).is_ok(),
+                Short => i16::try_from(exact).is_ok(),
+                Char => u16::try_from(exact).is_ok(),
+                Int => i32::try_from(exact).is_ok(),
+                _ => true,
+            };
+            if fits {
+                return value.clone();
+            }
+            if primitive == Int {
+                self.arithmetic_exception();
+            } else {
+                self.illegal_argument();
+            }
+            self.error(
+                "PNX2801",
+                span,
+                format!("Value {exact} is out of range for {name}"),
+            );
+            return Type::Never;
+        }
+        if accepts_char
+            && matches!(
+                value,
+                Type::Integral(IntegerType {
+                    range: IntegerRange::OutsideInt64,
+                    ..
+                })
+            )
+        {
+            self.illegal_argument();
+            self.error(
+                "PNX2801",
+                span,
+                format!("Value is outside the JVM long range for {name}"),
+            );
+            return Type::Never;
+        }
+        let character = accepts_char && value.subtype_of(&Type::Character);
+        if !character && array_key_is_nonnumeric(value) {
+            if *value == Type::Nil {
+                self.null_pointer();
+            } else {
+                self.class_cast();
+            }
+            self.diagnostics.push(crate::Diagnostic::type_mismatch(
+                span,
+                &format!("{name} value"),
+                if accepts_char {
+                    "Number or Character"
+                } else {
+                    "Number"
+                }
+                .into(),
+                value.inferred().to_string(),
+            ));
+            return Type::Never;
+        }
+        let fixed = value.subtype_of(&Type::Integral(IntegerType::FIXED));
+        if !has_closed_scalar_class(value) {
+            self.may_throw();
+        } else {
+            match primitive {
+                Byte | Short => self.illegal_argument(),
+                Char if !character => self.illegal_argument(),
+                Int if !character && !value.subtype_of(&Type::Integral(IntegerType::INT32)) => {
+                    self.arithmetic_exception()
+                }
+                Long if !character && !fixed => self.illegal_argument(),
+                Float if !fixed => self.illegal_argument(),
+                _ => {}
+            }
+        }
+        value.clone()
+    }
+
+    fn access_array_index(
         &mut self,
         class: JvmArrayClass,
         length: Option<usize>,
         index: &Type,
         span: Span,
+    ) -> Type {
+        match index {
+            Type::Unknown | Type::Never => index.clone(),
+            Type::Union(parts) => Type::union(
+                parts
+                    .iter()
+                    .map(|part| self.access_array_index(class, length, part, span)),
+            ),
+            _ => self.read_array_at(class, length, index.exact_integer_value(), span, None),
+        }
+    }
+
+    fn convert_array_index(
+        &mut self,
+        index: &Type,
+        span: Span,
         inlined: bool,
+        operation: &str,
     ) -> Type {
         if let Some(index) = index.exact_long_value() {
             if let Ok(index) = i32::try_from(index) {
-                return self.read_array_at(class, length, Some(index), span, None);
+                return Type::Integer(index);
             }
             self.arithmetic_exception();
             self.error(
@@ -210,7 +521,7 @@ impl Checker<'_> {
                 return Type::union(
                     parts
                         .iter()
-                        .map(|part| self.aget_index(class, length, part, span, inlined)),
+                        .map(|part| self.convert_array_index(part, span, inlined, operation)),
                 );
             }
             _ => {}
@@ -219,9 +530,9 @@ impl Checker<'_> {
         if inlined {
             match index {
                 Type::Char(value) => {
-                    return self.read_array_at(class, length, Some(*value as i32), span, None);
+                    return Type::Integer(*value as i32);
                 }
-                Type::Character => return self.read_array_at(class, length, None, span, None),
+                Type::Character => return Type::Integral(IntegerType::FIXED_INT32),
                 _ => {}
             }
         }
@@ -233,7 +544,7 @@ impl Checker<'_> {
             }
             self.diagnostics.push(crate::Diagnostic::type_mismatch(
                 span,
-                "clojure.core/aget index",
+                &format!("{operation} index"),
                 if inlined {
                     "Number or Character"
                 } else {
@@ -249,7 +560,7 @@ impl Checker<'_> {
         } else if !index.subtype_of(&Type::Integral(IntegerType::INT32)) {
             self.arithmetic_exception();
         }
-        self.read_array_at(class, length, None, span, None)
+        Type::Integral(IntegerType::FIXED_INT32)
     }
 
     fn check_array_receiver(

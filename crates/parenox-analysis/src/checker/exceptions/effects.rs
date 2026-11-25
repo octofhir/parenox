@@ -137,6 +137,12 @@ impl Checker<'_> {
         }
     }
 
+    pub(in crate::checker) fn array_store(&mut self) {
+        if let Some(throws) = &mut self.throws {
+            throws.record(ExceptionClass::ArrayStoreException, Type::Throwable);
+        }
+    }
+
     pub(in crate::checker) fn arity_error(&mut self) {
         if let Some(throws) = &mut self.throws {
             throws.record(ExceptionClass::ArityException, Type::Throwable);

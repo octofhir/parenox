@@ -21,6 +21,7 @@ pub(super) enum ExceptionClass {
     ArithmeticException,
     IndexOutOfBoundsException,
     ArrayIndexOutOfBoundsException,
+    ArrayStoreException,
     ExceptionInfo,
     IOException,
     FileNotFoundException,
@@ -52,6 +53,7 @@ impl ExceptionClass {
             "ArithmeticException" => Some(Self::ArithmeticException),
             "IndexOutOfBoundsException" => Some(Self::IndexOutOfBoundsException),
             "ArrayIndexOutOfBoundsException" => Some(Self::ArrayIndexOutOfBoundsException),
+            "ArrayStoreException" => Some(Self::ArrayStoreException),
             _ => None,
         }
     }

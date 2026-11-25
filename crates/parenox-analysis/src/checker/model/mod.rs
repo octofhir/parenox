@@ -7,6 +7,7 @@ mod fdefs;
 mod guards;
 mod imports;
 mod interfaces;
+mod multimethods;
 mod partial;
 mod references;
 mod require;
@@ -202,6 +203,7 @@ pub(crate) struct Model {
     core_in_project: Option<bool>,
     set_namespace_in_project: Option<bool>,
     pub functions: BTreeMap<String, Function>,
+    multimethod_contracts: BTreeMap<String, (usize, Contract)>,
     checked_data_functions: BTreeSet<String>,
     // Conservative references to unannotated helpers, including transitive cache dependencies.
     helper_dependencies: BTreeMap<String, BTreeSet<String>>,
@@ -393,6 +395,9 @@ impl Model {
             }
         }
         for (name, parts) in fdefs {
+            if model.read_multimethod_contract(declarations, &name, parts, source, globals) {
+                continue;
+            }
             if model.unchecked_functions.contains_key(&name) {
                 model.diagnostics.push(Diagnostic::analysis_gap(
                     "PNX9001",
