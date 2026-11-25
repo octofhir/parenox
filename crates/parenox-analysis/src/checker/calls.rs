@@ -1213,6 +1213,12 @@ impl<'model> Checker<'model> {
                     | "clojure.core/range"
                     | "clojure.core/take"
                     | "clojure.core/drop"
+                    | "clojure.core/split-at"
+                    | "clojure.core/concat"
+                    | "clojure.core/interpose"
+                    | "clojure.core/interleave"
+                    | "clojure.core/repeat"
+                    | "clojure.core/cycle"
                     | "clojure.core/constantly"
                     | "clojure.core/not="
                     | "clojure.core/subvec"
@@ -1491,6 +1497,12 @@ impl<'model> Checker<'model> {
                     | "clojure.core/range"
                     | "clojure.core/take"
                     | "clojure.core/drop"
+                    | "clojure.core/split-at"
+                    | "clojure.core/concat"
+                    | "clojure.core/interpose"
+                    | "clojure.core/interleave"
+                    | "clojure.core/repeat"
+                    | "clojure.core/cycle"
                     | "clojure.core/subvec"
                     | "clojure.core/first"
                     | "clojure.core/next"
@@ -1535,7 +1547,12 @@ impl<'model> Checker<'model> {
             }
             "clojure.core/nth" => return self.nth(args),
             "clojure.core/range" => return self.range(args),
-            "clojure.core/take" | "clojure.core/drop" => {
+            "clojure.core/concat" => return self.concat(args),
+            "clojure.core/interpose" => return self.interpose(args, span),
+            "clojure.core/interleave" => return self.interleave(args),
+            "clojure.core/repeat" => return self.repeat(args),
+            "clojure.core/cycle" => return self.cycle(&args[0]),
+            "clojure.core/take" | "clojure.core/drop" | "clojure.core/split-at" => {
                 return self.slice_sequence(name, args, span);
             }
             "clojure.core/odd?" | "clojure.core/even?" => {
@@ -1779,8 +1796,14 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
             Arity::Fixed(2),
             Arity::Fixed(3),
         ],
-        "clojure.core/+" | "clojure.core/*" | "clojure.core/str" | "clojure.core/conj"
-        | "clojure.core/list" | "clojure.core/merge" => &[Arity::Variadic(0)],
+        "clojure.core/+"
+        | "clojure.core/*"
+        | "clojure.core/str"
+        | "clojure.core/conj"
+        | "clojure.core/list"
+        | "clojure.core/merge"
+        | "clojure.core/concat"
+        | "clojure.core/interleave" => &[Arity::Variadic(0)],
         "clojure.core/-"
         | "clojure.core/="
         | "clojure.core/not="
@@ -1793,9 +1816,13 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         | "clojure.core/ex-info"
         | "clojure.string/split" => &[Arity::Fixed(2), Arity::Fixed(3)],
         "clojure.string/replace" => &[Arity::Fixed(3)],
-        "clojure.core/take" | "clojure.core/drop" => &[Arity::Fixed(1), Arity::Fixed(2)],
+        "clojure.core/take"
+        | "clojure.core/drop"
+        | "clojure.core/interpose"
+        | "clojure.core/repeat" => &[Arity::Fixed(1), Arity::Fixed(2)],
         "clojure.string/join" => &[Arity::Fixed(1), Arity::Fixed(2)],
         "clojure.core/cons"
+        | "clojure.core/split-at"
         | "clojure.lang.MapEntry/create"
         | "clojure.core/find"
         | "clojure.core/select-keys"
@@ -1963,6 +1990,12 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/range"
             | "clojure.core/take"
             | "clojure.core/drop"
+            | "clojure.core/split-at"
+            | "clojure.core/concat"
+            | "clojure.core/interpose"
+            | "clojure.core/interleave"
+            | "clojure.core/repeat"
+            | "clojure.core/cycle"
             | "clojure.core/odd?"
             | "clojure.core/even?"
             | "clojure.core/alength"

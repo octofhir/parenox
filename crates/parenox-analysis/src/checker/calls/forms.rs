@@ -28,6 +28,7 @@ pub(super) enum CoreForm {
     Update,
     MapTransform,
     LazyMap,
+    Repeatedly,
     GroupBy,
     MergeWith,
     Apply,
@@ -69,6 +70,7 @@ impl CoreForm {
             "update" | "update-in" => Self::Update,
             "update-keys" | "update-vals" => Self::MapTransform,
             "map" => Self::LazyMap,
+            "repeatedly" => Self::Repeatedly,
             "group-by" => Self::GroupBy,
             "merge-with" => Self::MergeWith,
             "apply" => Self::Apply,
@@ -95,6 +97,7 @@ impl CoreForm {
                 | Self::Update
                 | Self::MapTransform
                 | Self::LazyMap
+                | Self::Repeatedly
                 | Self::GroupBy
                 | Self::MergeWith
                 | Self::Apply
@@ -175,6 +178,7 @@ impl Checker<'_> {
             CoreForm::Update => self.update(xs, span, env, name),
             CoreForm::MapTransform => self.map_transform(&xs[1..], span, env, name),
             CoreForm::LazyMap => self.lazy_map(xs, span, env),
+            CoreForm::Repeatedly => self.repeatedly(xs, span, env),
             CoreForm::GroupBy => self.group_by(&xs[1..], span, env),
             CoreForm::MergeWith => self.merge_with(&xs[1..], span, env),
             CoreForm::Apply => self.apply_form(xs, span, env),

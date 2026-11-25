@@ -496,6 +496,8 @@ impl Checker<'_> {
                 if !matches!(
                     name.as_str(),
                     "clojure.core/conj"
+                        | "clojure.core/concat"
+                        | "clojure.core/interleave"
                         | "clojure.core/merge"
                         | "clojure.core/disj"
                         | "clojure.core/dissoc"
