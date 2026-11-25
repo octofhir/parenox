@@ -5,10 +5,10 @@ use super::super::{
 use super::{
     ArgumentForms, Callable, PreparedCallable, call_returns, narrow_emptiness,
     narrow_seq_emptiness, predicate_type,
-    sequences::{collection_emptiness, iteration_may_throw},
+    sequences::{SequenceSlice, collection_emptiness, iteration_may_throw},
 };
 use crate::reader::{Form, Kind, Span};
-use crate::types::{IntegerClass, IntegerType, Type};
+use crate::types::{Compatibility, IntegerClass, IntegerType, LengthBounds, Type};
 use crate::{ContractKind, Diagnostic};
 
 const MAX_VECTOR_TRANSFORM_STEPS: usize = 128;
@@ -173,9 +173,8 @@ impl Checker<'_> {
                 let args = self.typed_args(&forms[1..], env);
                 Some(self.append_vector_inputs(&args))
             }
-            // The empty vector literal supplies the ordinary conj! step.
-            [transducer, source] if matches!(&target.kind, Kind::Vector(items) if items.is_empty()) => {
-                self.collect_vector_transducer(transducer, source, span, env)
+            [transducer, source] => {
+                self.collect_vector_transducer(target, transducer, source, span, env)
             }
             _ => None,
         }
@@ -224,18 +223,27 @@ impl Checker<'_> {
 
     fn collect_vector_transducer(
         &mut self,
+        target: &Form,
         transducer: &Form,
         source: &Form,
         span: Span,
         env: &Env,
     ) -> Option<Value> {
-        let Kind::List(form) = &transducer.kind else {
+        let (Kind::Vector(target_items), Kind::List(form)) = (&target.kind, &transducer.kind)
+        else {
             return None;
         };
         let [operator, callback] = form.as_slice() else {
             return None;
         };
-        let operation = match self.standard_core_name(operator, env)?.as_str() {
+        let name = self.standard_core_name(operator, env)?;
+        if matches!(name.as_str(), "clojure.core/take" | "clojure.core/drop") {
+            return Some(self.collect_vector_slice(&name, target, callback, source, env));
+        }
+        if !target_items.is_empty() {
+            return None;
+        }
+        let operation = match name.as_str() {
             "clojure.core/map" => VectorOperation::Map,
             "clojure.core/filter" => VectorOperation::Filter(callback),
             "clojure.core/keep" => VectorOperation::Keep,
@@ -249,6 +257,96 @@ impl Checker<'_> {
                 };
                 checker.collect_vector_using(selected, source, operation, span, scope)
             }),
+        )
+    }
+
+    fn collect_vector_slice(
+        &mut self,
+        name: &str,
+        target: &Form,
+        count: &Form,
+        source: &Form,
+        env: &Env,
+    ) -> Value {
+        let destination = self.infer(target, env);
+        let target_returns = !destination.stops_evaluation();
+        let limit = self.infer_path(count, env, target_returns, false);
+        let construction_returns = target_returns && !limit.stops_evaluation();
+        let input = self.infer_path(source, env, construction_returns, false);
+        if !construction_returns || input.stops_evaluation() {
+            return Value::new(Type::Never);
+        }
+        let (Type::Tuple(prefix), Some(LiteralContainer::Vector(_))) =
+            (&destination.known, &destination.literal_container)
+        else {
+            return self.unchecked_form(target.span, "into needs a proven ordinary vector target");
+        };
+        if input.known == Type::Nil {
+            return destination;
+        }
+        let (Type::Tuple(items), Some(LiteralContainer::Vector(_))) =
+            (&input.known, &input.literal_container)
+        else {
+            return self.unchecked_form(
+                source.span,
+                "into needs a proven ordinary vector or Nil source for this transducer",
+            );
+        };
+        if items.is_empty() {
+            return destination;
+        }
+        // The transducer tests its count when the source supplies its first item.
+        let start = self.diagnostics.len();
+        self.expect(&limit, &Type::Number, count.span, name);
+        self.note_builtin_contract(start, name);
+        if limit.known.compatibility(&Type::Number) == Compatibility::Mismatch {
+            self.may_throw();
+            return Value::new(Type::Never);
+        }
+        let decrements = if name == "clojure.core/take" {
+            1
+        } else {
+            items.len() as i64
+        };
+        if let Some(count) = limit.known.exact_long_value()
+            && count.checked_sub(decrements).is_none()
+        {
+            if limit.known.subtype_of(&Type::Integral(IntegerType::FIXED)) {
+                self.arithmetic_exception();
+                return Value::new(Type::Never);
+            }
+            self.may_throw();
+        }
+
+        let slice = SequenceSlice::new(name, &limit.known);
+        if let Some(range) = slice.positions(items.len()) {
+            let length = prefix.len() + range.len();
+            let kept = range.map(|index| input.position_value(items[index].clone(), index));
+            let contents = prefix
+                .iter()
+                .enumerate()
+                .map(|(index, item)| destination.position_value(item.clone(), index))
+                .chain(kept);
+            let mut result = literal_vector_value(contents, length, true);
+            if matches!(result.known, Type::Vector(_)) {
+                result.narrow(Type::BoundedCollection(
+                    Box::new(result.known.clone()),
+                    LengthBounds::exact(length),
+                ));
+            }
+            result.notes.clone_from(&input.notes);
+            return result;
+        }
+        self.may_throw();
+        let element = Type::union(prefix.iter().chain(items).cloned());
+        let lengths = slice.lengths(LengthBounds::exact(items.len()));
+        let lengths = LengthBounds {
+            min: prefix.len() + lengths.min,
+            max: lengths.max.map(|max| prefix.len() + max),
+        };
+        Value::with_notes(
+            Type::BoundedCollection(Box::new(Type::Vector(Box::new(element))), lengths),
+            input.notes,
         )
     }
 

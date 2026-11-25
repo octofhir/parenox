@@ -1211,6 +1211,8 @@ impl<'model> Checker<'model> {
                     | "clojure.core/first"
                     | "clojure.core/nth"
                     | "clojure.core/range"
+                    | "clojure.core/take"
+                    | "clojure.core/drop"
                     | "clojure.core/constantly"
                     | "clojure.core/not="
                     | "clojure.core/subvec"
@@ -1487,6 +1489,8 @@ impl<'model> Checker<'model> {
                     | "clojure.core/set"
                     | "clojure.core/seq"
                     | "clojure.core/range"
+                    | "clojure.core/take"
+                    | "clojure.core/drop"
                     | "clojure.core/subvec"
                     | "clojure.core/first"
                     | "clojure.core/next"
@@ -1531,6 +1535,9 @@ impl<'model> Checker<'model> {
             }
             "clojure.core/nth" => return self.nth(args),
             "clojure.core/range" => return self.range(args),
+            "clojure.core/take" | "clojure.core/drop" => {
+                return self.slice_sequence(name, args, span);
+            }
             "clojure.core/odd?" | "clojure.core/even?" => {
                 let (number, site) = &args[0];
                 self.expect(number, &Type::Integral(IntegerType::ANY), *site, name);
@@ -1786,6 +1793,7 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         | "clojure.core/ex-info"
         | "clojure.string/split" => &[Arity::Fixed(2), Arity::Fixed(3)],
         "clojure.string/replace" => &[Arity::Fixed(3)],
+        "clojure.core/take" | "clojure.core/drop" => &[Arity::Fixed(1), Arity::Fixed(2)],
         "clojure.string/join" => &[Arity::Fixed(1), Arity::Fixed(2)],
         "clojure.core/cons"
         | "clojure.lang.MapEntry/create"
@@ -1953,6 +1961,8 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/val"
             | "clojure.core/count"
             | "clojure.core/range"
+            | "clojure.core/take"
+            | "clojure.core/drop"
             | "clojure.core/odd?"
             | "clojure.core/even?"
             | "clojure.core/alength"

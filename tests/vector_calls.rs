@@ -189,6 +189,59 @@ fn into_checks_transducers_with_the_actual_vector_positions() {
 }
 
 #[test]
+fn into_checks_take_and_drop_transducers_on_ordinary_vectors() {
+    let report = check(
+        r#"
+(defn take-prefix {:t/sig '[:-> (s/tuple #{false} #{"kept"})]} []
+  (into [] (take 2) [false "kept" :skipped]))
+(defn drop-prefix {:t/sig '[:-> #{"nested"}]} []
+  (first (first (into [] (drop 1) [false ["nested"]]))))
+(defn append-prefix {:t/sig '[:-> (s/tuple #{:start} #{"kept"})]} []
+  (into [:start] (drop 1) [false "kept"]))
+(defn variable {:t/sig '[number? :-> (s/coll-of int? :kind vector? :max-count 2)]} [limit]
+  (into [] (take limit) [1 2]))
+(defn variable-appended {:t/sig '[number? :-> (s/coll-of int? :kind vector? :min-count 1 :max-count 3)]}
+  [limit] (into [0] (take limit) [1 2]))
+(defn no-input {:t/sig '[:-> #{true}]} []
+  (empty? (into [] (take :invalid) nil)))
+(defn source-before-step {:t/sig '[:-> #{:source}]} []
+  (try (into [] (drop :invalid) (throw (ex-info "source" {:part :source})))
+       (catch clojure.lang.ExceptionInfo e (:part (ex-data e)))))
+(defn target-before-construction {:t/sig '[:-> #{:target}]} []
+  (try (into [(throw (ex-info "target" {:part :target}))]
+             (take (throw (ex-info "count" {:part :count})))
+             [1])
+       (catch clojure.lang.ExceptionInfo e (:part (ex-data e)))))
+(defn take-overflow {:t/sig '[:-> #{:overflow}]} []
+  (try (into [] (take -9223372036854775808) [1])
+       (catch ArithmeticException _ :overflow)))
+(defn drop-overflow {:t/sig '[:-> #{:overflow}]} []
+  (try (into [] (drop -9223372036854775807) [1 2])
+       (catch ArithmeticException _ :overflow)))
+"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let items = "1 ".repeat(20);
+    let source = format!(
+        "(defn larger-result {{:t/sig '[:-> #{{true}}]}} []
+           (= 40 (count (into [{items}] (take 20) [{items}]))))"
+    );
+    let report = check(&source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let report = check(
+        r#"(defn bad {:t/sig '[:-> any?]} []
+               (into [] (take :invalid) [1]))"#,
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+}
+
+#[test]
 fn into_checks_reached_callback_uses_and_leaves_custom_traversal_open() {
     let body = r#"(ns lens (:require [clojure.spec.alpha :as s]))
 (defn range-for {:t/sig '[{:row int?} :-> int?]} [position] (:row position))

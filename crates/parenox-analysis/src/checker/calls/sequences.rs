@@ -1,13 +1,18 @@
 //! Vector and sequence traversal and accumulation.
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::Arc;
 
-use super::super::{Checker, LiteralContainer, Value, exact_set_member, literal_vector_value};
+use super::super::{
+    Checker, LiteralContainer, Value, exact_set_member, flow::has_closed_scalar_class,
+    literal_vector_value, nil_part,
+};
 use super::{literal_equality, vectors::element_type};
 use crate::Diagnostic;
 use crate::reader::Span;
 use crate::types::{
-    ExtraFields, IntegerClass, IntegerType, LengthBounds, MAX_TUPLE_ITEMS, MapType, Type,
+    Compatibility, ExtraFields, IntegerClass, IntegerType, LengthBounds, MAX_TUPLE_ITEMS, MapType,
+    Type,
 };
 
 #[derive(Clone, Copy)]
@@ -23,7 +28,7 @@ fn fixed_range(start: i64, end: i64, step: i64) -> Type {
         return Type::empty_list();
     }
     if step == 0 {
-        return Type::Seq(Box::new(Type::exact_long(start, IntegerClass::IntOrLong)));
+        return infinite_sequence(Type::exact_long(start, IntegerClass::IntOrLong));
     }
     // Inputs are i32 values widened to i64, so even the full distance fits.
     let distance = if step > 0 { end - start } else { start - end };
@@ -125,6 +130,89 @@ pub(super) fn nonempty_sequence(element: Type, lengths: LengthBounds) -> Type {
     }
 }
 
+fn infinite_sequence(element: Type) -> Type {
+    // Cover every lower bound expressible in a collection contract.
+    nonempty_sequence(
+        element,
+        LengthBounds {
+            min: i32::MAX as usize,
+            max: None,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SequenceSlice {
+    Take(Option<usize>),
+    Drop(Option<usize>),
+}
+
+impl SequenceSlice {
+    pub(super) fn new(name: &str, count: &Type) -> Self {
+        let limit = count
+            .exact_long_value()
+            .map(|value| usize::try_from(value.max(0)).unwrap_or(usize::MAX));
+        match name {
+            "clojure.core/take" => Self::Take(limit),
+            "clojure.core/drop" => Self::Drop(limit),
+            _ => unreachable!("take or drop was resolved before slicing"),
+        }
+    }
+
+    pub(super) fn positions(self, length: usize) -> Option<Range<usize>> {
+        match self {
+            Self::Take(Some(limit)) => Some(0..limit.min(length)),
+            Self::Drop(Some(count)) => Some(count.min(length)..length),
+            Self::Take(None) | Self::Drop(None) => None,
+        }
+    }
+
+    pub(super) fn lengths(self, source: LengthBounds) -> LengthBounds {
+        match self {
+            Self::Take(Some(limit)) => LengthBounds {
+                min: limit.min(source.min),
+                max: Some(source.max.map_or(limit, |max| max.min(limit))),
+            },
+            Self::Drop(Some(count)) => source.after_consuming(count),
+            Self::Take(None) | Self::Drop(None) => LengthBounds {
+                min: 0,
+                max: source.max,
+            },
+        }
+    }
+}
+
+fn slice_sequence_type(sequence: Type, slice: SequenceSlice) -> Type {
+    match sequence {
+        Type::Nil => Type::empty_seq(),
+        Type::Never | Type::Unknown => Type::Unknown,
+        Type::Union(parts) => Type::union(
+            parts
+                .into_iter()
+                .map(|part| slice_sequence_type(part, slice)),
+        ),
+        Type::SeqTuple(items) | Type::ListTuple(items)
+            if let Some(positions) = slice.positions(items.len()) =>
+        {
+            Type::SeqTuple(items[positions].into())
+        }
+        shape => {
+            let lengths = slice.lengths(shape.length_bounds());
+            if lengths.max == Some(0) {
+                return Type::empty_seq();
+            }
+            let element = element_type(shape)
+                .unwrap_or_else(|_| unreachable!("a sequence has an element type"));
+            let sequence = nonempty_sequence(element, lengths);
+            if lengths.min == 0 {
+                Type::union([Type::empty_seq(), sequence])
+            } else {
+                sequence
+            }
+        }
+    }
+}
+
 fn nonempty_seq(items: &[Type]) -> Type {
     if items.is_empty() {
         Type::Nil
@@ -199,7 +287,7 @@ impl Checker<'_> {
             self.expect(arg, &Type::Number, *span, "clojure.core/range");
         }
         if args.is_empty() {
-            return Value::new(Type::Seq(Box::new(Type::Integral(IntegerType::ANY))));
+            return Value::new(infinite_sequence(Type::Integral(IntegerType::ANY)));
         }
         let fixed = Type::Integral(IntegerType::FIXED);
         let integer = Type::Integral(IntegerType::ANY);
@@ -229,6 +317,62 @@ impl Checker<'_> {
             Type::empty_list(),
             Type::Seq(Box::new(element)),
         ]))
+    }
+
+    pub(super) fn slice_sequence(
+        &mut self,
+        name: &str,
+        args: &[(Value, Span)],
+        span: Span,
+    ) -> Value {
+        let [(count, count_span), (source, source_span)] = args else {
+            return self.unsupported(
+                span,
+                format!("Type analysis for an unapplied {name} transducer is unavailable"),
+            );
+        };
+        self.expect(count, &Type::Number, *count_span, name);
+        let slice = SequenceSlice::new(name, &count.known);
+        if matches!(slice, SequenceSlice::Take(Some(0))) {
+            return Value::new(Type::empty_seq());
+        }
+        if matches!(slice, SequenceSlice::Drop(None))
+            && !has_closed_scalar_class(&source.known)
+            && !matches!(source.literal_container, Some(LiteralContainer::List(_)))
+        {
+            // IDrop collections can check the argument during construction.
+            if matches!(source.literal_container, Some(LiteralContainer::Vector(_)))
+                && count.known.compatibility(&Type::Number) == Compatibility::Mismatch
+            {
+                if nil_part(&count.known) != Type::Never {
+                    self.null_pointer();
+                }
+                if !count.known.subtype_of(&Type::Nil) {
+                    self.class_cast();
+                }
+                return Value::new(Type::Never);
+            }
+            self.may_throw();
+        }
+
+        // Deferred traversal can still be checked for types.
+        let enclosing = self.throws.take();
+        let sequence = self.sequence_call(name, source, *source_span);
+        self.throws = enclosing;
+        let mut result =
+            Value::with_notes(slice_sequence_type(sequence.known, slice), sequence.notes);
+        if let Type::SeqTuple(items) = &result.known
+            && let Some(positions) = sequence
+                .literal_container
+                .as_ref()
+                .and_then(LiteralContainer::child_positions)
+            && let Some(range) = slice.positions(positions.len())
+            && range.len() == items.len()
+        {
+            result.literal_container =
+                Some(LiteralContainer::Positions(Arc::from(&positions[range])));
+        }
+        result
     }
 
     pub(super) fn cons(&mut self, args: &[(Value, Span)]) -> Value {
@@ -511,7 +655,7 @@ impl Checker<'_> {
         span: Span,
     ) -> Value {
         let operation = match name {
-            "clojure.core/seq" => ReadSequence::Start,
+            "clojure.core/seq" | "clojure.core/take" | "clojure.core/drop" => ReadSequence::Start,
             "clojure.core/first" => ReadSequence::Head,
             "clojure.core/next" => ReadSequence::Tail,
             "clojure.core/rest" => ReadSequence::Rest,

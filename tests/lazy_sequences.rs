@@ -124,6 +124,76 @@ fn lazy_map_preserves_the_shortest_source_bounds() {
 }
 
 #[test]
+fn take_preserves_prefix_types_and_caps_sequence_length() {
+    for (expression, result) in [
+        ("(= 10 (count (take 10 (range))))", "#{true}"),
+        (
+            "(= 1000000000 (count (take 1000000000 (range))))",
+            "#{true}",
+        ),
+        ("(= 1 (count (take 10 [:one])))", "#{true}"),
+        ("(apply inc (take 1 (range 4 20)))", "int?"),
+        ("(nth (take 2 [false \"middle\" :tail]) 1)", "#{\"middle\"}"),
+        (
+            "(first (first (take 1 [[\"nested\"] nil])))",
+            "#{\"nested\"}",
+        ),
+        ("(empty? (take -1 false))", "#{true}"),
+        (
+            "(try (take 0 (throw (ex-info \"source\" {}))) (catch Exception e :source))",
+            "#{:source}",
+        ),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+    let report = check("(take 2 false)", "any?");
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX2322");
+    let report = check("(take 1)", "any?");
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX9001");
+}
+
+#[test]
+fn drop_preserves_tail_types_and_consumes_sequence_bounds() {
+    for (expression, result) in [
+        ("(= 33 (count (drop 67 (range 100))))", "#{true}"),
+        (
+            "(apply inc (take 1 (drop 2 [1 2 8 7])))",
+            "(s/and int? #{9})",
+        ),
+        (
+            "(first (first (drop 1 [false [\"nested\"]])))",
+            "#{\"nested\"}",
+        ),
+        ("(first (drop -1 [:first \"next\"]))", "#{:first}"),
+        ("(empty? (drop 3 [1 2]))", "#{true}"),
+        ("(empty? (drop 1000000000 (range 100)))", "#{true}"),
+        ("(= 10 (count (take 10 (drop 1000 (range)))))", "#{true}"),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+
+    let report = check("(drop 0 false)", "any?");
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX2322");
+    let report = check(
+        "(try (drop :bad [1]) (catch ClassCastException _ :caught))",
+        "#{:caught}",
+    );
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2322");
+    let report = check("(drop 1)", "any?");
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX9001");
+}
+
+#[test]
 fn unsupported_map_traversal_is_distinguished_from_a_nonseqable_source() {
     let array = check("(map identity (byte-array 4))", "t/any");
     assert!(!array.complete, "{array:#?}");
