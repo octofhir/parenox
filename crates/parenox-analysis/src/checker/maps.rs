@@ -12,7 +12,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::{
-    Checker, Env, LiteralContainer, Value, calls::call_returns, nil_part, quote::quoted_symbol,
+    Checker, Env, LiteralContainer, Value,
+    calls::{array_key_is_nonnumeric, boxed_array_element, call_returns, stable_array_key},
+    nil_part,
+    quote::quoted_symbol,
 };
 use crate::Diagnostic;
 use crate::reader::{Form, Kind, Span};
@@ -415,6 +418,16 @@ impl Checker<'_> {
         };
         let ty = match &value.known {
             _ if scalar => absent(),
+            Type::JvmArray(class) => {
+                match self.array_lookup_presence(key, value.known_array_length()) {
+                    Some(false) => absent(),
+                    Some(true) => boxed_array_element(*class),
+                    None if matches!(mode, Lookup::Required | Lookup::Presence) => {
+                        boxed_array_element(*class)
+                    }
+                    None => Type::union([boxed_array_element(*class), default_type()]),
+                }
+            }
             indexed
                 if let Some(index) = key.associative_index()
                     && let Some(item) = indexed.indexed_item(index) =>
@@ -594,6 +607,22 @@ impl Checker<'_> {
         let mut args = args.into_iter();
         let (value, _) = args.next().unwrap();
         let (key_value, key_span) = args.next().unwrap();
+        if matches!(value.known, Type::JvmArray(_)) {
+            let presence = stable_array_key(&key_value.known)
+                .then(|| env.presence(target, key))
+                .flatten();
+            let result = presence.map_or_else(
+                || {
+                    self.contains_array_index(
+                        &key_value.known,
+                        value.known_array_length(),
+                        key_span,
+                    )
+                },
+                Type::Bool,
+            );
+            return Value::with_notes(result, value.notes);
+        }
         let key_type = if matches!(value.known, Type::Set(_)) {
             key_value.known
         } else {
@@ -613,6 +642,38 @@ impl Checker<'_> {
             Some(present) => Type::Bool(present),
             None => self.contains_type(&value.known, key_type, target.span, value.is_literal_set()),
         })
+    }
+
+    fn contains_array_index(&mut self, key: &Type, length: Option<usize>, span: Span) -> Type {
+        match key {
+            Type::Never => return Type::Never,
+            Type::Unknown => {
+                self.may_throw();
+                return Type::Unknown;
+            }
+            Type::Union(parts) => {
+                return Type::union(
+                    parts
+                        .iter()
+                        .map(|key| self.contains_array_index(key, length, span)),
+                );
+            }
+            _ => {}
+        }
+        if !key.subtype_of(&Type::Number) {
+            self.illegal_argument();
+        }
+        if array_key_is_nonnumeric(key) {
+            self.diagnostics.push(Diagnostic::type_mismatch(
+                span,
+                "contains? JVM array index",
+                "Number".into(),
+                key.inferred().to_string(),
+            ));
+            return Type::Never;
+        }
+        self.array_lookup_presence(key, length)
+            .map_or(Type::Boolean, Type::Bool)
     }
 
     fn contains_type(&mut self, ty: &Type, key: &Type, span: Span, literal_set: bool) -> Type {

@@ -9,7 +9,7 @@ use super::super::{
     Checker, Env, LiteralContainer, Value, exact_set_member, flow::has_closed_scalar_class,
     literal_vector_value, nil_part,
 };
-use super::{literal_equality, vectors::element_type};
+use super::{arrays::boxed_array_element, literal_equality, vectors::element_type};
 use crate::Diagnostic;
 use crate::reader::{Form, Span};
 use crate::types::{
@@ -23,6 +23,18 @@ enum ReadSequence {
     Head,
     Tail,
     Rest,
+}
+
+fn reads_array(name: &str) -> bool {
+    matches!(
+        name,
+        "clojure.core/seq"
+            | "clojure.core/first"
+            | "clojure.core/next"
+            | "clojure.core/rest"
+            | "clojure.core/distinct"
+            | "clojure.core/frequencies"
+    )
 }
 
 fn fixed_range(start: i64, end: i64, step: i64) -> Type {
@@ -367,7 +379,7 @@ fn bounded_sequence_value(element: Type, lengths: LengthBounds, notes: Vec<Strin
 
 fn modeled_distinct_source(ty: &Type) -> bool {
     match ty {
-        Type::Nil | Type::Never | Type::Unknown => true,
+        Type::Nil | Type::Never | Type::Unknown | Type::JvmArray(_) => true,
         Type::Union(parts) => parts.iter().all(modeled_distinct_source),
         Type::Parameter(parameter) => parameter
             .upper
@@ -1588,6 +1600,11 @@ impl Checker<'_> {
         let empty = value
             .exact_set_members()
             .map(|members| Type::Bool(members.is_empty()))
+            .or_else(|| {
+                value
+                    .known_array_length()
+                    .map(|length| Type::Bool(length == 0))
+            })
             .or_else(|| collection_emptiness(&value.known));
         let Some(empty) = empty else {
             self.diagnostics.push(Diagnostic::type_mismatch(
@@ -1600,6 +1617,9 @@ impl Checker<'_> {
         };
         if name == "clojure.core/empty?" {
             return Value::with_notes(empty, value.notes.clone());
+        }
+        if empty == Type::Bool(true) {
+            return Value::with_notes(Type::Nil, value.notes.clone());
         }
         let nonempty = narrow_emptiness(&value.known, false);
         let mut result = value.clone();
@@ -1667,7 +1687,14 @@ impl Checker<'_> {
         if iteration_may_throw(&value.known) {
             self.may_throw();
         }
-        let result = self.read_sequence(operation, &value.known, name, span, true);
+        let result = match (&value.known, value.known_array_length()) {
+            (Type::JvmArray(class), Some(length)) if reads_array(name) => operation.bounded(
+                boxed_array_element(*class),
+                LengthBounds::exact(length),
+                true,
+            ),
+            _ => self.read_sequence(operation, &value.known, name, span, true),
+        };
         if matches!(operation, ReadSequence::Head) {
             if matches!(value.known, Type::Map(_)) {
                 return value.traversal_element(result);
@@ -1850,6 +1877,7 @@ impl Checker<'_> {
                 }
             }
             Type::String => op.open(&Type::Character, 0),
+            Type::JvmArray(class) if reads_array(name) => op.open(&boxed_array_element(*class), 0),
             Type::Map(map) => self.read_map_sequence(op, map, name, span),
             Type::Union(parts) => Type::union(
                 parts
@@ -2009,7 +2037,7 @@ pub(super) fn collection_emptiness(ty: &Type) -> Option<Type> {
         }
         Type::Seq(_) | Type::List(_) | Type::MapEntry(_) => Type::Bool(false),
         Type::Vector(element) | Type::Set(element) if **element == Type::Never => Type::Bool(true),
-        Type::Vector(_) | Type::Set(_) | Type::String => Type::Boolean,
+        Type::Vector(_) | Type::Set(_) | Type::String | Type::JvmArray(_) => Type::Boolean,
         Type::Str(text) => Type::Bool(text.is_empty()),
         Type::Map(map) => map.emptiness().map_or(Type::Boolean, Type::Bool),
         Type::Union(parts) => Type::union(
@@ -2068,6 +2096,7 @@ fn counted_type(ty: &Type) -> Option<Type> {
         | Type::Set(_)
         | Type::SpecCollection(_)
         | Type::BoundedCollection(..)
+        | Type::JvmArray(_)
         | Type::Unknown => return Some(JVM_COUNT),
         Type::Never => return Some(Type::Never),
         Type::Parameter(parameter) => return counted_type(parameter.upper.as_ref()?),
@@ -2084,6 +2113,12 @@ impl Checker<'_> {
     pub(super) fn count(&mut self, (value, span): &(Value, Span)) -> Value {
         if let Some(members) = value.exact_set_members()
             && let Ok(size) = i32::try_from(members.len())
+        {
+            return Value::new(Type::Integer(size));
+        }
+        if let Some(size) = value
+            .known_array_length()
+            .and_then(|size| i32::try_from(size).ok())
         {
             return Value::new(Type::Integer(size));
         }

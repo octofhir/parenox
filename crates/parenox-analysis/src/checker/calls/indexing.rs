@@ -1,8 +1,9 @@
 //! Strict indexing through clojure.core/nth and vector invocation.
 use super::super::{Checker, LiteralContainer, Value, literal_vector_value};
+use super::arrays::{array_index_in_bounds, boxed_array_element};
 use crate::Diagnostic;
 use crate::reader::Span;
-use crate::types::{IndexedItem, Type};
+use crate::types::{IndexedItem, IntegerType, JvmArrayClass, Type};
 
 #[derive(Clone, Copy)]
 enum IndexedAccess {
@@ -32,26 +33,34 @@ impl Checker<'_> {
         let (key, key_span) = &args[1];
         let fallback = args.get(2).map(|(value, _)| value);
         let index = key.known.exact_integer_value();
+        let array = matches!(collection.known, Type::JvmArray(_));
+        let length = collection.known_array_length();
+        if !array {
+            self.may_throw();
+        }
         let proof = match (&collection.known, &collection.literal_container) {
             (Type::Tuple(items), Some(vector @ LiteralContainer::Vector(_))) => {
                 Some((items, vector))
             }
             _ => None,
         };
-        if self.partial_scope.is_some()
+        if !array
+            && self.partial_scope.is_some()
             && (index.is_none() || (proof.is_none() && collection.known != Type::Nil))
         {
             return Value::new(Type::Unknown);
         }
         let mut result = Value::new(self.nth_value(
-            (&collection.known, *collection_span),
+            (&collection.known, *collection_span, length),
             (&key.known, *key_span),
             fallback.map(|value| &value.known),
             IndexedAccess::Nth,
         ));
         if let Some(index) = index {
             let fallback_proof = || fallback.and_then(|value| value.literal_container.as_ref());
-            let selected = if collection.known == Type::Nil {
+            let selected = if collection.known == Type::Nil
+                || (array && array_index_in_bounds(index, length) == Some(false))
+            {
                 fallback_proof()
             } else if let Some((items, vector)) = proof {
                 match usize::try_from(index) {
@@ -138,7 +147,7 @@ impl Checker<'_> {
             return Value::new(Type::Unknown);
         };
         let mut result = Value::new(self.nth_value(
-            (&vector.known, head),
+            (&vector.known, head, None),
             (&key.known, *key_span),
             None,
             IndexedAccess::VectorCall,
@@ -155,7 +164,7 @@ impl Checker<'_> {
 
     fn nth_value(
         &mut self,
-        collection: (&Type, Span),
+        collection: (&Type, Span, Option<usize>),
         key: (&Type, Span),
         fallback: Option<&Type>,
         access: IndexedAccess,
@@ -165,6 +174,27 @@ impl Checker<'_> {
                 self.illegal_argument();
             }
             return self.nth_at(collection, (index, key.1), fallback, access);
+        }
+        if let (IndexedAccess::Nth, Type::JvmArray(class)) = (access, collection.0) {
+            match key.0 {
+                Type::Integral(_) => {
+                    if let Some(index) = key.0.exact_long_value() {
+                        self.arithmetic_exception();
+                        self.error(
+                            "PNX2801",
+                            key.1,
+                            format!("Index {index} is outside the JVM int range"),
+                        );
+                        return Type::Never;
+                    }
+                    if !key.0.subtype_of(&Type::Integral(IntegerType::INT32)) {
+                        self.arithmetic_exception();
+                    }
+                    return self.read_array_at(*class, collection.2, None, key.1, fallback);
+                }
+                Type::Union(_) => {}
+                _ => self.may_throw(),
+            }
         }
         match key.0 {
             Type::Never | Type::Unknown => key.0.clone(),
@@ -214,12 +244,12 @@ impl Checker<'_> {
 
     fn nth_at(
         &mut self,
-        collection: (&Type, Span),
+        collection: (&Type, Span, Option<usize>),
         index: (i32, Span),
         fallback: Option<&Type>,
         access: IndexedAccess,
     ) -> Type {
-        let (ty, span) = collection;
+        let (ty, span, length) = collection;
         match ty {
             Type::Nil => return fallback.cloned().unwrap_or(Type::Nil),
             Type::Never | Type::Unknown => return ty.clone(),
@@ -231,8 +261,11 @@ impl Checker<'_> {
                 return Type::union(
                     parts
                         .iter()
-                        .map(|part| self.nth_at((part, span), index, fallback, access)),
+                        .map(|part| self.nth_at((part, span, length), index, fallback, access)),
                 );
+            }
+            Type::JvmArray(class) if matches!(access, IndexedAccess::Nth) => {
+                return self.read_array_at(*class, length, Some(index.0), index.1, fallback);
             }
             _ => {}
         }
@@ -240,7 +273,7 @@ impl Checker<'_> {
             self.diagnostics.push(Diagnostic::type_mismatch(
                 span,
                 "clojure.core/nth",
-                "Vector | Seq | String | Nil".into(),
+                "Vector | Seq | String | JVM array | Nil".into(),
                 ty.inferred().to_string(),
             ));
             return Type::Unknown;
@@ -285,6 +318,43 @@ impl Checker<'_> {
                 self.diagnostics.push(diagnostic);
                 Type::Never
             }
+        }
+    }
+
+    pub(super) fn read_array_at(
+        &mut self,
+        class: JvmArrayClass,
+        length: Option<usize>,
+        index: Option<i32>,
+        span: Span,
+        fallback: Option<&Type>,
+    ) -> Type {
+        let in_bounds = index
+            .and_then(|index| array_index_in_bounds(index, length))
+            .or_else(|| (length == Some(0)).then_some(false));
+        if in_bounds == Some(false) {
+            if let Some(default) = fallback {
+                return default.clone();
+            }
+            self.array_index_out_of_bounds();
+            let message = match (index, length) {
+                (Some(index), Some(length)) => {
+                    format!("Index {index} is out of bounds for a JVM array of length {length}")
+                }
+                (Some(index), None) => format!("Index {index} is out of bounds for a JVM array"),
+                (None, _) => "Cannot index an empty JVM array".into(),
+            };
+            self.error("PNX2801", span, message);
+            return Type::Never;
+        }
+        let element = boxed_array_element(class);
+        if in_bounds == Some(true) {
+            element
+        } else if let Some(default) = fallback {
+            Type::union([element, default.clone()])
+        } else {
+            self.array_index_out_of_bounds();
+            element
         }
     }
 }

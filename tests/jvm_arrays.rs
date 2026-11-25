@@ -1,6 +1,275 @@
 use parenox::Session;
 
 #[test]
+fn aget_checks_boxed_reads_hints_and_indices() {
+    let source = r#"
+(ns demo)
+(defn byte-at {:t/sig '[bytes? int? :-> int?]} [^bytes buffer i] (aget buffer i))
+(defn flag {:t/sig '[:-> boolean?]} [] (aget (boolean-array 1) 0))
+(defn via-apply {:t/sig '[:-> char?]} [] (apply aget [(char-array [\x]) 0]))
+(defn fractional {:t/sig '[:-> int?]} [] (aget (byte-array 2) 0.5))
+(defn character-index {:t/sig '[:-> int?]} [] (aget (byte-array 2) \u0000))
+(defn in-bounds {:t/sig '[:-> int?]} []
+  (try (aget (byte-array 2) 1)
+       (catch IndexOutOfBoundsException _ :wrong)))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (body, exception, code) in [
+        (
+            "(aget (byte-array 2) 2)",
+            "ArrayIndexOutOfBoundsException",
+            "PNX2801",
+        ),
+        (
+            "(aget (byte-array 2) 4294967296N)",
+            "ArithmeticException",
+            "PNX2801",
+        ),
+        (
+            "(aget (byte-array 2) :bad)",
+            "ClassCastException",
+            "PNX2322",
+        ),
+        (
+            "(let [^ints a (byte-array 1)] (aget a 0))",
+            "ClassCastException",
+            "PNX2322",
+        ),
+        (
+            r"(apply aget [(byte-array 2) \u0000])",
+            "ClassCastException",
+            "PNX2322",
+        ),
+    ] {
+        let source = format!(
+            "(defn f {{:t/sig '[:-> #{{:caught}}]}} []
+               (try (do {body} :returned) (catch {exception} _ :caught)))"
+        );
+        let report = Session::default().check("arrays.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, code, "{report:#?}");
+    }
+
+    for source in [
+        "(defn f {:t/sig '[:-> t/any]} [] (aget (object-array [(byte-array 2)]) 0 1))",
+        r#"(ns demo (:require [clojure.spec.alpha :as s]))
+            (defn f {:t/sig '[bytes? (s/coll-of int? :kind vector? :min-count 1) :-> t/any]}
+              [buffer indices] (apply aget buffer indices))"#,
+    ] {
+        let report = Session::default().check("arrays.clj", source);
+        assert!(
+            !report.complete
+                && report
+                    .diagnostics
+                    .iter()
+                    .any(|finding| finding.code == "PNX9001"),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn array_contains_checks_numeric_indices_and_refines_guarded_reads() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn present {:t/sig '[:-> #{true}]} []
+  (contains? (byte-array 2) 4294967296N))
+(defn absent {:t/sig '[:-> #{false}]} []
+  (contains? (byte-array 2) 2))
+(defn negative {:t/sig '[:-> #{false}]} []
+  (contains? (byte-array 2) -1))
+(defn empty-array {:t/sig '[int? :-> #{false}]} [i]
+  (contains? (byte-array 0) i))
+(defn float-index {:t/sig '[:-> boolean?]} []
+  (contains? (byte-array 2) 0.5))
+(defn guarded {:t/sig '[bytes? int? :-> int?]} [buffer i]
+  (if (contains? buffer i)
+    (get buffer i :missing)
+    0))
+(defn absent-default {:t/sig '[bytes? int? :-> #{:present :missing}]} [buffer i]
+  (if (contains? buffer i) :present (get buffer i :missing)))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let unstable = source.replace("bytes? int? :-> int?", "bytes? number? :-> int?");
+    let report = Session::default().check("arrays.clj", &unstable);
+    assert!(!report.ok && report.complete, "{report:#?}");
+
+    for key in ["nil", ":not-an-index"] {
+        let source = format!(
+            "(defn f {{:t/sig '[:-> #{{:caught}}]}} []
+              (try (do (contains? (byte-array 1) {key}) :returned)
+                   (catch IllegalArgumentException _ :caught)))"
+        );
+        let report = Session::default().check("arrays.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, "PNX2322");
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            key
+        );
+    }
+}
+
+#[test]
+fn get_on_arrays_uses_number_int_value_and_preserves_missing_defaults() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn read-at {:t/sig '[:-> int?]} []
+  (get (byte-array 2) 1 :missing))
+(defn wrapped-index {:t/sig '[:-> boolean?]} []
+  (try (get (boolean-array 1) 4294967296N :missing)
+       (catch ArithmeticException _ :wrong)))
+(defn negative-index {:t/sig '[:-> #{:missing}]} []
+  (get (byte-array 2) 4294967295 :missing))
+(defn missing-key {:t/sig '[:-> #{"missing"}]} []
+  (first (get (byte-array 2) :not-an-index ["missing"])))
+(defn fallback-with-bounds {:t/sig '[:-> #{:missing}]} []
+  (get (byte-array 2) 2 :missing))
+(defn dynamic-index {:t/sig '[bytes? int? :-> (s/nilable int?)]} [buffer index]
+  (get buffer index))
+(defn empty-array {:t/sig '[number? :-> #{:missing}]} [index]
+  (get (byte-array 0) index :missing))
+(defn required-index {:t/sig '[:-> int?]} []
+  (try (req! (byte-array 1) 4294967296)
+       (catch IllegalArgumentException _ :wrong)))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let source = "(defn read-array {:t/sig '[:-> int?]} [] (req! (byte-array 2) 2))";
+    let report = Session::default().check("arrays.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2741");
+}
+
+#[test]
+fn array_reads_use_known_lengths_without_assuming_element_values() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn narrowed-size {:t/sig '[:-> #{true}]} []
+  (= 2 (alength (byte-array 4294967298))))
+(defn wrapped-size {:t/sig '[:-> #{true}]} []
+  (let [[array] [(object-array [:a :b :c])]] (= 3 (alength array))))
+(defn joined-size {:t/sig '[boolean? :-> #{true}]} [flag]
+  (= 2 (count (if flag (byte-array 2) (byte-array [3 4])))))
+(defn empty-seq {:t/sig '[:-> nil?]} [] (seq (int-array nil)))
+(defn empty-array {:t/sig '[:-> #{true}]} [] (empty? (int-array 0)))
+(defn empty-buffer {:t/sig '[:-> nil?]} [] (not-empty (byte-array 0)))
+(defn preserved-array {:t/sig '[:-> bytes?]} [] (not-empty (byte-array 1)))
+(defn first-element {:t/sig '[:-> int?]} [] (first (byte-array 2)))
+(defn tail-count {:t/sig '[:-> #{true}]} []
+  (= 999999 (count (next (int-array 1000000)))))
+(defn in-bounds {:t/sig '[:-> boolean?]} []
+  (try (nth (boolean-array 1) 0)
+       (catch ArrayIndexOutOfBoundsException _ :wrong)))
+(defn out-of-bounds {:t/sig '[:-> #{"missing"}]} []
+  (first (nth (byte-array 2) 2 ["missing"])))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let source = "(defn read-array {:t/sig '[:-> int?]} [] (nth (byte-array 2) 2))";
+    let report = Session::default().check("arrays.clj", source);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(report.complete, "{report:#?}");
+    assert_eq!(finding.code, "PNX2801");
+    assert!(finding.message.contains("length 2"), "{finding:#?}");
+}
+
+#[test]
+fn nth_on_arrays_checks_element_type_fallbacks_and_jvm_index_bounds() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn byte-at {:t/sig '[bytes? int? :-> int?]} [buffer i]
+  (nth buffer i))
+(defn flag-at {:t/sig '[:-> boolean?]} []
+  (nth (boolean-array [false]) 0 nil))
+(defn ref-at {:t/sig '[:-> t/any]} []
+  (nth (object-array [nil]) 0 :missing))
+(defn negative-fallback {:t/sig '[:-> #{"fallback"}]} []
+  (first (nth (byte-array 2) -1 ["fallback"])))
+(defn maximum-fallback {:t/sig '[:-> #{:missing}]} []
+  (nth (byte-array 2) 2147483647 :missing))
+(defn maybe-bounds {:t/sig '[bytes? :-> (s/or :value int? :bounds #{:bounds})]} [buffer]
+  (try (nth buffer 0)
+       (catch ArrayIndexOutOfBoundsException _ :bounds)
+       (catch ArithmeticException _ :wrong)))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for (index, fallback, exception) in [
+        ("-1", "", "ArrayIndexOutOfBoundsException"),
+        ("2147483647", "", "IndexOutOfBoundsException"),
+        ("2147483648", " :missing", "ArithmeticException"),
+        ("4294967296N", " :missing", "ArithmeticException"),
+    ] {
+        let source = format!(
+            "(defn read-array {{:t/sig '[:-> #{{:caught}}]}} []
+               (try (do (nth (byte-array 2) {index}{fallback}) :returned)
+                    (catch {exception} _ :caught)
+                    (catch IllegalArgumentException _ :wrong)))"
+        );
+        let report = Session::default().check("arrays.clj", &source);
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, "PNX2801");
+        assert_eq!(
+            &source[finding.span.start.offset..finding.span.end.offset],
+            index
+        );
+    }
+}
+
+#[test]
+fn array_sequence_reads_preserve_boxed_types_and_possible_emptiness() {
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn bytes-seq {:t/sig '[bytes? :-> (s/nilable (s/coll-of int? :kind seq? :min-count 1))]}
+  [buffer] (seq buffer))
+(defn head {:t/sig '[:-> (s/nilable boolean?)]} []
+  (first (boolean-array [false true])))
+(defn tail {:t/sig '[:-> (s/nilable (s/coll-of char? :kind seq? :min-count 1))]} []
+  (next (char-array [\a \b])))
+(defn remaining {:t/sig '[:-> (s/coll-of number? :kind seq?)]} []
+  (rest (double-array 0)))
+(defn size {:t/sig '[bytes? :-> int?]} [buffer] (count buffer))
+(defn empty-buffer {:t/sig '[bytes? :-> boolean?]} [buffer] (empty? buffer))
+(defn nonempty-buffer {:t/sig '[bytes? :-> (s/nilable bytes?)]} [buffer] (not-empty buffer))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let source = r#"
+(ns demo (:require [clojure.spec.alpha :as s]))
+(defn nonempty {:t/sig '[bytes? :-> (s/coll-of int? :kind seq? :min-count 1)]}
+  [buffer] (seq buffer))
+(defn wrong-element {:t/sig '[:-> (s/nilable keyword?)]} []
+  (first (boolean-array 2)))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(!report.ok && report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics.len(), 2, "{report:#?}");
+}
+
+#[test]
 fn byte_arrays_supply_type_evidence_independent_of_local_hints() {
     let source = r#"
 (defn by-alias {:t/sig '[:-> int?]} []

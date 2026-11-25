@@ -826,6 +826,14 @@ fn distinct_keeps_first_occurrences_and_bounds_the_result_length() {
         ("(= 2 (count (distinct \"aab\")))", "#{true}"),
         ("(first (distinct (seq #{:a})))", "#{:a}"),
         (
+            "(distinct (int-array [1 1 2]))",
+            "(s/coll-of int? :kind seq?)",
+        ),
+        (
+            "(distinct (double-array [1 1 2]))",
+            "(s/coll-of number? :kind seq?)",
+        ),
+        (
             "(= 1 (count (distinct (repeat 1000000000 :same))))",
             "#{true}",
         ),
@@ -855,8 +863,6 @@ fn distinct_keeps_first_occurrences_and_bounds_the_result_length() {
     }
 
     let report = check("(distinct)", "any?");
-    assert_eq!(report.diagnostics[0].code, "PNX9001");
-    let report = check("(distinct (int-array 2))", "any?");
     assert_eq!(report.diagnostics[0].code, "PNX9001");
     let report = check("(distinct [] [])", "any?");
     assert_eq!(report.diagnostics[0].code, "PNX2554");

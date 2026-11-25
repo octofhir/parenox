@@ -128,6 +128,15 @@ impl Checker<'_> {
         }
     }
 
+    pub(in crate::checker) fn array_index_out_of_bounds(&mut self) {
+        if let Some(throws) = &mut self.throws {
+            throws.record(
+                ExceptionClass::ArrayIndexOutOfBoundsException,
+                Type::Throwable,
+            );
+        }
+    }
+
     pub(in crate::checker) fn arity_error(&mut self) {
         if let Some(throws) = &mut self.throws {
             throws.record(ExceptionClass::ArityException, Type::Throwable);

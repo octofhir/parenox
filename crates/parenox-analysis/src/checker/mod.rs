@@ -100,6 +100,7 @@ impl Model {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LiteralContainer {
+    ArrayLength(usize),
     Map(Option<Arc<BTreeMap<Type, LiteralContainer>>>),
     Set(Option<Arc<[Type]>>),
     Vector(Option<Arc<[Option<LiteralContainer>]>>),
@@ -141,6 +142,7 @@ impl LiteralContainer {
 
     fn matches_type(&self, ty: &Type) -> bool {
         match (self, ty) {
+            (Self::ArrayLength(_), Type::JvmArray(_)) => true,
             (Self::Map(_), Type::Map(_)) => true,
             (Self::Set(_), Type::Set(_)) | (Self::GroupBuckets, Type::Map(_)) => true,
             (Self::NonemptyVector, Type::Tuple(items)) => !items.is_empty(),
@@ -202,6 +204,7 @@ impl LiteralContainer {
             }),
             (
                 left @ (Self::Positions(_)
+                | Self::ArrayLength(_)
                 | Self::GroupBuckets
                 | Self::GroupBucketSequence
                 | Self::NonemptyVector),
@@ -296,6 +299,17 @@ impl Value {
 
     fn is_literal_map(&self) -> bool {
         matches!(self.literal_container, Some(LiteralContainer::Map(_)))
+    }
+
+    fn known_array_length(&self) -> Option<usize> {
+        match self.literal_container {
+            Some(LiteralContainer::ArrayLength(length))
+                if matches!(self.known, Type::JvmArray(_)) =>
+            {
+                Some(length)
+            }
+            _ => None,
+        }
     }
 
     fn literal_set(members: Vec<Type>) -> Self {

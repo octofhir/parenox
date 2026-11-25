@@ -32,10 +32,28 @@ fn frequencies_preserves_counts_and_map_key_semantics() {
 }
 
 #[test]
+fn frequencies_accepts_primitive_and_reference_arrays() {
+    let source = r#"
+        (ns demo (:require [clojure.spec.alpha :as s]))
+        (defn byte-counts {:t/sig '[:-> (s/map-of int? int?)]} []
+          (frequencies (byte-array [1 1 2])))
+        (defn boolean-counts {:t/sig '[:-> (s/map-of boolean? int?)]} []
+          (frequencies (boolean-array [false true false])))
+        (defn ref-counts {:t/sig '[:-> #{true}]} []
+          (map? (frequencies (object-array [nil :a nil]))))
+    "#;
+    let report = Session::default().check("demo.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let wrong = source.replace("(s/map-of boolean? int?)", "(s/map-of keyword? int?)");
+    let report = Session::default().check("demo.clj", &wrong);
+    assert!(!report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
 fn frequencies_reports_non_reducible_inputs_and_unmodeled_traversal() {
     for (body, code) in [
         ("(frequencies false)", "PNX2322"),
-        ("(frequencies (int-array 2))", "PNX9001"),
         ("(frequencies)", "PNX2554"),
     ] {
         let source = format!("(defn run {{:t/sig '[:-> any?]}} [] {body})");
@@ -45,4 +63,13 @@ fn frequencies_reports_non_reducible_inputs_and_unmodeled_traversal() {
         };
         assert_eq!(error.code, code, "{report:#?}");
     }
+
+    let report = Session::default().check(
+        "demo.clj",
+        "(defn run {:t/sig '[any? :-> any?]} [x] (frequencies x))",
+    );
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX9001");
 }

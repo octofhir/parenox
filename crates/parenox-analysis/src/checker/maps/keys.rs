@@ -122,7 +122,7 @@ impl Checker<'_> {
         let (key, key_span) = args.next().unwrap();
         let default = args.next().map(|(value, _)| value);
         let scalar = scalar_without_lookup(&target.known);
-        let key = if scalar || matches!(target.known, Type::Set(_)) {
+        let key = if scalar || matches!(target.known, Type::Set(_) | Type::JvmArray(_)) {
             key.known
         } else {
             let Some(key) = self.validate_map_key(key, key_span, name, true) else {
@@ -136,11 +136,19 @@ impl Checker<'_> {
         }
         let equivalent_key = target.equivalent_literal_map_key_choices(&key);
         let key = equivalent_key.as_ref().unwrap_or(&key);
-        let presence = env
-            .presence(&xs[1], &xs[2])
+        let presence = (!matches!(target.known, Type::JvmArray(_)) || super::stable_array_key(key))
+            .then(|| env.presence(&xs[1], &xs[2]))
+            .flatten()
             .or_else(|| target.set_presence(key));
         let result = if required {
-            if presence.or_else(|| key_presence(&target.known, key)) != Some(true) {
+            let present = presence.or_else(|| {
+                if matches!(target.known, Type::JvmArray(_)) {
+                    self.array_lookup_presence(key, target.known_array_length())
+                } else {
+                    key_presence(&target.known, key)
+                }
+            });
+            if present != Some(true) {
                 self.illegal_argument();
             }
             let target = if presence == Some(false) {
@@ -301,6 +309,19 @@ impl Checker<'_> {
         let key_symbol = key
             .symbol()
             .and_then(|name| env.get(name).map(|v| (name, &v.known)));
+        if let Some(collection) = target.symbol()
+            && env
+                .get(collection)
+                .is_some_and(|value| matches!(value.known, Type::JvmArray(_)))
+        {
+            // Repeating a custom Number's intValue call can give a different index.
+            if let Some((key_name, ty)) = key_symbol
+                && super::stable_array_key(ty)
+            {
+                env.set_presence(collection, key_name, truth);
+            }
+            return;
+        }
         let exact = self.written_map_key(key).or_else(|| {
             key_symbol
                 .filter(|(_, ty)| ty.is_literal_map_key())

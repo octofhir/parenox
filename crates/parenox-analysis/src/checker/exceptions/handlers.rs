@@ -20,6 +20,7 @@ pub(super) enum ExceptionClass {
     NegativeArraySizeException,
     ArithmeticException,
     IndexOutOfBoundsException,
+    ArrayIndexOutOfBoundsException,
     ExceptionInfo,
     IOException,
     FileNotFoundException,
@@ -50,6 +51,7 @@ impl ExceptionClass {
             "NegativeArraySizeException" => Some(Self::NegativeArraySizeException),
             "ArithmeticException" => Some(Self::ArithmeticException),
             "IndexOutOfBoundsException" => Some(Self::IndexOutOfBoundsException),
+            "ArrayIndexOutOfBoundsException" => Some(Self::ArrayIndexOutOfBoundsException),
             _ => None,
         }
     }
@@ -60,6 +62,7 @@ impl ExceptionClass {
             Self::Error | Self::Exception => Some(Self::Throwable),
             Self::AssertionError => Some(Self::Error),
             Self::ArityException => Some(Self::IllegalArgumentException),
+            Self::ArrayIndexOutOfBoundsException => Some(Self::IndexOutOfBoundsException),
             Self::RuntimeException | Self::IOException => Some(Self::Exception),
             Self::FileNotFoundException => Some(Self::IOException),
             _ => Some(Self::RuntimeException),

@@ -2,6 +2,7 @@
 mod apply;
 mod arithmetic;
 mod arrays;
+pub(super) use arrays::{array_key_is_nonnumeric, boxed_array_element, stable_array_key};
 mod combinators;
 mod comprehensions;
 mod diagnostics;
@@ -1212,6 +1213,7 @@ impl<'model> Checker<'model> {
                 "clojure.core/count"
                     | "clojure.core/first"
                     | "clojure.core/nth"
+                    | "clojure.core/aget"
                     | "clojure.core/range"
                     | "clojure.core/take"
                     | "clojure.core/drop"
@@ -1494,6 +1496,7 @@ impl<'model> Checker<'model> {
                     | "clojure.core/="
                     | "clojure.core/not="
                     | "clojure.core/alength"
+                    | "clojure.core/aget"
                     | "clojure.core/str"
                     | "clojure.core/name"
                     | "clojure.core/map?"
@@ -1531,6 +1534,7 @@ impl<'model> Checker<'model> {
                     | "clojure.core/partition"
                     | "clojure.core/subvec"
                     | "clojure.core/first"
+                    | "clojure.core/nth"
                     | "clojure.core/next"
                     | "clojure.core/rest"
                     | "clojure.core/keys"
@@ -1561,12 +1565,27 @@ impl<'model> Checker<'model> {
             "clojure.core/=" | "clojure.core/not=" => {
                 self.equality(args, name == "clojure.core/not=")
             }
-            "clojure.core/alength" => {
-                let (receiver, span) = &args[0];
+            "clojure.core/alength" | "clojure.core/aget" => {
+                let (receiver, argument_span) = &args[0];
                 let operand = written.map(|call| (&call.operands[0], call.env));
                 let hint = operand.and_then(|(form, env)| env.java_hint(form));
-                let span = operand.map_or(*span, |(form, _)| form.without_metadata().span);
-                return self.array_length(receiver, span, hint);
+                let receiver_span =
+                    operand.map_or(*argument_span, |(form, _)| form.without_metadata().span);
+                if name == "clojure.core/aget" {
+                    if args.len() == 2
+                        && hint.is_none()
+                        && operand.is_some_and(|(form, _)| {
+                            matches!(form.without_metadata().kind, Kind::Nil)
+                        })
+                    {
+                        return self.unchecked_form(
+                            receiver_span,
+                            "The aget overload for a literal nil receiver is unchecked",
+                        );
+                    }
+                    return self.array_get(args, receiver_span, span, hint, written.is_some());
+                }
+                return self.array_length(receiver, receiver_span, hint);
             }
             "clojure.core/empty?" | "clojure.core/not-empty" => {
                 return self.emptiness_call(name, &args[0]);
@@ -1857,6 +1876,7 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         | "clojure.string/split" => &[Arity::Fixed(2), Arity::Fixed(3)],
         "clojure.string/replace" => &[Arity::Fixed(3)],
         "clojure.core/dedupe" | "clojure.core/distinct" => &[Arity::Fixed(0), Arity::Fixed(1)],
+        "clojure.core/aget" => &[Arity::Variadic(2)],
         "clojure.core/partition-all" => &[Arity::Fixed(1), Arity::Fixed(2), Arity::Fixed(3)],
         "clojure.core/partition" => &[Arity::Fixed(2), Arity::Fixed(3), Arity::Fixed(4)],
         "clojure.core/take"
@@ -2057,6 +2077,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/odd?"
             | "clojure.core/even?"
             | "clojure.core/alength"
+            | "clojure.core/aget"
             | "clojure.core/empty?"
             | "clojure.core/not-empty"
             | "clojure.core/nth"
