@@ -863,6 +863,103 @@ fn distinct_keeps_first_occurrences_and_bounds_the_result_length() {
 }
 
 #[test]
+fn shuffle_preserves_collection_length_without_assuming_order() {
+    for (expression, result) in [
+        ("(empty? (shuffle []))", "#{true}"),
+        ("(= 2 (count (shuffle #{:a :b})))", "#{true}"),
+        ("(first (first (shuffle [[\"nested\"]])))", "#{\"nested\"}"),
+        ("(nth (shuffle '(:a :b)) 0)", "#{:a :b}"),
+        ("(= 1000000 (count (shuffle (range 1000000))))", "#{true}"),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+
+    let report = check("(nth (shuffle [:a :b]) 0)", "#{:a}");
+    assert!(!report.ok, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|finding| finding.code != "PNX9001"),
+        "{report:#?}"
+    );
+
+    for (source, exception) in [
+        ("nil", "NullPointerException"),
+        ("\"ab\"", "ClassCastException"),
+        ("{:a 1}", "ClassCastException"),
+    ] {
+        let report = check(
+            &format!("(try (do (shuffle {source}) :returned) (catch {exception} _ :caught))"),
+            "#{:caught}",
+        );
+        let [finding] = report.diagnostics.as_slice() else {
+            panic!("{report:#?}");
+        };
+        assert!(report.complete, "{report:#?}");
+        assert_eq!(finding.code, "PNX2322");
+    }
+}
+
+#[test]
+fn flatten_recurses_only_through_sequential_values_in_order() {
+    for (expression, result) in [
+        ("(empty? (flatten nil))", "#{true}"),
+        ("(empty? (flatten {:items [1 2]}))", "#{true}"),
+        ("(empty? (flatten \"text\"))", "#{true}"),
+        (
+            "(apply (fn [a b c d] [a b c d]) (flatten [[nil [false]] '(:a ()) [\"leaf\"]]))",
+            "(s/tuple nil? #{false} #{:a} #{\"leaf\"})",
+        ),
+        (
+            "(first (get (first (flatten [[{:items [\"kept\"]}]])) :items))",
+            "#{\"kept\"}",
+        ),
+        (
+            "(nth (flatten [(clojure.lang.MapEntry/create :a [1 2])]) 0)",
+            "#{:a}",
+        ),
+        ("(first (flatten [(byte-array 2)]))", "bytes?"),
+        (
+            "(= 1000000001 (count (flatten [(range 1000000000) [:tail]])))",
+            "#{true}",
+        ),
+    ] {
+        let report = check(expression, result);
+        assert!(report.ok && report.complete, "{expression}: {report:#?}");
+    }
+
+    let report = Session::default().check(
+        "demo.clj",
+        r#"(ns demo (:require [clojure.spec.alpha :as s]))
+        (defn run {:t/sig '[(s/coll-of (s/coll-of keyword? :kind vector? :min-count 2 :max-count 3)
+                                       :kind vector? :min-count 2 :max-count 4)
+                            :-> (s/coll-of keyword? :kind seq? :min-count 4 :max-count 12)]}
+          [rows] (flatten rows))"#,
+    );
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let report = Session::default().check(
+        "demo.clj",
+        "(ns demo) (defn run {:t/sig '[any? :-> any?]} [x] (flatten x))",
+    );
+    assert!(!report.complete, "{report:#?}");
+    assert_eq!(report.diagnostics[0].code, "PNX9001");
+
+    let nested = format!("(flatten {}:leaf{})", "[".repeat(40), "]".repeat(40));
+    let report = check(&nested, "any?");
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX9001");
+    assert!(
+        finding.message.contains("nested shape limit"),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn unsupported_map_traversal_is_distinguished_from_a_nonseqable_source() {
     let array = check("(map identity (byte-array 4))", "t/any");
     assert!(!array.complete, "{array:#?}");

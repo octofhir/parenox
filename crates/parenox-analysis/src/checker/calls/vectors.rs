@@ -1,6 +1,7 @@
 //! Contextual calls over collections that produce eager Clojure vectors.
 use super::super::{
-    Checker, Env, LiteralContainer, Value, flow::narrow_by_type, literal_vector_value, nil_part,
+    Checker, Env, LiteralContainer, Value, flow::has_closed_scalar_class, flow::narrow_by_type,
+    literal_vector_value, nil_part,
 };
 use super::{
     ArgumentForms, Callable, PreparedCallable, call_returns, narrow_emptiness,
@@ -8,7 +9,7 @@ use super::{
     sequences::{SequenceSlice, collection_emptiness, iteration_may_throw},
 };
 use crate::reader::{Form, Kind, Span};
-use crate::types::{Compatibility, IntegerClass, IntegerType, LengthBounds, Type};
+use crate::types::{Compatibility, IntegerClass, IntegerType, LengthBounds, MAX_TUPLE_ITEMS, Type};
 use crate::{ContractKind, Diagnostic};
 
 const MAX_VECTOR_TRANSFORM_STEPS: usize = 128;
@@ -84,6 +85,86 @@ pub(in crate::checker) fn narrow_vector_predicate(input: &Type, truth: bool) -> 
 }
 
 impl Checker<'_> {
+    pub(super) fn shuffle(&mut self, (source, span): &(Value, Span)) -> Value {
+        let ty = if source.is_literal_map() {
+            self.class_cast();
+            self.invalid_shuffle_input(&source.known, *span)
+        } else if let Some(members) = source.exact_set_members() {
+            shuffled_vector(
+                Type::union(members.iter().cloned()),
+                LengthBounds::exact(members.len()),
+            )
+        } else {
+            self.shuffle_type(&source.known, *span)
+        };
+        if ty != Type::Never
+            && !matches!(
+                source.literal_container,
+                Some(
+                    LiteralContainer::Vector(_)
+                        | LiteralContainer::List(_)
+                        | LiteralContainer::Set(_)
+                )
+            )
+        {
+            // ArrayList copies the input eagerly, which can realize a lazy seq.
+            self.may_throw();
+        }
+        if let Type::Tuple(items) = &ty
+            && let [item] = items.as_ref()
+        {
+            let item = source.position_value(item.clone(), 0);
+            let mut result = literal_vector_value(std::iter::once(item), 1, true);
+            result.notes.clone_from(&source.notes);
+            return result;
+        }
+        Value::with_notes(ty, source.notes.clone()).with_ordinary_tuple()
+    }
+
+    fn shuffle_type(&mut self, source: &Type, span: Span) -> Type {
+        match source {
+            Type::Never | Type::Unknown => source.clone(),
+            Type::Nil => {
+                self.null_pointer();
+                self.invalid_shuffle_input(source, span)
+            }
+            Type::Union(parts) => {
+                Type::union(parts.iter().map(|part| self.shuffle_type(part, span)))
+            }
+            Type::Parameter(parameter) if let Some(upper) = &parameter.upper => {
+                self.shuffle_type(upper, span)
+            }
+            Type::JvmArray(_) => {
+                self.class_cast();
+                self.invalid_shuffle_input(source, span)
+            }
+            source if has_closed_scalar_class(source) => {
+                self.class_cast();
+                self.invalid_shuffle_input(source, span)
+            }
+            source => shuffle_collection_element(source).map_or_else(
+                || {
+                    self.unchecked_form(
+                        span,
+                        "Type analysis for shuffle cannot verify java.util.Collection on this source",
+                    )
+                    .known
+                },
+                |element| shuffled_vector(element, source.length_bounds()),
+            ),
+        }
+    }
+
+    fn invalid_shuffle_input(&mut self, source: &Type, span: Span) -> Type {
+        self.diagnostics.push(Diagnostic::type_mismatch(
+            span,
+            "clojure.core/shuffle",
+            "a non-nil java.util.Collection".into(),
+            source.inferred().to_string(),
+        ));
+        Type::Never
+    }
+
     pub(in crate::checker) fn assoc_vector(
         &mut self,
         (collection, span): &(Value, Span),
@@ -684,12 +765,42 @@ impl Checker<'_> {
     }
 }
 
-pub(super) enum CollectionError {
+fn shuffle_collection_element(source: &Type) -> Option<Type> {
+    match source {
+        Type::BoundedCollection(collection, _) => shuffle_collection_element(collection),
+        Type::Union(parts) => parts
+            .iter()
+            .map(shuffle_collection_element)
+            .collect::<Option<Vec<_>>>()
+            .map(Type::union),
+        Type::Tuple(_)
+        | Type::Vector(_)
+        | Type::SeqTuple(_)
+        | Type::Seq(_)
+        | Type::ListTuple(_)
+        | Type::List(_)
+        | Type::MapEntry(_)
+        | Type::Set(_) => element_type(source.clone()).ok(),
+        _ => None,
+    }
+}
+
+fn shuffled_vector(element: Type, lengths: LengthBounds) -> Type {
+    if lengths.max == Some(lengths.min) && lengths.min <= MAX_TUPLE_ITEMS {
+        return Type::Tuple(vec![element; lengths.min].into_boxed_slice());
+    }
+    if lengths == LengthBounds::UNBOUNDED {
+        return Type::Vector(Box::new(element));
+    }
+    Type::BoundedCollection(Box::new(Type::Vector(Box::new(element))), lengths)
+}
+
+pub(in crate::checker) enum CollectionError {
     OpenMap,
     NotSeqable,
 }
 
-pub(super) fn element_type(collection: Type) -> Result<Type, CollectionError> {
+pub(in crate::checker) fn element_type(collection: Type) -> Result<Type, CollectionError> {
     match collection {
         Type::BoundedCollection(collection, _) => element_type(*collection),
         Type::Vector(element) | Type::Set(element) | Type::Seq(element) | Type::List(element) => {

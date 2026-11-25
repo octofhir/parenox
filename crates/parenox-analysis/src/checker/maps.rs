@@ -1,5 +1,6 @@
 //! Map lookup, path updates and key presence.
 mod binding_input;
+mod frequencies;
 mod grouping;
 mod keys;
 mod merge;

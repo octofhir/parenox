@@ -19,10 +19,12 @@ mod search;
 mod sequences;
 mod strings;
 mod vectors;
-pub(super) use vectors::{narrow_vector_predicate, vector_predicate};
+pub(super) use vectors::{element_type, narrow_vector_predicate, vector_predicate};
 
 pub(super) use identifiers::identifier_name;
-pub(super) use sequences::{iteration_may_throw, narrow_emptiness, narrow_seq_emptiness};
+pub(super) use sequences::{
+    iteration_may_throw, narrow_emptiness, narrow_seq_emptiness, sequence_lengths,
+};
 pub(super) use strings::concatenate_literal_strings;
 
 use super::flow::{Conditional, has_closed_scalar_class};
@@ -1223,9 +1225,12 @@ impl<'model> Checker<'model> {
                     | "clojure.core/take-last"
                     | "clojure.core/drop-last"
                     | "clojure.core/reverse"
+                    | "clojure.core/shuffle"
                     | "clojure.core/butlast"
                     | "clojure.core/dedupe"
                     | "clojure.core/distinct"
+                    | "clojure.core/flatten"
+                    | "clojure.core/frequencies"
                     | "clojure.core/partition-all"
                     | "clojure.core/partition"
                     | "clojure.core/constantly"
@@ -1516,9 +1521,12 @@ impl<'model> Checker<'model> {
                     | "clojure.core/take-last"
                     | "clojure.core/drop-last"
                     | "clojure.core/reverse"
+                    | "clojure.core/shuffle"
                     | "clojure.core/butlast"
                     | "clojure.core/dedupe"
                     | "clojure.core/distinct"
+                    | "clojure.core/flatten"
+                    | "clojure.core/frequencies"
                     | "clojure.core/partition-all"
                     | "clojure.core/partition"
                     | "clojure.core/subvec"
@@ -1573,9 +1581,12 @@ impl<'model> Checker<'model> {
             "clojure.core/take-nth" => return self.take_nth(args, span),
             "clojure.core/take-last" => return self.take_last(args),
             "clojure.core/reverse" => return self.reverse(&args[0]),
+            "clojure.core/shuffle" => return self.shuffle(&args[0]),
             "clojure.core/butlast" => return self.butlast(&args[0]),
             "clojure.core/dedupe" => return self.dedupe(args, span),
             "clojure.core/distinct" => return self.distinct(args, span),
+            "clojure.core/flatten" => return self.flatten(&args[0]),
+            "clojure.core/frequencies" => return self.frequencies(&args[0]),
             "clojure.core/partition-all" => return self.partition_all(args, span),
             "clojure.core/partition" => return self.partition(args, span),
             "clojure.core/take"
@@ -2035,9 +2046,12 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/take-last"
             | "clojure.core/drop-last"
             | "clojure.core/reverse"
+            | "clojure.core/shuffle"
             | "clojure.core/butlast"
             | "clojure.core/dedupe"
             | "clojure.core/distinct"
+            | "clojure.core/flatten"
+            | "clojure.core/frequencies"
             | "clojure.core/partition-all"
             | "clojure.core/partition"
             | "clojure.core/odd?"

@@ -1,4 +1,6 @@
 //! Vector and sequence traversal and accumulation.
+mod flatten;
+
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -276,7 +278,7 @@ fn nonempty_seq(items: &[Type]) -> Type {
     }
 }
 
-fn sequence_lengths(source: &Type, sequence: &Type) -> LengthBounds {
+pub(in crate::checker) fn sequence_lengths(source: &Type, sequence: &Type) -> LengthBounds {
     let source = source.length_bounds();
     let sequence = sequence.length_bounds();
     LengthBounds {
@@ -352,7 +354,7 @@ fn dedupe_skips_initial(item: &Type) -> Option<bool> {
         .or_else(|| (item.known_intersection(&initial) == Some(Type::Never)).then_some(false))
 }
 
-fn bounded_sequence_value(element: Type, lengths: LengthBounds, sequence: Value) -> Value {
+fn bounded_sequence_value(element: Type, lengths: LengthBounds, notes: Vec<String>) -> Value {
     let result = if lengths.max == Some(0) {
         Type::empty_seq()
     } else if lengths.min == 0 {
@@ -360,7 +362,7 @@ fn bounded_sequence_value(element: Type, lengths: LengthBounds, sequence: Value)
     } else {
         nonempty_sequence(element, lengths)
     };
-    Value::with_notes(result, sequence.notes)
+    Value::with_notes(result, notes)
 }
 
 fn modeled_distinct_source(ty: &Type) -> bool {
@@ -915,7 +917,7 @@ impl Checker<'_> {
                 max: Some(values.len()),
             };
             let element = Type::union(values.into_iter().map(|item| item.known));
-            return bounded_sequence_value(element, lengths, sequence);
+            return bounded_sequence_value(element, lengths, sequence.notes);
         }
         let element = element_type(sequence.known.clone())
             .unwrap_or_else(|_| unreachable!("a sequence has an element type"));
@@ -929,7 +931,7 @@ impl Checker<'_> {
                 source_lengths.max
             },
         };
-        bounded_sequence_value(element, lengths, sequence)
+        bounded_sequence_value(element, lengths, sequence.notes)
     }
 
     pub(super) fn distinct(&mut self, args: &[(Value, Span)], span: Span) -> Value {
@@ -992,7 +994,7 @@ impl Checker<'_> {
                 max: Some(values.len()),
             };
             let element = Type::union(values.into_iter().map(|item| item.known));
-            return bounded_sequence_value(element, lengths, sequence);
+            return bounded_sequence_value(element, lengths, sequence.notes);
         }
         let element = element_type(sequence.known.clone())
             .unwrap_or_else(|_| unreachable!("a sequence has an element type"));
@@ -1004,7 +1006,7 @@ impl Checker<'_> {
                 source_lengths.max
             },
         };
-        bounded_sequence_value(element, lengths, sequence)
+        bounded_sequence_value(element, lengths, sequence.notes)
     }
 
     pub(super) fn partition_all(&mut self, args: &[(Value, Span)], span: Span) -> Value {
@@ -1279,7 +1281,12 @@ impl Checker<'_> {
         slice_sequence_value(&sequence, SequenceSlice::ButLast)
     }
 
-    fn eager_sequence(&mut self, name: &str, source: &Value, span: Span) -> Value {
+    pub(in crate::checker) fn eager_sequence(
+        &mut self,
+        name: &str,
+        source: &Value,
+        span: Span,
+    ) -> Value {
         let sequence = self.sequence_call(name, source, span);
         // Traversing the entire source can force deferred sequence steps.
         if !sequence.stops_evaluation()
@@ -1626,6 +1633,7 @@ impl Checker<'_> {
             | "clojure.core/butlast"
             | "clojure.core/dedupe"
             | "clojure.core/distinct"
+            | "clojure.core/frequencies"
             | "clojure.core/partition-all"
             | "clojure.core/partition" => ReadSequence::Start,
             "clojure.core/first" => ReadSequence::Head,
@@ -1861,6 +1869,7 @@ impl Checker<'_> {
                         | "clojure.core/reverse"
                         | "clojure.core/butlast"
                         | "clojure.core/dedupe"
+                        | "clojure.core/frequencies"
                         | "clojure.core/partition-all"
                         | "clojure.core/partition"
                 ) && !definitely_not_seqable(actual) =>
