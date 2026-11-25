@@ -1,4 +1,4 @@
-use super::{bounded_sequence_value, iteration_may_throw, positional_sequence};
+use super::{bounded_sequence_value, iteration_may_throw};
 use crate::checker::{Checker, LiteralContainer, Value, flow::has_closed_scalar_class};
 use crate::reader::Span;
 use crate::types::{LengthBounds, MAX_TUPLE_ITEMS, Type};
@@ -112,7 +112,7 @@ impl Checker<'_> {
         match result {
             Ok(flat) => {
                 if let Some(positions) = flat.positions {
-                    let mut result = positional_sequence(positions);
+                    let mut result = Value::positional_sequence(positions);
                     result.notes.clone_from(&source.notes);
                     result
                 } else {

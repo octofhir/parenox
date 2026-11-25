@@ -156,12 +156,15 @@ impl TrackedProject {
             classpath,
             ..ProjectOptions::default()
         };
-        let project = DiskProject::read(options.load_at(&path)?)?;
+        let mut settings = options.load_at(&path)?;
+        let suppressions = std::mem::take(&mut settings.suppressions);
+        let project = DiskProject::read(settings)?;
         project.require_source_files()?;
         let mut tracked = Self {
             files: project.files,
             ..Self::default()
         };
+        tracked.session.set_project_suppressions(suppressions);
         let externs = project
             .externs
             .into_iter()
@@ -183,6 +186,7 @@ impl TrackedProject {
             .as_ref()
             .ok_or("Open a disk project before refreshing")?;
         let mut settings = disk.options.load_at(&disk.root)?;
+        let suppressions = std::mem::take(&mut settings.suppressions);
         if disk.externs_overridden {
             settings.externs.clear();
             settings.dependency_externs.clear();
@@ -218,6 +222,7 @@ impl TrackedProject {
             self.session.forget_file(&file.path);
         }
         self.files = files;
+        self.session.set_project_suppressions(suppressions);
         if !disk.externs_overridden {
             self.externs = disk_externs;
         }

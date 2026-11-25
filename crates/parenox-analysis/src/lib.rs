@@ -186,10 +186,20 @@ pub struct Report {
     pub stats: Stats,
 }
 
-/// A finding explicitly suppressed at a source form; the original occurrence ID is retained.
+/// A suppressed finding with its original occurrence ID and rule location.
 #[derive(Debug, Serialize)]
 pub struct SuppressedDiagnostic {
     pub diagnostic: Diagnostic,
     pub reason: String,
     pub directive: Span,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+}
+
+/// Location and rationale for suppressing one diagnostic code across a project.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProjectSuppression {
+    pub config_path: String,
+    pub directive: Span,
+    pub reason: String,
 }

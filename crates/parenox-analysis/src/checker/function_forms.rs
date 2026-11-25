@@ -97,6 +97,13 @@ pub(super) fn local_fn_name(name: &str, raw: bool) -> &str {
     name
 }
 
+pub(super) fn split_method_name(tail: &[Form]) -> (Option<&Form>, &[Form]) {
+    match tail.split_first() {
+        Some((name, arms)) if raw_local_symbol(name).is_some() => (Some(name), arms),
+        _ => (None, tail),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ClauseMode {
     Checked,
@@ -175,17 +182,19 @@ pub(super) fn split_rest(forms: &[Form]) -> Result<(&[Form], Option<&Form>), Spa
 
 pub(super) fn pack_arguments(arity: Arity, mut values: Vec<Value>) -> Vec<Value> {
     if let Arity::Variadic(count) = arity {
-        let rest: Vec<_> = values.drain(count..).map(|value| value.known).collect();
-        let ty = if rest.contains(&Type::Never) {
-            Type::Never
+        let rest = values.split_off(count);
+        let rest = if rest.iter().any(Value::stops_evaluation) {
+            Value::new(Type::Never)
         } else if rest.is_empty() {
-            Type::Nil
+            Value::new(Type::Nil)
         } else if rest.len() <= MAX_TUPLE_ITEMS {
-            Type::SeqTuple(rest.into_boxed_slice())
+            Value::positional_sequence(rest)
         } else {
-            Type::Seq(Box::new(Type::union(rest)))
+            Value::new(Type::Seq(Box::new(Type::union(
+                rest.into_iter().map(|value| value.known),
+            ))))
         };
-        values.push(Value::new(ty));
+        values.push(rest);
     }
     values
 }
@@ -214,17 +223,6 @@ pub(super) fn function_clause(
         .map_err(|span| error("PNX1001", span, "& requires exactly one rest binding"))?;
     if check_types {
         validate_function_hints(parameters, params, rest)?;
-    }
-    if check_types
-        && !mode.raw()
-        && let Some(rest) = rest
-        && rest.map().is_some()
-    {
-        return Err(Box::new(Diagnostic::analysis_gap(
-            "PNX9001",
-            rest.span,
-            "Map destructuring of variadic arguments is not supported yet",
-        )));
     }
     for param in params.iter().chain(rest) {
         if mode.raw() && raw_local_symbol(param).is_none() {

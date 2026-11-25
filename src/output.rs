@@ -97,13 +97,15 @@ pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: 
 
 pub fn file_diagnostics(report: &Report, source: &str, color: bool) -> String {
     let mut output = diagnostics(&report.path, source, &report.diagnostics, color);
-    if !report.suppressed.is_empty() {
-        let renderer = renderer(color);
-        for finding in &report.suppressed {
-            let message = suppression_note(&report.path, finding);
-            let note = Group::with_title(Level::NOTE.secondary_title(message));
-            writeln!(output, "{}", renderer.render(&[note])).unwrap();
-        }
+    let renderer = renderer(color);
+    for finding in report
+        .suppressed
+        .iter()
+        .filter(|finding| finding.config_path.is_none())
+    {
+        let message = suppression_note(&report.path, finding);
+        let note = Group::with_title(Level::NOTE.secondary_title(message));
+        writeln!(output, "{}", renderer.render(&[note])).unwrap();
     }
     output
 }
@@ -180,9 +182,9 @@ fn summary<'a>(
     let mut output = String::new();
     if !complete {
         let message = if suppressed == 0 {
-            "check is incomplete; some constructs could not be analyzed"
+            "check is incomplete; some constructs could not be analyzed".into()
         } else {
-            "check is incomplete; findings were suppressed or analysis was limited"
+            format!("check is incomplete; {suppressed} findings suppressed")
         };
         let note = Group::with_title(Level::NOTE.secondary_title(message));
         writeln!(output, "{}", renderer.render(&[note])).unwrap();
@@ -275,11 +277,23 @@ pub fn plain(report: &Report) -> String {
             .unwrap();
         }
     }
+    let mut configured = 0;
     for finding in &report.suppressed {
+        if finding.config_path.is_some() {
+            configured += 1;
+            continue;
+        }
         writeln!(
             output,
             "  note: {}",
             suppression_note(&report.path, finding)
+        )
+        .unwrap();
+    }
+    if configured > 0 {
+        writeln!(
+            output,
+            "  note: {configured} findings suppressed by project config"
         )
         .unwrap();
     }

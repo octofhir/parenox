@@ -14,6 +14,159 @@ const HANDLER: Source<'_> = Source {
 };
 
 #[test]
+fn spec_predicates_keep_coverage_gaps_distinct_from_missing_definitions() {
+    let source = r#"
+(ns predicates (:require [clojure.spec.alpha :as s]))
+(defn local? [x] (string? x))
+(s/def ::named (s/with-gen local? (fn [] nil)))
+(s/def ::anonymous #(string? %))
+(s/def ::instant inst?)
+(s/def ::function fn?)
+(s/def ::missing unresolved-predicate?)
+(defn accept {:t/sig '[::named ::anonymous ::instant ::function :-> t/any]} [a _ _ _] a)
+(s/def ::bad-arity #(= %1 %2))
+"#;
+    let report = Session::default().check("predicates.clj", source);
+    let [error, arity] = report
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.message, "Unsupported type unresolved-predicate?");
+    assert_eq!(arity.code, "PNX2554");
+    assert!(!report.complete);
+    for text in [
+        "uses a source-defined predicate",
+        "anonymous spec predicate is unchecked",
+        "Input type of predicate inst? is unchecked",
+        "Input type of predicate fn? is unchecked",
+    ] {
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|finding| { finding.severity == "warning" && finding.message.contains(text) }),
+            "{report:#?}"
+        );
+    }
+    assert_eq!(
+        report
+            .diagnostics
+            .iter()
+            .filter(|finding| {
+                finding.span.start.line == 9
+                    && finding.message.contains("has an unchecked input type")
+            })
+            .count(),
+        4,
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn sampled_specs_check_collection_shape_and_length_without_proving_each_element() {
+    let source = r#"
+(ns sampled (:require [clojure.spec.alpha :as s]))
+(s/def ::strings (s/every string? :kind vector? :count 2))
+(s/def ::some some?)
+(defn unsampled-member {:t/sig '[:-> ::strings]} [] ["a" 42])
+(defn wrong-length {:t/sig '[:-> ::strings]} [] ["only-one"])
+(defn wrong-kind {:t/sig '[:-> ::strings]} [] #{"a" "b"})
+(defn false-is-present {:t/sig '[:-> ::some]} [] false)
+(defn nil-is-absent {:t/sig '[:-> ::some]} [] nil)
+"#;
+    let report = Session::default().check("sampled.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .map(|finding| (finding.span.start.line, finding.code.as_str()))
+        .collect();
+    assert_eq!(
+        errors,
+        [(6, "PNX2322"), (7, "PNX2322"), (9, "PNX2322")],
+        "{report:#?}"
+    );
+    assert!(
+        report.diagnostics.iter().any(|finding| {
+            finding.severity == "warning"
+                && finding
+                    .message
+                    .contains("only the collection kind and length are checked")
+        }),
+        "{report:#?}"
+    );
+    assert!(
+        report.diagnostics.iter().any(|finding| {
+            finding.span.start.line == 5
+                && finding
+                    .message
+                    .contains("Spec :sampled/strings has an unchecked input type")
+        }),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn letfn_specs_register_known_and_opaque_types_with_source_locations() {
+    let provider = Source {
+        path: "scoped.clj",
+        source: r#"(ns scoped (:require [clojure.spec.alpha :as s]))
+(letfn [(check-value [value] (string? value))]
+  (s/def ::known string?)
+  (s/def ::opaque check-value))
+(s/def ::copied ::opaque)"#,
+    };
+    let consumer = Source {
+        path: "consumer.clj",
+        source: r#"(ns consumer (:require [scoped :as p]))
+(defn known {:t/sig '[:-> ::p/known]} [] 42)
+(defn opaque {:t/sig '[::p/copied :-> t/any]} [value] value)"#,
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[consumer, provider], None);
+    assert!(
+        report.files[1].diagnostics.iter().any(|finding| {
+            finding.severity == "warning"
+                && finding.message.contains("depends on local letfn bindings")
+        }),
+        "{report:#?}"
+    );
+    let diagnostics = &report.files[0].diagnostics;
+    let [error] = diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(error.code, "PNX2322", "{report:#?}");
+    assert_eq!(error.expected.as_deref(), Some("String"));
+    assert!(diagnostics.iter().any(|finding| {
+        finding
+            .message
+            .contains("Spec :scoped/copied has an unchecked input type")
+    }));
+    let offset = consumer.source.find("::p/known").unwrap();
+    let target = session.definition(consumer.path, offset).unwrap();
+    assert_eq!(target.path, provider.path);
+    assert_eq!(target.span.start.line, 3);
+
+    let removed = session.check_project(&[consumer], None);
+    assert!(
+        removed.files[0]
+            .diagnostics
+            .iter()
+            .any(|finding| { finding.message == "No declaration for spec :scoped/copied" }),
+        "{removed:#?}"
+    );
+}
+
+#[test]
 fn alias_only_requires_do_not_create_cycles_and_spec_keys_follow_their_owner() {
     let mut session = Session::default();
     let first = session.check_project(&[APP, CONFIG, HANDLER], None);

@@ -14,9 +14,14 @@ use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::Arc;
 
 use super::{Contract, Globals, Model, Names};
-use crate::checker::calls::is_modeled_call;
+use crate::checker::calls::{is_modeled_call, is_string_search};
 use crate::reader::{Form, Kind, Span};
 use crate::{ContractKind, ContractOrigin, Diagnostic};
+
+fn reserves_extern_name(name: &str) -> bool {
+    // Explicit contracts for string searches predate the built-in fallback.
+    is_modeled_call(name) && !is_string_search(name)
+}
 
 #[derive(Clone)]
 pub(super) struct Externs {
@@ -114,7 +119,7 @@ impl Model {
                 );
                 continue;
             };
-            if is_modeled_call(name_string) {
+            if reserves_extern_name(name_string) {
                 let mut diagnostic = Diagnostic::new(
                     "PNX2790",
                     name.span,

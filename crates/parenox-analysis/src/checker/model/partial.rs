@@ -2,12 +2,12 @@
 use super::contracts::function_parts;
 use super::declarations::symbols_match;
 use super::externs::ExternalDeclaration;
-use super::multimethods::CheckedMethodBodies;
+use super::multimethods::{CheckedMethodBodies, method_scope};
 use super::{Declarations, DeclaredValue, Globals, Model};
 use crate::checker::calls::is_modeled_string_member;
 use crate::checker::{
     Checker, Env, Value,
-    function_forms::{Clause, function_clauses},
+    function_forms::{Clause, function_clauses, split_method_name},
 };
 use crate::reader::{Form, Kind};
 use crate::types::{Arity, Type};
@@ -55,7 +55,7 @@ impl Declarations {
             checked.offsets.insert(offset);
             let mut checker = Checker::new(model, globals, source);
             for clause in clauses.values() {
-                checker.untyped_clause(clause);
+                checker.untyped_clause(clause, method.then(|| untyped_method_name(form)).flatten());
             }
             checked.diagnostics.extend(
                 checker
@@ -128,7 +128,7 @@ impl Declarations {
             checker.partial_scope = Some(Cow::Borrowed(&shadowed));
             checker.partial_method_body = method;
             for clause in clauses.values() {
-                checker.untyped_clause(clause);
+                checker.untyped_clause(clause, method.then(|| untyped_method_name(form)).flatten());
             }
             diagnostics.extend(checker.diagnostics.into_iter().filter(|diagnostic| {
                 diagnostic.contract.as_ref().is_some_and(|origin| {
@@ -172,11 +172,18 @@ pub(super) fn untyped_clauses(form: &Form, method: bool) -> Option<BTreeMap<Arit
         return None;
     };
     let body = if method {
-        items.get(3..)?
+        split_method_name(items.get(3..)?).1
     } else {
         function_parts(items.get(2..)?).0
     };
     function_clauses(body, form.span).ok()
+}
+
+pub(super) fn untyped_method_name(form: &Form) -> Option<&Form> {
+    let Kind::List(items) = &form.without_metadata().kind else {
+        return None;
+    };
+    split_method_name(items.get(3..)?).0
 }
 
 impl Model {
@@ -251,11 +258,20 @@ impl Model {
 }
 
 impl Checker<'_> {
-    pub(in crate::checker::model) fn untyped_clause(&mut self, clause: &Clause<'_>) {
+    pub(in crate::checker::model) fn untyped_clause(
+        &mut self,
+        clause: &Clause<'_>,
+        local_name: Option<&Form>,
+    ) {
         let diagnostics_start = self.diagnostics.len();
         self.partial_method_opaque = false;
         let args = vec![Value::new(Type::Unknown); clause.parameters().count()];
-        self.function_body(clause, args, &Env::new(), None);
+        self.function_body(
+            clause,
+            args,
+            &method_scope(local_name, || Type::Unknown),
+            None,
+        );
         // An opaque form may change which operations are reached or which vars are called.
         if self.partial_method_opaque {
             self.diagnostics.truncate(diagnostics_start);

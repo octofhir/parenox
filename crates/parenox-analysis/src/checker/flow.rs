@@ -8,7 +8,8 @@ pub(super) use selectors::{narrow_literal, refine_owner};
 
 use super::bindings::{dotted_binding_error, raw_local_symbol};
 use super::calls::{
-    definitely_noncallable, is_builtin, narrow_emptiness, narrow_vector_predicate, predicate_type,
+    callable_predicate, definitely_noncallable, is_builtin, is_string_search, narrow_emptiness,
+    narrow_vector_predicate, predicate_type,
 };
 use super::maps::narrow_map_predicate;
 use super::model::DeclaredValue;
@@ -845,6 +846,7 @@ impl Checker<'_> {
                     self.narrow_sequence_subject(init, scope, !truth);
                 }
             } else if non_nil {
+                self.narrow_completed_string_search(init, scope);
                 self.narrow_subject(init, scope, |ty| {
                     if truth {
                         ty.without_nil()
@@ -947,8 +949,28 @@ impl Checker<'_> {
         let op = self.model.resolve(op);
         (op.starts_with("clojure.core/")
             || op == "clojure.string/blank?"
+            || is_string_search(&op)
             || self.is_spec_validation(&op))
         .then_some(op)
+    }
+
+    pub(super) fn narrow_completed_string_search(&self, form: &Form, env: &mut Env) {
+        let Kind::List(items) = &form.kind else {
+            return;
+        };
+        let [head, receiver, _, tail @ ..] = items.as_slice() else {
+            return;
+        };
+        if !self.globals.project_namespaces.contains("clojure.string")
+            && let Some(op) = self.unshadowed_operation(head, env)
+            && is_string_search(&op)
+            && !self
+                .model
+                .has_unavailable_wildcard_scope(head.symbol().unwrap())
+            && (tail.is_empty() || (!op.ends_with('?') && tail.len() == 1))
+        {
+            self.narrow_subject(receiver, env, Type::without_nil);
+        }
     }
 
     pub(super) fn narrow(&self, test: &Form, truth: bool, env: &mut Env) {
@@ -995,6 +1017,7 @@ impl Checker<'_> {
             return;
         };
         match (op.as_str(), args) {
+            (op, _) if is_string_search(op) => self.narrow_completed_string_search(test, env),
             ("clojure.core/contains?", _) => self.narrow_contains(args, truth, env),
             ("clojure.core/get" | "clojure.core/get-in", [_, _]) => {
                 self.narrow_subject(test, env, truthy);
@@ -1058,6 +1081,25 @@ impl Checker<'_> {
                     } else {
                         nil_part(ty)
                     }
+                });
+            }
+            ("clojure.core/fn?" | "clojure.core/ifn?", [operand])
+                if self
+                    .model
+                    .can_use_standard_core(head.symbol().unwrap(), self.globals) =>
+            {
+                let ifn = op == "clojure.core/ifn?";
+                self.narrow_subject(operand, env, |ty| {
+                    let parts = match ty {
+                        Type::Union(parts) => parts.as_slice(),
+                        _ => std::slice::from_ref(ty),
+                    };
+                    Type::union(
+                        parts
+                            .iter()
+                            .filter(|ty| callable_predicate(ty, None, ifn) != Type::Bool(!truth))
+                            .cloned(),
+                    )
                 });
             }
             ("clojure.core/map?", [operand])

@@ -49,6 +49,52 @@ fn conventional_config_is_loaded_without_positional_paths() {
 }
 
 #[test]
+fn project_suppression_keeps_the_original_finding_and_other_errors() {
+    let dir = TestDir::new("project-suppressions");
+    fs::write(
+        dir.0.join("parenox.edn"),
+        r#"{:paths ["src"] :suppress {"PNX9002" "Partial coverage during adoption"}}"#,
+    )
+    .unwrap();
+    fs::create_dir(dir.0.join("src")).unwrap();
+    fs::write(dir.0.join("src/app.clj"), "(ns app) (defn f [x] x)").unwrap();
+    let run = |format: &str| {
+        Command::new(env!("CARGO_BIN_EXE_parenox"))
+            .current_dir(&dir.0)
+            .args(["check", "--check-unannotated", "--format", format])
+            .output()
+            .unwrap()
+    };
+    let output = run("json");
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["complete"], false);
+    assert_eq!(report["diagnostics"], serde_json::json!([]));
+    let record = &report["suppressed"][0];
+    assert_eq!(record["diagnostic"]["code"], "PNX9002");
+    assert!(record["diagnostic"]["id"].is_string());
+    assert_eq!(record["config_path"], "parenox.edn");
+    assert_eq!(record["reason"], "Partial coverage during adoption");
+    let pretty = String::from_utf8(run("pretty").stderr).unwrap();
+    assert!(pretty.contains("1 suppressed"), "{pretty}");
+    assert!(!pretty.contains("PNX9002"), "{pretty}");
+
+    fs::write(
+        dir.0.join("src/bad.clj"),
+        r#"(ns bad) (defn f [] (inc "bad"))"#,
+    )
+    .unwrap();
+    let output = run("json");
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["files"][1]["diagnostics"][0]["code"], "PNX2322");
+    assert_eq!(
+        report["files"][1]["suppressed"][0]["diagnostic"]["code"],
+        "PNX9002"
+    );
+}
+
+#[test]
 fn formatter_loads_edn_rules_and_requires_explicit_write() {
     let dir = TestDir::new("formatter config");
     fs::write(

@@ -403,6 +403,18 @@ impl Value {
         self
     }
 
+    fn positional_sequence(items: Vec<Self>) -> Self {
+        let (types, children): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .map(|item| (item.known, item.literal_container))
+            .unzip();
+        let mut result = Self::new(Type::SeqTuple(types.into_boxed_slice()));
+        if children.iter().any(Option::is_some) {
+            result.literal_container = Some(LiteralContainer::Positions(Arc::from(children)));
+        }
+        result
+    }
+
     fn position_value(&self, known: Type, index: usize) -> Self {
         let mut value = Self::with_notes(known, self.notes.clone());
         value.literal_container = self
@@ -654,20 +666,10 @@ impl Checker<'_> {
         signature: &Signature,
     ) -> (Value, Span) {
         let clause = self.model.source_clause(function, signature.arity());
-        let mut args: Vec<_> = signature.args.iter().cloned().map(Value::new).collect();
-        if let Some(rest) = &signature.rest {
-            let seq = Type::Seq(Box::new(rest.clone()));
-            // At the required count Clojure invokes a matching fixed clause first.
-            let rest = if function
-                .arities
-                .contains_key(&Arity::Fixed(signature.args.len()))
-            {
-                seq
-            } else {
-                seq.nilable()
-            };
-            args.push(Value::new(rest));
-        }
+        let has_fixed_clause = function
+            .arities
+            .contains_key(&Arity::Fixed(signature.args.len()));
+        let args = signature_bindings(signature, has_fixed_clause);
         let result = self.function_body(&clause, args, &Env::new(), None);
         let return_span = clause.body.last().map_or(clause.span, |form| form.span);
         (result, return_span)
@@ -1207,6 +1209,20 @@ impl Checker<'_> {
             Value::new(Type::Unknown)
         }
     }
+}
+
+fn signature_bindings(signature: &Signature, has_fixed_clause: bool) -> Vec<Value> {
+    let mut args: Vec<_> = signature.args.iter().cloned().map(Value::new).collect();
+    if let Some(rest) = &signature.rest {
+        let seq = Type::Seq(Box::new(rest.clone()));
+        // At the required count Clojure invokes a matching fixed clause first.
+        args.push(Value::new(if has_fixed_clause {
+            seq
+        } else {
+            seq.nilable()
+        }));
+    }
+    args
 }
 
 fn vector_type(items: Vec<Type>) -> Type {

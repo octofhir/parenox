@@ -551,6 +551,107 @@ fn explicit_quote_can_initialize_an_adjacent_literal_root() {
 }
 
 #[test]
+fn explicit_root_writes_invalidate_literal_types_across_namespaces() {
+    let provider = Source {
+        path: "provider.clj",
+        source: "(ns provider) (def slot nil) (def untouched nil)",
+    };
+    let consumer = Source {
+        path: "consumer.clj",
+        source: "(ns consumer (:require [provider :as p]))
+                 (defn run {:t/sig '[:-> t/any]} [] (p/slot 1))
+                 (defn other {:t/sig '[:-> t/any]} [] (p/untouched 1))",
+    };
+    let writer = Source {
+        path: "writer.clj",
+        source: "(ns writer (:require [provider :as p]))
+                 (do (alter-var-root #'p/slot (constantly identity)))
+                 '(alter-var-root #'p/untouched (constantly identity))",
+    };
+    let call_errors = |report: parenox::ProjectReport| {
+        report.files[0]
+            .diagnostics
+            .iter()
+            .filter(|finding| finding.code == "PNX2322")
+            .map(|finding| finding.span.start.line)
+            .collect::<Vec<_>>()
+    };
+    let mut session = Session::default();
+    assert_eq!(
+        call_errors(session.check_project(&[consumer, provider], None)),
+        [2, 3]
+    );
+    let with_writer = session.check_project(&[consumer, provider, writer], None);
+    assert!(with_writer.files[1].diagnostics.iter().any(|finding| {
+        finding.code == "PNX9001" && finding.message.contains("alter-var-root")
+    }));
+    assert_eq!(call_errors(with_writer), [3]);
+    assert_eq!(
+        call_errors(session.check_project(&[consumer, provider], None)),
+        [2, 3]
+    );
+}
+
+#[test]
+fn arithmetic_initializers_publish_exact_roots_and_invalidate_dependents() {
+    let provider = Source {
+        path: "limits.clj",
+        source: "(ns limits) (def ^:const bytes (* 1024 (inc 99))) (def saved bytes)",
+    };
+    let consumer = Source {
+        path: "reader.clj",
+        source: "(ns reader (:require [limits :as limits]))
+                 (defn size {:t/sig '[:-> #{true}]} [] (= limits/saved 102400))",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[consumer, provider], None);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let exported = session.export_externs(&[provider], &[]);
+    let edn = exported
+        .edn
+        .as_deref()
+        .unwrap_or_else(|| panic!("{exported:#?}"));
+    assert!(edn.contains("limits/saved {:value 102400}"), "{edn}");
+
+    let changed = provider.source.replace("(inc 99)", "(- 101 2)");
+    let report = session.check_project(
+        &[
+            consumer,
+            Source {
+                source: &changed,
+                ..provider
+            },
+        ],
+        None,
+    );
+    let [finding] = report.files[0].diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2322");
+    assert_eq!(finding.actual.as_deref(), Some("false"), "{finding:#?}");
+}
+
+#[test]
+fn arithmetic_initializers_leave_overflow_and_shadowed_core_calls_unchecked() {
+    for (prefix, initializer) in [
+        ("", "(inc 9223372036854775807)"),
+        ("(defn * [& xs] :shadowed)", "(* 1024 100)"),
+        ("(defn + [& xs] :shadowed)", "(* (+ 1 2) 3)"),
+        ("", "(inc 3 4)"),
+    ] {
+        let source = format!("(ns limits) {prefix} (def bytes {initializer})");
+        let report = Session::default().check("limits.clj", &source);
+        assert!(
+            report.diagnostics.iter().any(|finding| {
+                finding.code == "PNX9001"
+                    && &source[finding.span.start.offset..finding.span.end.offset] == initializer
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn platform_long_initializers_track_competing_namespaces_and_export_as_values() {
     let reader = Source {
         path: "platform-root.clj",

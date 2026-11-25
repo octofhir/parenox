@@ -3,6 +3,48 @@ use parenox::{DocumentHover, Session, Source};
 const SOURCE: &str = include_str!("../examples/jvm_strings.cljc");
 
 #[test]
+fn string_search_uses_utf16_indices_and_refines_a_completed_receiver() {
+    let source = r#"
+(ns demo (:require [clojure.string :as str] [clojure.spec.alpha :as s]))
+(defn prefix {:t/sig '[:-> #{true}]} [] (str/starts-with? "héllo" "hé"))
+(defn suffix {:t/sig '[:-> #{false}]} [] (str/ends-with? "one" "two"))
+(defn first-hit {:t/sig '[:-> #{true}]} [] (= 2 (str/index-of "😀a😀a" \a)))
+(defn last-hit {:t/sig '[:-> #{true}]} [] (= 5 (str/last-index-of "😀a😀a" "a")))
+(defn wrap-index {:t/sig '[:-> #{true}]} [] (= 4 (str/index-of "abaaba" \b 4294967298)))
+(defn absent {:t/sig '[:-> nil?]} [] (apply str/last-index-of ["abc" "a" -1]))
+(defn strip-prefix {:t/sig '[(s/nilable string?) :-> string?]} [value]
+  (if (str/starts-with? value "x") (subs value 1) value))
+(defn before-colon {:t/sig '[(s/nilable string?) :-> string?]} [value]
+  (let [idx (str/last-index-of value ":")]
+    (if (nil? idx) value (subs value 0 idx))))
+(defn from-colon {:t/sig '[(s/nilable string?) :-> string?]} [value]
+  (if-some [idx (str/index-of value ":")] (subs value idx) value))
+"#;
+    let report = Session::default().check("search.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn string_search_reports_a_definitely_invalid_receiver_and_arity() {
+    let source = r#"
+(ns demo (:require [clojure.string :as str]))
+(defn bad-receiver {:t/sig '[:-> boolean?]} [] (str/starts-with? nil "x"))
+(defn bad-arity {:t/sig '[:-> boolean?]} [] (str/ends-with? "x" "x" 0))
+"#;
+    let report = Session::default().check("search.clj", source);
+    let codes: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| finding.code.as_str())
+        .collect();
+    assert_eq!(codes, ["PNX2322", "PNX2554"], "{report:#?}");
+    assert_eq!(
+        report.diagnostics[0].expected.as_deref(),
+        Some("Non-nil CharSequence")
+    );
+}
+
+#[test]
 fn unmodeled_jvm_forms_keep_their_syntax_and_eager_operand_resolution() {
     let source = r#"(ns demo)
 (defn member {:t/sig '[t/any :-> t/any]} [file] (.getName file))

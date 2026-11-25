@@ -14,11 +14,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Names;
 use crate::Diagnostic;
+use crate::checker::function_forms::{lexical_function_clauses, split_method_name};
 use crate::checker::maps::literal_key_type;
 use crate::checker::quote::quoted_symbol;
 use crate::reader::{Form, Kind, Span};
 use crate::types::{
-    ExtraFields, Field, IntegerType, JvmArrayClass, LengthBounds, MAX_TUPLE_ITEMS, MapType,
+    Arity, ExtraFields, Field, IntegerType, JvmArrayClass, LengthBounds, MAX_TUPLE_ITEMS, MapType,
     Parameters, SPEC_INVALID, Type,
 };
 
@@ -28,17 +29,19 @@ pub(super) fn read_type(
     source: &str,
     diagnostics: &mut Vec<Diagnostic>,
     lookup: impl FnMut(&str, Span) -> Option<Type>,
-) -> Type {
-    TypeReader {
+) -> (Type, bool) {
+    let mut reader = TypeReader {
         names,
         source,
         parameters: None,
         literal_shapes: false,
         unchecked_inputs: None,
+        partial_input: false,
         diagnostics,
         lookup,
-    }
-    .parse(form)
+    };
+    let ty = reader.parse(form);
+    (ty, reader.partial_input)
 }
 
 pub(super) fn read_type_with_parameters(
@@ -56,6 +59,7 @@ pub(super) fn read_type_with_parameters(
         parameters,
         literal_shapes: true,
         unchecked_inputs,
+        partial_input: false,
         diagnostics,
         lookup,
     }
@@ -68,6 +72,7 @@ struct TypeReader<'a, F> {
     parameters: Option<&'a Parameters>,
     literal_shapes: bool,
     unchecked_inputs: Option<&'a BTreeSet<String>>,
+    partial_input: bool,
     diagnostics: &'a mut Vec<Diagnostic>,
     lookup: F,
 }
@@ -194,16 +199,27 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             }
             Kind::Symbol(s) => predicate_type(self.names, s).unwrap_or_else(|| {
                 if self.names.spec_core_shadows.contains(s) {
-                    self.diagnostics.push(Diagnostic::analysis_gap(
-                        "PNX9001",
+                    return self.unchecked_predicate(
                         form.span,
                         format!("Source predicate {s} is unchecked"),
-                    ));
+                    );
+                } else if matches!(
+                    self.names.resolve_parts(s),
+                    ("clojure.core", "fn?" | "inst?")
+                ) {
+                    return self.unchecked_predicate(
+                        form.span,
+                        format!("Input type of predicate {s} is unchecked"),
+                    );
                 } else {
                     self.error("PNX9001", form.span, format!("Unsupported type {s}"));
                 }
                 Type::Unknown
             }),
+            Kind::AnonymousFunction(function) => self.anonymous_predicate(
+                form.span,
+                Arity::new(function.required, function.variadic).accepts(1),
+            ),
             Kind::Keyword(key) => self.spec(&self.names.key(key), form.span),
             Kind::Map(forms) if self.literal_shapes => {
                 let mut fields = BTreeMap::new();
@@ -240,6 +256,19 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                         .map_or(Type::Unknown, Type::Map);
                 }
                 match op.as_deref() {
+                    Some("clojure.core/fn") if !self.literal_shapes => {
+                        let (_, clauses) = split_method_name(&xs[1..]);
+                        match lexical_function_clauses(clauses, form.span) {
+                            Ok(clauses) => self.anonymous_predicate(
+                                form.span,
+                                clauses.keys().any(|arity| arity.accepts(1)),
+                            ),
+                            Err(diagnostic) => {
+                                self.diagnostics.push(*diagnostic);
+                                Type::Unknown
+                            }
+                        }
+                    }
                     Some("clojure.spec.alpha/fspec") => self
                         .function_spec(&xs[1..], form.span, "s/fspec")
                         .map_or(Type::Unknown, |signature| {
@@ -367,8 +396,15 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
                             Type::Unknown
                         }
                     }
-                    Some("clojure.spec.alpha/coll-of") if xs.len() >= 2 => {
-                        self.collection(form, &xs[1], &xs[2..])
+                    Some("clojure.spec.alpha/coll-of" | "clojure.spec.alpha/every")
+                        if xs.len() >= 2 =>
+                    {
+                        self.collection(
+                            form,
+                            &xs[1],
+                            &xs[2..],
+                            op.as_deref() == Some("clojure.spec.alpha/every"),
+                        )
                     }
                     _ => {
                         self.error("PNX9001", form.span, "Unsupported type form");
@@ -383,14 +419,37 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
         }
     }
 
-    fn collection(&mut self, form: &Form, element: &Form, options: &[Form]) -> Type {
+    fn unchecked_predicate(&mut self, span: Span, message: impl Into<String>) -> Type {
+        self.partial_input = true;
+        self.diagnostics
+            .push(Diagnostic::analysis_gap("PNX9001", span, message));
+        Type::Unknown
+    }
+
+    fn anonymous_predicate(&mut self, span: Span, unary: bool) -> Type {
+        if unary {
+            self.unchecked_predicate(
+                span,
+                "Input type of this anonymous spec predicate is unchecked",
+            )
+        } else {
+            self.error("PNX2554", span, "A spec predicate must accept one argument");
+            Type::Unknown
+        }
+    }
+
+    fn collection(&mut self, form: &Form, element: &Form, options: &[Form], sampled: bool) -> Type {
         let (pairs, extra) = options.as_chunks::<2>();
         if !extra.is_empty()
             || pairs.iter().any(|[key, _]| {
                 !matches!(
                     key.keyword(),
                     Some(":kind" | ":gen-max" | ":min-count" | ":max-count")
-                )
+                ) && !(sampled
+                    && matches!(
+                        key.keyword(),
+                        Some(":count" | ":distinct" | ":gen" | ":into")
+                    ))
             })
         {
             self.error("PNX9001", form.span, "Unsupported type form");
@@ -399,6 +458,24 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
         let Some(bounds) = self.collection_bounds(pairs, form.span) else {
             return Type::Unknown;
         };
+        let element_type = |reader: &mut Self| {
+            if sampled {
+                Type::Any
+            } else {
+                reader.parse(element)
+            }
+        };
+        if sampled {
+            if let Some(key) = element.keyword() {
+                self.spec(&self.names.key(key), element.span);
+            }
+            self.partial_input = true;
+            self.diagnostics.push(Diagnostic::analysis_gap(
+                "PNX9001",
+                element.span,
+                "s/every samples elements; only the collection kind and length are checked",
+            ));
+        }
         let constrain = |ty| {
             if bounds == LengthBounds::UNBOUNDED {
                 ty
@@ -410,7 +487,7 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             .iter()
             .rfind(|[key, _]| key.keyword() == Some(":kind"))
         else {
-            let element = self.parse(element);
+            let element = element_type(self);
             if collection_element(&element) {
                 return constrain(Type::SpecCollection(Box::new(element)));
             }
@@ -426,15 +503,15 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             .filter(|symbol| !self.names.spec_core_shadows.contains(*symbol))
             .map(|symbol| self.names.resolve_parts(symbol))
         {
-            Some(("clojure.core", "set?")) => Type::Set(Box::new(self.parse(element))),
-            Some(("clojure.core", "vector?")) => Type::Vector(Box::new(self.parse(element))),
+            Some(("clojure.core", "set?")) => Type::Set(Box::new(element_type(self))),
+            Some(("clojure.core", "vector?")) => Type::Vector(Box::new(element_type(self))),
             Some(("clojure.core", "seq?")) => {
-                Type::union([Type::empty_seq(), Type::Seq(Box::new(self.parse(element)))])
+                Type::union([Type::empty_seq(), Type::Seq(Box::new(element_type(self)))])
             }
-            Some(("clojure.core", "list?")) => Type::union([
-                Type::empty_list(),
-                Type::List(Box::new(self.parse(element))),
-            ]),
+            Some(("clojure.core", "list?")) => {
+                Type::union([Type::empty_list(), Type::List(Box::new(element_type(self)))])
+            }
+            Some(("clojure.core", "map?")) if sampled => core_predicate_type("map?").unwrap(),
             Some(("clojure.core", "map?")) if bounds == LengthBounds::UNBOUNDED => {
                 match &self.parse(element) {
                     // Each map member is an entry, even if its key or value
@@ -468,10 +545,12 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
     fn collection_bounds(&mut self, pairs: &[[Form; 2]], span: Span) -> Option<LengthBounds> {
         let mut minimum = None;
         let mut maximum = None;
+        let mut exact = None;
         for [key, value] in pairs {
             let limit = match key.keyword() {
                 Some(":min-count") => &mut minimum,
                 Some(":max-count") => &mut maximum,
+                Some(":count") => &mut exact,
                 _ => continue,
             };
             let Some(count) = Type::integer_literal(value, self.source)
@@ -488,6 +567,20 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
             *limit = Some(count);
         }
         let min = minimum.unwrap_or(0);
+        if let Some(count) = exact
+            && count >= min
+            && maximum.is_none_or(|max| count <= max)
+        {
+            return Some(LengthBounds::exact(count));
+        }
+        if exact.is_some() {
+            self.error(
+                "PNX9001",
+                span,
+                "Collection count conflicts with its length bounds",
+            );
+            return None;
+        }
         if maximum.is_some_and(|max| max < min) {
             self.error(
                 "PNX9001",
@@ -502,7 +595,12 @@ impl<F: FnMut(&str, Span) -> Option<Type>> TypeReader<'_, F> {
 
 fn collection_element(element: &Type) -> bool {
     match element {
-        Type::SpecValue | Type::String | Type::Str(_) | Type::Number | Type::Integral(_) => true,
+        Type::Any
+        | Type::SpecValue
+        | Type::String
+        | Type::Str(_)
+        | Type::Number
+        | Type::Integral(_) => true,
         Type::Map(map) => !map.has_unknown_value_constraint(),
         Type::Union(parts) => parts.iter().all(collection_element),
         _ => false,
@@ -562,6 +660,7 @@ pub(super) fn core_predicate_type(name: &str) -> Option<Type> {
         "boolean?" => Type::Boolean,
         "false?" => Type::Bool(false),
         "any?" => Type::SpecValue,
+        "some?" => Type::union([Type::SpecTruthy, Type::Bool(false)]),
         "identity" => Type::SpecTruthy,
         "keyword?" => Type::Keyword,
         "symbol?" => Type::Symbol,

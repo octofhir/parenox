@@ -71,13 +71,15 @@ impl Model {
             let qualified = format!("{}/{symbol}", self.names.namespace);
             let (name, _) = self.exports.literals.get_key_value(&qualified)?;
             let initializer = def_initializer(&parts[2..])?;
-            let encoded = if index < declarations.completed_before_last_tag() {
+            let encoded = if self.root_writes.contains(symbol) {
+                Err("alter-var-root can change this var's value")
+            } else if index < declarations.completed_before_last_tag() {
                 Err("A later data reader can change this var's value")
-            } else if super::is_modeled_call(name) {
+            } else if super::reserves_extern_name(name) {
                 Err("externs cannot replace a built-in checking rule")
             } else {
                 match self.captured_initializers.get(&index) {
-                    Some(CapturedInitializer::PlatformLong(value)) => Ok(value.to_string()),
+                    Some(CapturedInitializer::FixedLong(value)) => Ok(value.to_string()),
                     Some(CapturedInitializer::Form(form)) => {
                         encode(form, source, &self.names, Context::Initializer)
                     }

@@ -76,6 +76,36 @@ impl Declarations {
         Ok(declarations)
     }
 
+    /// Expose compiler-level do bodies as top-level forms after reader validation.
+    pub(crate) fn expand_top_level_do(&mut self, read: &mut CheckRead) {
+        let can_expand = |form: &Form| {
+            top_level_do(form).is_some() && !changes_reader_namespace(form, &self.names)
+        };
+        if !read.forms.iter().any(can_expand) {
+            return;
+        }
+        let mut expanded = Vec::with_capacity(read.forms.len());
+        let boundary = self.completed_before_last_tag();
+        let mut expanded_boundary = 0;
+        for (index, form) in std::mem::take(&mut read.forms).into_iter().enumerate() {
+            if can_expand(&form) {
+                append_top_level_do(form, &mut expanded);
+            } else {
+                expanded.push(form);
+            }
+            if index < boundary {
+                expanded_boundary = expanded.len();
+            }
+        }
+        if let Some(dispatches) = &mut read.unchecked_dispatches {
+            dispatches.completed_before_last_tag = expanded_boundary;
+        }
+        read.forms = expanded;
+        let refers_to_assert_expr = self.refers_to_assert_expr;
+        *self = Self::read_source_declarations(read);
+        self.refers_to_assert_expr = refers_to_assert_expr;
+    }
+
     pub(crate) fn read_source_declarations(read: &CheckRead) -> Self {
         Self::read_declarations_with_boundary(read, &read.forms)
     }
@@ -147,6 +177,45 @@ impl Declarations {
 
     fn namespace_read_boundary(&self) -> Option<usize> {
         self.namespace_read_end.or(self.namespace_end)
+    }
+}
+
+fn top_level_do(form: &Form) -> Option<&[Form]> {
+    let Kind::List(items) = &form.kind else {
+        return None;
+    };
+    let (head, body) = items.split_first()?;
+    matches!(&head.kind, Kind::Symbol(name) if name == "do").then_some(body)
+}
+
+fn changes_reader_namespace(form: &Form, names: &Names) -> bool {
+    if let Some(body) = top_level_do(form) {
+        return body
+            .iter()
+            .any(|form| changes_reader_namespace(form, names));
+    }
+    let Kind::List(items) = &form.without_metadata().kind else {
+        return false;
+    };
+    items.first().and_then(Form::symbol).is_some_and(|op| {
+        matches!(op, "ns" | "require" | "in-ns")
+            || matches!(
+                names.resolve_parts(op),
+                ("clojure.core", "ns" | "require" | "in-ns" | "alias")
+            )
+    })
+}
+
+fn append_top_level_do(form: Form, output: &mut Vec<Form>) {
+    if top_level_do(&form).is_some() {
+        let Kind::List(items) = form.kind else {
+            unreachable!()
+        };
+        for child in items.into_iter().skip(1) {
+            append_top_level_do(child, output);
+        }
+    } else {
+        output.push(form);
     }
 }
 

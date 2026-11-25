@@ -1,12 +1,23 @@
 //! Type checks for JVM string functions with type-dependent behavior.
 use super::{
     Checker, Compatibility, Env, Span, Type, Value, arithmetic::excludes_number, call_returns,
+    has_closed_scalar_class,
 };
 use crate::Diagnostic;
 use crate::reader::Form;
-use crate::types::MAX_TUPLE_ITEMS;
+use crate::types::{IntegerType, MAX_TUPLE_ITEMS};
 
 const MAX_CONCATENATED_STRING_BYTES: usize = 1024;
+
+pub(in crate::checker) fn is_string_search(name: &str) -> bool {
+    matches!(
+        name,
+        "clojure.string/starts-with?"
+            | "clojure.string/ends-with?"
+            | "clojure.string/index-of"
+            | "clojure.string/last-index-of"
+    )
+}
 
 pub(in crate::checker) fn concatenate_literal_strings(
     parts: impl IntoIterator<Item: AsRef<str>>,
@@ -23,6 +34,70 @@ pub(in crate::checker) fn concatenate_literal_strings(
 }
 
 impl Checker<'_> {
+    pub(super) fn clojure_string_search(&mut self, name: &str, args: &[(Value, Span)]) -> Type {
+        let [(receiver, receiver_span), (needle, needle_span), tail @ ..] = args else {
+            unreachable!("string search arity was checked");
+        };
+        let edge = name.ends_with('?');
+        let needle_type = if edge {
+            Type::String
+        } else {
+            Type::union([Type::String, Type::Character])
+        };
+        // A CharSequence implementation other than String can also return normally.
+        let receiver_invalid = (receiver.literal_container.is_some()
+            || has_closed_scalar_class(&receiver.known)
+            || matches!(receiver.known, Type::JvmArray(_)))
+            && receiver.known.known_intersection(&Type::String) == Some(Type::Never);
+        if receiver_invalid {
+            self.diagnostics.push(Diagnostic::type_mismatch(
+                *receiver_span,
+                name,
+                "Non-nil CharSequence".into(),
+                receiver.ty.to_string(),
+            ));
+        }
+        self.expect(needle, &needle_type, *needle_span, name);
+        if let [(index, span)] = tail {
+            self.expect(index, &Type::Number, *span, name);
+        }
+        if receiver_invalid
+            || needle.known.known_intersection(&needle_type) == Some(Type::Never)
+            || tail.iter().any(|(index, _)| excludes_number(index))
+        {
+            self.may_throw();
+            return Type::Never;
+        }
+        if edge {
+            if let (Type::Str(text), Type::Str(needle)) = (&receiver.known, &needle.known) {
+                return Type::Bool(if name == "clojure.string/starts-with?" {
+                    text.starts_with(needle)
+                } else {
+                    text.ends_with(needle)
+                });
+            }
+            self.may_throw();
+            return Type::Boolean;
+        }
+        let backward = name == "clojure.string/last-index-of";
+        let start = match tail {
+            [] => Some(if backward { i32::MAX } else { 0 }),
+            [(index, _)] => index
+                .known
+                .subtype_of(&Type::Integral(IntegerType::FIXED))
+                .then(|| index.known.exact_long_value().map(|start| start as i32))
+                .flatten(),
+            _ => unreachable!("string search arity was checked"),
+        };
+        if let (Type::Str(text), Some(start)) = (&receiver.known, start)
+            && let Some(found) = literal_string_index(text, &needle.known, start, backward)
+        {
+            return found.map_or(Type::Nil, Type::Integer);
+        }
+        self.may_throw();
+        Type::Integral(IntegerType::FIXED_INT32).nilable()
+    }
+
     pub(super) fn str_result(&mut self, args: &[(Value, Span)]) -> Type {
         if !args
             .iter()
@@ -323,6 +398,43 @@ impl Checker<'_> {
         }
         Type::String
     }
+}
+
+fn literal_string_index(
+    text: &str,
+    needle: &Type,
+    start: i32,
+    backward: bool,
+) -> Option<Option<i32>> {
+    // Bound allocation and UTF-16 substring work on the literal path.
+    let limit = MAX_CONCATENATED_STRING_BYTES;
+    if text.len() > limit {
+        return None;
+    }
+    let text: Vec<_> = text.encode_utf16().collect();
+    let needle: Vec<_> = match needle {
+        Type::Str(needle) if needle.len() <= limit => needle.encode_utf16().collect(),
+        Type::Char(ch) if ch.len_utf16() == 1 => vec![*ch as u16],
+        _ => return None,
+    };
+    let Some(last) = text.len().checked_sub(needle.len()) else {
+        return Some(None);
+    };
+    let matches = |&index: &usize| text[index..].starts_with(&needle);
+    let found = if backward {
+        usize::try_from(start)
+            .ok()
+            .and_then(|start| (0..=start.min(last)).rev().find(matches))
+    } else {
+        let start = start.max(0) as usize;
+        let start = if needle.is_empty() {
+            start.min(last)
+        } else {
+            start
+        };
+        (start..=last).find(matches)
+    };
+    Some(found.map(|index| index as i32))
 }
 
 fn non_nil_compatibility(ty: &Type) -> Compatibility {

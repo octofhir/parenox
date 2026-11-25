@@ -22,6 +22,7 @@ pub(in crate::checker::model) fn read_function_spec(
         parameters: None,
         literal_shapes: false,
         unchecked_inputs,
+        partial_input: false,
         diagnostics,
         lookup,
     }

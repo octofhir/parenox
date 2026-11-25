@@ -68,7 +68,7 @@ fn adjacent_definition<'a>(
                 .is_err()
         })?;
     let captured = captured.and_then(|values| values.get(&previous_index));
-    let allow_const = matches!(captured, Some(CapturedInitializer::PlatformLong(_)));
+    let allow_const = matches!(captured, Some(CapturedInitializer::FixedLong(_)));
     let (name, value) = plain_def(previous, allow_const)?;
     if !forms.first().is_some_and(static_namespace_prelude)
         || declarations.forward_vars.contains_key(name)

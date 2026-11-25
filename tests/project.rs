@@ -494,6 +494,228 @@ fn checks_top_level_calls_to_source_functions_without_running_them() {
 }
 
 #[test]
+fn reader_tables_validate_mappings_without_creating_a_namespace() {
+    let table = Source {
+        path: "resources/data_readers.clj",
+        source: "{demo/item library.reader/read-item}",
+    };
+    let second = Source {
+        path: "more/data_readers.cljc",
+        source: "#?(:clj {demo/item library.reader/read-item} :cljs {demo/item other/read-item})",
+    };
+    let regular = Source {
+        path: "demo/data_readers.clj",
+        source: "(ns demo.data-readers) (defn label {:t/sig '[:-> string?]} [] \"ok\")",
+    };
+    let app = Source {
+        path: "app.clj",
+        source: "(ns app (:require [demo.data-readers :as r])) \"Standalone documentation\" :marker
+                 (defn label {:t/sig '[:-> string?]} [] (r/label))",
+    };
+    let mut session = Session::default();
+    let sources = [app, regular, table, second];
+    let report = session.check_project(&sources, None);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let exported = session.export_externs(&sources, &[]);
+    assert!(
+        exported.report.complete && exported.edn.is_some(),
+        "{exported:#?}"
+    );
+
+    let conflict = Source {
+        source: "{demo/item alternate/read-item}",
+        ..second
+    };
+    let report = session.check_project(&[app, regular, table, conflict], None);
+    let [finding] = report.files[3].diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2790");
+    assert!(finding.notes[0].contains("resources/data_readers.clj"));
+
+    let malformed = Source {
+        source: "{demo/item read-item}",
+        ..table
+    };
+    let report = session.check_project(&[malformed], None);
+    let [finding] = report.files[0].diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX9000");
+    assert!(finding.message.contains("qualified Var symbol"));
+}
+
+#[test]
+fn top_level_do_exposes_jvm_declarations_and_checks_nested_calls() {
+    let provider = Source {
+        path: "wrapped.cljc",
+        source: r#"(ns wrapped (:require [clojure.spec.alpha :as s]))
+#?(:clj
+   (do (def label "ready")
+       (do (defn render [value] value)
+           (s/fdef render :args (s/cat :value string?) :ret string?)))
+   :cljs
+   (def label :cljs))"#,
+    };
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [wrapped :as w]))
+(defn label {:t/sig '[:-> #{"ready"}]} [] w/label)
+(do (do (w/render 42)))"#,
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app, provider], None);
+    assert!(
+        report.files[1].ok && report.files[1].complete,
+        "{report:#?}"
+    );
+    let [error] = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(
+        &app.source[error.span.start.offset..error.span.end.offset],
+        "42"
+    );
+    let target = session
+        .definition(app.path, app.source.find("w/render").unwrap() + 2)
+        .unwrap();
+    assert_eq!(target.path, provider.path);
+    assert_eq!(target.span.start.line, 4);
+
+    let source = app.source.replace(
+        "(do (do (w/render 42)))",
+        ";; parenox-ignore PNX2322: exercise the original do span\n(do (do (w/render 42)))",
+    );
+    let report = session.check_project(
+        &[
+            Source {
+                source: &source,
+                ..app
+            },
+            provider,
+        ],
+        None,
+    );
+    let [suppressed] = report.files[0].suppressed.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(suppressed.diagnostic.code, "PNX2322");
+}
+
+#[test]
+fn checks_typed_top_level_calls_and_reports_opaque_load_time_effects() {
+    let provider = Source {
+        path: "setup.clj",
+        source: "(ns setup)
+                 (defn start {:t/sig '[string? :-> string?]} [text] text)",
+    };
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [setup :as setup]))
+(defn- start {:t/sig '[string? :-> string?]} [text] text)
+(defn untyped [x] x)
+(start "ok")
+(start 42)
+(setup/start "ok")
+(setup/start)
+(untyped :ok)"#,
+    };
+    let report = Session::default().check_project(&[app, provider], None);
+    assert!(!report.complete);
+    let errors: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .map(|finding| (finding.span.start.line, finding.code.as_str()))
+        .collect();
+    assert_eq!(errors, [(5, "PNX2322"), (7, "PNX2554")], "{report:#?}");
+    let warnings: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.code == "PNX9001" && finding.severity == "warning")
+        .map(|finding| finding.span.start.line)
+        .collect();
+    assert_eq!(warnings, [4, 5, 6, 7, 8], "{report:#?}");
+}
+
+#[test]
+fn named_defmethod_self_calls_use_the_local_method_contract() {
+    let source = Source {
+        path: "render.clj",
+        source: r#"(ns demo (:require [clojure.spec.alpha :as s]))
+(defmulti render identity)
+(s/fdef render :args (s/cat :value string?) :ret string?)
+(defmethod render :default local [value]
+  (if (empty? value) value (local (subs value 1))))
+(defmethod render :bad local [value] (local 12))"#,
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[source], None);
+    assert_eq!(report.stats.checked_functions, 2, "{report:#?}");
+    let errors: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .collect();
+    let [error] = errors.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(error.code, "PNX2322", "{error:#?}");
+    assert_eq!(
+        &source.source[error.span.start.offset..error.span.end.offset],
+        "12"
+    );
+    let usage = source.source.find("(local (subs").unwrap() + 1;
+    let target = session.definition(source.path, usage).unwrap();
+    assert_eq!(target.span.start.line, 4);
+    assert_eq!(
+        &source.source[target.span.start.offset..target.span.end.offset],
+        "local"
+    );
+}
+
+#[test]
+fn variadic_defmethod_checks_rest_bindings_and_self_calls() {
+    let source = Source {
+        path: "render.clj",
+        source: r#"(ns demo (:require [clojure.spec.alpha :as s]))
+(defmulti render (fn [value & _] value))
+(s/fdef render :args (s/cat :value string? :more (s/* string?)) :ret string?)
+(defmethod render :default local [value & [option]]
+  (if option (local (subs option 1)) value))
+(defmethod render "bad-rest" [value & [option]]
+  (if option (subs (inc option) 1) value))
+(defmethod render "bad-call" local
+  ([value] value)
+  ([value & [option]] (if option (local value 42) value)))"#,
+    };
+    let report = Session::default().check_project(&[source], None);
+    assert_eq!(report.stats.checked_functions, 3, "{report:#?}");
+    let errors: Vec<_> = report.files[0]
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .map(|finding| {
+            (
+                finding.code.as_str(),
+                &source.source[finding.span.start.offset..finding.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        [("PNX2322", "option"), ("PNX2322", "42")],
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn unannotated_mode_checks_functions_and_methods_without_assuming_argument_types() {
     let source = Source {
         path: "smoke.clj",
@@ -501,7 +723,7 @@ fn unannotated_mode_checks_functions_and_methods_without_assuming_argument_types
 (defn accepts-unknown [x] (inc x))
 (defn bad [] (inc "oops"))
 (defmulti render identity)
-(defmethod render :bad [x] (inc :bad))"#,
+(defmethod render :bad local [x] (inc :bad))"#,
     };
     let default = Session::default().check_project(&[source], None);
     assert_eq!(default.stats.checked_functions, 0);
@@ -1646,14 +1868,13 @@ fn removed_sources_or_contracts_do_not_leave_stale_declarations() {
     fix(&mut files);
     let mut session = Session::default();
     assert!(run(&mut session, &files, Some(EXTERNS)).ok);
+    let external = EXTERNS.replace("[string? string?", "[number? string?");
+    let changed = run(&mut session, &files, Some(&external));
+    assert!(!changed.ok && changed.complete, "{changed:#?}");
     let missing_contract = run(&mut session, &files, None);
-    assert!(!missing_contract.ok && !missing_contract.complete);
     assert!(
-        missing_contract
-            .files
-            .iter()
-            .flat_map(|f| &f.diagnostics)
-            .any(|d| d.message.contains("starts-with?"))
+        missing_contract.ok && missing_contract.complete,
+        "{missing_contract:#?}"
     );
     files.remove("clinic/store.clj");
     let removed = run(&mut session, &files, Some(EXTERNS));

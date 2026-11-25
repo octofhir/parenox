@@ -1,6 +1,22 @@
 use parenox::Session;
 
 #[test]
+fn numeric_comparisons_keep_exact_fixed_integer_results() {
+    let source = r#"
+(ns numbers (:require [clojure.spec.alpha :as s]))
+(defn ordered {:t/sig '[:-> #{true}]} [] (< 9007199254740992 9007199254740993))
+(defn equal {:t/sig '[:-> #{true}]} [] (<= 4 4))
+(defn singleton {:t/sig '[:-> #{true}]} [] (>= :anything))
+(defn stop-early {:t/sig '[:-> #{false}]} [] (> 1 2 :unused))
+(defn spread {:t/sig '[:-> #{false}]} [] (apply >= [3 2 4]))
+(defn unknown-spread {:t/sig '[(s/coll-of int? :min-count 1) :-> boolean?]} [xs]
+  (apply < 0 xs))
+"#;
+    let report = Session::default().check("numbers.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
 fn integer_contracts_accept_canonicalized_jvm_integer_literals() {
     for expression in [
         "42",

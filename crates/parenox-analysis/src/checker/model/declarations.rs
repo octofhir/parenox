@@ -3,6 +3,7 @@ mod method_bodies;
 mod outline;
 mod protocol_implementations;
 mod reader_names;
+mod root_writes;
 mod var_documentation;
 
 pub(super) use protocol_implementations::collect_protocol_group_methods;
@@ -16,7 +17,10 @@ use super::references::ProjectCall;
 use super::require::{ExplicitReferral, RuntimeLoads};
 use crate::Diagnostic;
 use crate::checker::bindings::binding_names;
-use crate::checker::function_forms::{Clause, function_clauses, lexical_function_clauses};
+use crate::checker::function_forms::{
+    Clause, function_clauses, letfn_bindings, letfn_definition, lexical_function_clauses,
+    split_method_name,
+};
 use crate::reader::{Form, Kind, OmittedDispatch, Span, UncheckedDispatches};
 use crate::types::Arity;
 
@@ -196,6 +200,13 @@ impl Names {
 pub(super) struct SpecDeclaration {
     pub name: Span,
     pub body: Form,
+    pub input_gap: Option<SpecInputGap>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpecInputGap {
+    LetfnBinding,
+    SourcePredicate,
 }
 
 pub(super) struct DeclaredVar {
@@ -486,7 +497,7 @@ impl Declarations {
             let [_, target, _, arities @ ..] = items.as_slice() else {
                 return None;
             };
-            lexical_function_clauses(arities, form.span).ok()?;
+            lexical_function_clauses(split_method_name(arities).1, form.span).ok()?;
             let target = target.without_metadata();
             Some((target.symbol()?, target.span))
         })
@@ -783,9 +794,11 @@ impl Declarations {
     pub(crate) fn top_level_call_diagnostics(
         &self,
         forms: &[Form],
+        standard_core: bool,
         mut public_macro: impl FnMut(&str, &str) -> bool,
         mut public_call: impl FnMut(&str, &str, usize) -> ProjectCall,
-    ) -> BTreeMap<usize, Diagnostic> {
+        mut check_typed_call: impl FnMut(&Form, &str) -> Option<Vec<Diagnostic>>,
+    ) -> BTreeMap<usize, Vec<Diagnostic>> {
         self.unmodeled_calls
             .iter()
             .filter_map(|&index| {
@@ -804,39 +817,63 @@ impl Declarations {
                     namespace != self.namespace() && public_macro(namespace, name)
                 };
                 let span = items[0].without_metadata().span;
-                let diagnostic = if known_macro {
-                    Diagnostic::analysis_gap(
-                        "PNX9001",
-                        span,
-                        format!("Expansion of source macro {op} is unchecked"),
-                    )
-                } else if !local {
-                    let actual = items.len() - 1;
-                    match public_call(namespace, name, actual) {
-                        ProjectCall::Function {
-                            expected_arity: Some(expected),
-                            ..
-                        } => Diagnostic::new(
-                            "PNX2554",
-                            span,
-                            format!("{op} expects {expected} arguments, got {actual}"),
-                        ),
-                        ProjectCall::Function {
-                            expected_arity: None,
-                            ..
-                        } => Diagnostic::analysis_gap(
+                if known_macro {
+                    return Some((
+                        offset,
+                        vec![Diagnostic::analysis_gap(
                             "PNX9001",
                             span,
-                            format!(
-                                "Analysis of top-level call to source function {op} is unavailable"
-                            ),
-                        ),
-                        _ => return None,
-                    }
+                            format!("Expansion of source macro {op} is unchecked"),
+                        )],
+                    ));
+                }
+                if standard_core && let Some((namespace, name)) = self.explicit_root_write(forms, items) {
+                    return Some((offset, vec![Diagnostic::analysis_gap(
+                        "PNX9001",
+                        span,
+                        format!("Load-time effects of alter-var-root on {namespace}/{name} are unchecked"),
+                    )]));
+                }
+                let actual = items.len() - 1;
+                let local_call = (local
+                    && self
+                        .source_var(forms, name, false)
+                        .is_some_and(|target| target.end.offset < offset))
+                .then(|| self.source_function_call(forms, name, actual, false));
+                if (!local || matches!(local_call, Some(ProjectCall::Function { .. })))
+                    && let Some(mut diagnostics) = check_typed_call(form, op)
+                {
+                    diagnostics.push(Diagnostic::analysis_gap(
+                        "PNX9001",
+                        span,
+                        format!("Load-time effects of top-level call to {op} are unchecked"),
+                    ));
+                    return Some((offset, diagnostics));
+                }
+                let call = if local {
+                    local_call?
                 } else {
-                    return None;
+                    public_call(namespace, name, actual)
                 };
-                Some((offset, diagnostic))
+                let diagnostic = match call {
+                    ProjectCall::Function {
+                        expected_arity: Some(expected),
+                        ..
+                    } if !local => Diagnostic::new(
+                        "PNX2554",
+                        span,
+                        format!("{op} expects {expected} arguments, got {actual}"),
+                    ),
+                    ProjectCall::Function { .. } => Diagnostic::analysis_gap(
+                        "PNX9001",
+                        span,
+                        format!(
+                            "Analysis of top-level call to source function {op} is unavailable"
+                        ),
+                    ),
+                    _ => return None,
+                };
+                Some((offset, vec![diagnostic]))
             })
             .collect()
     }
@@ -990,6 +1027,12 @@ impl Declarations {
             if index > 0 && index <= model.reflection_flags.len() {
                 continue;
             }
+            if matches!(
+                form.kind,
+                Kind::String(_) | Kind::Utf16String(_) | Kind::Keyword(_)
+            ) {
+                continue;
+            }
             let Kind::List(xs) = &form.without_metadata().kind else {
                 model.error("PNX9001", form.span, "Unsupported top-level form");
                 continue;
@@ -1052,20 +1095,9 @@ impl Declarations {
                     model.discarded_comments.push(index);
                 }
                 "clojure.spec.alpha/def" if xs.len() == 3 => {
-                    if let Some(key) = xs[1].keyword() {
-                        let key = model.names.key(key);
-                        let declaration = SpecDeclaration {
-                            name: xs[1].span,
-                            body: xs[2].clone(),
-                        };
-                        if model.specs.insert(key.clone(), declaration).is_some() {
-                            model.error("PNX2790", xs[1].span, format!("Duplicate spec {key}"));
-                            model.duplicate_specs.insert(key);
-                        }
-                    } else {
-                        model.error("PNX9001", xs[1].span, "Spec name must be a keyword");
-                    }
+                    model.read_spec_declaration(forms, &xs[1], &xs[2], false);
                 }
+                "clojure.core/letfn" if model.read_letfn_specs(forms, xs) => {}
                 "clojure.core/defn" | "clojure.core/defn-" => {
                     model.functions.push(index);
                     if let [_, name, tail @ ..] = xs.as_slice()
@@ -1431,6 +1463,132 @@ impl Declarations {
                 });
             }
         }
+    }
+
+    fn read_spec_declaration(
+        &mut self,
+        forms: &[Form],
+        name: &Form,
+        body: &Form,
+        captures_locals: bool,
+    ) {
+        let Some(key) = name.keyword().map(|key| self.names.key(key)) else {
+            self.error("PNX9001", name.span, "Spec name must be a keyword");
+            return;
+        };
+        let input_gap = if captures_locals {
+            Some(SpecInputGap::LetfnBinding)
+        } else {
+            self.has_source_spec_predicate(forms, body)
+                .then_some(SpecInputGap::SourcePredicate)
+        };
+        let declaration = SpecDeclaration {
+            name: name.span,
+            body: body.clone(),
+            input_gap,
+        };
+        if self.specs.insert(key.clone(), declaration).is_some() {
+            self.error("PNX2790", name.span, format!("Duplicate spec {key}"));
+            self.duplicate_specs.insert(key);
+        }
+    }
+
+    fn has_source_spec_predicate(&self, forms: &[Form], mut body: &Form) -> bool {
+        while let Kind::List(items) = &body.without_metadata().kind
+            && let [head, predicate, _] = items.as_slice()
+            && head.symbol().is_some_and(|name| {
+                self.names.resolve_parts(name) == ("clojure.spec.alpha", "with-gen")
+            })
+        {
+            body = predicate;
+        }
+        let Some(symbol) = body.symbol() else {
+            return false;
+        };
+        let local = if symbol != "/" && symbol.contains('/') {
+            let (namespace, local) = self.names.resolve_parts(symbol);
+            if namespace != self.namespace() {
+                return false;
+            }
+            local
+        } else {
+            symbol
+        };
+        self.source_var(forms, local, false)
+            .is_some_and(|target| target.end.offset < body.span.start.offset)
+            && matches!(
+                self.source_function_call(forms, local, 1, false),
+                ProjectCall::Function {
+                    expected_arity: None,
+                    ..
+                }
+            )
+    }
+
+    fn read_letfn_specs(&mut self, forms: &[Form], items: &[Form]) -> bool {
+        let [head, bindings, body @ ..] = items else {
+            return false;
+        };
+        if body.is_empty()
+            || !self.is_unshadowed_core_operator(forms, head, "letfn")
+            || !self.names.loads_library("clojure.spec.alpha")
+            || items.iter().any(crate::checker::has_evaluated_metadata)
+        {
+            return false;
+        }
+        let Some(bindings) = letfn_bindings(bindings) else {
+            return false;
+        };
+        let mut locals = BTreeSet::new();
+        for binding in bindings {
+            let Some([name, clauses @ ..]) = letfn_definition(binding) else {
+                return false;
+            };
+            let Some(name) = name
+                .symbol()
+                .filter(|name| unqualified(name) && *name != "&")
+            else {
+                return false;
+            };
+            if !locals.insert(name) || lexical_function_clauses(clauses, binding.span).is_err() {
+                return false;
+            }
+        }
+        let specs: Option<Vec<_>> = body
+            .iter()
+            .map(|form| {
+                let Kind::List(items) = &form.kind else {
+                    return None;
+                };
+                let [head, name, body] = items.as_slice() else {
+                    return None;
+                };
+                let op = head.symbol()?;
+                (self.names.resolve_parts(op) == ("clojure.spec.alpha", "def")
+                    && (op.contains('/')
+                        || (!locals.contains(op)
+                            && self.all_refers.is_empty()
+                            && self.source_declarations(forms, op).next().is_none()))
+                    && name.keyword().is_some()
+                    && !matches!(body.kind, Kind::Nil))
+                .then_some((name, body))
+            })
+            .collect();
+        let Some(specs) = specs else { return false };
+        let mut unchecked = false;
+        for (name, body) in specs {
+            let captures_locals = !symbols_match(body, &mut |symbol| !locals.contains(symbol));
+            unchecked |= captures_locals;
+            self.read_spec_declaration(forms, name, body, captures_locals);
+        }
+        if !locals.is_empty() && !unchecked {
+            self.diagnostics.push(Diagnostic::analysis_gap(
+                "PNX9001",
+                head.span,
+                "Local functions in this top-level letfn are unchecked",
+            ));
+        }
+        true
     }
 
     fn read_ns(&mut self, xs: &[Form], span: Span, globals: Option<&Globals>) {

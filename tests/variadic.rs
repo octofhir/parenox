@@ -48,7 +48,6 @@ fn inline_rest_is_nil_when_empty_and_recur_receives_one_rest_slot() {
         ("((fn ([x y] x) ([x & xs] x)) 1)", "PNX2554"),
         ("((fn ([x & more] x) ([x y & more] x)) 1)", "PNX2554"),
         ("((fn [x & more extra] x) 1)", "PNX1001"),
-        ("((fn [x & {:keys [y]}] y) 1 :y 2)", "PNX9001"),
         ("((fn [x & more] (recur x)) 1)", "PNX2554"),
     ] {
         let source = format!("(ns demo) (defn f {{:t/sig '[:-> number?]}} [] {expr})");
@@ -56,6 +55,45 @@ fn inline_rest_is_nil_when_empty_and_recur_receives_one_rest_slot() {
         assert_eq!(report.diagnostics.len(), 1, "{expr}: {report:#?}");
         assert_eq!(report.diagnostics[0].code, code);
     }
+}
+
+#[test]
+fn variadic_map_bindings_read_pairs_and_a_trailing_options_map() {
+    let source = r#"
+(ns demo)
+(defn- size [& {:keys [n] :or {n :default}}] n)
+(defn empty-options {:t/sig '[:-> #{:default}]} [] (size))
+(defn keyword-pairs {:t/sig '[:-> #{:pair}]} [] (size :n :pair))
+(defn single-map {:t/sig '[:-> #{:single}]} [] (size {:n :single}))
+(defn trailing-map {:t/sig '[:-> #{:override}]} [] (size :n :pair {:n :override}))
+(defn via-apply {:t/sig '[:-> #{:spread}]} []
+  (apply (fn [& {:as opts}] (:n opts)) [:ignored 1 {:n :spread}]))
+"#;
+    let report = Session::default().check("variadic.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let bad = source.replace("(size :n :pair)", "(size :n :wrong)");
+    let report = Session::default().check("variadic.clj", &bad);
+    let [error] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.actual.as_deref(), Some(":wrong"));
+}
+
+#[test]
+fn variadic_map_binding_reports_a_gap_for_unknown_rest_positions() {
+    let source = r#"
+(defn options {:t/sig '[& t/any :-> t/any]} [& {:as opts}] opts)
+"#;
+    let report = Session::default().check("variadic.clj", source);
+    assert!(!report.complete, "{report:#?}");
+    assert!(report.diagnostics.iter().any(|finding| {
+        finding.code == "PNX9001"
+            && finding
+                .message
+                .contains("requires fixed sequence positions")
+    }));
 }
 
 #[test]

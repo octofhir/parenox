@@ -286,7 +286,7 @@ fn collection(actual: &Type, element: &Type) -> Compatibility {
     use Compatibility::{Mismatch, Proven, Unproven};
     match actual {
         Type::SpecCollection(actual) => actual.compatibility(element),
-        Type::Map(_) if *element == Type::SpecValue => Proven,
+        Type::Map(_) if matches!(element, Type::Any | Type::SpecValue) => Proven,
         Type::Map(map) => match (map.emptiness(), element) {
             (Some(true), _) => Proven,
             // A nonempty map yields entries rather than its keys or values.

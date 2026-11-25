@@ -1,9 +1,11 @@
 //! Inert EDN project settings for command-line checks.
 mod deps;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use parenox::ProjectSuppression;
 use parenox::formatter::{FormatOptions, IndentRule};
 use parenox::reader::{self, Form, Kind, Span};
 
@@ -20,6 +22,7 @@ pub(super) struct ProjectConfig {
     pub externs: Vec<String>,
     pub dependency_externs: Vec<String>,
     pub format: FormatOptions,
+    pub suppressions: BTreeMap<String, ProjectSuppression>,
 }
 
 impl ProjectOptions {
@@ -136,6 +139,10 @@ impl ProjectConfig {
                     config.format = format_options(path, &source, value)?;
                     continue;
                 }
+                ":suppress" => {
+                    read_suppressions(path, value, &mut config.suppressions)?;
+                    continue;
+                }
                 _ => {
                     return Err(invalid(
                         path,
@@ -167,6 +174,61 @@ impl ProjectConfig {
         }
         Ok(config)
     }
+}
+
+fn read_suppressions(
+    path: &Path,
+    form: &Form,
+    rules: &mut BTreeMap<String, ProjectSuppression>,
+) -> Result<(), String> {
+    let Some(entries) = form.map() else {
+        return Err(invalid(path, form.span, ":suppress must be an EDN map"));
+    };
+    for [key, value] in entries.as_chunks::<2>().0 {
+        let Kind::String(code) = &key.kind else {
+            return Err(invalid(
+                path,
+                key.span,
+                ":suppress keys must be diagnostic code strings",
+            ));
+        };
+        if !matches!(code.strip_prefix("PNX"), Some(digits)
+            if digits.len() == 4 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return Err(invalid(
+                path,
+                key.span,
+                "expected a diagnostic code such as PNX9002",
+            ));
+        }
+        let Kind::String(reason) = &value.kind else {
+            return Err(invalid(
+                path,
+                value.span,
+                ":suppress requires a non-empty reason",
+            ));
+        };
+        if reason.trim().is_empty() {
+            return Err(invalid(
+                path,
+                value.span,
+                ":suppress requires a non-empty reason",
+            ));
+        }
+        let rule = ProjectSuppression {
+            config_path: path.to_string_lossy().into_owned(),
+            directive: key.span,
+            reason: reason.trim().into(),
+        };
+        if rules.insert(code.clone(), rule).is_some() {
+            return Err(invalid(
+                path,
+                key.span,
+                &format!("duplicate suppression for {code}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn format_options(path: &Path, source: &str, form: &Form) -> Result<FormatOptions, String> {

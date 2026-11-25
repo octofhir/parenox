@@ -448,6 +448,9 @@ impl Checker<'_> {
         }
         let returns = invalid_hint.is_none() && !value.stops_evaluation();
         self.inspect_path(returns, |checker| {
+            if returns {
+                checker.narrow_completed_string_search(init, env);
+            }
             let source = checker.binding_selector(pattern, init, env);
             // Read the initializer's class selection in the previous scope.
             let inherited_hint = pattern

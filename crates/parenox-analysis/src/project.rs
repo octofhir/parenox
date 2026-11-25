@@ -1,3 +1,4 @@
+mod data_readers;
 mod dependency_cycles;
 mod extern_export;
 mod navigation;
@@ -26,7 +27,7 @@ use crate::checker::{
     ProjectCall, RuntimeLoads, SpecCache, SpecFingerprint, SpecSource,
 };
 use crate::reader::{self, Form, Position, Span};
-use crate::suppressions::{MARKER, Suppressions};
+use crate::suppressions::{MARKER, Suppressions, apply_project};
 use crate::{
     ContractOrigin, Diagnostic, ExternChangeKind, ExternDiff, ExternSnapshot, Report, Stats,
 };
@@ -118,6 +119,7 @@ struct FileCache {
     snapshot: u64,
     parsed: bool,
     kind: FileKind,
+    reader_table: bool,
     forms: Arc<[Form]>,
     parse_error: Option<Diagnostic>,
     suppressions: Suppressions,
@@ -236,6 +238,8 @@ impl FileCache {
             ),
             FileKind::Externs => reader::read_externs_for_check(source),
         };
+        self.reader_table =
+            kind == FileKind::Source && data_readers::is_reader_table(path, &read.forms);
         let earlier_error = read_error
             .as_ref()
             .filter(|_| kind == FileKind::Source)
@@ -245,6 +249,7 @@ impl FileCache {
         let reader_failed = read_error.is_some() && earlier_error.is_none();
         let parsed = match earlier_error.or(read_error) {
             Some(error) => Err(error),
+            None if self.reader_table => data_readers::validate(&read).map(|()| None),
             None if kind == FileKind::Source => {
                 Declarations::read_source(source, &mut read).map(Some)
             }
@@ -263,7 +268,12 @@ impl FileCache {
             },
         };
         match parsed {
-            Ok(declarations) => {
+            Ok(mut declarations) => {
+                self.suppressions =
+                    Suppressions::read(source, &read.forms, std::mem::take(&mut read.comments));
+                if let Some(declarations) = &mut declarations {
+                    declarations.expand_top_level_do(&mut read);
+                }
                 let fingerprint = declarations
                     .as_ref()
                     .and_then(|declarations| declarations.spec_fingerprint(source, &read.forms));
@@ -271,12 +281,11 @@ impl FileCache {
                     self.spec_fingerprint = fingerprint.map(Arc::new);
                 }
                 self.declarations = declarations;
-                self.suppressions = Suppressions::read(source, &read.forms, read.comments);
                 self.forms = read.forms.into();
             }
             Err(error) => {
                 self.forms = Arc::default();
-                if kind == FileKind::Source {
+                if kind == FileKind::Source && !self.reader_table {
                     if !reader_failed {
                         // Preserve the valid prefix when namespace validation fails.
                         read.forms
@@ -349,6 +358,7 @@ impl FileCache {
 #[derive(Default)]
 pub struct Session {
     check_unannotated: bool,
+    project_suppressions: BTreeMap<String, crate::ProjectSuppression>,
     files: BTreeMap<String, FileCache>,
     specs: SpecCache,
     externs: ExternCache,
@@ -357,6 +367,11 @@ pub struct Session {
 }
 
 impl Session {
+    /// Replace report filters without invalidating cached analysis.
+    pub fn set_project_suppressions(&mut self, rules: BTreeMap<String, crate::ProjectSuppression>) {
+        self.project_suppressions = rules;
+    }
+
     /// Check recognized bodies without a signature using unknown parameter types.
     pub fn with_unannotated_bodies(mut self, enabled: bool) -> Self {
         self.check_unannotated = enabled;
@@ -574,6 +589,14 @@ impl Session {
             });
             entries.push((source, cache));
         }
+        data_readers::check_conflicts(entries[..count].iter().zip(&mut reports).filter_map(
+            |((source, cache), report)| {
+                (cache.reader_table
+                    && cache.parse_error.is_none()
+                    && cache.snapshot == self.snapshot)
+                    .then_some((source.path, cache.forms.as_ref(), &mut report.diagnostics))
+            },
+        ));
         let mut namespaces = BTreeMap::new();
         let mut ambiguous = BTreeSet::new();
         for (index, (_, cache)) in entries[..count].iter().enumerate() {
@@ -714,6 +737,15 @@ impl Session {
         for namespace in namespaces.keys() {
             globals.register_namespace(namespace);
         }
+        if !namespaces.contains_key("clojure.core") {
+            for (_, cache) in &entries[..count] {
+                if let Some(declarations) = &cache.declarations {
+                    declarations.collect_root_writes(&cache.forms, |namespace, name| {
+                        globals.register_root_write(namespace, name);
+                    });
+                }
+            }
+        }
         for (source, cache) in &mut entries[count..] {
             if cache.parse_error.is_none()
                 && cache
@@ -824,6 +856,7 @@ impl Session {
                 if let (Some(declarations), Some(model)) = (&file.declarations, &file.model) {
                     let calls = declarations.top_level_call_diagnostics(
                         &file.forms,
+                        !namespaces.contains_key("clojure.core"),
                         |namespace, name| {
                             provider(namespace).is_some_and(|(_, declarations)| {
                                 declarations.source_macro(name, None)
@@ -848,6 +881,9 @@ impl Session {
                             } else {
                                 call
                             }
+                        },
+                        |form, name| {
+                            model.check_top_level_contract_call(form, name, &globals, source.source)
                         },
                     );
                     if !calls.is_empty() {
@@ -966,8 +1002,8 @@ impl Session {
                             if tests.is_some_and(|tests| tests.contains(&offset)) {
                                 return None;
                             }
-                            if let Some(call) = calls.and_then(|calls| calls.get(&offset)) {
-                                return Some(call.clone());
+                            if calls.is_some_and(|calls| calls.contains_key(&offset)) {
+                                return None;
                             }
                             if methods
                                 .as_ref()
@@ -981,6 +1017,9 @@ impl Session {
                         }
                         Some(diagnostic.clone())
                     }));
+                if let Some(calls) = calls {
+                    report.diagnostics.extend(calls.values().flatten().cloned());
+                }
                 let has_declaration_findings = report.diagnostics.len() != declaration_start;
                 if index >= count {
                     report
@@ -1135,6 +1174,9 @@ impl Session {
                     }
                 }
                 *ordinal += 1;
+            }
+            if index < count && matches!(mode, SnapshotMode::Check(_)) {
+                apply_project(&self.project_suppressions, report);
             }
             report.ok = report.diagnostics.is_empty();
             report.complete = report.suppressed.is_empty()

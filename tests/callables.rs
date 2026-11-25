@@ -1,6 +1,45 @@
 use parenox::Session;
 
 #[test]
+fn callable_predicates_distinguish_jvm_fn_from_other_invokable_values() {
+    let source = r#"
+(ns callable (:require [clojure.spec.alpha :as s]))
+(def optional-hook nil)
+(defn fallback {:t/sig '[:-> #{:fallback}]} []
+  (if (fn? optional-hook) (optional-hook) :fallback))
+(defn keyword-lookup {:t/sig '[:-> #{:found}]} []
+  (if (and (ifn? :key) (not (fn? :key))) (:key {:key :found}) :wrong))
+(defn map-lookup {:t/sig '[:-> #{:found}]} []
+  (let [m {:key :found}]
+    (if (and (ifn? m) (not (fn? m))) (m :key) :wrong)))
+(defn guarded-hook {:t/sig '[(s/nilable (s/fspec :args (s/cat) :ret string?)) :-> string?]}
+  [hook]
+  (if (ifn? hook) (hook) "fallback"))
+(defn unknown-function-class
+  {:t/sig '[(s/fspec :args (s/cat) :ret string?) :-> boolean?]} [hook]
+  (fn? hook))
+(defn shadowed {:t/sig '[:-> #{:shadowed}]} []
+  (let [fn? (fn [_] true)]
+    (if (fn? optional-hook) :shadowed :wrong)))
+"#;
+    let report = Session::default().check("callable.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let unguarded = source.replace(
+        "(if (fn? optional-hook) (optional-hook) :fallback)",
+        "(optional-hook)",
+    );
+    let report = Session::default().check("callable.clj", &unguarded);
+    assert!(
+        report.diagnostics.iter().any(|finding| {
+            finding.code == "PNX2322"
+                && finding.message == "Call target: expected Callable, got Nil"
+        }),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn constantly_captures_a_value_and_accepts_any_invocation_arity() {
     let source = r#"
         (ns demo (:require [clojure.spec.alpha :as s]))

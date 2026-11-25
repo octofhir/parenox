@@ -1,5 +1,5 @@
 //! JVM fixed-precision arithmetic shared by ordinary and prepared calls.
-use super::{Checker, Env, Value};
+use super::{Checker, Env, Value, nil_part};
 use crate::reader::{Form, Span};
 use crate::types::{IntegerClass, IntegerType, Type};
 
@@ -9,14 +9,7 @@ pub(super) struct FixedResult {
 }
 
 pub(super) fn fixed_result(name: &str, args: &[(Value, Span)]) -> Option<FixedResult> {
-    let operation = match name {
-        "clojure.core/+" => Operation::Add,
-        "clojure.core/-" => Operation::Subtract,
-        "clojure.core/*" => Operation::Multiply,
-        "clojure.core/inc" => Operation::Increment,
-        "clojure.core/dec" => Operation::Decrement,
-        _ => return None,
-    };
+    let operation = Operation::core(name)?;
     let fixed = Type::Integral(IntegerType::FIXED);
     if !args.iter().all(|(value, _)| value.known.subtype_of(&fixed)) {
         return None;
@@ -44,6 +37,17 @@ pub(super) fn fixed_result(name: &str, args: &[(Value, Span)]) -> Option<FixedRe
     }
 }
 
+pub(in crate::checker) fn fold_fixed_integers(
+    name: &str,
+    values: impl ExactSizeIterator<Item = Option<i64>>,
+) -> Option<i64> {
+    let operation = Operation::core(name)?;
+    if matches!(operation, Operation::Increment | Operation::Decrement) && values.len() != 1 {
+        return None;
+    }
+    operation.fold(values)
+}
+
 enum Operation {
     Add,
     Subtract,
@@ -53,6 +57,17 @@ enum Operation {
 }
 
 impl Operation {
+    fn core(name: &str) -> Option<Self> {
+        match name {
+            "clojure.core/+" => Some(Self::Add),
+            "clojure.core/-" => Some(Self::Subtract),
+            "clojure.core/*" => Some(Self::Multiply),
+            "clojure.core/inc" => Some(Self::Increment),
+            "clojure.core/dec" => Some(Self::Decrement),
+            _ => None,
+        }
+    }
+
     fn fold(self, mut values: impl ExactSizeIterator<Item = Option<i64>>) -> Option<i64> {
         match self {
             Self::Add => values.try_fold(0_i64, |sum, value| sum.checked_add(value?)),
@@ -71,7 +86,71 @@ impl Operation {
     }
 }
 
+pub(super) fn integer_comparison(name: &str) -> Option<fn(i64, i64) -> bool> {
+    match name {
+        "clojure.core/<" => Some(|left, right| left < right),
+        "clojure.core/<=" => Some(|left, right| left <= right),
+        "clojure.core/>" => Some(|left, right| left > right),
+        "clojure.core/>=" => Some(|left, right| left >= right),
+        _ => None,
+    }
+}
+
 impl Checker<'_> {
+    pub(super) fn compare_numbers(
+        &mut self,
+        name: &str,
+        compare: fn(i64, i64) -> bool,
+        args: &[(Value, Span)],
+    ) -> Value {
+        let fixed = Type::Integral(IntegerType::FIXED);
+        let mut may_short_circuit = false;
+        for pair in args.windows(2) {
+            if pair.iter().all(|(value, _)| value.known.subtype_of(&fixed)) {
+                if let (Some(left), Some(right)) = (
+                    pair[0].0.known.exact_long_value(),
+                    pair[1].0.known.exact_long_value(),
+                ) {
+                    if !compare(left, right) {
+                        return Value::new(Type::Bool(false));
+                    }
+                    continue;
+                }
+            } else {
+                let mut invalid = false;
+                for (value, span) in pair {
+                    if excludes_number(value) {
+                        self.expect(value, &Type::Number, *span, name);
+                        invalid = true;
+                    }
+                }
+                if invalid {
+                    if pair
+                        .iter()
+                        .any(|(value, _)| nil_part(&value.known) != Type::Never)
+                    {
+                        self.null_pointer();
+                    }
+                    if pair.iter().all(|(value, _)| value.known != Type::Nil) {
+                        self.class_cast();
+                    }
+                    return Value::new(if may_short_circuit {
+                        Type::Bool(false)
+                    } else {
+                        Type::Never
+                    });
+                }
+                self.may_throw();
+            }
+            may_short_circuit = true;
+        }
+        Value::new(if may_short_circuit {
+            Type::Boolean
+        } else {
+            Type::Bool(true)
+        })
+    }
+
     pub(super) fn direct_extremum(
         &mut self,
         name: &str,

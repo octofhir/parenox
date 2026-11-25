@@ -39,6 +39,21 @@ or element. Literal maps and vectors can locate the exact value in source.
 Computed arguments retain their range and report the failing path in a note.
 A call with a definite argument mismatch has an unknown result type.
 Signature help shows the expected arguments and declared result for that call.
+Top-level calls use available function contracts to check arguments and
+arity. Calls to an earlier local function without a contract report partial
+coverage, and a checked call still reports a gap for its load-time effects.
+Direct top-level `do` forms expose their JVM declarations and calls in
+source order. Groups with a direct reader namespace change remain unchecked.
+Top-level `letfn` groups whose body registers specs expose those spec keys.
+Specs that capture a local function retain an unchecked type. A registration
+that does not capture a local can use the normal spec type rules.
+A direct spec predicate backed by an earlier unary function in the same file
+can register a spec with an unchecked input type. Anonymous predicates and
+the standard `inst?` and `fn?` predicates also report input coverage gaps.
+`fn?` and `ifn?` refine branches for known JVM values. Keywords and
+ordinary map literals implement `IFn`; `fn?` checks the distinct `Fn`
+interface. A structural function contract supplies invocation types for
+`ifn?` and leaves the concrete `Fn` class test open.
 
 A function body without a checked signature can still report a proved
 argument mismatch at a call to a required library with an EDN extern.
@@ -73,12 +88,17 @@ From a project directory, run `parenox check`, or supply one or more files
 and directories. Source scans include `.clj` and `.cljc`, skip hidden entries
 and do not follow symlinks within a directory. Explicitly supplied source
 roots may be symlinks. The checker uses the `:clj` branches of `.cljc`.
+Files named `data_readers.clj` or `data_readers.cljc` without a namespace
+declaration are checked as reader tables. The checker validates symbol pairs
+and reports conflicting mappings across tables in the snapshot. It does
+not invoke tag handlers.
 
 ```edn
 {:paths ["src"]
  :externs ["externs/api.edn"]
  :dependency-externs ["externs/dependencies.edn"]
- :dependency-sources ["../vendor/library/src"]}
+ :dependency-sources ["../vendor/library/src"]
+ :suppress {"PNX9002" "Allow partial coverage during adoption"}}
 ```
 
 All keys in this `parenox.edn` example are optional. Relative paths resolve
@@ -86,6 +106,16 @@ from its directory. Select another file with `--config FILE`. For `check`,
 positional paths replace `:paths` and skip the default `parenox.edn` unless
 `--config` is supplied. Repeated `--externs` or `--dependency-externs` flags
 replace their matching configured list.
+
+`:suppress` maps exact diagnostic code strings to reasons. It applies to
+source reports in `check`, project diagnostics in `lsp`, and disk-backed
+`serve` sessions. `PNX9002` includes the per-file coverage warning about
+bodies checked with unknown parameter types. A rule suppresses every
+occurrence of its code, including errors and warnings that share that code.
+JSON retains the original diagnostic, config path, and reason under
+`suppressed`. Suppressed findings leave the report incomplete and do not
+affect type inference. Use `--config parenox.edn` to apply the rules when
+passing positional paths.
 
 Without configured source roots, Parenox falls back to `deps.edn`. Use
 `--deps FILE` to select a different manifest or repeat `--alias NAME` to
@@ -153,6 +183,10 @@ an analysis gap.
 Consecutive bare aliases can forward the same captured literal data. Each
 public alias can export that value to EDN. A proven bare read keeps later
 initializers eligible for folding. An unchecked effect ends that proof.
+An explicit top-level `alter-var-root` with a Var operand, including one
+inside a top-level `do` in another namespace, withholds the target `def`'s
+initializer type from project checks. The checker reports the resulting gap
+at the definition.
 An initializer can also fold a two-argument call to standard
 `clojure.set/union` over inline sets or earlier local literal sets in a
 stable scope. The call supports up to 64 written members and 64 KiB per
@@ -160,6 +194,11 @@ set literal. Supported members include symbols, keywords, strings,
 characters, Boolean values, nil, and exact integers in the signed long
 range. For equal members it keeps the object from the larger set, or
 from the left set when the sizes tie. Other members leave a coverage gap.
+
+`def` initializers can also fold standard `+`, `-`, `*`, `inc`, and `dec`
+over fixed integer literals and nested calls in a stable namespace scope.
+Overflow and unresolved operators leave a coverage gap. Proven results
+are available to dependent checks and export as decimal EDN integers.
 
 `def` initializers may read `Long/MIN_VALUE` and `Long/MAX_VALUE` when
 the qualifier resolves to `java.lang.Long`. Parenox checks for competing
@@ -224,6 +263,11 @@ Exporting the regex object as an EDN literal value is unsupported.
   lsp4clj. For a map input, the elements are its entries. An empty map
   satisfies the element constraint. An individual map entry can itself
   satisfy the constraint when both its key and value have the required shape.
+- `s/every` checks the supported collection kind and length options,
+  including `:count`, `:min-count`, and `:max-count`. The report marks
+  element types as unchecked because the runtime samples elements.
+- A `some?` spec accepts non-nil values, including `false`, subject to
+  Spec's reserved invalid value.
 - `s/fspec` uses `s/cat` and `:ret` for callback contracts. Direct
   fixed-arity calls can supply types to `fn` and `#()` arguments, including
   values at declared keys in a literal map argument. Fixed callback contracts
@@ -388,8 +432,10 @@ implementations:
  vendor.bindings/with-bindings {:macro :let-like}}
 ```
 
-A checked source declaration takes precedence. Duplicate externs or attempts
-to replace a modeled built-in report `PNX2790`. Literal values describe the
+A checked source declaration takes precedence. The string search rules
+for `starts-with?`, `ends-with?`, `index-of`, and `last-index-of` apply
+when those `clojure.string` names lack an explicit contract. Duplicate externs
+or attempts to replace other modeled built-ins report `PNX2790`. Literal values describe the
 initializer, not later runtime changes. A `:let-like` description supplies
 lexical scope for sequential bindings, not the macro's result, effects, or
 tail positions; such calls still report `PNX9009`.
@@ -810,6 +856,9 @@ In a direct map destructuring binding, Clojure 1.13 evaluates the `:or`
 defaults before the value to destructure. A default can run even when its
 key is present or unused. A proven runtime failure in a default or initializer
 leaves later bindings and the body subject to compiler checks.
+Variadic bindings such as `[x & {:keys [limit] :as opts}]` can use known
+keyword/value pairs, a single options map, or pairs followed by a literal map.
+With an open rest sequence, Parenox reports partial coverage for the map conversion.
 On the JVM, a dot in a local parameter or binding name produces `PNX1001`
 on the written binding. Dots in destructuring keys are allowed when the local
 name is valid. A named `fn` can use dots in its own name.
@@ -993,6 +1042,11 @@ arguments and reports nil as an invalid input. `false` is a non-nil
 value. `clojure.string/blank?` accepts String, nil, and false in the
 modeled subset. A false result implies the argument is truthy. `trim`
 requires a String in the modeled subset.
+The checker computes literal `starts-with?` and `ends-with?` results
+and tracks the UTF-16 indices returned by `index-of` and `last-index-of`.
+After a successful direct search in an `if` test, `let` initializer, or
+conditional binding, the checker can treat its lexically tracked receiver
+as non-nil.
 
 A literal Boolean assignment to the core `*warn-on-reflection*` var in
 the opening block after a statically resolved `ns` is supported. The

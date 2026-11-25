@@ -484,6 +484,12 @@ impl Checker<'_> {
                 self.may_throw();
                 Value::new(Type::String)
             }
+            Callable::Builtin(name) if super::arithmetic::integer_comparison(name).is_some() => {
+                self.check_spread_arities(builtin_arities(name), lengths, spread.span);
+                self.note_builtin_contract(start, name);
+                self.may_throw();
+                Value::new(Type::Boolean)
+            }
             Callable::Builtin(name)
                 if matches!(name.as_str(), "clojure.core/min" | "clojure.core/max") =>
             {

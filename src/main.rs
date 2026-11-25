@@ -145,10 +145,11 @@ impl CheckMode {
 
 fn check(options: CheckOptions, mode: CheckMode, check_unannotated: bool) -> Result<u8, String> {
     let validate_externs = mode == CheckMode::ValidateExterns;
-    let config = options.resolved_config()?;
+    let mut config = options.resolved_config()?;
     if validate_externs && config.externs.is_empty() {
         return Err("validate-externs requires at least one --externs file".into());
     }
+    let suppressions = std::mem::take(&mut config.suppressions);
     let project = DiskProject::read(config)?;
     project.require_source_files()?;
     let DiskProject {
@@ -159,6 +160,7 @@ fn check(options: CheckOptions, mode: CheckMode, check_unannotated: bool) -> Res
     let format = options.format();
     let color = format == Format::Pretty && options.color.enabled();
     let mut session = Session::default().with_unannotated_bodies(check_unannotated);
+    session.set_project_suppressions(suppressions);
     if files.len() == 1 && externs.is_empty() && dependencies.is_empty() {
         let (path, source) = files.first_key_value().unwrap();
         if format == Format::Pretty {

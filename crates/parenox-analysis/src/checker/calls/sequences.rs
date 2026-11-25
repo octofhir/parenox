@@ -339,18 +339,6 @@ fn may_use_padding(lengths: LengthBounds, size: usize, step: usize) -> bool {
         .is_some_and(|next| lengths.includes(next))
 }
 
-fn positional_sequence(items: Vec<Value>) -> Value {
-    let (types, children): (Vec<_>, Vec<_>) = items
-        .into_iter()
-        .map(|item| (item.known, item.literal_container))
-        .unzip();
-    let mut result = Value::new(Type::SeqTuple(types.into_boxed_slice()));
-    if children.iter().any(Option::is_some) {
-        result.literal_container = Some(LiteralContainer::Positions(Arc::from(children)));
-    }
-    result
-}
-
 fn sequence_item_equality(left: &Type, right: &Type) -> Option<bool> {
     literal_equality(left, right).or_else(|| {
         ((left.is_vector() && has_closed_scalar_class(right))
@@ -391,7 +379,7 @@ fn modeled_distinct_source(ty: &Type) -> bool {
 
 fn repeated_values(item: &Value, length: usize) -> Value {
     if length <= MAX_TUPLE_ITEMS {
-        positional_sequence(vec![item.clone(); length])
+        Value::positional_sequence(vec![item.clone(); length])
     } else {
         Value::with_notes(
             nonempty_sequence(item.known.clone(), LengthBounds::exact(length)),
@@ -594,7 +582,7 @@ impl Checker<'_> {
                 true
             });
             if fixed {
-                return positional_sequence(values);
+                return Value::positional_sequence(values);
             }
         }
         let element = Type::union(sequences.into_iter().map(|sequence| {
@@ -641,7 +629,7 @@ impl Checker<'_> {
                 }
                 values.push(sequence.position_value(item.clone(), index));
             }
-            return positional_sequence(values);
+            return Value::positional_sequence(values);
         }
         let mut element = element_type(sequence.known)
             .unwrap_or_else(|_| unreachable!("a sequence has an element type"));
@@ -695,7 +683,7 @@ impl Checker<'_> {
                     values.push(sequence.position_value(items[index].clone(), index));
                 }
             }
-            return positional_sequence(values);
+            return Value::positional_sequence(values);
         }
         let element = Type::union(sequences.into_iter().map(|sequence| {
             element_type(sequence.known)
@@ -864,7 +852,7 @@ impl Checker<'_> {
                 .step_by(spacing)
                 .map(|(index, item)| sequence.position_value(item.clone(), index))
                 .collect();
-            return positional_sequence(values);
+            return Value::positional_sequence(values);
         }
         let first = if spacing == Some(0) {
             fixed.and_then(|items| items.first()).cloned()
@@ -919,7 +907,7 @@ impl Checker<'_> {
                 }
             }
             if minimum == values.len() {
-                let mut result = positional_sequence(values);
+                let mut result = Value::positional_sequence(values);
                 result.notes = sequence.notes;
                 return result;
             }
@@ -997,7 +985,7 @@ impl Checker<'_> {
                 values.push(sequence.position_value(item.clone(), index));
             }
             if minimum == values.len() {
-                let mut result = positional_sequence(values);
+                let mut result = Value::positional_sequence(values);
                 result.notes = sequence.notes;
                 return result;
             }
@@ -1063,13 +1051,13 @@ impl Checker<'_> {
             {
                 let groups = (0..items.len()).step_by(spacing).map(|first| {
                     let end = first.saturating_add(size).min(items.len());
-                    positional_sequence(
+                    Value::positional_sequence(
                         (first..end)
                             .map(|index| sequence.position_value(items[index].clone(), index))
                             .collect(),
                     )
                 });
-                return positional_sequence(groups.collect());
+                return Value::positional_sequence(groups.collect());
             }
             let last_size = spacing.map_or(1, |spacing| {
                 if lengths.max == Some(lengths.min) {
@@ -1188,9 +1176,9 @@ impl Checker<'_> {
                     .take(size - (end - start))
                     .enumerate()
                     .map(|(index, item)| pad_sequence.position_value(item.clone(), index));
-                positional_sequence(source.chain(padding).collect())
+                Value::positional_sequence(source.chain(padding).collect())
             });
-            return positional_sequence(result.collect());
+            return Value::positional_sequence(result.collect());
         }
         let shape_item = |sequence: Value| {
             element_type(sequence.known)

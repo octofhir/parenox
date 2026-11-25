@@ -28,6 +28,9 @@ impl Session {
             let mut entries = Vec::new();
             for (index, source) in sources.iter().enumerate() {
                 let cache = &self.files[source.path];
+                if cache.reader_table {
+                    continue;
+                }
                 let model = cache
                     .model
                     .as_ref()

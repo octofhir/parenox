@@ -235,6 +235,7 @@ impl Workspace {
 
     fn reload(&mut self) -> Result<bool, String> {
         let mut settings = self.options.load_for_format(&self.root)?;
+        let suppressions = std::mem::take(&mut settings.suppressions);
         let format_options = settings.format.clone();
         let editable_roots = settings
             .paths
@@ -314,6 +315,7 @@ impl Workspace {
         self.source_aliases = source_aliases;
         self.externs = project.externs;
         self.format_options = format_options;
+        self.session.set_project_suppressions(suppressions);
         self.dependency_completions = completion::DependencyCompletions::new(classpath);
         self.session_ready = false;
         Ok(externs_changed)

@@ -124,6 +124,7 @@ pub(crate) struct Globals {
     pub(super) project_namespaces: BTreeSet<String>,
     pub(crate) runtime_loads: RuntimeLoads,
     exports: BTreeMap<String, Arc<Exports>>,
+    root_writes: BTreeMap<String, BTreeSet<String>>,
     externs: Option<Arc<Externs>>,
 }
 
@@ -141,6 +142,15 @@ impl Globals {
 
     pub fn register_namespace(&mut self, namespace: &str) {
         self.project_namespaces.insert(namespace.into());
+    }
+
+    pub(crate) fn register_root_write(&mut self, namespace: &str, name: &str) {
+        if self.project_namespaces.contains(namespace) {
+            self.root_writes
+                .entry(namespace.into())
+                .or_default()
+                .insert(name.into());
+        }
     }
 
     pub fn spec(&self, key: &str) -> Option<&Type> {
@@ -191,6 +201,7 @@ pub(crate) struct Model {
     source_forms: Arc<[Form]>,
     externs: Option<Arc<ExternFile>>,
     literals: BTreeMap<String, LiteralVar>,
+    root_writes: BTreeSet<String>,
     captured_initializers: BTreeMap<usize, CapturedInitializer>,
     initializer_macros: BTreeMap<String, bool>,
     initializer_class_names: BTreeMap<String, bool>,
@@ -211,6 +222,40 @@ pub(crate) struct Model {
 }
 
 impl Model {
+    pub(crate) fn check_top_level_contract_call(
+        &self,
+        form: &Form,
+        name: &str,
+        globals: &Globals,
+        source: &str,
+    ) -> Option<Vec<Diagnostic>> {
+        if self.has_unavailable_wildcard_scope(name) || crate::checker::has_evaluated_metadata(form)
+        {
+            return None;
+        }
+        let Some(DeclaredValue::Function(contract)) =
+            self.declared_value(name, globals, form.span.start.offset)
+        else {
+            return None;
+        };
+        if contract
+            .origin
+            .name
+            .split_once('/')
+            .is_some_and(|(namespace, local)| {
+                globals
+                    .root_writes
+                    .get(namespace)
+                    .is_some_and(|writes| writes.contains(local))
+            })
+        {
+            return None;
+        }
+        let mut checker = super::Checker::new(self, globals, source);
+        checker.infer(form, &super::Env::new());
+        Some(checker.diagnostics)
+    }
+
     pub(super) fn loads_spec(&self, provider: &SpecProvider) -> bool {
         let loaded = |source: &specs::RegistrationSource| {
             self.path == source.path || self.names.loads_library(&source.namespace)
@@ -263,6 +308,11 @@ impl Model {
         let mut model = Self {
             names: declarations.names.clone(),
             path: path.into(),
+            root_writes: globals
+                .root_writes
+                .get(declarations.namespace())
+                .cloned()
+                .unwrap_or_default(),
             source_forms: source_forms.clone(),
             core_in_project: comment_core_in_project,
             diagnostics: declarations.diagnostics.clone(),
@@ -541,7 +591,11 @@ impl Model {
     }
 
     pub fn refresh_external_inputs(&mut self, globals: &Globals) -> bool {
-        self.core_in_project
+        globals.root_writes.get(self.namespace()).map_or_else(
+            || self.root_writes.is_empty(),
+            |writes| *writes == self.root_writes,
+        ) && self
+            .core_in_project
             .is_none_or(|present| present == globals.project_namespaces.contains("clojure.core"))
             && self
                 .set_namespace_in_project

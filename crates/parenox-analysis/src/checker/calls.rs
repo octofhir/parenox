@@ -1,6 +1,7 @@
 //! Function resolution, call-site inference and built-in calls.
 mod apply;
 mod arithmetic;
+pub(super) use arithmetic::fold_fixed_integers;
 mod arrays;
 pub(super) use arrays::{array_key_is_nonnumeric, boxed_array_element, stable_array_key};
 mod combinators;
@@ -26,7 +27,7 @@ pub(super) use identifiers::identifier_name;
 pub(super) use sequences::{
     iteration_may_throw, narrow_emptiness, narrow_seq_emptiness, sequence_lengths,
 };
-pub(super) use strings::concatenate_literal_strings;
+pub(super) use strings::{concatenate_literal_strings, is_string_search};
 
 use super::flow::{Conditional, has_closed_scalar_class};
 use super::{
@@ -1208,6 +1209,8 @@ impl<'model> Checker<'model> {
     fn is_available_builtin(&self, spelling: &str, resolved: &str) -> bool {
         is_builtin(resolved)
             && !self.model.has_unavailable_wildcard_scope(spelling)
+            && (!is_string_search(resolved)
+                || !self.globals.project_namespaces.contains("clojure.string"))
             && ((!matches!(
                 resolved,
                 "clojure.core/count"
@@ -1247,7 +1250,10 @@ impl<'model> Checker<'model> {
                     | "clojure.core/peek"
                     | "clojure.core/min"
                     | "clojure.core/max"
-            ) && primitive_array_setter(resolved).is_none())
+                    | "clojure.core/fn?"
+                    | "clojure.core/ifn?"
+            ) && primitive_array_setter(resolved).is_none()
+                && arithmetic::integer_comparison(resolved).is_none())
                 || self.model.can_use_standard_core(spelling, self.globals))
     }
 
@@ -1475,6 +1481,12 @@ impl<'model> Checker<'model> {
         if matches!(name, "clojure.core/min" | "clojure.core/max") {
             return self.extremum(name, args);
         }
+        if let Some(compare) = arithmetic::integer_comparison(name) {
+            return self.compare_numbers(name, compare, args);
+        }
+        if is_string_search(name) {
+            return Value::new(self.clojure_string_search(name, args));
+        }
         let arithmetic = arithmetic::fixed_result(name, args);
         if arithmetic.is_none()
             && matches!(name, "clojure.core/inc" | "clojure.core/dec")
@@ -1556,6 +1568,8 @@ impl<'model> Checker<'model> {
                     | "clojure.core/some?"
                     | "clojure.core/true?"
                     | "clojure.core/false?"
+                    | "clojure.core/fn?"
+                    | "clojure.core/ifn?"
                     | "clojure.core/boolean"
                     | "clojure.core/not"
             )
@@ -1811,6 +1825,14 @@ impl<'model> Checker<'model> {
             }
             // These predicates test JVM object identity with the canonical Booleans.
             "clojure.core/true?" | "clojure.core/false?" => Type::Boolean,
+            "clojure.core/fn?" | "clojure.core/ifn?" => {
+                let value = &args[0].0;
+                callable_predicate(
+                    &value.known,
+                    value.literal_container.as_ref(),
+                    name == "clojure.core/ifn?",
+                )
+            }
             "clojure.core/boolean" => boolean_cast_result(&args[0].0.known),
             "clojure.core/not" => {
                 if args[0].0.ty.truthy() == Type::Never {
@@ -1867,6 +1889,7 @@ fn unconditional_core_inliner(name: &str) -> bool {
 
 fn builtin_arities(name: &str) -> &'static [Arity] {
     match name {
+        name if arithmetic::integer_comparison(name).is_some() => &[Arity::Variadic(1)],
         "clojure.core/range" => &[
             Arity::Fixed(0),
             Arity::Fixed(1),
@@ -1891,6 +1914,8 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         "clojure.core/nth"
         | "clojure.core/subvec"
         | "clojure.core/ex-info"
+        | "clojure.string/index-of"
+        | "clojure.string/last-index-of"
         | "clojure.string/split" => &[Arity::Fixed(2), Arity::Fixed(3)],
         "clojure.string/replace" => &[Arity::Fixed(3)],
         "clojure.core/dedupe" | "clojure.core/distinct" => &[Arity::Fixed(0), Arity::Fixed(1)],
@@ -1912,6 +1937,8 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
         | "clojure.lang.MapEntry/create"
         | "clojure.core/find"
         | "clojure.core/select-keys"
+        | "clojure.string/starts-with?"
+        | "clojure.string/ends-with?"
         | "clojure.core/zipmap" => &[Arity::Fixed(2)],
         name if array_constructor(name).is_some_and(|class| class != JvmArrayClass::Reference) => {
             &[Arity::Fixed(1), Arity::Fixed(2)]
@@ -1961,6 +1988,42 @@ pub(super) fn definitely_noncallable(ty: &Type) -> bool {
         }) => true,
         Type::Union(parts) => !parts.is_empty() && parts.iter().all(definitely_noncallable),
         _ => false,
+    }
+}
+
+pub(super) fn callable_predicate(ty: &Type, proof: Option<&LiteralContainer>, ifn: bool) -> Type {
+    match ty {
+        Type::Never => Type::Never,
+        Type::Union(parts) => Type::union(
+            parts
+                .iter()
+                .map(|part| callable_predicate(part, proof, ifn)),
+        ),
+        Type::Parameter(parameter) => parameter
+            .upper
+            .as_ref()
+            .map_or(Type::Boolean, |upper| callable_predicate(upper, proof, ifn)),
+        // Structural function contracts promise IFn, which need not implement Fn.
+        Type::Function(_) => {
+            if ifn {
+                Type::Bool(true)
+            } else {
+                Type::Boolean
+            }
+        }
+        ty if key_callable_name(ty).is_some() => Type::Bool(ifn),
+        ty if has_closed_scalar_class(ty) || matches!(ty, Type::JvmArray(_)) => Type::Bool(false),
+        _ => match proof.filter(|proof| proof.matches_type(ty)) {
+            Some(
+                LiteralContainer::Vector(_)
+                | LiteralContainer::NonemptyVector
+                | LiteralContainer::Set(_)
+                | LiteralContainer::Map(_)
+                | LiteralContainer::GroupBuckets,
+            ) => Type::Bool(ifn),
+            Some(LiteralContainer::List(_)) => Type::Bool(false),
+            _ => Type::Boolean,
+        },
     }
 }
 
@@ -2066,6 +2129,8 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.core/some?"
             | "clojure.core/true?"
             | "clojure.core/false?"
+            | "clojure.core/fn?"
+            | "clojure.core/ifn?"
             | "clojure.core/boolean"
             | "clojure.core/not"
             | "clojure.core/="
@@ -2137,6 +2202,8 @@ pub(super) fn is_builtin(name: &str) -> bool {
             | "clojure.string/split"
             | "clojure.string/join"
     ) || predicate_type(name).is_some()
+        || arithmetic::integer_comparison(name).is_some()
+        || is_string_search(name)
         || array_constructor(name).is_some()
         || primitive_array_setter(name).is_some()
 }

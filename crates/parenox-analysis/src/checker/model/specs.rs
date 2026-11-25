@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use super::Globals;
 use super::contracts::function_parts;
-use super::declarations::{Declarations, Names, SpecDeclaration, symbols_match};
+use super::declarations::{Declarations, Names, SpecDeclaration, SpecInputGap, symbols_match};
 use super::type_forms::{
     core_predicate_type, enum_conversion, live_lookup_conversion, projected_collection_child,
     read_type, source_conversion, string_keyed_map_child, structured_conversion, tagged_or,
@@ -26,6 +26,7 @@ use crate::types::{ExtraFields, Field, IntegerType, MapType, Type};
 pub(crate) struct SpecFingerprint {
     names: Names,
     bodies: Vec<(String, Span, Span, String)>,
+    input_gaps: BTreeMap<String, SpecInputGap>,
     duplicates: BTreeSet<String>,
     contextual: BTreeMap<String, SpecConversion>,
     registration_barriers: Vec<usize>,
@@ -40,6 +41,7 @@ impl SpecFingerprint {
         };
         self.names == other.names
             && self.duplicates == other.duplicates
+            && self.input_gaps == other.input_gaps
             && self.contextual == other.contextual
             && self.bodies.len() == other.bodies.len()
             && self.bodies.iter().zip(&other.bodies).all(
@@ -181,10 +183,16 @@ impl Declarations {
         Some(SpecFingerprint {
             names: self.names.clone(),
             bodies,
+            input_gaps: self
+                .specs
+                .iter()
+                .filter_map(|(key, declaration)| Some((key.clone(), declaration.input_gap?)))
+                .collect(),
             duplicates: self.duplicate_specs.clone(),
             contextual: self
                 .specs
                 .iter()
+                .filter(|(_, declaration)| declaration.input_gap.is_none())
                 .filter_map(|(key, declaration)| {
                     enum_conversion(self, forms, source, &declaration.body)
                         .or_else(|| live_lookup_conversion(self, forms, &declaration.body))
@@ -583,6 +591,23 @@ impl<'a> Resolver<'a> {
         }
 
         let body = &owner.declaration.body;
+        if let Some(gap) = owner.declaration.input_gap {
+            let reason = match gap {
+                SpecInputGap::LetfnBinding => "depends on local letfn bindings",
+                SpecInputGap::SourcePredicate => "uses a source-defined predicate",
+            };
+            self.diagnostics
+                .entry(owner.path.into())
+                .or_default()
+                .push(Diagnostic::analysis_gap(
+                    "PNX9001",
+                    body.span,
+                    format!("Spec {key} {reason}; its input type is unchecked"),
+                ));
+            self.types.insert(key.to_owned(), Type::Unknown);
+            self.unchecked_inputs.insert(key.to_owned());
+            return Some(Type::Unknown);
+        }
         let registered_at = body.span.end.offset;
         if let Some(target) = body.keyword().map(|target| owner.names.key(target))
             && let Some(declaration) = self.declarations.get(target.as_str())
@@ -618,8 +643,9 @@ impl<'a> Resolver<'a> {
             self.direct_conversions.insert(key);
         }
         let mut local_ready_at = Some(registered_at);
-        let ty = if let Some(conversion) = &direct {
-            conversion.success_input()
+        let mut unchecked_child = false;
+        let (ty, partial_input) = if let Some(conversion) = &direct {
+            (conversion.success_input(), false)
         } else {
             read_type(
                 owner.names,
@@ -628,6 +654,7 @@ impl<'a> Resolver<'a> {
                 &mut diagnostics,
                 |child, span| {
                     let ty = self.resolve(child, owner.path, span);
+                    unchecked_child |= self.unchecked_inputs.contains(child);
                     if let Some(sources) = self.required_registrations.get(child) {
                         required.extend(sources);
                     }
@@ -722,10 +749,12 @@ impl<'a> Resolver<'a> {
         }
         // A supported conversion may still lack an input type. Propagate
         // that distinction to aliases and contracts containing the spec.
-        if self
-            .conversions
-            .get(key)
-            .is_some_and(SpecConversion::has_unchecked_input)
+        if partial_input
+            || unchecked_child
+            || self
+                .conversions
+                .get(key)
+                .is_some_and(SpecConversion::has_unchecked_input)
             || required
                 .iter()
                 .any(|child| self.unchecked_inputs.contains(*child))

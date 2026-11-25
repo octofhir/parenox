@@ -3,11 +3,14 @@ use super::declarations::SourceDeclaration;
 use super::vars::literal;
 use super::{Contract, Declarations, Globals, Model};
 use crate::checker::{
-    Checker, Env, Value, function_forms::function_clauses, has_evaluated_metadata,
+    Checker, Env, Value,
+    function_forms::{function_clauses, split_method_name},
+    has_evaluated_metadata, signature_bindings,
 };
 use crate::reader::{Form, Kind};
-use crate::types::Arity;
+use crate::types::{Arity, Type};
 use crate::{ContractKind, Diagnostic};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 #[derive(Default)]
@@ -81,27 +84,49 @@ impl Model {
             {
                 continue;
             }
+            let (local_name, arms) = split_method_name(arms);
             let Ok(clauses) = function_clauses(arms, form.span) else {
                 continue;
             };
             let pairs = clauses
                 .iter()
                 .map(|(arity, clause)| {
-                    let mut matching = contract
-                        .signatures
-                        .iter()
-                        .filter(|signature| signature.arity() == *arity);
+                    let mut matching = contract.signatures.iter().filter_map(|signature| {
+                        if signature.arity() == *arity {
+                            Some(Cow::Borrowed(signature))
+                        } else if signature.rest.is_some()
+                            && *arity == Arity::Fixed(signature.args.len())
+                        {
+                            // The fixed clause takes the zero-rest case of this contract.
+                            let mut signature = signature.clone();
+                            signature.rest = None;
+                            Some(Cow::Owned(signature))
+                        } else {
+                            None
+                        }
+                    });
                     let signature = matching.next()?;
-                    (matches!(arity, Arity::Fixed(_)) && matching.next().is_none())
-                        .then_some((clause, signature))
+                    matching.next().is_none().then_some((clause, signature))
                 })
                 .collect::<Option<Vec<_>>>();
             let Some(pairs) = pairs else { continue };
+            let env = method_scope(local_name, || {
+                Type::Function(
+                    pairs
+                        .iter()
+                        .map(|(_, signature)| signature.as_ref().clone())
+                        .collect(),
+                )
+            });
             checked.offsets.insert(operator.span.start.offset);
             for (clause, signature) in pairs {
                 let mut checker = Checker::new(self, globals, source);
-                let args = signature.args.iter().cloned().map(Value::new).collect();
-                let result = checker.function_body(clause, args, &Env::new(), None);
+                let fixed = Arity::Fixed(signature.args.len());
+                let args = signature_bindings(
+                    &signature,
+                    clauses.iter().any(|(arity, _)| *arity == fixed),
+                );
+                let result = checker.function_body(clause, args, &env, None);
                 let span = clause.body.last().map_or(clause.span, |form| form.span);
                 checker.expect_contract(
                     &result,
@@ -115,4 +140,12 @@ impl Model {
         }
         checked
     }
+}
+
+pub(super) fn method_scope(name: Option<&Form>, own_type: impl FnOnce() -> Type) -> Env {
+    let mut env = Env::new();
+    if let Some(symbol) = name.and_then(Form::symbol) {
+        env.insert(symbol.into(), Value::new(own_type()));
+    }
+    env
 }

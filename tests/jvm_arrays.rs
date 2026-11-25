@@ -259,6 +259,29 @@ fn aclone_preserves_array_class_and_length_for_direct_and_apply_calls() {
 }
 
 #[test]
+fn aget_respects_a_loop_guard_against_the_array_length() {
+    let source = r#"
+(defn scan {:t/sig '[:-> #{:done}]} []
+  (let [marker (byte-array [1 2 3 4])
+        length (alength marker)]
+    (loop [j 0]
+      (if (>= j length)
+        :done
+        (do (aget marker j) (recur (inc j)))))))
+"#;
+    let report = Session::default().check("arrays.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let off_by_one = source.replace("(>= j length)", "(> j length)");
+    let report = Session::default().check("arrays.clj", &off_by_one);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2801");
+    assert!(finding.message.contains("Index 4"), "{finding:#?}");
+}
+
+#[test]
 fn aget_checks_boxed_reads_hints_and_indices() {
     let source = r#"
 (ns demo)

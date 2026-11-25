@@ -1,7 +1,7 @@
 //! Serialize resolved public contracts without source names or spec dependencies.
 use std::fmt::{self, Write};
 
-use super::{ExternalDeclaration, Model, is_modeled_call};
+use super::{ExternalDeclaration, Model, reserves_extern_name};
 use crate::reader::{MAX_NESTING_DEPTH, Span};
 use crate::types::{
     ExtraFields, IntegerClass, IntegerRange, IntegerType, JvmArrayClass, LengthBounds, MapType,
@@ -48,7 +48,7 @@ impl Model {
         &self,
     ) -> impl Iterator<Item = (&str, Span, Result<&[Signature], &'static str>)> {
         self.exports.functions.iter().map(|(name, contract)| {
-            let signature = if is_modeled_call(name) {
+            let signature = if reserves_extern_name(name) {
                 Err("externs cannot replace a built-in checking rule")
             } else {
                 Ok(contract.signatures.as_ref())

@@ -16,7 +16,7 @@ use crate::types::{IntegerClass, Type};
 #[derive(Clone)]
 pub(super) enum CapturedInitializer {
     Form(Arc<Form>),
-    PlatformLong(i64),
+    FixedLong(i64),
 }
 
 impl CapturedInitializer {
@@ -196,8 +196,14 @@ impl Model {
         let value = if dynamic {
             self.unsupported_var(name_form.span, "Dynamic vars are not supported yet");
             Value::new(Type::Unknown)
-        } else if let Some(CapturedInitializer::PlatformLong(value)) = captured {
-            // Both fields exceed int range and have the type of their decimal literals.
+        } else if self.root_writes.contains(symbol) {
+            self.unsupported_var(
+                name_form.span,
+                "Var root can change through alter-var-root; its initializer type is unchecked",
+            );
+            Value::new(Type::Unknown)
+        } else if let Some(CapturedInitializer::FixedLong(value)) = captured {
+            // A bounded fold has the same type as its decimal integer literal.
             Value::new(Type::exact_long(*value, IntegerClass::IntOrLong))
         } else if let Some(value) = expanded {
             if literal(value) {

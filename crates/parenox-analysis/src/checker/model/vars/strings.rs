@@ -2,10 +2,12 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use super::super::super::calls::{concatenate_literal_strings, identifier_name};
+use super::super::super::calls::{
+    concatenate_literal_strings, fold_fixed_integers, identifier_name,
+};
 use super::super::{Declarations, Globals, contracts::function_parts, declarations::symbols_match};
 use super::{CapturedInitializer, def_initializer, initializers, sets};
-use crate::reader::{Form, Kind};
+use crate::reader::{Form, IntegerLiteralClass, Kind, NumericLiteral, classify_number_with_class};
 use crate::types::Type;
 
 #[derive(Default)]
@@ -24,8 +26,10 @@ enum Foldable<'a> {
     Str(&'a [Form]),
     Names(&'a [Form]),
     SetUnion(Vec<&'a Form>),
-    PlatformLong(i64),
+    FixedLong(i64),
 }
+
+const MAX_ARITHMETIC_DEPTH: usize = 16;
 
 impl<'a> LiteralInitializerScope<'a> {
     pub(in crate::checker::model) fn new(source: &'a str) -> Self {
@@ -76,7 +80,7 @@ impl<'a> LiteralInitializerScope<'a> {
                 kind: Kind::Set(items.into_iter().cloned().collect()),
                 span: value.span,
             })),
-            Foldable::PlatformLong(value) => return Some(CapturedInitializer::PlatformLong(value)),
+            Foldable::FixedLong(value) => return Some(CapturedInitializer::FixedLong(value)),
         };
         Some(CapturedInitializer::from_form(Form {
             kind,
@@ -95,7 +99,7 @@ impl<'a> LiteralInitializerScope<'a> {
         if let Kind::Symbol(symbol) = &value.kind {
             return self
                 .platform_long(declarations, globals, symbol)
-                .map(Foldable::PlatformLong);
+                .map(Foldable::FixedLong);
         }
         if let Some((head, operator, arguments)) = str_call(declarations, value) {
             let end = self.shadow_start(declarations, forms, operator, "str")?;
@@ -104,6 +108,12 @@ impl<'a> LiteralInitializerScope<'a> {
         let Kind::List(items) = &value.kind else {
             return None;
         };
+        if value.span.end.offset - value.span.start.offset <= initializers::MAX_SUBSTITUTED_BYTES
+            && let Some(value) =
+                self.fixed_integer(declarations, forms, value, MAX_ARITHMETIC_DEPTH)
+        {
+            return Some(Foldable::FixedLong(value));
+        }
         if let [head, left, right] = items.as_slice()
             && declarations.names.loads_library("clojure.set")
             && head.symbol().is_some_and(|name| {
@@ -163,6 +173,48 @@ impl<'a> LiteralInitializerScope<'a> {
                 .iter()
                 .all(|item| matches!(item.kind, Kind::String(_) | Kind::Keyword(_))))
         .then_some(Foldable::Names(items))
+    }
+
+    fn fixed_integer(
+        &mut self,
+        declarations: &'a Declarations,
+        forms: &'a [Form],
+        value: &'a Form,
+        depth: usize,
+    ) -> Option<i64> {
+        match &value.kind {
+            Kind::Number => {
+                let token = &self.source[value.span.start.offset..value.span.end.offset];
+                match classify_number_with_class(token) {
+                    (NumericLiteral::Integer(value), Some(IntegerLiteralClass::Long)) => {
+                        Some(value)
+                    }
+                    _ => None,
+                }
+            }
+            Kind::List(items) if depth > 0 => {
+                let (head, args) = items.split_first()?;
+                let Kind::Symbol(operator) = &head.kind else {
+                    return None;
+                };
+                let ("clojure.core", core @ ("+" | "-" | "*" | "inc" | "dec")) =
+                    declarations.names.resolve_parts(operator)
+                else {
+                    return None;
+                };
+                if head.span.start.offset
+                    >= self.shadow_start(declarations, forms, operator, core)?
+                {
+                    return None;
+                }
+                fold_fixed_integers(
+                    &format!("clojure.core/{core}"),
+                    args.iter()
+                        .map(|arg| self.fixed_integer(declarations, forms, arg, depth - 1)),
+                )
+            }
+            _ => None,
+        }
     }
 
     fn platform_long(

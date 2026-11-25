@@ -1,8 +1,8 @@
-//! Source-local filtering after checking. The checker never trusts a suppression as a type fact.
+//! Diagnostic filtering after checking.
 use std::collections::BTreeMap;
 
 use crate::reader::{Form, Kind, LineComment, Span};
-use crate::{Diagnostic, Report, SuppressedDiagnostic};
+use crate::{Diagnostic, ProjectSuppression, Report, SuppressedDiagnostic};
 
 pub(crate) const MARKER: &str = "parenox-ignore";
 
@@ -123,6 +123,7 @@ impl Suppressions {
                         diagnostic,
                         reason: rule.reason.clone(),
                         directive: rule.directive,
+                        config_path: None,
                     });
                 }
                 None => report.diagnostics.push(diagnostic),
@@ -143,6 +144,24 @@ impl Suppressions {
                 )
             })
             .collect()
+    }
+}
+
+pub(crate) fn apply_project(rules: &BTreeMap<String, ProjectSuppression>, report: &mut Report) {
+    if rules.is_empty() {
+        return;
+    }
+    for diagnostic in report
+        .diagnostics
+        .extract_if(.., |diagnostic| rules.contains_key(&diagnostic.code))
+    {
+        let rule = &rules[&diagnostic.code];
+        report.suppressed.push(SuppressedDiagnostic {
+            diagnostic,
+            reason: rule.reason.clone(),
+            directive: rule.directive,
+            config_path: Some(rule.config_path.clone()),
+        });
     }
 }
 
