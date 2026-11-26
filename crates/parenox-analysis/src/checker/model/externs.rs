@@ -15,13 +15,13 @@ use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::Arc;
 
 use super::{Contract, Globals, Model, Names};
-use crate::checker::calls::{is_modeled_call, is_string_search};
+use crate::checker::calls::{is_modeled_call, is_string_parser, is_string_search};
 use crate::reader::{Form, Kind, Span};
 use crate::{ContractKind, ContractOrigin, Diagnostic};
 
 fn reserves_extern_name(name: &str) -> bool {
-    // Explicit contracts for string searches predate the built-in fallback.
-    is_modeled_call(name) && !is_string_search(name)
+    // Explicit string contracts predate these built-in fallbacks.
+    is_modeled_call(name) && !is_string_search(name) && !is_string_parser(name)
 }
 
 #[derive(Clone)]

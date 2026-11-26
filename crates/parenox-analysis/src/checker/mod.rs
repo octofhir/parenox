@@ -242,8 +242,14 @@ struct Value {
     guard: Option<Arc<VerifiedGuard>>,
     // Structural types do not prove ordinary JVM collection behavior.
     literal_container: Option<LiteralContainer>,
-    pattern_captures: Option<u16>,
+    pattern_captures: Option<PatternCaptures>,
     rejection: Option<CallRejection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PatternCaptures {
+    count: u16,
+    required: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -544,11 +550,15 @@ impl Value {
         } else {
             None
         };
-        let pattern_captures = if self.pattern_captures == other.pattern_captures {
+        let pattern_captures =
             self.pattern_captures
-        } else {
-            None
-        };
+                .zip(other.pattern_captures)
+                .and_then(|(left, right)| {
+                    (left.count == right.count).then_some(PatternCaptures {
+                        count: left.count,
+                        required: left.required & right.required,
+                    })
+                });
         let known = self.known.join_values(other.known);
         Self {
             contract,
@@ -1007,8 +1017,8 @@ impl Checker<'_> {
             Kind::SymbolicNumber(_) => Value::new(Type::NonIntegral),
             Kind::String(s) => Value::new(Type::Str(s.clone())),
             Kind::Utf16String(_) => Value::new(Type::String),
-            Kind::Regex { captures } => Value {
-                pattern_captures: *captures,
+            Kind::Regex { captures, required_captures } => Value {
+                pattern_captures: captures.map(|count| PatternCaptures { count, required: *required_captures }),
                 ..Value::new(Type::Pattern)
             },
             Kind::Character(c) => Value::new(Type::Char(*c)),

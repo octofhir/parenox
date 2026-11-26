@@ -87,7 +87,7 @@ impl ContractOrigin {
 }
 
 /// A proposed edit, never applied automatically. Offsets refer to the report's source snapshot.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Suggestion {
     pub message: String,
     pub span: Span,

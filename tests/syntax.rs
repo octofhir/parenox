@@ -256,7 +256,10 @@ fn regex_literals_preserve_pattern_escapes_instead_of_decoding_strings() {
     assert_lossless(source, &parsed);
     assert!(matches!(
         parsed.forms[0].kind,
-        Kind::Regex { captures: Some(0) }
+        Kind::Regex {
+            captures: Some(0),
+            ..
+        }
     ));
     assert_eq!(parsed.forms[1].keyword(), Some(":after"));
     assert!(
@@ -270,7 +273,7 @@ fn regex_literals_preserve_pattern_escapes_instead_of_decoding_strings() {
     for (source, count) in [
         (r##"#"(a)(b)?""##, Some(2)),
         (r##"#"\(""##, Some(0)),
-        (r##"#"[()]""##, None),
+        (r##"#"[()]""##, Some(0)),
         (r##"#"(?i)(a)""##, Some(1)),
         (r##"#"(?i)[a-f]+""##, Some(0)),
         (r##"#"(?<=a)(b)""##, Some(1)),
@@ -283,7 +286,7 @@ fn regex_literals_preserve_pattern_escapes_instead_of_decoding_strings() {
         assert_lossless(source, &parse);
         let semantic = reader::read(source).unwrap();
         for form in [&parse.forms[0], &semantic[0]] {
-            assert!(matches!(form.kind, Kind::Regex { captures } if captures == count));
+            assert!(matches!(form.kind, Kind::Regex { captures, .. } if captures == count));
         }
     }
 }

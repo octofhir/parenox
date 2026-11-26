@@ -1,5 +1,6 @@
 //! Human-readable diagnostics. JSON is serialized directly from `Report` by the CLI.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use annotate_snippets::{AnnotationKind, Group, Level, Patch, Renderer, Snippet};
@@ -43,10 +44,66 @@ fn renderer(color: bool) -> Renderer {
     }
 }
 
+struct Finding<'a> {
+    diagnostic: &'a Diagnostic,
+    contexts: Vec<&'a [String]>,
+}
+
+fn same_finding(left: &Diagnostic, right: &Diagnostic) -> bool {
+    left.span == right.span
+        && left.code == right.code
+        && left.severity == right.severity
+        && left.title() == right.title()
+        && left.message == right.message
+        && left.expected == right.expected
+        && left.actual == right.actual
+        && left.contract == right.contract
+        && left.callback_contract == right.callback_contract
+        && left.mismatch_path == right.mismatch_path
+        && left.help == right.help
+        && left.suggestions == right.suggestions
+}
+
+fn group_findings(diagnostics: &[Diagnostic]) -> Vec<Finding<'_>> {
+    let mut findings: Vec<Finding<'_>> = Vec::new();
+    let mut locations = BTreeMap::<_, Vec<usize>>::new();
+    for diagnostic in diagnostics {
+        let indices = locations
+            .entry((
+                diagnostic.span.start.offset,
+                diagnostic.span.end.offset,
+                diagnostic.code.as_str(),
+            ))
+            .or_default();
+        let context = diagnostic.notes.as_slice();
+        if let Some(&index) = indices
+            .iter()
+            .find(|&&index| same_finding(findings[index].diagnostic, diagnostic))
+        {
+            let contexts = &mut findings[index].contexts;
+            if !context.is_empty() && !contexts.contains(&context) {
+                contexts.push(context);
+            }
+        } else {
+            indices.push(findings.len());
+            findings.push(Finding {
+                diagnostic,
+                contexts: if context.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![context]
+                },
+            });
+        }
+    }
+    findings
+}
+
 pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: bool) -> String {
     let renderer = renderer(color);
     let mut output = String::new();
-    for diagnostic in diagnostics {
+    for finding in group_findings(diagnostics) {
+        let diagnostic = finding.diagnostic;
         let title = diagnostic.title();
         let mut annotation =
             AnnotationKind::Primary.span(diagnostic.span.start.offset..diagnostic.span.end.offset);
@@ -70,8 +127,20 @@ pub fn diagnostics(path: &str, source: &str, diagnostics: &[Diagnostic], color: 
         if let Some(contract) = &diagnostic.callback_contract {
             primary = primary.element(Level::NOTE.message(callback_contract_note(contract)));
         }
-        for note in &diagnostic.notes {
-            primary = primary.element(Level::NOTE.message(note));
+        let joined_contexts;
+        if let [context] = finding.contexts.as_slice() {
+            for note in *context {
+                primary = primary.element(Level::NOTE.message(note));
+            }
+        } else {
+            joined_contexts = finding
+                .contexts
+                .iter()
+                .map(|context| context.join("\n"))
+                .collect::<Vec<_>>();
+            for context in &joined_contexts {
+                primary = primary.element(Level::NOTE.message(context));
+            }
         }
         if let Some(help) = &diagnostic.help {
             primary = primary.element(Level::HELP.message(help));
@@ -144,8 +213,8 @@ fn summary<'a>(
     let mut suppressed = 0;
     for file in files {
         suppressed += file.suppressed.len();
-        for diagnostic in &file.diagnostics {
-            if diagnostic.severity == "warning" {
+        for finding in group_findings(&file.diagnostics) {
+            if finding.diagnostic.severity == "warning" {
                 warnings += 1;
             } else {
                 errors += 1;

@@ -10,7 +10,7 @@ pub use names::array_class_component;
 #[doc(hidden)]
 pub use namespace_map::{qualify_namespaced_entries, qualify_namespaced_entries_at};
 pub use numbers::{
-    IntegerLiteralClass, NumericLiteral, classify_number, classify_number_with_class,
+    IntegerLiteralClass, NumericLiteral, classify_number, classify_number_with_class, decimal_digit,
 };
 #[doc(hidden)]
 pub use uniqueness::{check_resolved_collection, check_resolved_collection_with_namespaces};
@@ -53,6 +53,8 @@ pub enum Kind {
     Regex {
         /// The exact group count for regex syntax understood by the reader.
         captures: Option<u16>,
+        /// Bits for capturing groups that participate in every successful match.
+        required_captures: u32,
     },
     Character(char),
     Number,

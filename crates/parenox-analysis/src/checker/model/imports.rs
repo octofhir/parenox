@@ -79,16 +79,13 @@ impl Declarations {
 
     fn import_class(&mut self, qualified: &str, form: &Form) {
         let span = form.span;
-        let Some((_, short)) = qualified.rsplit_once('.').filter(|(package, class)| {
-            valid_package(package) && !class.is_empty() && !class.contains('/')
-        }) else {
-            self.error(
-                "PNX1001",
-                span,
-                "An import requires a fully qualified JVM class name",
-            );
+        let (package, short) = qualified
+            .rsplit_once('.')
+            .map_or((None, qualified), |(package, class)| (Some(package), class));
+        if !package.is_none_or(valid_package) || short.is_empty() || short.contains('/') {
+            self.error("PNX1001", span, "An import requires a JVM class name");
             return;
-        };
+        }
         if let Some(previous) = self.names.imports.get(short)
             && previous != qualified
         {

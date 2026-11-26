@@ -652,6 +652,7 @@ fn predicate_type(names: &Names, symbol: &str) -> Option<Type> {
 pub(super) fn core_predicate_type(name: &str) -> Option<Type> {
     Some(match name {
         "string?" => Type::String,
+        "uuid?" => Type::Uuid,
         "char?" => Type::Character,
         "number?" => Type::Number,
         "integer?" => Type::Integral(IntegerType::ANY),

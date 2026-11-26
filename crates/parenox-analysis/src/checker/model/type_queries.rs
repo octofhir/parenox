@@ -1,9 +1,9 @@
 //! Analyze the containing function clause for a focused type query.
 use super::{
     Declarations, DeclaredValue, Globals, Model,
-    partial::{untyped_clauses, untyped_method_name, uses_standard_partial_calls},
+    partial::{untyped_clauses, untyped_method_scope, uses_standard_partial_calls},
 };
-use crate::checker::{CheckedCall, Checker, TypeQuery};
+use crate::checker::{CheckedCall, Checker, Env, TypeQuery};
 use crate::reader::{Form, Kind, Span};
 use crate::types::Type;
 use std::borrow::Cow;
@@ -114,7 +114,7 @@ impl Declarations {
                     checker.untyped_binding_budget = Some(MAX_UNTYPED_BINDING_STEPS);
                     checker.literal_binding_query = query.includes_literal_bindings();
                     checker.type_query = Some(query);
-                    checker.untyped_clause(clause, None);
+                    checker.untyped_clause(clause, &Env::new());
                     types.extend(checker.binding_query_results());
                 }
             }
@@ -241,7 +241,7 @@ impl Declarations {
             checker.type_query = Some(query);
             checker.partial_scope = Some(Cow::Owned(self.partial_shadowed(forms)));
             checker.partial_method_body = true;
-            checker.untyped_clause(clause, untyped_method_name(&forms[index]));
+            checker.untyped_clause(clause, &untyped_method_scope(&forms[index], &clauses));
             return checker.type_query;
         }
         self.functions.binary_search(&index).ok()?;
@@ -266,7 +266,7 @@ impl Declarations {
             let clause = clauses.values().find(|clause| {
                 offset >= clause.span.start.offset && offset < clause.span.end.offset
             })?;
-            checker.untyped_clause(clause, None);
+            checker.untyped_clause(clause, &Env::new());
         }
         checker.type_query
     }

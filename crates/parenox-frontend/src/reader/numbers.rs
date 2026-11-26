@@ -28,7 +28,8 @@ pub(super) fn starts_number(text: &str) -> bool {
     }
 }
 
-pub(super) fn decimal_digit(ch: char) -> Option<u32> {
+/// Classify a decimal digit accepted by the JVM's UTF-16 character operations.
+pub fn decimal_digit(ch: char) -> Option<u32> {
     if ch.is_ascii() {
         return ch.to_digit(10);
     }

@@ -257,13 +257,18 @@ impl Checker<'_> {
         );
         self.note_builtin_contract(start, name);
 
-        let captures = pattern.pattern_captures.map(usize::from);
         let groups = || Type::Vector(Box::new(Type::String.nilable()));
-        let result = match captures {
-            Some(0) => Type::String,
-            Some(count) if count < MAX_TUPLE_ITEMS => Type::Tuple(
+        let result = match pattern.pattern_captures {
+            Some(captures) if captures.count == 0 => Type::String,
+            Some(captures) if usize::from(captures.count) < MAX_TUPLE_ITEMS => Type::Tuple(
                 std::iter::once(Type::String)
-                    .chain(std::iter::repeat_n(Type::String.nilable(), count))
+                    .chain((0..captures.count).map(|index| {
+                        if captures.required & (1_u32 << index) != 0 {
+                            Type::String
+                        } else {
+                            Type::String.nilable()
+                        }
+                    }))
                     .collect(),
             ),
             Some(_) => groups(),

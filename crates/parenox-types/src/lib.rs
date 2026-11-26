@@ -237,6 +237,7 @@ pub enum Type {
     /// Built-in numeric values for which Clojure's integer? predicate is false.
     NonIntegral,
     String,
+    Uuid,
     Pattern,
     JvmIterator,
     JvmArray(JvmArrayClass),
@@ -614,6 +615,7 @@ impl fmt::Display for Type {
             Type::NonIntegral => write!(f, "Number that is not a Clojure integer"),
             Type::String => write!(f, "String"),
             Type::Pattern => write!(f, "Pattern"),
+            Type::Uuid => write!(f, "UUID"),
             Type::JvmIterator => write!(f, "java.util.Iterator"),
             Type::JvmArray(class) => fmt::Display::fmt(class, f),
             Type::Character => write!(f, "Character"),

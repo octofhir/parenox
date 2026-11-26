@@ -750,6 +750,92 @@ fn unannotated_mode_checks_functions_and_methods_without_assuming_argument_types
 }
 
 #[test]
+fn unannotated_named_methods_check_recursive_arities() {
+    let source = r#"(ns demo)
+(defmulti render identity)
+(defmethod render :fixed local [value] (local))
+(defmethod render :variadic local [value & [option]] (apply local []))
+(defmethod render :mixed local
+  ([value] (local nil 4))
+  ([value extra & [option]] (if option (apply local [value]) (local))))
+(defmethod render :shadowed local [value]
+  (let [local (fn [] :ok)] (local)))"#;
+    let report = Session::default()
+        .with_unannotated_bodies(true)
+        .check("recursive_methods.clj", source);
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .map(|finding| (finding.code.as_str(), finding.span.start.line))
+        .collect();
+    assert_eq!(
+        errors,
+        [("PNX2554", 3), ("PNX2554", 4), ("PNX2554", 7)],
+        "{report:#?}"
+    );
+    assert!(!report.complete, "{report:#?}");
+    let method_gaps: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| {
+            finding.code == "PNX9001"
+                && &source[finding.span.start.offset..finding.span.end.offset] == "defmethod"
+        })
+        .collect();
+    let [gap] = method_gaps.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert!(gap.message.contains("4 unannotated methods"), "{gap:#?}");
+}
+
+#[test]
+fn checks_core_string_and_bounds_errors_in_unannotated_method_bodies() {
+    let source = r#"(ns demo)
+(defmulti render (fn [value] value))
+(defmethod render :parse [_] (parse-long :oops))
+(defmethod render :substring [_] (subs nil 0))
+(defmethod render :bounds [_] (nth [:one] 2))
+(defmethod render :slice [_] (subvec [:one] 0 2))
+(defmethod render :optional [value] (parse-long value))
+(defmethod render :fallback [_] (nth [:one] 2 :default))
+(defmethod render :opaque [configure] (configure) (parse-long :maybe))
+(defmethod render :unloaded [_] (clojure.string/join "," 42) (parse-long :maybe))"#;
+    let check = |source| Session::default().check("methods.clj", source);
+    let report = check(source);
+    assert!(!report.complete, "{report:#?}");
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|finding| finding.severity == "error")
+        .map(|finding| (finding.code.as_str(), finding.span.start.line))
+        .collect();
+    assert_eq!(
+        findings,
+        [
+            ("PNX2322", 3),
+            ("PNX2322", 4),
+            ("PNX2801", 5),
+            ("PNX2801", 6),
+        ],
+        "{report:#?}"
+    );
+
+    let shadowed = source.replace(
+        "(defmethod render :parse",
+        "(defn parse-long [value] value)\n(defmethod render :parse",
+    );
+    let report = check(&shadowed);
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|finding| { finding.code == "PNX2322" && finding.span.start.line == 4 }),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn checks_local_defmethod_bodies_against_multimethod_fdefs() {
     let source = Source {
         path: "render.clj",

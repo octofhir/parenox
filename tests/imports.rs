@@ -22,11 +22,35 @@ fn import_groups_and_qualified_classes_resolve_in_exception_handlers() {
 }
 
 #[test]
+fn imports_jvm_classes_from_the_default_package() {
+    let source = "(ns demo (:import SampleParser))";
+    let mut session = Session::default();
+    let report = session.check("imports.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+    assert_eq!(
+        session.completion_java_class("imports.clj", "SampleParser"),
+        Some("SampleParser")
+    );
+    assert_eq!(
+        session.definition_java_class("imports.clj", source.find("SampleParser").unwrap()),
+        Some("SampleParser")
+    );
+
+    let conflicting = "(ns demo (:import SampleParser [example SampleParser]))";
+    let report = session.check("imports.clj", conflicting);
+    let [finding] = report.diagnostics.as_slice() else {
+        panic!("{report:#?}");
+    };
+    assert_eq!(finding.code, "PNX2790", "{finding:#?}");
+}
+
+#[test]
 fn validates_import_shape_conflicts_and_known_nonthrowable_classes() {
     for (source, code) in [
         (include_str!("../examples/imports_bad.clj"), "PNX2790"),
         ("(ns bad (:import [java.io]))", "PNX1001"),
-        ("(ns bad (:import String))", "PNX1001"),
+        ("(ns bad (:import java/String))", "PNX1001"),
+        ("(ns bad (:import java..String))", "PNX1001"),
         (
             "(ns bad (:import java.lang.String))
            (defn f {:t/sig '[:-> number?]} [] (try 1 (catch String e 2)))",

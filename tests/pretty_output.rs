@@ -1,6 +1,27 @@
 use parenox::{Session, output};
 
 #[test]
+fn pretty_groups_repeated_findings_and_keeps_each_call_context() {
+    let source = r#"(ns demo)
+(defn- increment [value] (inc value))
+(defn first-call {:t/sig '[:-> t/any]} [] (increment :wrong))
+(defn second-call {:t/sig '[:-> t/any]} [] (increment :wrong))"#;
+    let report = Session::default().check("demo.clj", source);
+    assert_eq!(report.diagnostics.len(), 2, "{report:#?}");
+    assert_ne!(report.diagnostics[0].id, report.diagnostics[1].id);
+    let rendered = output::pretty(&report, source, false);
+    assert_eq!(rendered.matches("error[PNX2322]").count(), 1, "{rendered}");
+    for finding in &report.diagnostics {
+        let [context] = finding.notes.as_slice() else {
+            panic!("{finding:#?}")
+        };
+        assert!(rendered.contains(context), "{rendered}");
+    }
+    assert!(rendered.contains("due to 1 previous error"), "{rendered}");
+    assert_eq!(output::plain(&report).matches("PNX2322").count(), 2);
+}
+
+#[test]
 fn nil_suggestion_rechecks_successfully_without_weakening_the_signature() {
     let source = "(ns demo (:require [clojure.spec.alpha :as s] [clojure.string :as str]))\n\
                   (defn f {:t/sig '[(s/nilable string?) :-> string?]} [x] (str/upper-case x))";

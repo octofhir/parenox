@@ -3,6 +3,98 @@ use parenox::{DocumentHover, Session, Source};
 const SOURCE: &str = include_str!("../examples/jvm_strings.cljc");
 
 #[test]
+fn core_parsers_preserve_literal_failures_and_jvm_result_types() {
+    let source = r#"
+(ns decimal)
+(defn leading-zero {:t/sig '[:-> #{true}]} [] (= 8 (parse-long "08")))
+(defn unicode-digit {:t/sig '[:-> #{true}]} [] (= 12 (parse-long "+١٢")))
+(defn minimum {:t/sig '[:-> #{true}]} [] (= -9223372036854775808 (parse-long "-9223372036854775808")))
+(defn overflow {:t/sig '[:-> nil?]} [] (apply parse-long ["9223372036854775808"]))
+(defn whitespace {:t/sig '[:-> nil?]} [] (parse-long " 8"))
+(defn invalid-bool {:t/sig '[:-> nil?]} [] (parse-boolean "True"))
+(defn false-valued {:t/sig '[:-> #{false}]} []
+  (if-some [value (parse-boolean "false")] value true))
+(defn decimal-suffix {:t/sig '[:-> #{false}]} [] (integer? (parse-double " 42.0D ")))
+(defn empty-decimal {:t/sig '[:-> nil?]} [] (parse-double " "))
+(defn shadowed {:t/sig '[:-> #{:shadowed}]} []
+  (let [parse-long (fn [_] :shadowed)] (parse-long "5")))
+"#;
+    let report = Session::default().check("decimal.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn core_parsers_throw_on_non_strings_and_expose_nullable_results() {
+    let source = r#"
+(defn invalid {:t/sig '[:-> #{:caught}]} []
+  (try (parse-long nil) (catch IllegalArgumentException _ :caught)))
+(defn checked-number {:t/sig '[string? :-> int?]} [text]
+  (if-some [value (parse-long text)] (inc value) 0))
+(defn missing-fallback {:t/sig '[string? :-> int?]} [text] (parse-long text))
+"#;
+    let report = Session::default().check("decimal.clj", source);
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| (finding.span.start.line, finding.code.as_str()))
+        .collect();
+    assert_eq!(errors, [(3, "PNX2322"), (6, "PNX2322")], "{report:#?}");
+}
+
+#[test]
+fn parse_double_distinguishes_jvm_number_syntax_from_invalid_literals() {
+    let source = r#"
+(defn hex {:t/sig '[:-> #{false}]} [] (nil? (parse-double " -0X.8P+10f ")))
+(defn hex-whole {:t/sig '[:-> #{false}]} [] (nil? (parse-double "0xFEp0")))
+(defn decimal {:t/sig '[:-> #{false}]} [] (nil? (parse-double "12.e-3")))
+(defn overflow {:t/sig '[:-> #{false}]} [] (nil? (parse-double "1e99999999999")))
+(defn specials {:t/sig '[boolean? :-> #{false}]} [flag]
+  (nil? (parse-double (if flag "+NaN" "-Infinity"))))
+(defn invalid {:t/sig '[boolean? :-> nil?]} [flag]
+  (parse-double (if flag "not a number" "0x1.0")))
+(defn invalid-exponent {:t/sig '[:-> nil?]} [] (parse-double "0x1p+"))
+(defn missing-significand {:t/sig '[:-> nil?]} [] (parse-double "0x.p0"))
+(defn localized {:t/sig '[:-> nil?]} [] (parse-double "١.٢"))
+(defn invalid-suffix {:t/sig '[:-> nil?]} [] (parse-double "InfinityD"))
+"#;
+    let report = Session::default().check("double.clj", source);
+    assert!(report.ok && report.complete, "{report:#?}");
+}
+
+#[test]
+fn parse_uuid_preserves_success_failure_and_jvm_exceptions() {
+    let source = r#"
+(ns ids (:require [clojure.spec.alpha :as s]))
+(defn canonical {:t/sig '[:-> uuid?]} [] (parse-uuid "A1234567-1234-1234-1234-123456789abc"))
+(defn short {:t/sig '[:-> #{true}]} [] (uuid? (apply parse-uuid ["+1-2-3-4-5"])))
+(defn invalid {:t/sig '[:-> nil?]} [] (parse-uuid "1-2-3-4-g"))
+(defn too-large {:t/sig '[:-> nil?]} [] (parse-uuid "8000000000000000-2-3-4-5"))
+(defn optional-id {:t/sig '[string? :-> (s/nilable uuid?)]} [text] (parse-uuid text))
+(defn guarded {:t/sig '[string? :-> (s/nilable uuid?)]} [text]
+  (let [id (parse-uuid text)] (when (uuid? id) id)))
+(defn nil-input {:t/sig '[:-> #{:nil}]} []
+  (try (parse-uuid nil) (catch NullPointerException _ :nil)))
+(defn number-input {:t/sig '[:-> #{:class}]} []
+  (try (parse-uuid 42) (catch ClassCastException _ :class)))
+"#;
+    let report = Session::default().check("ids.clj", source);
+    let errors: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|finding| (finding.span.start.line, finding.code.as_str()))
+        .collect();
+    assert_eq!(errors, [(11, "PNX2322"), (13, "PNX2322")], "{report:#?}");
+
+    let source = Source {
+        path: "ids.clj",
+        source: source.split("(defn nil-input").next().unwrap(),
+    };
+    let export = Session::default().export_externs(&[source], &[]);
+    let snapshot = export.edn.unwrap_or_else(|| panic!("{:#?}", export.report));
+    assert!(snapshot.contains("clojure.core/uuid?"), "{snapshot}");
+}
+
+#[test]
 fn string_search_uses_utf16_indices_and_refines_a_completed_receiver() {
     let source = r#"
 (ns demo (:require [clojure.string :as str] [clojure.spec.alpha :as s]))

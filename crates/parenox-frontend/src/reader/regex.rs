@@ -10,6 +10,7 @@ enum RegexEscape {
 impl Reader<'_> {
     pub(super) fn regex(&mut self, start: Position) -> Result<Kind, ReadError> {
         self.bump(); // "
+        let body_start = self.pos.offset;
         let mut complex = false;
         let mut open_groups = 0_usize;
         let mut unmatched_group_close = false;
@@ -98,8 +99,84 @@ impl Reader<'_> {
         } else {
             None
         };
-        Ok(Kind::Regex { captures })
+        let shape = saw_parenthesis
+            .then(|| capture_participation(&self.source[body_start..self.pos.offset - 1]))
+            .flatten();
+        let (captures, required_captures) =
+            shape.map_or((captures, 0), |(count, required)| (Some(count), required));
+        Ok(Kind::Regex {
+            captures,
+            required_captures,
+        })
     }
+}
+
+fn capture_participation(pattern: &str) -> Option<(u16, u32)> {
+    let mut chars = pattern.char_indices().peekable();
+    let mut count = 0_u16;
+    let mut required = 0_u32;
+    let mut depth = 0_usize;
+    let mut top_level_group = None;
+    let mut root_alternation = false;
+
+    while let Some((offset, ch)) = chars.next() {
+        match ch {
+            '\\' => regex_escape(&mut chars)?,
+            '[' => {
+                chars.next_if(|(_, ch)| *ch == '^');
+                if chars.peek().is_some_and(|(_, ch)| *ch == ']') {
+                    // Java treats a leading closing bracket as literal.
+                    chars.next();
+                }
+                loop {
+                    match chars.next()?.1 {
+                        ']' => break,
+                        '[' => return None, // Nested/intersected classes.
+                        '\\' => regex_escape(&mut chars)?,
+                        _ => {}
+                    }
+                }
+            }
+            '(' => {
+                if chars.peek().is_some_and(|(_, ch)| *ch == '?') {
+                    if !noncapturing_group(&pattern[offset + 2..]) {
+                        return None;
+                    }
+                } else {
+                    if depth == 0 {
+                        top_level_group = Some(count);
+                    }
+                    count = count.checked_add(1)?;
+                }
+                depth += 1;
+            }
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0
+                    && let Some(group) = top_level_group.take()
+                    && !chars
+                        .peek()
+                        .is_some_and(|(_, ch)| matches!(ch, '?' | '*' | '{'))
+                {
+                    required |= 1_u32.checked_shl(u32::from(group)).unwrap_or(0);
+                }
+            }
+            '|' if depth == 0 => root_alternation = true,
+            _ => {}
+        }
+    }
+    (depth == 0).then_some((count, if root_alternation { 0 } else { required }))
+}
+
+fn regex_escape(chars: &mut impl Iterator<Item = (usize, char)>) -> Option<()> {
+    match chars.next()?.1 {
+        'c' => {
+            chars.next()?;
+        }
+        'Q' | 'N' | 'k' | 'p' | 'P' => return None,
+        _ => {}
+    }
+    Some(())
 }
 
 fn noncapturing_group(suffix: &str) -> bool {

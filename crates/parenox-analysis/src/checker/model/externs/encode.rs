@@ -293,6 +293,7 @@ impl SnapshotWriter {
             }
             Type::String => "clojure.core/string?",
             Type::Pattern => "java.util.regex.Pattern",
+            Type::Uuid => "clojure.core/uuid?",
             Type::JvmIterator => "java.util.Iterator",
             Type::JvmArray(JvmArrayClass::Byte) => "clojure.core/bytes?",
             Type::Character => "clojure.core/char?",

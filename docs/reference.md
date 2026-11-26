@@ -12,6 +12,8 @@ use `./target/release/parenox` from the checkout. Use `parenox --help` or
 
 `check` prints pretty diagnostics to stderr; `--format plain` and
 `--format json` print to stdout. `--json` is short for `--format json`.
+Pretty output displays repeated findings at one source span together with
+their distinct call contexts. JSON carries individual occurrences and IDs.
 Use `--color always|never` to override automatic color. Suggested edits
 are never applied automatically.
 
@@ -60,10 +62,13 @@ argument mismatch at a call to a required library with an EDN extern.
 The body retains its coverage warning. Unresolved macros and aliases
 that do not load a library do not establish an evaluated call.
 In a file with statically resolved `defmulti` and `defmethod` declarations,
-the checker also reports definite misuse of loaded `clojure.string` functions
-inside method bodies. Parameters start with unknown types. Hover can show
-types proved inside the method, and the diagnostic report marks dispatch and
-the rest of the body analysis as incomplete.
+the checker also reports definite misuse of loaded `clojure.string` functions,
+`subs`, and the core string parsers inside method bodies. Proven out-of-bounds
+indices in `nth` and `subvec` are reported too. Parameters start with unknown
+types. Hover can show types proved inside the method. With `--check-unannotated`,
+the checker also uses a named method's fixed and variadic parameter lists to
+check recursive calls, including `apply` with a known argument count. It reports
+unchecked dispatch and parameter types once per file in this mode.
 
 ### Targeted suppressions
 
@@ -208,6 +213,9 @@ source name with literal `:const` or `:private` metadata.
 A regex literal in a source `def` has type `java.util.regex.Pattern`.
 The reader records capture counts for supported syntax, including Java
 control escapes, noncapturing groups, and inline flags outside comment mode.
+`re-find` and `re-matches` use non-nil `String` for a top-level capture
+known to participate in every successful match. Possible omissions, such
+as optional captures or captures in alternatives, retain nil.
 `re-find` and `re-matches` use that count through source vars, local bindings,
 and `re-pattern` on an existing `Pattern`.
 Exporting the regex object as an EDN literal value is unsupported.
@@ -434,10 +442,10 @@ implementations:
  vendor.bindings/with-bindings {:macro :let-like}}
 ```
 
-A checked source declaration takes precedence. The string search rules
-for `starts-with?`, `ends-with?`, `index-of`, and `last-index-of` apply
-when those `clojure.string` names lack an explicit contract. Duplicate externs
-or attempts to replace other modeled built-ins report `PNX2790`. Literal values describe the
+A checked source declaration takes precedence. Built-in string search and
+core string parsing rules apply when their names lack an explicit contract.
+Duplicate externs or attempts to replace other modeled built-ins report
+`PNX2790`. Literal values describe the
 initializer, not later runtime changes. A `:let-like` description supplies
 lexical scope for sequential bindings, not the macro's result, effects, or
 tail positions; such calls still report `PNX9009`.
@@ -877,6 +885,8 @@ With an open rest sequence, Parenox reports partial coverage for the map convers
 On the JVM, a dot in a local parameter or binding name produces `PNX1001`
 on the written binding. Dots in destructuring keys are allowed when the local
 name is valid. A named `fn` can use dots in its own name.
+An explicit `:import` can name a JVM class in the default package, such as
+`(:import SampleParser)`. The JVM resolves the class on the runtime classpath.
 An unqualified name such as `step.next` can denote a JVM class. When Parenox
 can verify an ordinary function with that name in the current file or in a
 unique source namespace reached through `:refer`, it reports `PNX9001` at the
@@ -1062,6 +1072,13 @@ and tracks the UTF-16 indices returned by `index-of` and `last-index-of`.
 After a successful direct search in an `if` test, `let` initializer, or
 conditional binding, the checker can treat its lexically tracked receiver
 as non-nil.
+The core `parse-long`, `parse-boolean`, and `parse-double` functions require
+strings. Their return types include nil when parsing can fail. The checker
+infers exact integer and Boolean results from string literals and checks
+whether a literal matches the JVM's decimal or hexadecimal floating-point syntax.
+`parse-uuid` returns a `UUID` or nil, and `uuid?` can refine that result.
+ASCII literals follow the JVM's UUID syntax, including short groups.
+Non-ASCII literals of plausible length retain both possible outcomes.
 
 A literal Boolean assignment to the core `*warn-on-reflection*` var in
 the opening block after a statically resolved `ns` is supported. The

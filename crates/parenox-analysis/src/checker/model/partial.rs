@@ -10,7 +10,7 @@ use crate::checker::{
     function_forms::{Clause, function_clauses, split_method_name},
 };
 use crate::reader::{Form, Kind};
-use crate::types::{Arity, Type};
+use crate::types::{Arity, Signature, Type};
 use crate::{ContractKind, ContractOrigin, Diagnostic};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +26,13 @@ const STRING_OPERATORS: &[&str] = &[
     "split",
 ];
 const INDEX_OPERATORS: &[&str] = &["nth", "subvec"];
+const CORE_METHOD_OPERATORS: &[&str] = &[
+    "subs",
+    "parse-long",
+    "parse-double",
+    "parse-boolean",
+    "parse-uuid",
+];
 
 impl Declarations {
     pub(crate) fn check_unannotated_bodies(
@@ -37,6 +44,8 @@ impl Declarations {
         checked_methods: &BTreeSet<usize>,
     ) -> CheckedMethodBodies {
         let mut checked = CheckedMethodBodies::default();
+        let mut first_method = None;
+        let mut method_count = 0;
         let functions = self
             .unchecked_definitions(forms, model)
             .map(|form| (form.span.start.offset, form, false));
@@ -54,15 +63,38 @@ impl Declarations {
             };
             checked.offsets.insert(offset);
             let mut checker = Checker::new(model, globals, source);
+            let env = if method {
+                untyped_method_scope(form, &clauses)
+            } else {
+                Env::new()
+            };
             for clause in clauses.values() {
-                checker.untyped_clause(clause, method.then(|| untyped_method_name(form)).flatten());
+                checker.untyped_clause(clause, &env);
             }
-            checked.diagnostics.extend(
-                checker
-                    .diagnostics
-                    .into_iter()
-                    .filter(|diagnostic| matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")),
-            );
+            checked
+                .diagnostics
+                .extend(checker.diagnostics.into_iter().filter(|diagnostic| {
+                    matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
+                        || (method && diagnostic.code == "PNX2554")
+                }));
+            if method && let Kind::List(items) = &form.without_metadata().kind {
+                first_method.get_or_insert(items[0].span);
+                method_count += 1;
+            }
+        }
+        if let Some(span) = first_method {
+            let noun = if method_count == 1 {
+                "method"
+            } else {
+                "methods"
+            };
+            checked.diagnostics.push(Diagnostic::analysis_gap(
+                "PNX9001",
+                span,
+                format!(
+                    "Dispatch and parameter types are unchecked for {method_count} unannotated {noun} in this file"
+                ),
+            ));
         }
         checked
     }
@@ -127,15 +159,26 @@ impl Declarations {
             let mut checker = Checker::new(model, globals, source);
             checker.partial_scope = Some(Cow::Borrowed(&shadowed));
             checker.partial_method_body = method;
+            let env = if method {
+                untyped_method_scope(form, &clauses)
+            } else {
+                Env::new()
+            };
             for clause in clauses.values() {
-                checker.untyped_clause(clause, method.then(|| untyped_method_name(form)).flatten());
+                checker.untyped_clause(clause, &env);
             }
             diagnostics.extend(checker.diagnostics.into_iter().filter(|diagnostic| {
                 diagnostic.contract.as_ref().is_some_and(|origin| {
                     if method {
-                        return matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
-                            && origin.kind == ContractKind::Builtin
-                            && origin.name.starts_with("clojure.string/");
+                        let Some((namespace, local)) = origin.name.split_once('/') else {
+                            return false;
+                        };
+                        return origin.kind == ContractKind::Builtin
+                            && ((matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
+                                && method_operator(namespace, local))
+                                || (diagnostic.code == "PNX2801"
+                                    && namespace == "clojure.core"
+                                    && INDEX_OPERATORS.contains(&local)));
                     }
                     (matches!(diagnostic.code.as_str(), "PNX2322" | "PNX2801")
                         && partial_string_operator(&origin.name))
@@ -179,11 +222,25 @@ pub(super) fn untyped_clauses(form: &Form, method: bool) -> Option<BTreeMap<Arit
     function_clauses(body, form.span).ok()
 }
 
-pub(super) fn untyped_method_name(form: &Form) -> Option<&Form> {
-    let Kind::List(items) = &form.without_metadata().kind else {
-        return None;
+pub(super) fn untyped_method_scope(form: &Form, clauses: &BTreeMap<Arity, Clause<'_>>) -> Env {
+    let name = match &form.without_metadata().kind {
+        Kind::List(items) => items.get(3..).and_then(|arms| split_method_name(arms).0),
+        _ => None,
     };
-    split_method_name(items.get(3..)?).0
+    method_scope(name, || {
+        Type::Function(
+            clauses
+                .keys()
+                .map(|arity| Signature {
+                    args: vec![Type::Any; arity.required()],
+                    rest: matches!(arity, Arity::Variadic(_)).then_some(Type::Any),
+                    ret: Type::Unknown,
+                    parameters: None,
+                    nil_preserving: false,
+                })
+                .collect(),
+        )
+    })
 }
 
 impl Model {
@@ -199,7 +256,9 @@ impl Model {
         !symbols_match(form, &mut |name| {
             let (namespace, local) = self.names.resolve_parts(name);
             let builtin = if method {
-                namespace == "clojure.string" && STRING_OPERATORS.contains(&local)
+                (method_operator(namespace, local)
+                    && (namespace != "clojure.string" || self.names.loads_library(namespace)))
+                    || (namespace == "clojure.core" && INDEX_OPERATORS.contains(&local))
             } else {
                 partial_string_operator_parts(namespace, local)
                     || (namespace == "clojure.core" && INDEX_OPERATORS.contains(&local))
@@ -258,20 +317,11 @@ impl Model {
 }
 
 impl Checker<'_> {
-    pub(in crate::checker::model) fn untyped_clause(
-        &mut self,
-        clause: &Clause<'_>,
-        local_name: Option<&Form>,
-    ) {
+    pub(in crate::checker::model) fn untyped_clause(&mut self, clause: &Clause<'_>, env: &Env) {
         let diagnostics_start = self.diagnostics.len();
         self.partial_method_opaque = false;
         let args = vec![Value::new(Type::Unknown); clause.parameters().count()];
-        self.function_body(
-            clause,
-            args,
-            &method_scope(local_name, || Type::Unknown),
-            None,
-        );
+        self.function_body(clause, args, env, None);
         // An opaque form may change which operations are reached or which vars are called.
         if self.partial_method_opaque {
             self.diagnostics.truncate(diagnostics_start);
@@ -311,10 +361,17 @@ impl Checker<'_> {
             return !self.partial_method_body;
         }
         let (namespace, local) = self.model.names.resolve_parts(name);
+        if self.partial_method_body
+            && namespace == "clojure.string"
+            && !self.model.names.loads_library(namespace)
+        {
+            return false;
+        }
         let modeled = partial_string_operator_parts(namespace, local)
             || (namespace == "clojure.core"
                 && ((self.model.can_use_standard_core(name, self.globals)
                     && (INDEX_OPERATORS.contains(&local)
+                        || (self.partial_method_body && CORE_METHOD_OPERATORS.contains(&local))
                         || matches!(
                             local,
                             "mapv" | "count" | "first" | "inc" | "dec" | "min" | "max"
@@ -358,6 +415,14 @@ impl Checker<'_> {
             Some(DeclaredValue::UncheckedFunction(function)) => function.arities.is_some(),
             _ => false,
         }
+    }
+}
+
+fn method_operator(namespace: &str, local: &str) -> bool {
+    match namespace {
+        "clojure.core" => CORE_METHOD_OPERATORS.contains(&local),
+        "clojure.string" => STRING_OPERATORS.contains(&local),
+        _ => false,
     }
 }
 

@@ -45,6 +45,45 @@ fn regex_literal_vars_keep_their_pattern_type_across_files() {
 }
 
 #[test]
+fn required_regex_captures_exclude_nil_and_refresh_after_pattern_edits() {
+    let provider = Source {
+        path: "pattern.clj",
+        source: r##"(ns pattern) (def value #"^(?:id:|id=)(\d+)([a-z])$")"##,
+    };
+    let consumer = Source {
+        path: "client.clj",
+        source: r#"(ns client (:require [pattern :as p] [clojure.spec.alpha :as s]))
+(defn read-number {:t/sig '[string? :-> (s/nilable int?)]} [text]
+  (when-let [[_ digits _] (re-find (re-pattern p/value) text)]
+    (parse-long digits)))"#,
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[consumer, provider], None);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    for pattern in [r"^(?:id:|id=)(\d+)?([a-z])$", r"^(\d+)$|^([a-z])$"] {
+        let source = provider
+            .source
+            .replace(r"^(?:id:|id=)(\d+)([a-z])$", pattern);
+        let report = session.check_project(
+            &[
+                consumer,
+                Source {
+                    source: &source,
+                    ..provider
+                },
+            ],
+            None,
+        );
+        let [error] = report.files[0].diagnostics.as_slice() else {
+            panic!("{report:#?}")
+        };
+        assert_eq!(error.code, "PNX2322");
+        assert_eq!(error.actual.as_deref(), Some("Nil | String"));
+    }
+}
+
+#[test]
 fn named_regex_capture_edits_recheck_when_the_pattern_type_stays_the_same() {
     let provider = Source {
         path: "provider.clj",
@@ -82,7 +121,7 @@ fn named_regex_capture_edits_recheck_when_the_pattern_type_stays_the_same() {
     assert_eq!(finding.code, "PNX2322");
     assert_eq!(
         finding.actual.as_deref(),
-        Some("Nil | Tuple<String, Nil | String>")
+        Some("Nil | Tuple<String, String>")
     );
     assert_eq!(
         &consumer.source[finding.span.start.offset..finding.span.end.offset],

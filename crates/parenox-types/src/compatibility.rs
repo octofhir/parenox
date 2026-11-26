@@ -277,6 +277,7 @@ fn scalar_members(ty: &Type) -> Option<&[Type]> {
                     | Type::QualifiedSymbol
                     | Type::Sym(_)
                     | Type::Pattern
+                    | Type::Uuid
             )
         })
         .then_some(members)

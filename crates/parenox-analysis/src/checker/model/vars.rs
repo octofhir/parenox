@@ -8,7 +8,7 @@ use std::sync::Arc;
 pub(super) use initializers::{adjacent_literal_def, inert, prior_initializer};
 pub(super) use strings::LiteralInitializerScope;
 
-use super::super::{Checker, Env, LiteralContainer, Value};
+use super::super::{Checker, Env, LiteralContainer, PatternCaptures, Value};
 use super::{Declarations, Globals, Model};
 use crate::reader::{Form, Kind, Span};
 use crate::types::{IntegerClass, Type};
@@ -30,7 +30,7 @@ pub(in crate::checker) struct LiteralVar {
     pub ty: Type,
     pub private: bool,
     pub(in crate::checker) container: Option<LiteralContainer>,
-    pub(in crate::checker) pattern_captures: Option<u16>,
+    pub(in crate::checker) pattern_captures: Option<PatternCaptures>,
 }
 
 impl LiteralVar {

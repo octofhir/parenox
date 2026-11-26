@@ -16,6 +16,7 @@ mod interop;
 pub(super) use interop::{dot_form, is_modeled_string_member, new_arguments};
 mod lazy_map;
 mod macro_scopes;
+mod parsing;
 mod reduction;
 mod search;
 mod sequences;
@@ -50,6 +51,7 @@ use combinators::CombinedCallable;
 use forms::CoreForm;
 use inline::{CallbackReturn, Fnil, InlineFunction, Partial, PreparedChoice};
 use interop::QualifiedJvmMember;
+use parsing::Parser;
 
 enum Callable<'form, 'model> {
     Inline(InlineFunction<'form>),
@@ -1253,7 +1255,8 @@ impl<'model> Checker<'model> {
                     | "clojure.core/fn?"
                     | "clojure.core/ifn?"
             ) && primitive_array_setter(resolved).is_none()
-                && arithmetic::integer_comparison(resolved).is_none())
+                && arithmetic::integer_comparison(resolved).is_none()
+                && !is_string_parser(resolved))
                 || self.model.can_use_standard_core(spelling, self.globals))
     }
 
@@ -1486,6 +1489,9 @@ impl<'model> Checker<'model> {
         }
         if is_string_search(name) {
             return Value::new(self.clojure_string_search(name, args));
+        }
+        if let Some(parser) = Parser::for_name(name) {
+            return self.parse_string(name, parser, &args[0]);
         }
         let arithmetic = arithmetic::fixed_result(name, args);
         if arithmetic.is_none()
@@ -1950,6 +1956,7 @@ fn builtin_arities(name: &str) -> &'static [Arity] {
 pub(super) fn predicate_type(name: &str) -> Option<Type> {
     match name {
         "clojure.core/string?" => Some(Type::String),
+        "clojure.core/uuid?" => Some(Type::Uuid),
         "clojure.core/char?" => Some(Type::Character),
         "clojure.core/number?" => Some(Type::Number),
         "clojure.core/integer?" => Some(Type::Integral(IntegerType::ANY)),
@@ -2106,6 +2113,10 @@ pub(super) fn is_modeled_call(name: &str) -> bool {
     is_builtin(name) || CoreForm::resolve(name).is_some()
 }
 
+pub(super) fn is_string_parser(name: &str) -> bool {
+    Parser::for_name(name).is_some()
+}
+
 pub(super) fn is_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -2204,6 +2215,7 @@ pub(super) fn is_builtin(name: &str) -> bool {
     ) || predicate_type(name).is_some()
         || arithmetic::integer_comparison(name).is_some()
         || is_string_search(name)
+        || is_string_parser(name)
         || array_constructor(name).is_some()
         || primitive_array_setter(name).is_some()
 }
