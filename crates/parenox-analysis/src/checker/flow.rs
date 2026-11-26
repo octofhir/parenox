@@ -3,6 +3,7 @@ mod selectors;
 mod spec_guards;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 pub(super) use selectors::{narrow_literal, refine_owner};
 
@@ -11,8 +12,9 @@ use super::calls::{
     callable_predicate, definitely_noncallable, is_builtin, is_string_search, narrow_emptiness,
     narrow_vector_predicate, predicate_type,
 };
+use super::env::ResultGuard;
 use super::maps::narrow_map_predicate;
-use super::model::DeclaredValue;
+use super::model::{DeclaredValue, GuardMode, VerifiedGuard};
 use super::recur::bounded_state;
 use super::{Checker, Env, Value, has_evaluated_metadata, nil_part};
 use crate::expand::{self, Threading};
@@ -847,6 +849,9 @@ impl Checker<'_> {
                 }
             } else if non_nil {
                 self.narrow_completed_string_search(init, scope);
+                if truth {
+                    self.narrow_non_nil_result(init, scope);
+                }
                 self.narrow_subject(init, scope, |ty| {
                     if truth {
                         ty.without_nil()
@@ -973,12 +978,76 @@ impl Checker<'_> {
         }
     }
 
+    fn guarded_argument<'form>(
+        &self,
+        head: &Form,
+        args: &'form [Form],
+        env: &Env,
+    ) -> Option<(Arc<VerifiedGuard>, &'form Form)> {
+        let name = head.symbol()?;
+        if self.model.has_unavailable_wildcard_scope(name) || !self.allows_partial_call(head, env) {
+            return None;
+        }
+        let guard = if let Some(value) = env.get(name) {
+            value.guard.clone()?
+        } else {
+            let DeclaredValue::Function(contract) =
+                self.model
+                    .declared_value(name, self.globals, head.span.start.offset)?
+            else {
+                return None;
+            };
+            contract.guard.clone()?
+        };
+        guard.arities.contains(&args.len()).then(|| {
+            let argument = &args[guard.argument];
+            (guard, argument)
+        })
+    }
+
+    fn non_nil_guarded_call<'form>(
+        &self,
+        form: &'form Form,
+        env: &Env,
+    ) -> Option<(Arc<VerifiedGuard>, &'form Form)> {
+        let Kind::List(items) = &form.without_metadata().kind else {
+            return None;
+        };
+        let (head, args) = items.split_first()?;
+        let (guard, argument) = self.guarded_argument(head, args, env)?;
+        (guard.mode == GuardMode::Some).then_some((guard, argument))
+    }
+
+    pub(super) fn capture_result_guard(&self, form: &Form, env: &Env) -> Option<Arc<ResultGuard>> {
+        if let Some(name) = form.symbol() {
+            return env.result_guard(name);
+        }
+        let (guard, argument) = self.non_nil_guarded_call(form, env)?;
+        Some(Arc::new(ResultGuard {
+            subject: self.selector(argument, env)?,
+            ty: guard.ty.clone(),
+        }))
+    }
+
+    fn narrow_non_nil_result(&self, form: &Form, env: &mut Env) {
+        if let Some(guard) = form.symbol().and_then(|name| env.result_guard(name)) {
+            refine_owner(&guard.subject, env, |ty| {
+                narrow_by_type(ty, &guard.ty, true)
+            });
+        } else if let Some((guard, argument)) = self.non_nil_guarded_call(form, env) {
+            self.narrow_subject(argument, env, |ty| narrow_by_type(ty, &guard.ty, true));
+        }
+    }
+
     pub(super) fn narrow(&self, test: &Form, truth: bool, env: &mut Env) {
         if !env.reachable() {
             return;
         }
         let truthy = |ty: &Type| if truth { ty.truthy() } else { ty.falsey() };
         if test.symbol().is_some() {
+            if truth {
+                self.narrow_non_nil_result(test, env);
+            }
             self.narrow_subject(test, env, truthy);
             return;
         }
@@ -994,25 +1063,10 @@ impl Checker<'_> {
         let Some(op) = self.unshadowed_operation(head, env) else {
             if head.keyword().is_some() {
                 self.narrow_subject(test, env, truthy);
-            } else if let Some(name) = head.symbol() {
-                let guard = if let Some(value) = env.get(name) {
-                    value.guard.clone()
-                } else if let Some(DeclaredValue::Function(contract)) =
-                    self.model
-                        .declared_value(name, self.globals, head.span.start.offset)
-                {
-                    contract.guard.clone()
-                } else {
-                    None
-                };
-                if let Some(guard) = guard
-                    && args.len() == guard.arity
-                    && (truth || guard.both)
-                {
-                    self.narrow_subject(&args[guard.argument], env, |ty| {
-                        narrow_by_type(ty, &guard.ty, truth)
-                    });
-                }
+            } else if let Some((guard, argument)) = self.guarded_argument(head, args, env)
+                && (truth || guard.mode == GuardMode::Both)
+            {
+                self.narrow_subject(argument, env, |ty| narrow_by_type(ty, &guard.ty, truth));
             }
             return;
         };
@@ -1034,6 +1088,9 @@ impl Checker<'_> {
                     .map(|ty| (right, ty, true))
                     .or_else(|| self.guard_literal(right).map(|ty| (left, ty, false)));
                 if let Some((subject, literal, literal_first)) = pair {
+                    if literal == Type::Nil && !truth {
+                        self.narrow_non_nil_result(subject, env);
+                    }
                     self.narrow_subject(subject, env, |ty| {
                         if literal_first && literal == Type::Nil {
                             // Util.equiv checks a null first operand before
@@ -1072,9 +1129,15 @@ impl Checker<'_> {
                 self.narrow_sequence_subject(operand, env, !truth);
             }
             ("clojure.core/nil?", [operand]) => {
+                if !truth {
+                    self.narrow_non_nil_result(operand, env);
+                }
                 self.narrow_subject(operand, env, |ty| narrow_by_type(ty, &Type::Nil, truth));
             }
             ("clojure.core/some?", [operand]) => {
+                if truth {
+                    self.narrow_non_nil_result(operand, env);
+                }
                 self.narrow_subject(operand, env, |ty| {
                     if truth {
                         ty.without_nil()

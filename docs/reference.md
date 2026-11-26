@@ -428,6 +428,8 @@ implementations:
 ```edn
 {vendor.store/find [string? :-> (clojure.spec.alpha/nilable map?)]
  vendor.uri/decode (t/nil-preserving [string? :-> string?])
+ vendor.text/has-prefix? {:sig [t/any t/any :-> boolean?]
+                          :guard [:then 1 string?]}
  vendor.store/default-limit {:value 50}
  vendor.bindings/with-bindings {:macro :let-like}}
 ```
@@ -450,6 +452,19 @@ the written result type. A call with Nil returns Nil. A call whose argument
 can be either retains the nullable signature. Extern validation requires
 evidence of the relation between the input and result.
 
+An extern may attach a guard to one or more fixed signatures. The guarded
+argument index must exist in every signature.
+The `:guard` vector uses a 1-based argument index. `:then` refines
+the argument when the result is true. `:both` also excludes the predicate's
+type when the result is false. Both require a Boolean result.
+`[:some 1 string?]` refines the first argument when the call returns a
+non-nil value, including `false`. It works with direct tests and simple
+`let` locals tested with `nil?` or `some?`.
+`check` trusts the declaration.
+`validate-externs` requires a verified source guard that supports the promise.
+For a source guard shared by several arities, the same parameter must occupy
+the same position in each clause and every clause must prove the guard.
+
 ### Validating library externs
 
 `parenox validate-externs --config parenox.edn` checks source bodies and
@@ -461,9 +476,9 @@ definitions and unproven compatibility report `PNX9011`.
 ### Exporting public contracts
 
 `parenox export-externs > current-api.edn` writes a checked snapshot of public
-signatures and literal vars, with named specs inlined. It requires a complete
-source check and verifies the generated EDN before printing it. It does not
-export private vars, imported externs, macro scopes, or guard refinements.
+function signatures, verified guards, and literal vars, with named specs
+inlined. It requires a complete source check and verifies that the generated
+EDN preserves those contracts before printing it.
 Snapshots above the export size or nesting limits report `PNX9012`.
 
 ### Proposing named spec contracts

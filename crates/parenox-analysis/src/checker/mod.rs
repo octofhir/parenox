@@ -16,12 +16,12 @@ mod recur;
 
 use env::Env;
 use exceptions::Throws;
-use model::{Contract, DeclaredValue, Function, VerifiedGuard};
 pub(crate) use model::{
-    Declarations, DocumentReferences, EncodeError, ExternCache, Globals, InterfaceKey, Model,
-    ProjectCall, RuntimeLoads, ScopedReference, SnapshotWriter, SpecCache, SpecConversion,
+    Contract, Declarations, DocumentReferences, EncodeError, ExternCache, Globals, InterfaceKey,
+    Model, ProjectCall, RuntimeLoads, ScopedReference, SnapshotWriter, SpecCache, SpecConversion,
     SpecFingerprint, SpecSource, bare_dotted_name, java_type_tag_at,
 };
+use model::{DeclaredValue, Function, VerifiedGuard};
 pub(crate) use queries::CheckedCall;
 use queries::TypeQuery;
 use recur::RecurTarget;

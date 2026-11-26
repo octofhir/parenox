@@ -14,6 +14,65 @@ fn validate(source: &str, externs: &str) -> ProjectReport {
 }
 
 #[test]
+fn validation_proves_a_guard_at_each_source_arity() {
+    let contract = "{api/text? {:sig [[t/any :-> boolean?] [t/any boolean? :-> boolean?]]
+                                :guard [:then 1 string?]}}";
+    let source = "(ns api)
+      (defn text? {:t/sig '[[t/any :-> boolean?] [t/any boolean? :-> boolean?]]
+                   :t/guard '[:then value string?]}
+        ([value] (string? value))
+        ([value enabled] (and enabled (string? value))))";
+    let report = validate(source, contract);
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let invalid = source.replace("(and enabled (string? value))", "enabled");
+    let report = validate(&invalid, contract);
+    assert!(
+        report.files[0]
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX9008"),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn validation_proves_a_non_nil_guard_with_a_nil_fallback() {
+    let contract = "{api/search {:sig [t/any :-> (clojure.spec.alpha/nilable string?)] :guard [:some 1 string?]}}";
+    let source = "(ns api (:require [clojure.spec.alpha :as s]))
+      (defn search {:t/sig '[t/any :-> (s/nilable string?)] :t/guard '[:some value string?]}
+        [value] (when (string? value) value))";
+    let report = validate(source, contract);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let invalid = source.replace(
+        "(when (string? value) value)",
+        "(if (string? value) value \"fallback\")",
+    );
+    let report = validate(&invalid, contract);
+    assert!(
+        report.files[0]
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX9008"),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn validation_requires_a_verified_source_guard_for_the_extern_promise() {
+    let contract = "{api/text? {:sig [t/any :-> boolean?] :guard [:then 1 string?]}}";
+    let source = "(ns api) (defn text? {:t/sig '[t/any :-> boolean?] :t/guard '[:both value string?]} [value] (string? value))";
+    let report = validate(source, contract);
+    assert!(report.ok && report.complete, "{report:#?}");
+    let missing = source.replace(" :t/guard '[:both value string?]", "");
+    let report = validate(&missing, contract);
+    let [finding] = report.files[1].diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(finding.code, "PNX9011");
+}
+
+#[test]
 fn source_can_accept_more_inputs_return_a_narrower_type_and_offer_extra_arities() {
     let report = validate(
         "(ns api (:require [clojure.spec.alpha :as s]))

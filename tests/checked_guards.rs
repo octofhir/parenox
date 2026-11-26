@@ -3,6 +3,107 @@ use parenox::{Session, Source};
 const EXAMPLE: &str = include_str!("../examples/checked_guards.clj");
 
 #[test]
+fn non_nil_guards_track_let_results_without_refining_shadowed_arguments() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [vendor.find :as f] [clojure.spec.alpha :as s]))
+(defn prefix {:t/sig '[(s/nilable string?) :-> string?]} [input]
+  (let [index (f/search input) saved index]
+    (if (nil? saved) "" (subs input 0 saved))))
+(defn bound {:t/sig '[(s/nilable string?) :-> string?]} [input]
+  (if-some [index (f/search input 1)] (subs input index) ""))
+(defn present-false {:t/sig '[(s/nilable string?) :-> string?]} [input]
+  (if-some [_ (f/flag input)] (subs input 0) ""))"#,
+    };
+    let externs = Source {
+        path: "find.edn",
+        source: "{vendor.find/search {:sig [[t/any :-> (clojure.spec.alpha/nilable int?)]
+                                           [t/any int? :-> (clojure.spec.alpha/nilable int?)]]
+                                      :guard [:some 1 string?]}
+                  vendor.find/flag {:sig [t/any :-> (clojure.spec.alpha/nilable #{false})] :guard [:some 1 string?]}}",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app], Some(externs));
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let source = app.source.replace("saved index]", "saved index input nil]");
+    let report = session.check_project(
+        &[Source {
+            source: &source,
+            ..app
+        }],
+        Some(externs),
+    );
+    let [error] = report.files[0].diagnostics.as_slice() else {
+        panic!("{report:#?}")
+    };
+    assert_eq!(error.code, "PNX2322");
+    assert_eq!(error.span.start.line, 4);
+}
+
+#[test]
+fn extern_guard_argument_must_exist_at_every_arity() {
+    let externs = Source {
+        path: "find.edn",
+        source: "{vendor.find/search {:sig [[t/any :-> boolean?] [t/any t/any :-> boolean?]]
+                                      :guard [:then 2 string?]}}",
+    };
+    let report = Session::default().check_project(&[], Some(externs));
+    assert_eq!(
+        report.files[0].diagnostics[0].code, "PNX9008",
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn extern_guards_narrow_the_selected_argument_and_follow_snapshot_edits() {
+    let app = Source {
+        path: "app.clj",
+        source: r#"(ns app (:require [example.text :as text] [clojure.spec.alpha :as s]))
+(defn prefix {:t/sig '[(s/nilable string?) :-> string?]} [value]
+  (if (text/has-prefix? "x" value) (subs value 1) "fallback"))"#,
+    };
+    let guarded = Source {
+        path: "text.edn",
+        source: "{example.text/has-prefix? {:guard [:then 2 string?]
+                         :sig [string? t/any :-> boolean?]}}",
+    };
+    let mut session = Session::default();
+    let report = session.check_project(&[app], Some(guarded));
+    assert!(report.ok && report.complete, "{report:#?}");
+    let plain = Source {
+        source: "{example.text/has-prefix? [string? t/any :-> boolean?]}",
+        ..guarded
+    };
+    let report = session.check_project(&[app], Some(plain));
+    assert!(
+        report.files[0]
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX2322"),
+        "{report:#?}"
+    );
+    let report = session.check_project(&[app], Some(guarded));
+    assert!(report.ok && report.complete, "{report:#?}");
+
+    let wrong_index = guarded.source.replace(":then 2", ":then 3");
+    let report = session.check_project(
+        &[app],
+        Some(Source {
+            source: &wrong_index,
+            ..guarded
+        }),
+    );
+    assert!(
+        report.files[1]
+            .diagnostics
+            .iter()
+            .any(|finding| finding.code == "PNX9008"),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn checked_guards_refine_true_and_proven_false_branches() {
     let source = format!(
         "{EXAMPLE}

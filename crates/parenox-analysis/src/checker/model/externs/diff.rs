@@ -2,6 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ExternCache, ExternalDeclaration, MacroScope};
+use crate::checker::model::GuardMode;
 use crate::reader::Span;
 use crate::types::{Compatibility, Type, extern_drift};
 use crate::{ExternChange, ExternChangeKind as Change, ExternDefinition, ExternMismatch};
@@ -61,6 +62,15 @@ fn changed(
     use ExternalDeclaration::{Function, Literal, Macro, Spec};
     match (old, new) {
         (Function(old), Function(new)) => {
+            let guard_change = if old.guard == new.guard {
+                None
+            } else {
+                Some(match (&old.guard, &new.guard) {
+                    (Some(_), None) => Change::Breaking,
+                    (Some(old), Some(new)) if !new.supports(old) => Change::Unproven,
+                    _ => Change::Compatible,
+                })
+            };
             if old.signatures.len() == new.signatures.len()
                 && old
                     .signatures
@@ -68,10 +78,10 @@ fn changed(
                     .zip(new.signatures.iter())
                     .all(|(a, b)| a.same_type(b))
             {
-                return None;
+                return guard_change.map(|change| (change, None));
             }
             Some(match extern_drift(&new.signatures, &old.signatures) {
-                None => (Change::Compatible, None),
+                None => (guard_change.unwrap_or(Change::Compatible), None),
                 Some((count, Compatibility::Mismatch, detail)) => {
                     (Change::Breaking, Some((count, detail)))
                 }
@@ -93,7 +103,22 @@ fn changed(
 fn definition((extern_, span): (&ExternalDeclaration, Span)) -> ExternDefinition {
     let declaration = match extern_ {
         ExternalDeclaration::Function(contract) => {
-            Type::Function(contract.signatures.clone()).to_string()
+            let signature = Type::Function(contract.signatures.clone());
+            contract.guard.as_ref().map_or_else(
+                || signature.to_string(),
+                |guard| {
+                    format!(
+                        "{signature} with {} guard on argument {} ({})",
+                        match guard.mode {
+                            GuardMode::Then => "true-branch",
+                            GuardMode::Both => "two-way",
+                            GuardMode::Some => "non-nil-result",
+                        },
+                        guard.argument + 1,
+                        guard.ty,
+                    )
+                },
+            )
         }
         ExternalDeclaration::Macro(MacroScope::LetLike(_)) => "{:macro :let-like}".into(),
         ExternalDeclaration::Literal(literal) => format!("{{:value {}}}", literal.edn),

@@ -16,6 +16,48 @@ fn export(sources: &[Source<'_>]) -> String {
 }
 
 #[test]
+fn exported_guards_preserve_refinements_without_library_sources() {
+    let provider = Source {
+        path: "search.clj",
+        source: r#"(ns search (:require [clojure.spec.alpha :as s]))
+(defn text? {:t/sig '[t/any :-> boolean?] :t/guard '[:both x string?]}
+  [x] (string? x))
+(defn slice {:t/sig '[[t/any :-> (s/nilable string?)]
+                     [t/any int? :-> (s/nilable string?)]]
+             :t/guard '[:some x string?]}
+  ([x] (when (string? x) x))
+  ([x i] (when (string? x) (subs x i))))"#,
+    };
+    let edn = export(&[provider]);
+    assert!(
+        edn.contains(":guard [:both 1 clojure.core/string?]"),
+        "{edn}"
+    );
+    assert!(
+        edn.contains(":guard [:some 1 clojure.core/string?]"),
+        "{edn}"
+    );
+    let externs = Source {
+        path: "search.edn",
+        source: &edn,
+    };
+    let client = Source {
+        path: "client.clj",
+        source: r#"(ns client (:require [search :as s]))
+(defn guarded {:t/sig '[t/any :-> string?]} [value]
+  (if (s/text? value) (subs value 0) ""))
+(defn result {:t/sig '[t/any :-> string?]} [value]
+  (let [match (s/slice value 1)]
+    (if (nil? match) "" (subs value 1))))"#,
+    };
+    let mut session = Session::default();
+    let validated = session.validate_externs(&[provider], &[externs]);
+    assert!(validated.ok && validated.complete, "{validated:#?}");
+    let checked = session.check_project(&[client], Some(externs));
+    assert!(checked.ok && checked.complete, "{checked:#?}");
+}
+
+#[test]
 fn exported_map_contract_preserves_scalar_keys_and_blames_the_field_value() {
     let provider = Source {
         path: "wire.clj",

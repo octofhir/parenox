@@ -6,14 +6,53 @@ use super::{Declarations, Function, Globals, Model};
 use crate::Diagnostic;
 use crate::checker::calls::predicate_type;
 use crate::reader::{Form, Kind, Span};
-use crate::types::Type;
+use crate::types::{Signature, Type};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct VerifiedGuard {
     pub argument: usize,
-    pub arity: usize,
+    pub arities: Box<[usize]>,
     pub ty: Type,
-    pub both: bool,
+    pub mode: GuardMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum GuardMode {
+    Then,
+    Both,
+    Some,
+}
+
+impl GuardMode {
+    pub(super) fn parse(form: &Form) -> Option<Self> {
+        match form.keyword()? {
+            ":then" => Some(Self::Then),
+            ":both" => Some(Self::Both),
+            ":some" => Some(Self::Some),
+            _ => None,
+        }
+    }
+
+    pub(super) fn supports_signature(self, signature: &Signature) -> bool {
+        signature.rest.is_none()
+            && (self == Self::Some || matches!(signature.ret, Type::Boolean | Type::Bool(_)))
+    }
+}
+
+impl VerifiedGuard {
+    pub(super) fn supports(&self, promised: &Self) -> bool {
+        promised
+            .arities
+            .iter()
+            .all(|arity| self.arities.contains(arity))
+            && self.argument == promised.argument
+            && match (self.mode, promised.mode) {
+                (GuardMode::Both, GuardMode::Both) => self.ty == promised.ty,
+                (GuardMode::Then | GuardMode::Both, GuardMode::Then)
+                | (GuardMode::Some, GuardMode::Some) => self.ty.subtype_of(&promised.ty),
+                _ => false,
+            }
+    }
 }
 
 impl Model {
@@ -87,14 +126,11 @@ fn prove(
     };
     let Some([mode, param, predicate]) = data.vector() else {
         return Err(invalid(
-            "Expected :t/guard '[:then parameter predicate?] or '[:both parameter predicate?]",
+            "Expected :t/guard '[mode parameter predicate?] with :then, :both, or :some",
         ));
     };
-    let both = match mode.keyword() {
-        Some(":then") => false,
-        Some(":both") => true,
-        _ => return Err(invalid(":t/guard direction must be :then or :both")),
-    };
+    let mode = GuardMode::parse(mode)
+        .ok_or_else(|| invalid(":t/guard direction must be :then, :both, or :some"))?;
     let Some(param) = param.symbol() else {
         return Err(invalid(":t/guard must name a parameter"));
     };
@@ -104,74 +140,97 @@ fn prove(
     else {
         return Err(invalid(":t/guard requires a supported scalar predicate"));
     };
-    let Some([signature]) = function.contract.as_ref().map(|c| c.signatures.as_ref()) else {
-        return Err(invalid(":t/guard requires a single fixed-arity signature"));
+    let Some(contract) = &function.contract else {
+        return Err(invalid(":t/guard requires a fixed-arity signature"));
     };
-    if signature.rest.is_some() || !matches!(signature.ret, Type::Boolean | Type::Bool(_)) {
-        return Err(invalid(
-            ":t/guard requires a fixed arity and a Boolean return contract",
-        ));
-    }
-    let arm = model.source_clause(function, signature.arity());
-    if !arm.conditions.pre.is_empty() || arm.conditions.post.is_some() {
-        return Err(invalid(
-            ":t/guard verification requires an arity without preconditions or postconditions",
-        ));
-    }
-    let mut names = BTreeSet::new();
-    let params: Vec<_> = arm
-        .parameters()
-        .enumerate()
-        .map(|(index, form)| {
-            let name = match &form.kind {
-                Kind::Symbol(name) => Some(name.as_str()),
-                _ => None,
-            }
-            .filter(|name| !name.contains('/') && *name != "&")
-            .filter(|name| names.insert(*name))
-            .ok_or_else(|| {
-                invalid(":t/guard requires distinct symbol parameters without destructuring")
-            })?;
-            Ok((name, signature.args[index].subtype_of(&Type::Boolean)))
-        })
-        .collect::<Result<_, Box<Diagnostic>>>()?;
-    let Some(argument) = params.iter().position(|(name, _)| *name == param) else {
-        return Err(invalid(":t/guard must name a parameter of this function"));
-    };
-    let [body] = arm.body else {
-        return Err(invalid(
-            ":t/guard requires a single boolean expression as the body",
-        ));
-    };
-    let proof = Proof {
-        model,
-        params: &params,
-        subject: param,
-        ty: &ty,
-        local_vars,
-    };
+    let mut guarded_argument = None;
+    for signature in contract.signatures.iter() {
+        if !mode.supports_signature(signature) {
+            return Err(invalid(
+                ":t/guard requires fixed arities. :then and :both require Boolean return contracts",
+            ));
+        }
+        let arm = model.source_clause(function, signature.arity());
+        if !arm.conditions.pre.is_empty() || arm.conditions.post.is_some() {
+            return Err(invalid(
+                ":t/guard verification requires an arity without preconditions or postconditions",
+            ));
+        }
+        let mut names = BTreeSet::new();
+        let params: Vec<_> = arm
+            .parameters()
+            .enumerate()
+            .map(|(index, form)| {
+                let name = match &form.kind {
+                    Kind::Symbol(name) => Some(name.as_str()),
+                    _ => None,
+                }
+                .filter(|name| !name.contains('/') && *name != "&")
+                .filter(|name| names.insert(*name))
+                .ok_or_else(|| {
+                    invalid(":t/guard requires distinct symbol parameters without destructuring")
+                })?;
+                Ok((name, signature.args[index].subtype_of(&Type::Boolean)))
+            })
+            .collect::<Result<_, Box<Diagnostic>>>()?;
+        let Some(argument) = params.iter().position(|(name, _)| *name == param) else {
+            return Err(invalid(":t/guard must name a parameter of this function"));
+        };
+        if guarded_argument
+            .replace(argument)
+            .is_some_and(|previous| previous != argument)
+        {
+            return Err(invalid(
+                ":t/guard parameter must occupy the same position in every arity",
+            ));
+        }
+        let [body] = arm.body else {
+            return Err(invalid(
+                ":t/guard requires a single boolean expression as the body",
+            ));
+        };
+        let proof = Proof {
+            model,
+            params: &params,
+            subject: param,
+            ty: &ty,
+            local_vars,
+        };
 
-    // Do not use the signature's input types as evidence. In each run,
-    // unrelated tests may be either true or false, even if correlated.
-    if proof.evaluate(body, false)? != Truth::False {
-        return Err(invalid(
-            "Guard body does not prove that a true result implies the declared type",
-        ));
+        // Do not use the signature's input types as evidence. In each run,
+        // unrelated tests may be either true or false, even if correlated.
+        if mode == GuardMode::Some {
+            if !proof.returns_nil(body)? {
+                return Err(invalid(
+                    "Guard body does not prove that a non-nil result implies the declared type",
+                ));
+            }
+        } else if proof.evaluate(body, false)? != Truth::False {
+            return Err(invalid(
+                "Guard body does not prove that a true result implies the declared type",
+            ));
+        }
+        if mode == GuardMode::Both && proof.evaluate(body, true)? != Truth::True {
+            return Err(invalid(
+                "Guard body does not prove that a false result excludes the declared type",
+            ));
+        }
     }
-    if both && proof.evaluate(body, true)? != Truth::True {
-        return Err(invalid(
-            "Guard body does not prove that a false result excludes the declared type",
-        ));
-    }
+    let argument =
+        guarded_argument.ok_or_else(|| invalid(":t/guard requires a fixed-arity signature"))?;
     Ok(VerifiedGuard {
         argument,
-        arity: params.len(),
+        arities: contract
+            .signatures
+            .iter()
+            .map(|signature| signature.args.len())
+            .collect(),
         ty,
-        both,
+        mode,
     })
 }
 
-fn scalar_predicate(op: &str) -> Option<Type> {
+pub(super) fn scalar_predicate(op: &str) -> Option<Type> {
     if op == "clojure.core/nil?" {
         Some(Type::Nil)
     } else {
@@ -213,6 +272,37 @@ struct Proof<'a> {
 }
 
 impl Proof<'_> {
+    fn returns_nil(&self, form: &Form) -> Result<bool, Box<Diagnostic>> {
+        match &form.without_metadata().kind {
+            Kind::Nil => Ok(true),
+            Kind::List(forms) => {
+                let [head, condition, bodies @ ..] = forms.as_slice() else {
+                    return Ok(false);
+                };
+                if head.symbol() == Some("if")
+                    && let [yes] | [yes, _] = bodies
+                {
+                    let truth = self.evaluate(condition, false)?;
+                    return Ok((truth == Truth::False || self.returns_nil(yes)?)
+                        && (truth == Truth::True
+                            || bodies.get(1).map_or(Ok(true), |no| self.returns_nil(no))?));
+                }
+                if head.symbol().is_some_and(|op| {
+                    self.model.resolve(op) == "clojure.core/when"
+                        && !self.local_vars.contains(op)
+                        && !self.params.iter().any(|(name, _)| *name == op)
+                }) {
+                    return Ok(self.evaluate(condition, false)? == Truth::False
+                        || bodies
+                            .last()
+                            .map_or(Ok(true), |body| self.returns_nil(body))?);
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn evaluate(&self, form: &Form, has_type: bool) -> Result<Truth, Box<Diagnostic>> {
         let unsupported = || {
             error(

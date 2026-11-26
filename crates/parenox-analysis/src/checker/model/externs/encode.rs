@@ -1,7 +1,8 @@
 //! Serialize resolved public contracts without source names or spec dependencies.
 use std::fmt::{self, Write};
 
-use super::{ExternalDeclaration, Model, reserves_extern_name};
+use super::{Contract, ExternalDeclaration, Model, reserves_extern_name};
+use crate::checker::model::GuardMode;
 use crate::reader::{MAX_NESTING_DEPTH, Span};
 use crate::types::{
     ExtraFields, IntegerClass, IntegerRange, IntegerType, JvmArrayClass, LengthBounds, MapType,
@@ -27,11 +28,11 @@ impl Model {
             .and_then(|file| file.table.namespaces.get(namespace))
             .and_then(|namespace| namespace.get(name));
         match (declaration, literal) {
-            (Some(ExternalDeclaration::Function(parsed)), None) => self
-                .exports
-                .functions
-                .get(name)
-                .is_some_and(|source| source.signatures == parsed.signatures),
+            (Some(ExternalDeclaration::Function(parsed)), None) => {
+                self.exports.functions.get(name).is_some_and(|source| {
+                    source.signatures == parsed.signatures && source.guard == parsed.guard
+                })
+            }
             (Some(ExternalDeclaration::Literal(parsed)), Some(edn)) => {
                 parsed.edn == edn
                     && self
@@ -44,14 +45,14 @@ impl Model {
         }
     }
 
-    pub(crate) fn exported_signatures(
+    pub(crate) fn exported_functions(
         &self,
-    ) -> impl Iterator<Item = (&str, Span, Result<&[Signature], &'static str>)> {
+    ) -> impl Iterator<Item = (&str, Span, Result<&Contract, &'static str>)> {
         self.exports.functions.iter().map(|(name, contract)| {
             let signature = if reserves_extern_name(name) {
                 Err("externs cannot replace a built-in checking rule")
             } else {
-                Ok(contract.signatures.as_ref())
+                Ok(contract)
             };
             (name.as_str(), self.functions[name].span, signature)
         })
@@ -167,7 +168,25 @@ impl SnapshotWriter {
         Ok(self.write_str(suffix)?)
     }
 
-    pub(crate) fn signatures(&mut self, signatures: &[Signature]) -> Encoded {
+    pub(crate) fn function(&mut self, contract: &Contract) -> Encoded {
+        let Some(guard) = &contract.guard else {
+            return self.signatures(&contract.signatures);
+        };
+        let mode = match guard.mode {
+            GuardMode::Then => ":then",
+            GuardMode::Both => ":both",
+            GuardMode::Some => ":some",
+        };
+        self.nested(1, "{:sig ", "}", |out| {
+            out.signatures(&contract.signatures)?;
+            out.nested(1, " :guard [", "]", |out| {
+                write!(out, "{mode} {} ", guard.argument + 1)?;
+                out.ty(&guard.ty)
+            })
+        })
+    }
+
+    fn signatures(&mut self, signatures: &[Signature]) -> Encoded {
         match signatures {
             [one] => self.signature(one),
             many => self.nested(1, "[", "]", |out| {

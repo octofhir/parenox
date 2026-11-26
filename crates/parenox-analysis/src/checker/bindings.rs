@@ -452,6 +452,14 @@ impl Checker<'_> {
                 checker.narrow_completed_string_search(init, env);
             }
             let source = checker.binding_selector(pattern, init, env);
+            let result_guard = pattern
+                .symbol()
+                .filter(|_| returns && !value.is_rejected())
+                .and_then(|name| {
+                    checker
+                        .capture_result_guard(init, env)
+                        .map(|guard| (name, guard))
+                });
             // Read the initializer's class selection in the previous scope.
             let inherited_hint = pattern
                 .symbol()
@@ -461,6 +469,9 @@ impl Checker<'_> {
                         .map(|hint| (name, hint.map(str::to_owned)))
                 });
             checker.bind_selected(pattern, value, env, source, defaults);
+            if let Some((name, guard)) = result_guard {
+                env.set_result_guard(name, guard);
+            }
             if let Some((name, hint)) = inherited_hint {
                 env.set_java_hint(name, hint);
             }

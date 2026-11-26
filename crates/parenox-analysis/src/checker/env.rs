@@ -20,6 +20,7 @@ pub(super) struct Env {
     java_hints: BTreeMap<String, JavaTypeHint<String>>,
     presence: Vec<Presence>,
     selectors: BTreeMap<String, Selector>,
+    non_nil_results: BTreeMap<String, Arc<ResultGuard>>,
     impossible: bool,
 }
 
@@ -62,6 +63,11 @@ pub(super) struct SelectorRoot {
 pub(super) struct Selector {
     pub root: SelectorRoot,
     pub keys: Vec<Type>,
+}
+
+pub(super) struct ResultGuard {
+    pub subject: Selector,
+    pub ty: Type,
 }
 
 impl Selector {
@@ -140,6 +146,7 @@ impl Env {
 
     pub(super) fn insert_selected(&mut self, name: String, value: Value, source: Option<Selector>) {
         self.inline_functions.remove(&name);
+        self.non_nil_results.remove(&name);
         self.java_hints.remove(&name);
         self.presence
             .retain(|fact| fact.collection != name && fact.key != name);
@@ -229,6 +236,14 @@ impl Env {
 
     pub(super) fn is_alias(&self, name: &str) -> bool {
         self.selectors.contains_key(name)
+    }
+
+    pub(super) fn result_guard(&self, name: &str) -> Option<Arc<ResultGuard>> {
+        self.non_nil_results.get(name).cloned()
+    }
+
+    pub(super) fn set_result_guard(&mut self, name: &str, guard: Arc<ResultGuard>) {
+        self.non_nil_results.insert(name.into(), guard);
     }
 
     pub(super) fn selector_for(&self, name: &str) -> Option<Selector> {

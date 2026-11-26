@@ -33,6 +33,28 @@ fn diff(before: &str, after: &str) -> ExternDiff {
 }
 
 #[test]
+fn dropping_an_extern_guard_is_a_breaking_change() {
+    let guarded = "{api/text? {:sig [t/any :-> boolean?] :guard [:then 1 string?]}}";
+    let plain = "{api/text? [t/any :-> boolean?]}";
+    let report = diff(guarded, plain);
+    assert!(!report.compatible, "{report:#?}");
+    assert_eq!(report.changes[0].kind, Change::Breaking);
+    let report = diff(plain, guarded);
+    assert!(report.compatible, "{report:#?}");
+    assert_eq!(report.changes[0].kind, Change::Compatible);
+}
+
+#[test]
+fn adding_a_guarded_overload_preserves_the_existing_guard() {
+    let guarded = "{api/text? {:sig [t/any :-> boolean?] :guard [:then 1 string?]}}";
+    let overloaded = "{api/text? {:sig [[t/any :-> boolean?] [t/any boolean? :-> boolean?]]
+                                  :guard [:then 1 string?]}}";
+    let report = diff(guarded, overloaded);
+    assert!(report.compatible, "{report:#?}");
+    assert_eq!(report.changes[0].kind, Change::Compatible);
+}
+
+#[test]
 fn reports_each_kind_of_known_change_and_ignores_alpha_renames() {
     let before = "{api/broaden [string? :-> (clojure.spec.alpha/nilable string?)]
                    api/removed [:-> number?]

@@ -6,16 +6,15 @@ use super::{
     ExternExport, FileCache, FileKind, ProjectReport, Session, Source, identify_diagnostics,
 };
 use crate::Diagnostic;
-use crate::checker::{EncodeError, Globals, Model, SnapshotWriter};
+use crate::checker::{Contract, EncodeError, Globals, Model, SnapshotWriter};
 use crate::reader::Span;
-use crate::types::Signature;
 
 const SNAPSHOT_PATH: &str = "<exported externs>";
 
 impl Session {
-    /// Checks a library and exports its public function signatures and literal values.
+    /// Checks a library and exports its public function contracts and literal values.
     /// Returns EDN only if it reconstructs those declarations in isolation.
-    /// Dependency externs and guard refinements are not exported.
+    /// Dependency externs are not exported.
     pub fn export_externs(
         &mut self,
         sources: &[Source<'_>],
@@ -35,13 +34,13 @@ impl Session {
                     .model
                     .as_ref()
                     .expect("a successfully checked source has a model");
-                let signatures = model.exported_signatures().map(|(name, span, signature)| {
-                    (name, span, signature.map(Exported::Signature))
-                });
+                let functions = model
+                    .exported_functions()
+                    .map(|(name, span, contract)| (name, span, contract.map(Exported::Function)));
                 let literals = cache
                     .public_literals()
                     .map(|(name, span, value)| (name, span, value.map(Exported::Literal)));
-                for (name, span, item) in signatures.chain(literals) {
+                for (name, span, item) in functions.chain(literals) {
                     match item {
                         Ok(item) => entries.push(Entry {
                             name,
@@ -83,7 +82,7 @@ struct Entry<'a> {
 }
 
 enum Exported<'a> {
-    Signature(&'a [Signature]),
+    Function(&'a Contract),
     Literal(String),
 }
 
@@ -95,7 +94,7 @@ impl Entry<'_> {
         let offset = edn.len();
         write!(edn, "{} ", self.name)?;
         match &self.item {
-            Exported::Signature(signatures) => edn.signatures(signatures)?,
+            Exported::Function(contract) => edn.function(contract)?,
             Exported::Literal(value) => write!(edn, "{{:value {value}}}")?,
         }
         Ok(offset)
@@ -140,7 +139,7 @@ fn encode_and_verify<'a>(entries: &'a [Entry<'a>]) -> Result<String, (&'a Entry<
     }
     for entry in entries {
         let literal = match &entry.item {
-            Exported::Signature(_) => None,
+            Exported::Function(_) => None,
             Exported::Literal(value) => Some(value.as_str()),
         };
         if !entry.model.matches_export(&parsed, entry.name, literal) {

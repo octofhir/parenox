@@ -27,7 +27,7 @@ use declarations::Names;
 pub(super) use externs::MacroScope;
 pub(crate) use externs::{EncodeError, ExternCache, SnapshotWriter};
 use externs::{ExternFile, ExternalDeclaration, Externs, LiteralExtern};
-pub(super) use guards::VerifiedGuard;
+pub(super) use guards::{GuardMode, VerifiedGuard};
 pub(crate) use imports::{bare_dotted_name, java_type_tag_at};
 pub(crate) use interfaces::InterfaceKey;
 use interfaces::{

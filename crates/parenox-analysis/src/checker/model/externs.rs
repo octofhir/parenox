@@ -2,6 +2,7 @@
 mod bundles;
 mod diff;
 mod encode;
+mod guards;
 mod literals;
 mod specs;
 mod validation;
@@ -167,11 +168,26 @@ impl Model {
                             },
                         ))))
                     }
+                    entries
+                        if entries
+                            .iter()
+                            .step_by(2)
+                            .any(|key| key.keyword() == Some(":sig")) =>
+                    {
+                        model.read_guarded_extern(
+                            entries,
+                            declaration.span,
+                            name_string,
+                            path,
+                            source,
+                            globals,
+                        )
+                    }
                     _ => {
                         model.error(
                             "PNX9001",
                             declaration.span,
-                            "Expected {:value <EDN data>} or {:macro :let-like}",
+                            "Expected {:value <EDN data>}, {:macro :let-like}, or {:sig [...] :guard [...]}",
                         );
                         None
                     }

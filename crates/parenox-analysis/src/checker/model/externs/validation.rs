@@ -146,7 +146,22 @@ fn validate_function(
             format!("No checked public source function for extern {name}"),
         ));
     };
-    let (count, outcome, detail) = extern_drift(&source.signatures, &promised.signatures)?;
+    let Some((count, outcome, detail)) = extern_drift(&source.signatures, &promised.signatures)
+    else {
+        return promised.guard.as_ref().and_then(|promised| {
+            (!source
+                .guard
+                .as_ref()
+                .is_some_and(|guard| guard.supports(promised)))
+            .then(|| {
+                Diagnostic::new(
+                    "PNX9011",
+                    span,
+                    format!("Extern {name}: the guard is not proved by the source contract"),
+                )
+            })
+        });
+    };
     let site = format!(
         "Extern {name} at {count} argument{}",
         if count == 1 { "" } else { "s" }
