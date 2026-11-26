@@ -107,15 +107,32 @@ fn literal_vars_shadow_core_builtins_and_unsupported_initializers_are_explicit()
     let unsupported = r#"
         (ns demo)
         (def ^:dynamic *limit* 1)
-        (def computed (inc 1))
+        (def computed (System/currentTimeMillis))
         (def unbound)
         (defn unsupported {:t/sig '[:-> number?]} []
           (+ *limit* computed unbound))
     "#;
     let report = session.check("unsupported.clj", unsupported);
     assert!(!report.ok && !report.complete, "{report:#?}");
-    assert_eq!(report.diagnostics.len(), 3, "{report:#?}");
-    assert!(report.diagnostics.iter().all(|d| d.code == "PNX9001"));
+    let gaps: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|d| {
+            (
+                d.code.as_str(),
+                &unsupported[d.span.start.offset..d.span.end.offset],
+            )
+        })
+        .collect();
+    assert_eq!(
+        gaps,
+        [
+            ("PNX9001", "^:dynamic *limit*"),
+            ("PNX9001", "(System/currentTimeMillis)"),
+            ("PNX9001", "unbound"),
+        ],
+        "{report:#?}"
+    );
 }
 
 #[test]
