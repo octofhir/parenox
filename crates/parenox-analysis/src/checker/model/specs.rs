@@ -592,18 +592,25 @@ impl<'a> Resolver<'a> {
 
         let body = &owner.declaration.body;
         if let Some(gap) = owner.declaration.input_gap {
-            let reason = match gap {
-                SpecInputGap::LetfnBinding => "depends on local letfn bindings",
-                SpecInputGap::SourcePredicate => "uses a source-defined predicate",
+            let message = match (gap, body.symbol()) {
+                (SpecInputGap::LetfnBinding, _) => {
+                    format!(
+                        "Spec {key} depends on local letfn bindings; its input type is unchecked"
+                    )
+                }
+                (SpecInputGap::SourcePredicate, Some(predicate)) => {
+                    format!("Source predicate {predicate} is unchecked in spec {key}")
+                }
+                (SpecInputGap::SourcePredicate, None) => {
+                    format!(
+                        "Spec {key} uses a source-defined predicate; its input type is unchecked"
+                    )
+                }
             };
             self.diagnostics
                 .entry(owner.path.into())
                 .or_default()
-                .push(Diagnostic::analysis_gap(
-                    "PNX9001",
-                    body.span,
-                    format!("Spec {key} {reason}; its input type is unchecked"),
-                ));
+                .push(Diagnostic::analysis_gap("PNX9001", body.span, message));
             self.types.insert(key.to_owned(), Type::Unknown);
             self.unchecked_inputs.insert(key.to_owned());
             return Some(Type::Unknown);
